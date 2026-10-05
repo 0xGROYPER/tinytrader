@@ -83,8 +83,13 @@ Parquet or JSON Lines.
 ```
 
 - Days are UTC, as in Databento.
-- Dataset names follow `VENUE.FEED`. Glacier-defined datasets use the
-  venue's own name for the feed (see [Open questions](#open-questions)).
+- Dataset names follow Databento's `VENUE.FEED`. For venues Databento doesn't
+  cover, the feed part is the venue's own name for the feed:
+  `COINBASE.EXCHANGE`, `KRAKEN.SPOT`, `KRAKEN.FUTURES`. Glacier keeps a short
+  registry of these names (`docs/datasets.md`) so deployments agree.
+- Files hold every symbol by default, one file per dataset, schema and day.
+  A dataset that captures only some symbols can opt into a symbol level,
+  `<DATASET>/<symbol>/<schema>/`, declared in its `dataset.json`.
 - A deployment refers to a store by its logical data root, never by a path.
 
 ### Segments and sealing
@@ -133,13 +138,12 @@ TLS-encrypted websocket traffic is useless as literal network packets, so raw
 capture records application-level messages after decryption, each with its
 receive timestamp, the connection it arrived on, and its direction.
 
-The proposed container is **pcapng**: a published, block-based, append-friendly
-format with nanosecond timestamps, per-connection interface descriptions,
-comments, and existing readers in Rust, Python, Wireshark and others. Each
-connection is an interface whose description records the endpoint and
-subscription; each message is a packet using a user-defined link type. The
-alternative is a small custom framed log, which is simpler to write but has
-no existing tooling. See [Open questions](#open-questions).
+The container is **pcapng**: a published, block-based, append-friendly format
+with nanosecond timestamps, per-connection interface descriptions, comments,
+and existing readers in Rust, Python, Wireshark and others. Each connection is
+an interface whose description records the endpoint and subscription; each
+message is a packet using a user-defined link type. A custom framed log would
+be simpler to write but has no existing tooling.
 
 ### Recovery
 
@@ -148,6 +152,36 @@ truncated to the last complete record and sealed with a `recovered` flag; raw
 partials are truncated to the last complete block. Nothing is discarded
 silently: recovery and any truncated bytes are recorded in the manifest and
 in `condition.json`.
+
+### Timestamps
+
+Every normalized record carries two UTC nanosecond timestamps, following DBN:
+`ts_event`, the venue's time for the event, and `ts_recv`, when the capturing
+host received it. Each capture records the host's clock source and estimated
+offset in its metadata, so latency and ordering analysis knows how far to
+trust `ts_recv`. Raw captures keep every timestamp the venue sent, inside the
+original messages.
+
+### Schema extensions
+
+Glacier's custom schemas carry a distinct, versioned name, such as
+`glacier.mbp-1/1`, recorded in each file's metadata. A reader that doesn't
+know a schema version refuses the file rather than misreading it.
+
+They are implemented by a `dbn-ext` library that wraps the official `dbn`
+crate and adds the extension records, with a matching CLI wrapper, so
+consumers use one API for standard and extended data. Because raw captures
+are kept, normalized data in an extension schema can be regenerated if DBN
+later supports the same data officially; the extensions are a convenience
+over the raw record, not the only copy of it.
+
+### Retention
+
+Raw captures are kept indefinitely. After a configurable age they move from
+fast storage to the archive tier; deleting them is always an explicit,
+manual operation, never a policy. Normalized and derived data follow the same
+rule by default, and derived data (such as Parquet exports) may be pruned and
+rebuilt freely.
 
 ### Coverage and gaps
 
@@ -202,17 +236,12 @@ schemas.
 - Compaction adds a background step per day; until it runs, readers see
   segments instead of a single file, transparently through the library.
 
-## Open questions
+## Resolved
 
-1. **Raw container:** pcapng, or a custom framed log?
-2. **Dataset naming for crypto venues:** for example `COINBASE.EXCHANGE`,
-   `KRAKEN.SPOT`. Should Glacier keep a registry of names so deployments agree?
-3. **Partition by symbol:** one file per dataset, schema and day containing
-   every symbol (Databento's default), or an optional symbol level, as in
-   `<DATASET>/<symbol>/<schema>/`?
-4. **Schema extensions:** how Glacier's DBN extensions are named and
-   versioned so readers can tell them apart from standard schemas.
-5. **Timestamps:** which receive and exchange timestamps every normalized
-   record carries, and how clock quality is recorded.
-6. **Retention:** per-dataset rules for how long raw data stays on fast
-   storage before moving or being pruned.
+- Raw captures use pcapng.
+- Datasets are named `VENUE.FEED`, with a registry in [datasets.md](../datasets.md).
+- One file per dataset, schema and day, with an optional symbol level.
+- Normalized records carry `ts_event` and `ts_recv`.
+- Custom schemas have prefixed, versioned names, implemented by `dbn-ext`
+  over the official `dbn` crate.
+- Raw captures are kept indefinitely and tiered down, never pruned by policy.
