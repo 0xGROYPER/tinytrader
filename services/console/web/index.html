@@ -157,12 +157,7 @@ tr:last-child td { border-bottom: 0; }
 .tip { position: absolute; pointer-events: none; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font: 13px var(--mono); color: var(--fg); white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.12); z-index: 2; }
 .tip .muted { display: block; font-size: 12px; }
 .empty { padding: 16px; color: var(--muted); font-size: 14px; }
-#nav-collections, #nav-store, .nav-group { display: contents; }
-.nav-group[hidden] { display: none; }
-.ws { display: inline-flex; margin-left: 8px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-.ws button { min-height: 30px; padding: 0 12px; border: 0; border-right: 1px solid var(--line); background: var(--bg); color: var(--fg-2); font: 500 13px var(--sans); cursor: pointer; }
-.ws button:last-child { border-right: 0; }
-.ws button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+#nav-collections, #nav-store { display: contents; }
 .news { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; }
 .story { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border-bottom: 1px solid var(--line-soft); }
 .story:last-child { border-bottom: 0; }
@@ -244,10 +239,6 @@ tr:last-child td { border-bottom: 0; }
     <b>Glacier Labs</b>
     <span class="crumb-sep" aria-hidden="true">/</span>
     <span class="deployment" id="profile" title="Deployment shown">…</span>
-    <div class="ws" role="group" aria-label="Workspace">
-      <button type="button" data-ws="ops" aria-pressed="true">Ops</button>
-      <button type="button" data-ws="market" aria-pressed="false">Market</button>
-    </div>
   </div>
   <div class="top-right">
     <span class="live"><span class="pulse stale" id="pulse"></span><span id="updated">connecting…</span></span>
@@ -258,24 +249,20 @@ tr:last-child td { border-bottom: 0; }
 
 <div class="shell">
   <nav class="nav" aria-label="Sections">
-    <div class="nav-group" id="nav-ops">
-      <div class="nav-label">Operate</div>
-      <button type="button" data-tab="overview" aria-current="page">Overview</button>
-      <button type="button" data-tab="services">Services</button>
-      <div id="nav-store"></div>
-      <div id="nav-collections"></div>
-    </div>
-    <div class="nav-group" id="nav-market" hidden>
-      <div class="nav-label">Market</div>
-      <button type="button" data-tab="charts">Charts</button>
-      <button type="button" data-tab="news">News</button>
-    </div>
+    <div class="nav-label">Operate</div>
+    <button type="button" data-tab="overview" aria-current="page">Overview</button>
+    <button type="button" data-tab="services">Services</button>
+    <div class="nav-label" style="padding-top:14px">Market</div>
+    <button type="button" data-tab="charts">Charts</button>
+    <button type="button" data-tab="news">News</button>
+    <div id="nav-store"></div>
+    <div id="nav-collections"></div>
   </nav>
   <main><div class="col" id="view"></div></main>
 </div>
 
 <script>
-const state = { tab: 'overview', workspace: 'ops', lastTab: { ops: 'overview', market: 'charts' }, newsSymbol: null, topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
+const state = { tab: 'overview', newsSymbol: null, topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
   ev: { service: null, after: 0, rows: [], paused: false, open: new Set(), times: [], fresh: new Set() } };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -596,14 +583,6 @@ function newsView() {
       ${n.summary ? `<p>${esc(n.summary)}</p>` : ''}
     </article>`).join('') || '<p class="muted" style="padding:16px;margin:0">No stories for this symbol.</p>'}</div>`;
 }
-function setWorkspace(ws, tab) {
-  state.workspace = ws;
-  state.tab = tab || state.lastTab[ws];
-  $('nav-ops').hidden = ws !== 'ops';
-  $('nav-market').hidden = ws !== 'market';
-  document.querySelectorAll('[data-ws]').forEach(b => b.setAttribute('aria-pressed', b.dataset.ws === ws));
-}
-const workspaceOf = tab => ['charts', 'news'].includes(tab) ? 'market' : 'ops';
 
 // ---------- store: data and storage ----------
 // Catalogs come from services that describe a `catalog` stream. Every root of
@@ -850,15 +829,8 @@ async function poll() {
 document.querySelector('.nav').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]'); if (!b) return;
   state.tab = b.dataset.tab; state.doc = null; state.navigated = true;
-  state.lastTab[workspaceOf(state.tab)] = state.tab;
   const c = currentCollection();
   try { history.replaceState(null, '', '#' + (c ? c.id : state.tab)); } catch (_) {}
-  render(); window.scrollTo(0, 0);
-});
-document.querySelector('.ws').addEventListener('click', e => {
-  const b = e.target.closest('[data-ws]'); if (!b || b.dataset.ws === state.workspace) return;
-  setWorkspace(b.dataset.ws); state.doc = null; state.navigated = true;
-  try { history.replaceState(null, '', '#' + state.tab); } catch (_) {}
   render(); window.scrollTo(0, 0);
 });
 $('view').addEventListener('click', e => {
@@ -925,8 +897,7 @@ $('theme-btn').addEventListener('click', () => {
   await loadCollections();
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
   if (hc) { state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true; }
-  else if (['services', 'data', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
-  else if (['charts', 'news'].includes(h)) { setWorkspace('market', h); state.lastTab.market = h; state.navigated = true; }
+  else if (['services', 'charts', 'news', 'data', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
   await loadTopology(); await poll();
   setInterval(poll, 2000);
   setInterval(pollEvents, 700);

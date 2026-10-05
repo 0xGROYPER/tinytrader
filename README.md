@@ -34,7 +34,7 @@ console the same way.
 | `libs/fleet` | Discovers and polls a deployment; the data layer behind every front end |
 | `services/Dockerfile` | Container image build for any service |
 | `apps/tui` | Terminal view of a deployment (Ratatui) |
-| `services/console` | The operator console: an **Ops** workspace (deployment graph, services, data, storage, docs) and a **Market** workspace (charts, news) |
+| `services/console` | The operator console: deployment graph, services, market charts and news, data, storage and docs, in one sidebar |
 | `services/ticker` | Toy service used by the quickstart |
 | `services/databento-live` | Example service streaming a Databento live subscription |
 | `services/alpaca-live` | Example service streaming Alpaca's free real-time IEX data |
