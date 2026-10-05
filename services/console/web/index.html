@@ -204,12 +204,14 @@ tr:last-child td { border-bottom: 0; }
 .doc-card b { color: var(--accent); font-weight: 600; }
 .doc-card span { font: 12px var(--mono); color: var(--muted); }
 .group-h { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 18px 0 8px; }
-.doc-layout { display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start; }
-.doc-nav { flex: 1 1 200px; max-width: 240px; display: flex; flex-direction: column; gap: 2px; }
-.doc-nav button { text-align: left; min-height: 32px; padding: 4px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--fg-2); font: inherit; font-size: 14px; cursor: pointer; }
-.doc-nav button:hover { background: var(--surface); }
-.doc-nav button[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.doc-nav .group-h { margin: 12px 10px 4px; }
+.nav-tree { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 6px 12px; padding-left: 4px; border-left: 1px solid var(--line-soft); }
+.nav .nav-tree button { min-height: 30px; font-size: 13.5px; }
+.nav .nav-tree .nav-group { font-weight: 600; color: var(--fg-2); gap: 6px; }
+.nav-group::before { content: ""; width: 0; height: 0; border-left: 5px solid var(--muted); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform .15s; }
+.nav-group[aria-expanded="true"]::before { transform: rotate(90deg); }
+.nav-leaves { display: flex; flex-direction: column; gap: 1px; margin-left: 11px; }
+.mobile-only { display: none; }
+@media (max-width: 780px) { .nav .nav-tree { display: none; } .mobile-only { display: inline-block; margin-bottom: 10px; } }
 .back { align-self: flex-start; border: 0; background: none; color: var(--accent); font: 500 14px var(--sans); cursor: pointer; padding: 4px 0; }
 .prose { flex: 999 1 420px; min-width: 0; max-width: 76ch; color: var(--fg-2); line-height: 1.65; }
 .prose .path { font: 12px var(--mono); color: var(--muted); }
@@ -278,7 +280,7 @@ tr:last-child td { border-bottom: 0; }
 </div>
 
 <script>
-const state = { tab: 'market', newsSymbol: null, topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
+const state = { openGroups: new Set(), navKey: '', tab: 'market', newsSymbol: null, topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
   ev: { service: null, after: 0, rows: [], paused: false, open: new Set(), times: [], fresh: new Set() } };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -767,10 +769,32 @@ async function loadCollections() {
     const r = await fetch('/api/collections', { cache: 'no-store' });
     if (!r.ok) return;
     state.collections = await r.json();
-    $('nav-collections').innerHTML = state.collections.length
-      ? '<div class="nav-sec"><div class="nav-label">Reference</div><div class="nav-items">' + state.collections.map(c => `<button type="button" data-tab="col:${esc(c.id)}">${esc(c.name)}</button>`).join('') + '</div></div>'
-      : '';
+    state.navKey = '';
+    updateCollectionsNav();
   } catch (_) {}
+}
+const groupLabel = g => g.split('/').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' › ');
+// The Reference section: each collection, and under the open one its
+// folders (collapsible) and documents, so documents need no second sidebar.
+function updateCollectionsNav() {
+  const key = [state.tab, state.doc, [...state.openGroups].join(','), state.collections.length].join('|');
+  if (key === state.navKey) return;
+  state.navKey = key;
+  if (!state.collections.length) { $('nav-collections').innerHTML = ''; return; }
+  const open = currentCollection();
+  const tree = c => {
+    const groups = [...new Set(c.docs.map(d => d.group))];
+    const leaf = d => `<button type="button" data-doc="${d.index}"${d.index === state.doc ? ' aria-current="page"' : ''}>${esc(d.title)}</button>`;
+    if (groups.length < 2) return `<div class="nav-tree">${c.docs.map(leaf).join('')}</div>`;
+    return `<div class="nav-tree">${groups.map(g => {
+      const expanded = state.openGroups.has(g);
+      return `<button type="button" class="nav-group" data-group="${esc(g)}" aria-expanded="${expanded}">${esc(groupLabel(g))}</button>` +
+        (expanded ? `<div class="nav-leaves">${c.docs.filter(d => d.group === g).map(leaf).join('')}</div>` : '');
+    }).join('')}</div>`;
+  };
+  $('nav-collections').innerHTML = '<div class="nav-sec"><div class="nav-label">Reference</div><div class="nav-items">' +
+    state.collections.map(c => `<button type="button" data-tab="col:${esc(c.id)}">${esc(c.name)}</button>` + (c === open && c.docs.length ? tree(c) : '')).join('') +
+    '</div></div>';
 }
 const currentCollection = () => state.collections.find(c => 'col:' + c.id === state.tab);
 function collectionView() {
@@ -780,16 +804,11 @@ function collectionView() {
   const groups = [...new Set(c.docs.map(d => d.group))];
   if (state.doc === null) {
     return `<div><h1>${esc(c.name)}</h1><p class="muted" style="margin:0">${c.docs.length} documents</p></div>` +
-      groups.map(g => `<section><div class="group-h">${esc(g)}</div><div class="doc-cards">${c.docs.filter(d => d.group === g).map(d =>
+      groups.map(g => `<section><div class="group-h">${esc(groupLabel(g))}</div><div class="doc-cards">${c.docs.filter(d => d.group === g).map(d =>
         `<button type="button" class="doc-card" data-doc="${d.index}"><b>${esc(d.title)}</b><span>${esc(d.path)}</span></button>`).join('')}</div></section>`).join('');
   }
-  return `<div class="doc-layout">
-    <nav class="doc-nav" aria-label="${esc(c.name)}"><button type="button" class="back" data-doc="">← All ${esc(c.name.toLowerCase())}</button>
-      ${groups.map(g => `<div class="group-h">${esc(g)}</div>` + c.docs.filter(d => d.group === g).map(d =>
-        `<button type="button" data-doc="${d.index}"${d.index === state.doc ? ' aria-current="page"' : ''}>${esc(d.title)}</button>`).join('')).join('')}
-    </nav>
-    <article class="prose" id="doc-body"><p class="muted">Loading…</p></article>
-  </div>`;
+  return `<div><button type="button" class="back mobile-only" data-doc="">← All ${esc(c.name.toLowerCase())}</button>
+    <article class="prose" id="doc-body"><p class="muted">Loading…</p></article></div>`;
 }
 async function wireDoc() {
   const c = currentCollection();
@@ -804,6 +823,8 @@ async function wireDoc() {
 function openDoc(index) {
   state.doc = index; state.navigated = true;
   const c = currentCollection();
+  const d = c?.docs.find(x => x.index === index);
+  if (d) state.openGroups.add(d.group);
   try { history.replaceState(null, '', '#' + (c ? c.id + (index === null ? '' : '-' + index) : '')); } catch (_) {}
   render(); window.scrollTo(0, 0);
 }
@@ -885,7 +906,9 @@ function render() {
   if (openDetails) { const d = document.querySelector('.detail > details'); if (d) d.open = true; }
   if ($('ev-list')) $('ev-list').scrollTop = evTop;
   if (focusId) { const n = document.querySelector(`[data-node="${CSS.escape(focusId)}"]`); if (n) n.focus({ preventScroll: true }); }
-  document.querySelectorAll('.nav button').forEach(b => { if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+  updateCollectionsNav();
+  const docOpen = state.tab.startsWith('col:') && state.doc !== null;
+  document.querySelectorAll('.nav button[data-tab]').forEach(b => { if (b.dataset.tab === state.tab && !docOpen) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   if (state.tab.startsWith('col:')) wireDoc();
   drawCharts();
   status();
@@ -920,6 +943,10 @@ document.querySelector('.home').addEventListener('click', e => {
   render(); window.scrollTo(0, 0);
 });
 document.querySelector('.nav').addEventListener('click', e => {
+  const g = e.target.closest('[data-group]');
+  if (g) { const k = g.dataset.group; if (state.openGroups.has(k)) state.openGroups.delete(k); else state.openGroups.add(k); updateCollectionsNav(); return; }
+  const dc = e.target.closest('[data-doc]');
+  if (dc) { openDoc(+dc.dataset.doc); return; }
   const b = e.target.closest('button[data-tab]'); if (!b) return;
   state.tab = b.dataset.tab; state.doc = null; state.navigated = true;
   const c = currentCollection();
@@ -992,7 +1019,10 @@ $('theme-btn').addEventListener('click', () => {
 (async () => {
   await loadCollections();
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
-  if (hc) { state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true; }
+  if (hc) {
+    state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true;
+    const d = hc.docs.find(x => x.index === state.doc); if (d) state.openGroups.add(d.group);
+  }
   else if (['overview', 'services', 'market', 'data', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
   else if (['accounts', 'news', 'calendar'].includes(h)) { state.tab = h; state.navigated = true; }
   else if (h === 'charts') { state.tab = 'market'; state.navigated = true; }
