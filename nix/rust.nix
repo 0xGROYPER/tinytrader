@@ -16,6 +16,7 @@
           ../libs/observe
           ../services/ticker
           ../services/databento-live
+          ../services/alpaca-live
           (lib.fileset.fileFilter (f: f.hasExt "rs" || f.name == "Cargo.toml") ../services/console)
           ../services/console/web
         ];
@@ -24,6 +25,8 @@
       commonArgs = {
         inherit src;
         strictDeps = true;
+        # alpaca-live builds OpenSSL from source (vendored), which needs perl.
+        nativeBuildInputs = [ pkgs.perl ];
         pname = "glacier-workspace";
         version = "0.1.0";
       };
@@ -48,11 +51,17 @@
       ticker = service "ticker" "Toy service streaming Coinbase public tickers to disk";
       console = service "console" "Glacier Labs console";
       databento-live = service "databento-live" "Example service streaming a Databento live subscription";
+      alpaca-live = service "alpaca-live" "Example service streaming Alpaca real-time IEX data";
 
     in
     {
       packages = {
-        inherit ticker console databento-live;
+        inherit
+          ticker
+          console
+          databento-live
+          alpaca-live
+          ;
       };
 
       checks = {

@@ -1,0 +1,16 @@
+[package]
+name = "alpaca-live"
+description = "Example service: streams Alpaca's real-time IEX trades and quotes and exposes health, metrics and events"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+apca = { version = "0.31", features = ["vendored-openssl"] }  # OpenSSL linked in, so minimal images work
+axum.workspace = true
+futures-util.workspace = true
+glacier-observe.workspace = true
+tokio.workspace = true

@@ -22,8 +22,9 @@ cd examples/quickstart && docker compose up --build -d
 # then open http://localhost:8080
 ```
 
-Got a Databento API key? [`examples/databento`](examples/databento/) streams a
-live subscription into the console the same way.
+Have a Databento or Alpaca account? [`examples/databento`](examples/databento/)
+and [`examples/alpaca`](examples/alpaca/) stream live market data into the
+console the same way.
 
 ## What's here
 
@@ -34,6 +35,7 @@ live subscription into the console the same way.
 | `services/console` | The operator console: deployment graph, live service state, panels |
 | `services/ticker` | Toy service used by the quickstart |
 | `services/databento-live` | Example service streaming a Databento live subscription |
+| `services/alpaca-live` | Example service streaming Alpaca's free real-time IEX data |
 | `infra/modules` | NixOS modules, such as `glacier.services.<name>` |
 | `nix/` | Flake modules: Rust builds and checks |
 | `examples/` | Complete deployments you can run or copy |

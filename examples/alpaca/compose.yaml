@@ -1,0 +1,54 @@
+# Glacier example: Alpaca's free real-time IEX feed and the Glacier console.
+#   export APCA_API_KEY_ID=... APCA_API_SECRET_KEY=...   # never commit them
+#   docker compose up --build -d
+#   open http://localhost:8080
+name: glacier-alpaca
+
+services:
+  alpaca-live:
+    build:
+      context: ../..
+      dockerfile: services/Dockerfile
+      args: { SERVICE: alpaca-live }
+    image: glacier/alpaca-live:dev
+    environment:
+      APCA_API_KEY_ID_FILE: /run/secrets/apca_api_key_id
+      APCA_API_SECRET_KEY_FILE: /run/secrets/apca_api_secret_key
+      ALPACA_SYMBOLS: ${ALPACA_SYMBOLS:-SPY,QQQ,AAPL}
+      ALPACA_CHANNELS: ${ALPACA_CHANNELS:-trades,quotes}
+      ALPACA_LISTEN: 0.0.0.0:9102   # reachable only on the Compose network
+    secrets: [apca_api_key_id, apca_api_secret_key]
+    restart: unless-stopped
+
+  console:
+    build:
+      context: ../..
+      dockerfile: services/Dockerfile
+      args: { SERVICE: console }
+    image: glacier/console:dev
+    environment:
+      CONSOLE_LISTEN: 0.0.0.0:8080
+      CONSOLE_TOPOLOGY: /etc/glacier/topology.json
+      CONSOLE_DOCKER: http://docker-proxy:2375
+      CONSOLE_COMPOSE_PROJECT: glacier-alpaca
+    volumes:
+      - ./topology.json:/etc/glacier/topology.json:ro
+    ports:
+      - "127.0.0.1:8080:8080"   # this machine only
+    depends_on: [alpaca-live, docker-proxy]
+    restart: unless-stopped
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    environment:
+      CONTAINERS: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
+secrets:
+  apca_api_key_id:
+    environment: APCA_API_KEY_ID
+  apca_api_secret_key:
+    environment: APCA_API_SECRET_KEY
