@@ -1,6 +1,6 @@
 # 0006: The market data relay
 
-- **Status:** Proposed (open questions resolved 2026-10-05)
+- **Status:** Accepted
 - **Date:** 2026-10-05
 
 ## Context
