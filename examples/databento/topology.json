@@ -2,33 +2,74 @@
   "name": "databento example",
   "focus": "databento-live",
   "hosts": [
-    { "id": "local", "label": "local", "sub": "Docker Compose" }
+    {
+      "id": "local",
+      "label": "local",
+      "sub": "Docker Compose"
+    }
   ],
   "external": [
-    { "id": "databento", "label": "databento", "sub": "live gateway", "role": "Databento live data gateway. Requires an API key and a plan that covers the subscription." }
+    {
+      "id": "databento",
+      "label": "databento",
+      "sub": "live gateway",
+      "role": "Databento live data gateway. Requires an API key and a plan that covers the subscription."
+    }
   ],
   "services": [
     {
-      "id": "databento-live", "host": "local", "label": "databento-live",
+      "id": "databento-live",
+      "host": "local",
+      "label": "databento-live",
       "role": "Example service: holds one Databento live subscription and shows a live tail of its records.",
       "health": "http://databento-live:9101/health",
       "metrics": "http://databento-live:9101/metrics",
-      "events": "http://databento-live:9101/events"
+      "events": "http://databento-live:9101/events",
+      "recent": "http://databento-live:9101/recent"
     },
     {
-      "id": "docker-proxy", "host": "local", "label": "docker-proxy",
+      "id": "docker-proxy",
+      "host": "local",
+      "label": "docker-proxy",
       "role": "Read-only view of the Docker API. The console reads container state through it and cannot change anything."
     },
     {
-      "id": "console", "host": "local", "label": "console",
+      "id": "console",
+      "host": "local",
+      "label": "console",
       "role": "This page. Polls every service and Docker every two seconds.",
       "health": "http://127.0.0.1:8080/health",
       "metrics": "http://127.0.0.1:8080/metrics"
     }
   ],
   "edges": [
-    { "from": "databento", "to": "databento-live", "kind": "flow", "label": "live session" },
-    { "from": "databento-live", "to": "console", "kind": "read", "label": "health · metrics · events" },
-    { "from": "docker-proxy", "to": "console", "kind": "read", "label": "container state" }
+    {
+      "from": "databento",
+      "to": "databento-live",
+      "kind": "flow",
+      "label": "live session"
+    },
+    {
+      "from": "databento-live",
+      "to": "console",
+      "kind": "read",
+      "label": "health \u00b7 metrics \u00b7 events"
+    },
+    {
+      "from": "docker-proxy",
+      "to": "console",
+      "kind": "read",
+      "label": "container state"
+    }
+  ],
+  "panels": [
+    {
+      "service": "databento-live",
+      "source": "recent",
+      "heading": "Live trades",
+      "note": "Most traded instruments, sampled once per second",
+      "title": "{key}",
+      "decimals": 2
+    }
   ]
 }

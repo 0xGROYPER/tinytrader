@@ -13,7 +13,7 @@
 //! - `TICKER_LISTEN`: address for the HTTP endpoints (default `127.0.0.1:9100`)
 //! - `TICKER_FEED`: websocket URL (default Coinbase Exchange public feed)
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -22,22 +22,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::extract::State as AxumState;
-use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
-use glacier_observe::{Events, Observer, State, unix_seconds};
+use glacier_observe::{Events, Observer, Series, State, unix_seconds};
 use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_FEED: &str = "wss://ws-feed.exchange.coinbase.com";
-/// Points kept per product for `/recent`, sampled at most once per second.
-const RECENT_POINTS: usize = 900;
 #[derive(Default)]
 struct Product {
     messages: u64,
     last_price: f64,
     last_at: Option<Instant>,
-    last_sample_ms: f64,
-    recent: VecDeque<(f64, f64)>,
 }
 
 #[derive(Default)]
@@ -50,6 +44,8 @@ struct Shared {
     last_gap: Mutex<Option<(f64, f64)>>,
     /// Recent messages, served at `/events` for the console's live tail.
     events: Events,
+    /// Sampled prices per product, served at `/recent` for charts.
+    series: Series,
 }
 
 #[tokio::main]
@@ -76,10 +72,10 @@ async fn main() {
     register_metrics(&observer, &shared);
 
     let app = Router::new()
-        .route("/recent", get(recent))
         .with_state(shared.clone())
         .merge(observer.router())
-        .merge(shared.events.router());
+        .merge(shared.events.router())
+        .merge(shared.series.router());
     let listener = match tokio::net::TcpListener::bind(&listen).await {
         Ok(l) => l,
         Err(e) => {
@@ -245,14 +241,7 @@ async fn stream_once(
         p.last_at = Some(Instant::now());
         if price.is_finite() {
             p.last_price = price;
-            let ms = now_s * 1000.0;
-            if ms - p.last_sample_ms >= 1000.0 {
-                p.last_sample_ms = ms;
-                p.recent.push_back((ms, price));
-                if p.recent.len() > RECENT_POINTS {
-                    p.recent.pop_front();
-                }
-            }
+            shared.series.push(product, price);
         }
     }
 }
@@ -330,21 +319,6 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>) {
             }
         }
     });
-}
-
-/// Recent sampled prices per product: `{ "BTC-USD": [[unix_ms, price], ...] }`.
-async fn recent(AxumState(s): AxumState<Arc<Shared>>) -> axum::Json<serde_json::Value> {
-    let map = lock(&s.products);
-    let out: serde_json::Map<String, serde_json::Value> = map
-        .iter()
-        .map(|(k, p)| {
-            (
-                k.clone(),
-                serde_json::json!(p.recent.iter().map(|(t, v)| [*t, *v]).collect::<Vec<_>>()),
-            )
-        })
-        .collect();
-    axum::Json(serde_json::Value::Object(out))
 }
 
 /// Appends lines to `<dir>/<product>/<YYYY-MM-DD>.jsonl`, one open file per product.

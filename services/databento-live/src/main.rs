@@ -28,7 +28,7 @@ use databento::dbn::{
     ErrorMsg, PitSymbolMap, SType, Schema, SymbolMappingMsg, SystemMsg, TradeMsg, UNDEF_PRICE,
 };
 use databento::live::Subscription;
-use glacier_observe::{Events, Observer, State};
+use glacier_observe::{Events, Observer, Series, State};
 
 struct Config {
     key: String,
@@ -45,6 +45,8 @@ struct Shared {
     records: Mutex<BTreeMap<&'static str, u64>>,
     last_record: Mutex<Option<Instant>>,
     events: Events,
+    /// Trade prices for the most traded instruments, served at `/recent`.
+    series: Series,
 }
 
 #[tokio::main]
@@ -58,12 +60,17 @@ async fn main() {
     };
     let listen = env("DATABENTO_LISTEN", "127.0.0.1:9101");
     let observer = Observer::new("databento-live", env!("CARGO_PKG_VERSION"));
-    let shared = Arc::new(Shared::default());
+    let shared = Arc::new(Shared {
+        // Options feeds have thousands of instruments; chart the six most traded.
+        series: Series::new(900, 1000, 6),
+        ..Shared::default()
+    });
     register_metrics(&observer, &shared, &config);
 
     let app = Router::new()
         .merge(observer.router())
-        .merge(shared.events.router());
+        .merge(shared.events.router())
+        .merge(shared.series.router());
     let listener = match tokio::net::TcpListener::bind(&listen).await {
         Ok(l) => l,
         Err(e) => {
@@ -150,6 +157,9 @@ async fn stream_once(config: &Config, observer: &Observer, shared: &Shared) -> R
             shared
                 .events
                 .push(trade_summary(&symbol, trade), format!("{trade:?}"));
+            if trade.price != UNDEF_PRICE {
+                shared.series.push(symbol.trim(), trade.price as f64 / 1e9);
+            }
             observer.set_state(State::Ready, "streaming");
             "trade"
         } else if let Some(m) = rec.get::<SymbolMappingMsg>() {

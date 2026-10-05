@@ -2,33 +2,74 @@
   "name": "alpaca example",
   "focus": "alpaca-live",
   "hosts": [
-    { "id": "local", "label": "local", "sub": "Docker Compose" }
+    {
+      "id": "local",
+      "label": "local",
+      "sub": "Docker Compose"
+    }
   ],
   "external": [
-    { "id": "alpaca", "label": "alpaca", "sub": "IEX real-time", "role": "Alpaca market data stream, IEX feed. Included in Alpaca's free plan." }
+    {
+      "id": "alpaca",
+      "label": "alpaca",
+      "sub": "IEX real-time",
+      "role": "Alpaca market data stream, IEX feed. Included in Alpaca's free plan."
+    }
   ],
   "services": [
     {
-      "id": "alpaca-live", "host": "local", "label": "alpaca-live",
+      "id": "alpaca-live",
+      "host": "local",
+      "label": "alpaca-live",
       "role": "Example service: streams IEX trades and quotes and shows a live tail.",
       "health": "http://alpaca-live:9102/health",
       "metrics": "http://alpaca-live:9102/metrics",
-      "events": "http://alpaca-live:9102/events"
+      "events": "http://alpaca-live:9102/events",
+      "recent": "http://alpaca-live:9102/recent"
     },
     {
-      "id": "docker-proxy", "host": "local", "label": "docker-proxy",
+      "id": "docker-proxy",
+      "host": "local",
+      "label": "docker-proxy",
       "role": "Read-only view of the Docker API."
     },
     {
-      "id": "console", "host": "local", "label": "console",
+      "id": "console",
+      "host": "local",
+      "label": "console",
       "role": "This page.",
       "health": "http://127.0.0.1:8080/health",
       "metrics": "http://127.0.0.1:8080/metrics"
     }
   ],
   "edges": [
-    { "from": "alpaca", "to": "alpaca-live", "kind": "flow", "label": "websocket" },
-    { "from": "alpaca-live", "to": "console", "kind": "read", "label": "health · metrics · events" },
-    { "from": "docker-proxy", "to": "console", "kind": "read", "label": "container state" }
+    {
+      "from": "alpaca",
+      "to": "alpaca-live",
+      "kind": "flow",
+      "label": "websocket"
+    },
+    {
+      "from": "alpaca-live",
+      "to": "console",
+      "kind": "read",
+      "label": "health \u00b7 metrics \u00b7 events"
+    },
+    {
+      "from": "docker-proxy",
+      "to": "console",
+      "kind": "read",
+      "label": "container state"
+    }
+  ],
+  "panels": [
+    {
+      "service": "alpaca-live",
+      "source": "recent",
+      "heading": "Live trades",
+      "note": "IEX trade prices, sampled once per second",
+      "title": "{key}",
+      "decimals": 2
+    }
   ]
 }

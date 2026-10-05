@@ -21,7 +21,7 @@ use apca::data::v2::stream::{Data, IEX, MarketData, RealtimeData, drive};
 use apca::{ApiInfo, Client};
 use axum::Router;
 use futures_util::{FutureExt as _, StreamExt as _};
-use glacier_observe::{Events, Observer, State};
+use glacier_observe::{Events, Observer, Series, State};
 
 /// Alpaca's API base URL; market data streams are the same for paper and live accounts.
 const BASE_URL: &str = "https://paper-api.alpaca.markets";
@@ -41,6 +41,8 @@ struct Shared {
     records: Mutex<BTreeMap<&'static str, u64>>,
     last_record: Mutex<Option<Instant>>,
     events: Events,
+    /// Trade prices per symbol, served at `/recent` for charts.
+    series: Series,
 }
 
 #[tokio::main]
@@ -59,7 +61,8 @@ async fn main() {
 
     let app = Router::new()
         .merge(observer.router())
-        .merge(shared.events.router());
+        .merge(shared.events.router())
+        .merge(shared.series.router());
     let listener = match tokio::net::TcpListener::bind(&listen).await {
         Ok(l) => l,
         Err(e) => {
@@ -145,6 +148,9 @@ async fn stream_once(config: &Config, observer: &Observer, shared: &Shared) -> R
                     format!("{} {} @ {}", t.symbol, t.trade_size, t.trade_price),
                     format!("{t:?}"),
                 );
+                if let Ok(price) = t.trade_price.to_string().parse::<f64>() {
+                    shared.series.push(&t.symbol, price);
+                }
                 "trade"
             }
             Data::Quote(q) => {

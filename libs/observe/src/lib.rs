@@ -331,6 +331,122 @@ async fn events(
     axum::Json(e.since(after, limit))
 }
 
+/// Live time series for charts, served at `GET /recent` as
+/// `{ "<key>": [[unix_ms, value], ...] }`.
+///
+/// Each key keeps at most `points` samples, taken at most once per
+/// `interval_ms`. `/recent` returns the `max_keys` keys with the most
+/// updates, so a feed with many instruments charts its most active ones.
+/// Up to 50 times `max_keys` keys are tracked; beyond that, the key updated
+/// least recently is dropped.
+#[derive(Clone)]
+pub struct Series {
+    inner: Arc<Mutex<SeriesInner>>,
+}
+
+struct SeriesInner {
+    points: usize,
+    interval_ms: f64,
+    max_keys: usize,
+    keys: HashMap<String, SeriesKey>,
+}
+
+struct SeriesKey {
+    samples: VecDeque<(f64, f64)>,
+    last_sample_ms: f64,
+    updated_ms: f64,
+    updates: u64,
+}
+
+impl Series {
+    #[must_use]
+    pub fn new(points: usize, interval_ms: u64, max_keys: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SeriesInner {
+                points: points.max(2),
+                interval_ms: interval_ms as f64,
+                max_keys: max_keys.max(1),
+                keys: HashMap::new(),
+            })),
+        }
+    }
+
+    /// Record a value for `key` now.
+    pub fn push(&self, key: &str, value: f64) {
+        if !value.is_finite() {
+            return;
+        }
+        self.push_at(key, value, unix_seconds() * 1000.0);
+    }
+
+    fn push_at(&self, key: &str, value: f64, now_ms: f64) {
+        let mut s = lock(&self.inner);
+        let (points, interval) = (s.points, s.interval_ms);
+        if !s.keys.contains_key(key) && s.keys.len() >= s.max_keys * 50 {
+            let oldest = s
+                .keys
+                .iter()
+                .min_by(|a, b| a.1.updated_ms.total_cmp(&b.1.updated_ms))
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                s.keys.remove(&k);
+            }
+        }
+        let k = s.keys.entry(key.to_owned()).or_insert(SeriesKey {
+            samples: VecDeque::new(),
+            last_sample_ms: f64::NEG_INFINITY,
+            updated_ms: now_ms,
+            updates: 0,
+        });
+        k.updated_ms = now_ms;
+        k.updates += 1;
+        if now_ms - k.last_sample_ms >= interval {
+            k.last_sample_ms = now_ms;
+            k.samples.push_back((now_ms, value));
+            if k.samples.len() > points {
+                k.samples.pop_front();
+            }
+        } else if let Some(last) = k.samples.back_mut() {
+            last.1 = value; // keep the latest value within the interval
+        }
+    }
+
+    /// The most active series, as served at `/recent`.
+    #[must_use]
+    pub fn snapshot(&self) -> serde_json::Value {
+        let s = lock(&self.inner);
+        let mut active: Vec<(&String, &SeriesKey)> = s.keys.iter().collect();
+        active.sort_by(|a, b| b.1.updates.cmp(&a.1.updates).then_with(|| a.0.cmp(b.0)));
+        let map: serde_json::Map<String, serde_json::Value> = active
+            .into_iter()
+            .take(s.max_keys)
+            .map(|(k, v)| {
+                let pts: Vec<[f64; 2]> = v.samples.iter().map(|(t, x)| [*t, *x]).collect();
+                (k.clone(), serde_json::json!(pts))
+            })
+            .collect();
+        serde_json::Value::Object(map)
+    }
+
+    /// Router with `/recent`, to merge into the service's app.
+    pub fn router(&self) -> Router {
+        Router::new()
+            .route("/recent", get(recent))
+            .with_state(self.clone())
+    }
+}
+
+impl Default for Series {
+    /// 15 minutes of one-second samples for up to 16 keys.
+    fn default() -> Self {
+        Self::new(900, 1000, 16)
+    }
+}
+
+async fn recent(AxumState(s): AxumState<Series>) -> axum::Json<serde_json::Value> {
+    axum::Json(s.snapshot())
+}
+
 /// Seconds since the Unix epoch, as a float.
 #[must_use]
 pub fn unix_seconds() -> f64 {
@@ -379,6 +495,22 @@ mod tests {
         let newer = e.since(4, 100);
         assert_eq!(newer["events"].as_array().unwrap().len(), 1);
         assert_eq!(newer["events"][0]["summary"], "event 4");
+    }
+
+    #[test]
+    fn series_samples_and_evicts() {
+        let s = Series::new(3, 1000, 2);
+        s.push_at("a", 1.0, 0.0);
+        s.push_at("a", 2.0, 500.0); // within the interval: updates the last sample
+        s.push_at("a", 3.0, 1000.0);
+        let snap = s.snapshot();
+        assert_eq!(snap["a"], serde_json::json!([[0.0, 2.0], [1000.0, 3.0]]));
+        s.push_at("b", 1.0, 2000.0);
+        s.push_at("b", 1.0, 3000.0);
+        s.push_at("c", 1.0, 4000.0); // only the two most active keys are served
+        let snap = s.snapshot();
+        assert!(snap.get("a").is_some() && snap.get("b").is_some());
+        assert!(snap.get("c").is_none());
     }
 
     #[test]
