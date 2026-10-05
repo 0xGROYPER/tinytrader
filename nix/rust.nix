@@ -28,6 +28,7 @@
           ../services/catalog
           ../services/alpaca-news
           ../services/alpaca-account
+          ../services/relay
           (lib.fileset.fileFilter (f: f.hasExt "rs" || f.name == "Cargo.toml") ../services/console)
           ../services/console/web
         ];
@@ -68,6 +69,7 @@
       catalog = service "catalog" "Read-only catalog of data roots";
       alpaca-news = service "alpaca-news" "Example service serving market news from Alpaca (Benzinga)";
       alpaca-account = service "alpaca-account" "Example service serving an Alpaca account's balances and positions";
+      relay = service "relay" "Market data relay: one provider connection served to local clients (glacier.relay/1)";
 
     in
     {
@@ -82,6 +84,7 @@
           catalog
           alpaca-news
           alpaca-account
+          relay
           ;
       };
 

@@ -42,6 +42,7 @@ console the same way.
 | `services/catalog` | Read-only catalog of data roots: datasets, coverage, disk space |
 | `services/alpaca-news` | Example service serving market news from Alpaca (supplied by Benzinga) |
 | `services/alpaca-account` | Example service serving an Alpaca account's balances and positions, read only |
+| `services/relay` | Market data relay: holds one provider connection and serves it to local clients ([decision 0006](docs/decisions/0006-market-data-relay.md)) |
 | `infra/modules` | NixOS modules, such as `glacier.services.<name>` |
 | `nix/` | Flake modules: Rust builds and checks |
 | `examples/` | Complete deployments you can run or copy |
