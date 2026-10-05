@@ -252,9 +252,7 @@ tr:last-child td { border-bottom: 0; }
     <div class="nav-label">Operate</div>
     <button type="button" data-tab="overview" aria-current="page">Overview</button>
     <button type="button" data-tab="services">Services</button>
-    <div class="nav-label" style="padding-top:14px">Market</div>
-    <button type="button" data-tab="charts">Charts</button>
-    <button type="button" data-tab="news">News</button>
+    <button type="button" data-tab="market">Market</button>
     <div id="nav-store"></div>
     <div id="nav-collections"></div>
   </nav>
@@ -549,10 +547,10 @@ function servicesTable() {
 }
 
 // ---------- market: charts and news ----------
-function chartsView() {
+function marketView() {
   const c = cards();
-  return `<div><h1>Charts</h1><p class="muted" style="margin:0">Live prices from this deployment's market data services.</p></div>` +
-    (c || '<p class="muted">No service is publishing price series yet.</p>');
+  return `<div><h1>Market</h1><p class="muted" style="margin:0">Live prices from this deployment's market data services, with the latest news below.</p></div>` +
+    (c || '<p class="muted">No service is publishing price series yet.</p>') + newsView();
 }
 function newsItems() {
   const seen = new Map();
@@ -568,13 +566,13 @@ function ago(iso) {
 }
 function newsView() {
   const items = newsItems();
-  if (!items.length) return '<div><h1>News</h1><p class="muted">No news service is running, or it has no stories yet.</p></div>';
+  if (!items.length) return '<div><h2>News</h2><p class="muted">No news service is running, or it has no stories yet.</p></div>';
   const counts = new Map();
   for (const n of items) for (const sym of n.symbols || []) counts.set(sym, (counts.get(sym) || 0) + 1);
   const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14).map(([sym]) => sym);
   const shown = state.newsSymbol ? items.filter(n => (n.symbols || []).includes(state.newsSymbol)) : items;
   const chip = (sym, label) => `<button type="button" class="chip-btn" data-news-symbol="${esc(sym ?? '')}" aria-pressed="${(state.newsSymbol ?? null) === sym}">${esc(label)}</button>`;
-  return `<div><h1>News</h1><p class="muted" style="margin:0">${items.length} recent stories, newest first.</p></div>
+  return `<div><h2>News</h2><p class="muted" style="margin:0">${items.length} recent stories, newest first.</p></div>
     <div class="chips">${chip(null, 'All')}${top.map(sym => chip(sym, sym)).join('')}</div>
     <div class="news">${shown.slice(0, 100).map(n => `<article class="story">
       <div class="story-meta"><span>${esc(ago(n.created_at))}</span><span>${esc(n.source || '')}${n.author ? ' · ' + esc(n.author) : ''}</span>
@@ -788,8 +786,7 @@ function render() {
   state.navigated = false;
   state.catalogAt = catalogStamp();
   $('view').innerHTML = state.tab === 'overview' ? topology()
-    : state.tab === 'charts' ? chartsView()
-    : state.tab === 'news' ? newsView()
+    : state.tab === 'market' ? marketView()
     : state.tab === 'services' ? servicesTable()
     : state.tab === 'data' ? dataView()
     : state.tab === 'storage' ? storageView() : collectionView();
@@ -897,7 +894,8 @@ $('theme-btn').addEventListener('click', () => {
   await loadCollections();
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
   if (hc) { state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true; }
-  else if (['services', 'charts', 'news', 'data', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
+  else if (['services', 'market', 'data', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
+  else if (['charts', 'news'].includes(h)) { state.tab = 'market'; state.navigated = true; }
   await loadTopology(); await poll();
   setInterval(poll, 2000);
   setInterval(pollEvents, 700);
