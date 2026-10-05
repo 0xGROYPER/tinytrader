@@ -1,8 +1,10 @@
-//! Example service: polls Alpaca's market news (supplied by Benzinga, free
-//! with an Alpaca account) over REST and serves recent stories.
+//! Example service: streams Alpaca's market news (supplied by Benzinga, free
+//! with an Alpaca account) and serves recent stories.
 //!
-//! Polling over REST, rather than streaming, keeps it independent of
-//! Alpaca's one-stream-per-account limit for market data.
+//! Stories arrive over Alpaca's news websocket as they are published. On
+//! start and after every reconnect, one REST request fills in what was missed.
+//! The news stream is separate from the market data streams, so it works
+//! alongside another process holding the account's market data stream.
 //!
 //! Serves `/news` (`{ "items": [...], "updated_at": unix_seconds }`, newest
 //! first, each item as Alpaca returns it: `id`, `headline`, `summary`,
@@ -21,22 +23,21 @@ use std::time::Duration;
 use axum::Router;
 use axum::routing::get;
 use clap::Parser;
+use futures_util::{SinkExt as _, StreamExt as _};
 use glacier_observe::{Events, Observer, State, listen_address, unix_seconds};
 use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::Message;
 
 const NEWS_URL: &str = "https://data.alpaca.markets/v1beta1/news";
+const STREAM_URL: &str = "wss://stream.data.alpaca.markets/v1beta1/news";
 
-/// Polls Alpaca's news feed and serves recent stories.
+/// Streams Alpaca's news feed and serves recent stories.
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
     /// Symbols to follow, comma-separated; all news when empty.
     #[arg(long, env = "ALPACA_NEWS_SYMBOLS", default_value = "")]
     symbols: String,
-
-    /// Seconds between polls.
-    #[arg(long, env = "ALPACA_NEWS_INTERVAL", default_value_t = 60)]
-    interval: u64,
 
     /// Stories kept and served.
     #[arg(long, default_value_t = 300)]
@@ -48,6 +49,7 @@ struct Shared {
     items: Mutex<VecDeque<Value>>,
     updated_at: Mutex<Option<f64>>,
     polls: AtomicU64,
+    reconnects: AtomicU64,
     errors: AtomicU64,
     events: Events,
 }
@@ -73,7 +75,7 @@ async fn main() {
     let shared = Arc::new(Shared::default());
     observer.describe(json!({
         "role": if symbols.is_empty() { "Market news from Alpaca (Benzinga), all symbols.".to_owned() } else { format!("Market news from Alpaca (Benzinga) for {}.", symbols.join(", ")) },
-        "upstream": [{ "id": "benzinga", "label": "benzinga", "sub": "news via Alpaca", "kind": "flow", "via": "REST, every minute" }],
+        "upstream": [{ "id": "benzinga", "label": "benzinga", "sub": "news via Alpaca", "kind": "flow", "via": "websocket" }],
         "streams": { "events": "/events", "news": "/news" },
     }));
     {
@@ -84,6 +86,12 @@ async fn main() {
                 "Polls of the news feed.",
                 &[],
                 s.polls.load(Ordering::Relaxed) as f64,
+            );
+            w.counter(
+                "glacier_news_reconnects_total",
+                "Reconnections to the news stream.",
+                &[],
+                s.reconnects.load(Ordering::Relaxed) as f64,
             );
             w.counter(
                 "glacier_news_errors_total",
@@ -139,27 +147,105 @@ async fn main() {
         .timeout(Duration::from_secs(15))
         .build()
         .expect("http client");
-    let every = Duration::from_secs(args.interval.max(15));
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut backoff = Duration::from_secs(1);
     loop {
+        // Catch up on anything published while disconnected, then stream.
         match poll(&http, &key, &secret, &symbols).await {
             Ok(fresh) => {
                 shared.polls.fetch_add(1, Ordering::Relaxed);
                 merge(&shared, fresh, args.keep);
                 *lock(&shared.updated_at) = Some(unix_seconds());
-                observer.set_state(
-                    State::Ready,
-                    &format!("{} stories", lock(&shared.items).len()),
-                );
             }
             Err(e) => {
                 shared.errors.fetch_add(1, Ordering::Relaxed);
                 eprintln!("alpaca-news: {e}");
                 observer.record_error(&e);
-                observer.set_state(State::Degraded, "news feed unreachable; retrying");
             }
         }
-        tokio::time::sleep(every).await;
+        let started = std::time::Instant::now();
+        let streamed = stream(&shared, &observer, &key, &secret, &symbols, args.keep).await;
+        if started.elapsed() > Duration::from_secs(60) {
+            backoff = Duration::from_secs(1);
+        }
+        shared.reconnects.fetch_add(1, Ordering::Relaxed);
+        if let Err(e) = streamed {
+            shared.errors.fetch_add(1, Ordering::Relaxed);
+            eprintln!("alpaca-news: {e}");
+            observer.record_error(&e);
+        }
+        observer.set_state(State::Degraded, "news stream disconnected; reconnecting");
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(60));
     }
+}
+
+/// Follow the news stream until it ends. Returns `Ok` when the server
+/// closes the connection, `Err` on failure.
+async fn stream(
+    shared: &Shared,
+    observer: &Observer,
+    key: &str,
+    secret: &str,
+    symbols: &[String],
+    keep: usize,
+) -> Result<(), String> {
+    let (mut ws, _) = tokio_tungstenite::connect_async(STREAM_URL)
+        .await
+        .map_err(|e| format!("cannot connect to the news stream: {e}"))?;
+    let subscribe = if symbols.is_empty() {
+        vec!["*".to_owned()]
+    } else {
+        symbols.to_vec()
+    };
+    while let Some(msg) = ws.next().await {
+        let text = match msg.map_err(|e| format!("news stream failed: {e}"))? {
+            Message::Text(t) => t,
+            Message::Close(_) => return Ok(()),
+            _ => continue,
+        };
+        let batch: Vec<Value> =
+            serde_json::from_str(&text).map_err(|e| format!("unreadable stream message: {e}"))?;
+        for m in batch {
+            match (m["T"].as_str(), m["msg"].as_str()) {
+                (Some("success"), Some("connected")) => {
+                    let auth = json!({ "action": "auth", "key": key, "secret": secret });
+                    ws.send(Message::text(auth.to_string()))
+                        .await
+                        .map_err(|e| format!("cannot authenticate: {e}"))?;
+                }
+                (Some("success"), Some("authenticated")) => {
+                    let sub = json!({ "action": "subscribe", "news": subscribe });
+                    ws.send(Message::text(sub.to_string()))
+                        .await
+                        .map_err(|e| format!("cannot subscribe: {e}"))?;
+                }
+                (Some("subscription"), _) => {
+                    observer.set_state(
+                        State::Ready,
+                        &format!("streaming; {} stories", lock(&shared.items).len()),
+                    );
+                }
+                (Some("error"), _) => {
+                    return Err(format!(
+                        "news stream refused: {} {}",
+                        m["code"],
+                        m["msg"].as_str().unwrap_or("")
+                    ));
+                }
+                (Some("n"), _) => {
+                    merge(shared, vec![m], keep);
+                    *lock(&shared.updated_at) = Some(unix_seconds());
+                    observer.set_state(
+                        State::Ready,
+                        &format!("streaming; {} stories", lock(&shared.items).len()),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The newest stories, newest first.

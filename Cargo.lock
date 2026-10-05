@@ -53,10 +53,13 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "futures-util",
  "glacier-observe",
  "reqwest",
+ "rustls",
  "serde_json",
  "tokio",
+ "tokio-tungstenite 0.27.0",
 ]
 
 [[package]]
