@@ -975,7 +975,7 @@ function applyTheme() {
   if (themeChoice) document.documentElement.setAttribute('data-theme', themeChoice);
   else document.documentElement.removeAttribute('data-theme');
   const now = themeChoice || systemTheme(), next = now === 'dark' ? 'light' : 'dark';
-  $('theme-btn').innerHTML = themeIcon[next];
+  $('theme-btn').innerHTML = themeIcon[now];
   $('theme-btn').setAttribute('aria-label', `Switch to ${next} theme`);
   $('theme-btn').title = `Switch to ${next} theme`;
 }
