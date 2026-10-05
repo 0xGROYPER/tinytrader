@@ -70,6 +70,21 @@ async fn main() {
         }
     }
     register_metrics(&observer, &shared);
+    observer.describe(serde_json::json!({
+        "role": format!("Streams Coinbase tickers for {} to JSON Lines files.", products.join(", ")),
+        "upstream": [{ "id": "coinbase", "label": "coinbase", "sub": "public ticker feed", "kind": "flow", "via": "websocket" }],
+        "streams": { "events": "/events", "series": "/recent" },
+        "stores": [{ "id": "data", "label": "ticker-data", "sub": "JSON Lines files", "metric": "glacier_ticker_bytes_written_total" }],
+        "panels": [{
+            "heading": "Live data",
+            "note": "Sampled once per second",
+            "decimals": 2,
+            "footer": [
+                { "metric": "glacier_ticker_messages_total", "match": "product", "format": "count", "suffix": " messages" },
+                { "metric": "glacier_ticker_last_message_age_seconds", "match": "product", "format": "age", "prefix": "last ", "suffix": " ago" }
+            ]
+        }]
+    }));
 
     let app = Router::new()
         .with_state(shared.clone())

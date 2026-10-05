@@ -58,6 +58,12 @@ async fn main() {
     let observer = Observer::new("alpaca-live", env!("CARGO_PKG_VERSION"));
     let shared = Arc::new(Shared::default());
     register_metrics(&observer, &shared);
+    observer.describe(serde_json::json!({
+        "role": format!("Alpaca real-time IEX trades and quotes for {}.", config.symbols.join(", ")),
+        "upstream": [{ "id": "alpaca", "label": "alpaca", "sub": "IEX real-time", "kind": "flow", "via": "websocket" }],
+        "streams": { "events": "/events", "series": "/recent" },
+        "panels": [{ "heading": "Live trades", "note": "IEX trade prices, sampled once per second", "decimals": 2 }]
+    }));
 
     let app = Router::new()
         .merge(observer.router())

@@ -5,6 +5,8 @@
 //! - `GET /health`: JSON describing the service and its state. HTTP 200 when
 //!   the service is ready, 503 otherwise.
 //! - `GET /metrics`: Prometheus text exposition format.
+//! - `GET /describe`: what the service is and can show, so a console can
+//!   draw it without configuration (see [`Observer::describe`]).
 //!
 //! Metric names and the health document are a versioned contract
 //! (`glacier.observe/1`): changes are additive only. Labels stay low
@@ -72,6 +74,7 @@ struct Inner {
     started: Instant,
     status: Mutex<Status>,
     render: Mutex<Option<Render>>,
+    description: Mutex<serde_json::Value>,
 }
 
 impl Observer {
@@ -91,6 +94,7 @@ impl Observer {
                     last_error_at: None,
                 }),
                 render: Mutex::new(None),
+                description: Mutex::new(serde_json::json!({})),
             }),
         }
     }
@@ -115,6 +119,35 @@ impl Observer {
         F: Fn(&mut MetricsWriter) + Send + Sync + 'static,
     {
         *lock(&self.inner.render) = Some(Box::new(render));
+    }
+
+    /// Describe the service for `/describe`. Recognised fields, all optional:
+    ///
+    /// - `role`: one sentence on what this instance does.
+    /// - `upstream`: sources it reads from, each `{ id, label, sub, kind, via }`
+    ///   for something outside the deployment, or `{ service, kind, via }` for
+    ///   another service in it. `kind` is `flow` (data) or `read`; `via` labels
+    ///   the connection.
+    /// - `streams`: paths of optional endpoints, `{ "events": "/events",
+    ///   "series": "/recent" }`.
+    /// - `stores`: places it writes, each `{ id, label, sub, metric }`, where
+    ///   `metric` names a metric with the bytes written.
+    /// - `panels`: suggested charts over `series`, each `{ heading, note,
+    ///   decimals, footer }` (footer entries as in the topology format).
+    pub fn describe(&self, description: serde_json::Value) {
+        *lock(&self.inner.description) = description;
+    }
+
+    /// The document served at `/describe`.
+    #[must_use]
+    pub fn description_json(&self) -> serde_json::Value {
+        let mut d = lock(&self.inner.description).clone();
+        if let Some(map) = d.as_object_mut() {
+            map.insert("schema".into(), SCHEMA.into());
+            map.insert("service".into(), self.inner.service.clone().into());
+            map.insert("build".into(), self.inner.build.clone().into());
+        }
+        d
     }
 
     #[must_use]
@@ -168,11 +201,12 @@ impl Observer {
         w.out
     }
 
-    /// Router with `/health` and `/metrics`, to merge into the service's app.
+    /// Router with `/health`, `/metrics` and `/describe`, to merge into the service's app.
     pub fn router(&self) -> Router {
         Router::new()
             .route("/health", get(health))
             .route("/metrics", get(metrics))
+            .route("/describe", get(describe))
             .with_state(self.clone())
     }
 }
@@ -184,6 +218,10 @@ async fn health(AxumState(o): AxumState<Observer>) -> Response {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (code, axum::Json(o.health_json())).into_response()
+}
+
+async fn describe(AxumState(o): AxumState<Observer>) -> axum::Json<serde_json::Value> {
+    axum::Json(o.description_json())
 }
 
 async fn metrics(AxumState(o): AxumState<Observer>) -> Response {

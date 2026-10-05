@@ -12,4 +12,5 @@ workspace = true
 axum.workspace = true
 databento = { version = "0.63", default-features = false, features = ["live"] }
 glacier-observe.workspace = true
+serde_json.workspace = true
 tokio.workspace = true

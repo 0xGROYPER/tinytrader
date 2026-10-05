@@ -11,6 +11,8 @@ services:
       dockerfile: services/Dockerfile
       args: { SERVICE: alpaca-live }
     image: glacier/alpaca-live:dev
+    labels:
+      glacier.observe: "9102"
     environment:
       APCA_API_KEY_ID_FILE: /run/secrets/apca_api_key_id
       APCA_API_SECRET_KEY_FILE: /run/secrets/apca_api_secret_key
@@ -26,6 +28,8 @@ services:
       dockerfile: services/Dockerfile
       args: { SERVICE: console }
     image: glacier/console:dev
+    labels:
+      glacier.observe: "8080"
     environment:
       CONSOLE_LISTEN: 0.0.0.0:8080
       CONSOLE_TOPOLOGY: /etc/glacier/topology.json
@@ -40,6 +44,8 @@ services:
 
   docker-proxy:
     image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    labels:
+      glacier.role: "Read-only view of the Docker API; the console reads container state through it."
     environment:
       CONTAINERS: 1
       POST: 0

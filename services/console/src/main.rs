@@ -2,7 +2,8 @@
 //!
 //! Serves the console page and a small read-only API:
 //!
-//! - `GET /api/topology`: the deployment description (hosts, services, stores, edges).
+//! - `GET /api/topology`: the deployment as drawn: hosts, services, stores,
+//!   edges and panels.
 //! - `GET /api/state`: the latest snapshot of every service: container state
 //!   from the Docker Engine API, plus each service's `/health`, `/metrics`
 //!   and optional `/recent` endpoints.
@@ -11,15 +12,28 @@
 //! of viewers cost one round of polling. The console never writes to Docker
 //! or to any service; it should reach Docker through a read-only proxy.
 //!
+//! **Discovery.** With Docker configured, every container in the project
+//! appears in the graph. A container labelled `glacier.observe=<port>` is
+//! asked for its `/describe` document, which supplies its role, upstream
+//! sources, stores, event and series endpoints and suggested panels. Other
+//! labels: `glacier.role` (a description for containers without
+//! `/describe`), `glacier.label` and `glacier.host`.
+//!
+//! **Overrides.** The topology file is optional. When present, it is layered
+//! over what was discovered: `name`, `focus` and `hosts` replace; `services`,
+//! `external` and `stores` entries merge by `id`; `edges` are added; `panels`
+//! for a service replace that service's suggested panels; `hide` lists ids to
+//! leave out. Without Docker, the file alone describes the deployment.
+//!
 //! Configuration (environment):
 //! - `CONSOLE_LISTEN`: address to serve on (default `127.0.0.1:8080`)
-//! - `CONSOLE_TOPOLOGY`: path to the topology JSON (default `topology.json`)
+//! - `CONSOLE_TOPOLOGY`: path to the optional topology file (default `topology.json`)
 //! - `CONSOLE_DOCKER`: Docker Engine API base URL, e.g. `http://docker-proxy:2375` (optional)
 //! - `CONSOLE_COMPOSE_PROJECT`: only show containers from this Compose project (optional)
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::extract::State as AxumState;
@@ -41,6 +55,10 @@ struct App {
     config: Config,
     http: reqwest::Client,
     snapshot: RwLock<Value>,
+    /// The deployment as currently drawn: discovered, then overridden.
+    topology: RwLock<Value>,
+    /// `/describe` documents per container id, with when they were fetched.
+    describes: Mutex<HashMap<String, (Instant, Value)>>,
     /// Previous CPU readings per container id: (container total, system total).
     cpu: Mutex<HashMap<String, (f64, f64)>>,
     polls: std::sync::atomic::AtomicU64,
@@ -66,11 +84,25 @@ async fn main() {
         config,
         http,
         snapshot: RwLock::new(json!({ "generated_at": null, "services": {} })),
+        topology: RwLock::new(json!({ "services": [] })),
+        describes: Mutex::new(HashMap::new()),
         cpu: Mutex::new(HashMap::new()),
         polls: std::sync::atomic::AtomicU64::new(0),
     });
 
     let observer = Observer::new("console", env!("CARGO_PKG_VERSION"));
+    // The Docker proxy, if any, is this console's upstream.
+    let proxy = app.config.docker.as_deref().and_then(|u| {
+        u.split("//")
+            .nth(1)?
+            .split([':', '/'])
+            .next()
+            .map(str::to_owned)
+    });
+    observer.describe(json!({
+        "role": "The operator console: polls every service and Docker every two seconds.",
+        "upstream": proxy.map_or_else(Vec::new, |p| vec![json!({ "service": p, "kind": "read", "via": "container state" })]),
+    }));
     {
         let a = app.clone();
         observer.set_metrics(move |w| {
@@ -115,10 +147,8 @@ async fn page() -> Html<&'static str> {
 }
 
 async fn topology(AxumState(app): AxumState<Arc<App>>) -> Response {
-    match read_topology(&app.config.topology) {
-        Ok(v) => axum::Json(v).into_response(),
-        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
+    let topo = read(&app.topology).clone();
+    ([(header::CACHE_CONTROL, "no-store")], axum::Json(topo)).into_response()
 }
 
 async fn state(AxumState(app): AxumState<Arc<App>>) -> Response {
@@ -145,10 +175,7 @@ async fn events(
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
 ) -> Response {
     let not_found = |m: String| (axum::http::StatusCode::NOT_FOUND, m).into_response();
-    let topo = match read_topology(&app.config.topology) {
-        Ok(t) => t,
-        Err(e) => return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    };
+    let topo = read(&app.topology).clone();
     let url = topo["services"]
         .as_array()
         .and_then(|list| {
@@ -177,10 +204,196 @@ async fn events(
     }
 }
 
-fn read_topology(path: &str) -> Result<Value, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("cannot read topology {path}: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("invalid topology {path}: {e}"))
+/// The optional topology file: absent means no overrides.
+fn read_overrides(path: &str) -> Result<Value, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            serde_json::from_str(&text).map_err(|e| format!("invalid topology {path}: {e}"))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
+        Err(e) => Err(format!("cannot read topology {path}: {e}")),
+    }
+}
+
+/// Build the deployment from running containers and their `/describe` documents.
+async fn discover(app: &App, containers: &HashMap<String, Value>) -> Value {
+    let mut names: Vec<&String> = containers.keys().collect();
+    names.sort();
+    let (mut services, mut external, mut stores, mut edges, mut panels) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut observed = Vec::new();
+    let mut console = None;
+    for name in names {
+        let c = &containers[name];
+        let labels = &c["labels"];
+        let label = |k: &str| labels[k].as_str().map(str::to_owned);
+        let host = label("glacier.host").unwrap_or_else(|| "local".into());
+        let mut svc = json!({
+            "id": name,
+            "host": host,
+            "label": label("glacier.label").unwrap_or_else(|| name.clone()),
+            "role": label("glacier.role"),
+        });
+        if let Some(port) = label("glacier.observe") {
+            let base = format!("http://{name}:{port}");
+            let d = describe(app, c["id"].as_str().unwrap_or(name), &base).await;
+            if d["service"].as_str() == Some("console") {
+                console = Some(name.clone());
+            }
+            observed.push(name.clone());
+            svc["health"] = json!(format!("{base}/health"));
+            svc["metrics"] = json!(format!("{base}/metrics"));
+            if let Some(r) = d["role"].as_str() {
+                svc["role"] = json!(r);
+            }
+            if let Some(path) = d["streams"]["events"].as_str() {
+                svc["events"] = json!(format!("{base}{path}"));
+            }
+            if let Some(path) = d["streams"]["series"].as_str() {
+                svc["recent"] = json!(format!("{base}{path}"));
+            }
+            for u in d["upstream"].as_array().into_iter().flatten() {
+                let kind = u["kind"].as_str().unwrap_or("flow");
+                let from = if let Some(other) = u["service"].as_str() {
+                    other.to_owned()
+                } else if let Some(id) = u["id"].as_str() {
+                    if !external.iter().any(|e: &Value| e["id"] == id) {
+                        external.push(json!({ "id": id, "label": u["label"].as_str().unwrap_or(id), "sub": u["sub"], "role": u["role"] }));
+                    }
+                    id.to_owned()
+                } else {
+                    continue;
+                };
+                edges.push(json!({ "from": from, "to": name, "kind": kind, "label": u["via"] }));
+            }
+            for st in d["stores"].as_array().into_iter().flatten() {
+                let id = format!("{name}-{}", st["id"].as_str().unwrap_or("store"));
+                let mut store = json!({ "id": id, "host": svc["host"], "label": st["label"], "sub": st["sub"] });
+                if let Some(m) = st["metric"].as_str() {
+                    store["metric"] = json!({ "service": name, "name": m, "label": "Bytes written", "format": "bytes", "suffix": " written" });
+                }
+                stores.push(store);
+                edges.push(json!({ "from": name, "to": id, "kind": "flow" }));
+            }
+            for p in d["panels"].as_array().into_iter().flatten() {
+                let mut p = p.clone();
+                p["service"] = json!(name);
+                p["source"] = json!("recent");
+                panels.push(p);
+            }
+        }
+        services.push(svc);
+    }
+    if let Some(console) = &console {
+        for name in observed.iter().filter(|n| *n != console) {
+            edges.push(
+                json!({ "from": name, "to": console, "kind": "read", "label": "health · metrics" }),
+            );
+        }
+    }
+    json!({
+        "name": app.config.project.clone().unwrap_or_else(|| "deployment".into()),
+        "hosts": [{ "id": "local", "label": "local", "sub": "Docker Compose" }],
+        "external": external,
+        "services": services,
+        "stores": stores,
+        "edges": edges,
+        "panels": panels,
+    })
+}
+
+/// A container's `/describe` document, refreshed at most every 30 seconds.
+async fn describe(app: &App, id: &str, base: &str) -> Value {
+    if let Some((at, d)) = lock(&app.describes).get(id)
+        && at.elapsed() < Duration::from_secs(30)
+    {
+        return d.clone();
+    }
+    match get_json::<Value>(app, &format!("{base}/describe")).await {
+        Ok(d) => {
+            lock(&app.describes).insert(id.to_owned(), (Instant::now(), d.clone()));
+            d
+        }
+        // Not cached, so a service is described as soon as it answers.
+        Err(_) => json!({}),
+    }
+}
+
+/// Layer the topology file's overrides over the discovered deployment.
+fn apply_overrides(mut topo: Value, o: &Value) -> Value {
+    for key in ["name", "focus", "hosts"] {
+        if !o[key].is_null() {
+            topo[key] = o[key].clone();
+        }
+    }
+    for list in ["services", "external", "stores"] {
+        let mut items = topo[list].as_array().cloned().unwrap_or_default();
+        for item in o[list].as_array().into_iter().flatten() {
+            match items.iter_mut().find(|i| i["id"] == item["id"]) {
+                Some(existing) => {
+                    if let (Some(e), Some(n)) = (existing.as_object_mut(), item.as_object()) {
+                        for (k, v) in n {
+                            e.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                None => items.push(item.clone()),
+            }
+        }
+        topo[list] = json!(items);
+    }
+    let mut edges = topo["edges"].as_array().cloned().unwrap_or_default();
+    for e in o["edges"].as_array().into_iter().flatten() {
+        if !edges
+            .iter()
+            .any(|x| x["from"] == e["from"] && x["to"] == e["to"])
+        {
+            edges.push(e.clone());
+        }
+    }
+    topo["edges"] = json!(edges);
+    if let Some(own) = o["panels"].as_array() {
+        let overridden: Vec<&Value> = own.iter().map(|p| &p["service"]).collect();
+        let mut panels: Vec<Value> = topo["panels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| !overridden.contains(&&p["service"]))
+            .cloned()
+            .collect();
+        panels.extend(own.iter().cloned());
+        topo["panels"] = json!(panels);
+    }
+    if let Some(hide) = o["hide"].as_array() {
+        let hidden = |v: &Value| hide.contains(v);
+        for list in ["services", "external", "stores"] {
+            let kept: Vec<Value> = topo[list]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|i| !hidden(&i["id"]))
+                .cloned()
+                .collect();
+            topo[list] = json!(kept);
+        }
+        let kept: Vec<Value> = topo["edges"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|e| !hidden(&e["from"]) && !hidden(&e["to"]))
+            .cloned()
+            .collect();
+        topo["edges"] = json!(kept);
+        let kept: Vec<Value> = topo["panels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| !hidden(&p["service"]))
+            .cloned()
+            .collect();
+        topo["panels"] = json!(kept);
+    }
+    topo
 }
 
 async fn poll_forever(app: Arc<App>, observer: Observer) {
@@ -204,8 +417,8 @@ async fn poll_forever(app: Arc<App>, observer: Observer) {
 
 /// Build one snapshot. Returns it with a description of any console-level problem.
 async fn poll_once(app: &App) -> (Value, Option<String>) {
-    let topo = match read_topology(&app.config.topology) {
-        Ok(t) => t,
+    let overrides = match read_overrides(&app.config.topology) {
+        Ok(o) => o,
         Err(e) => {
             return (
                 json!({ "generated_at": unix_seconds(), "error": e, "services": {} }),
@@ -220,6 +433,15 @@ async fn poll_once(app: &App) -> (Value, Option<String>) {
         },
         None => (HashMap::new(), None),
     };
+    let discovered = if app.config.docker.is_some() {
+        discover(app, &containers).await
+    } else {
+        json!({ "name": "deployment", "services": [] })
+    };
+    let topo = apply_overrides(discovered, &overrides);
+    *app.topology
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = topo.clone();
 
     let mut services = serde_json::Map::new();
     let empty = Vec::new();
@@ -329,6 +551,7 @@ async fn containers(app: &App, base: &str) -> Result<HashMap<String, Value>, Str
                 "started_at": inspect["State"]["StartedAt"],
                 "restart_count": inspect["RestartCount"],
                 "health": inspect["State"]["Health"]["Status"],
+                "labels": c["Labels"],
                 "cpu_percent": cpu_percent,
                 "memory": mem,
             }),
@@ -453,6 +676,14 @@ fn short_error(e: &reqwest::Error) -> String {
     }
 }
 
+fn read<T>(l: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    l.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
 }
@@ -470,6 +701,32 @@ mod tests {
         assert_eq!(v["x"][0]["labels"]["kind"], "a\"b");
         assert_eq!(v["x"][0]["value"], 3.0);
         assert_eq!(v["up"][0]["value"], 1.0);
+    }
+
+    #[test]
+    fn overrides_merge_hide_and_replace_panels() {
+        let found = json!({
+            "name": "proj",
+            "services": [{ "id": "a", "label": "a" }, { "id": "b", "label": "b" }],
+            "external": [],
+            "stores": [],
+            "edges": [{ "from": "a", "to": "b" }],
+            "panels": [{ "service": "a", "heading": "found" }],
+        });
+        let o = json!({
+            "name": "mine",
+            "services": [{ "id": "a", "label": "Alpha" }, { "id": "c", "label": "c" }],
+            "panels": [{ "service": "a", "heading": "mine" }],
+            "hide": ["b"],
+        });
+        let t = apply_overrides(found, &o);
+        assert_eq!(t["name"], "mine");
+        assert_eq!(
+            t["services"],
+            json!([{ "id": "a", "label": "Alpha" }, { "id": "c", "label": "c" }])
+        );
+        assert_eq!(t["edges"], json!([]));
+        assert_eq!(t["panels"], json!([{ "service": "a", "heading": "mine" }]));
     }
 
     #[test]

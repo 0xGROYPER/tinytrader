@@ -16,6 +16,7 @@ dependencies = [
  "axum",
  "futures-util",
  "glacier-observe",
+ "serde_json",
  "tokio",
 ]
 
@@ -470,6 +471,7 @@ dependencies = [
  "axum",
  "databento",
  "glacier-observe",
+ "serde_json",
  "tokio",
 ]
 

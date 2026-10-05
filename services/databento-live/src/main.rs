@@ -66,6 +66,17 @@ async fn main() {
         ..Shared::default()
     });
     register_metrics(&observer, &shared, &config);
+    observer.describe(serde_json::json!({
+        "role": format!(
+            "Databento live subscription: {} {} for {}.",
+            config.dataset,
+            config.schema,
+            config.symbols.join(", ")
+        ),
+        "upstream": [{ "id": "databento", "label": "databento", "sub": config.dataset, "kind": "flow", "via": "live session" }],
+        "streams": { "events": "/events", "series": "/recent" },
+        "panels": [{ "heading": "Live trades", "note": "Most traded instruments, sampled once per second", "decimals": 2 }]
+    }));
 
     let app = Router::new()
         .merge(observer.router())
