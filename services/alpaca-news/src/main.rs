@@ -73,7 +73,7 @@ async fn main() {
     let shared = Arc::new(Shared::default());
     observer.describe(json!({
         "role": if symbols.is_empty() { "Market news from Alpaca (Benzinga), all symbols.".to_owned() } else { format!("Market news from Alpaca (Benzinga) for {}.", symbols.join(", ")) },
-        "upstream": [{ "id": "alpaca-news", "label": "alpaca", "sub": "news (Benzinga)", "kind": "flow", "via": "REST, every minute" }],
+        "upstream": [{ "id": "benzinga", "label": "benzinga", "sub": "news via Alpaca", "kind": "flow", "via": "REST, every minute" }],
         "streams": { "events": "/events", "news": "/news" },
     }));
     {

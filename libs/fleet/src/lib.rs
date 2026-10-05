@@ -288,13 +288,22 @@ async fn observe_into(
         let from = if let Some(other) = u["service"].as_str() {
             other.to_owned()
         } else if let Some(id) = u["id"].as_str() {
-            if !f.external.iter().any(|e| e["id"] == id) {
-                f.external.push(json!({ "id": id, "label": u["label"].as_str().unwrap_or(id), "sub": u["sub"], "role": u["role"] }));
+            // A source named like the service itself would draw it feeding itself.
+            let id = if id == name {
+                format!("{id}-source")
+            } else {
+                id.to_owned()
+            };
+            if !f.external.iter().any(|e| e["id"] == id.as_str()) {
+                f.external.push(json!({ "id": id, "label": u["label"].as_str().unwrap_or(&id), "sub": u["sub"], "role": u["role"] }));
             }
-            id.to_owned()
+            id
         } else {
             continue;
         };
+        if from == name {
+            continue;
+        }
         f.edges
             .push(json!({ "from": from, "to": name, "kind": kind, "label": u["via"] }));
     }

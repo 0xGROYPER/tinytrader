@@ -366,15 +366,22 @@ const NW = 176, NH = 50, CG = 96, RG = 26, PAD = 24, HOST_TOP = 40;
 function layout() {
   const byId = nodesById(), edges = state.topo?.edges || [];
   const ids = Object.keys(byId);
-  const col = {};
-  ids.forEach(id => { col[id] = byId[id].kind === 'ext' ? 0 : 1; });
-  for (let i = 0; i < ids.length; i++) {
+  // Column = longest chain of edges leading to a node. Self-edges and edges
+  // that would close a cycle are ignored, so no topology can stretch the graph.
+  const col = {}, onPath = new Set();
+  const colOf = id => {
+    if (col[id] !== undefined) return col[id];
+    if (byId[id].kind === 'ext') return (col[id] = 0);
+    onPath.add(id);
+    let c = 1;
     for (const e of edges) {
-      if (!byId[e.from] || !byId[e.to] || byId[e.to].kind === 'ext') continue;
-      const c = byId[e.from].kind === 'ext' ? 1 : col[e.from] + 1;
-      if (c > col[e.to]) col[e.to] = c;
+      if (e.to !== id || e.from === id || !byId[e.from] || onPath.has(e.from)) continue;
+      c = Math.max(c, byId[e.from].kind === 'ext' ? 1 : colOf(e.from) + 1);
     }
-  }
+    onPath.delete(id);
+    return (col[id] = c);
+  };
+  ids.forEach(colOf);
   const hosts = state.topo?.hosts || [{ id: 'local', label: 'local' }];
   const hostOf = n => n.kind === 'ext' ? null : (n.host || hosts[0].id);
   const maxCol = Math.max(1, ...Object.values(col));
