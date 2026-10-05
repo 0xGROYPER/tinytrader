@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inconsolata:wght@400;500;600&family=Inter:wght@400;500;600&display=swap">
 <style>
-/* Layout: scientific-docs shell; follows the system theme unless the viewer picks one., NixOS-flavoured blue and light blue with an orange for attention. */
+/* Layout: scientific-docs shell; light or dark, following the system unless the viewer picks one. NixOS-flavoured blue and light blue with an orange for attention. */
 :root {
   color-scheme: light;
   --bg: #FFFFFF; --surface: #F5F8FC; --line: #D5DFEB; --line-soft: #E8EEF5;
@@ -59,11 +59,6 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 .home:hover b { color: var(--accent); }
 .crumb-sep { color: var(--line); font-size: 20px; font-weight: 300; line-height: 1; margin: 0 -2px; }
 .deployment { font-size: 16px; color: var(--fg-2); }
-.live { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
-.pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
-.pulse.stale { background: var(--warn-mark); }
-@media (prefers-reduced-motion: no-preference) { .pulse:not(.stale) { animation: pulse 2s ease-in-out infinite; } }
-@keyframes pulse { 50% { opacity: .35; } }
 
 .icon-btn { width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); cursor: pointer; }
 .icon-btn:hover { background: var(--surface); }
@@ -256,7 +251,6 @@ tr:last-child td { border-bottom: 0; }
     <span class="deployment" id="profile" title="Deployment shown">…</span>
   </div>
   <div class="top-right">
-    <span class="live"><span class="pulse stale" id="pulse"></span><span id="updated">connecting…</span></span>
     <button type="button" class="icon-btn" id="theme-btn"></button>
   </div>
 </header>
@@ -862,8 +856,6 @@ function render() {
 function status() {
   const age = state.lastOk ? (Date.now() - state.lastOk) / 1000 : null;
   const stale = age == null || age > 6;
-  $('pulse').classList.toggle('stale', stale);
-  $('updated').textContent = age == null ? 'connecting…' : stale ? `no update for ${Math.round(age)}s` : 'live';
   const problems = [];
   if (stale && age != null) problems.push('The console backend is not responding. Data shown may be out of date.');
   const d = state.snap?.docker;
@@ -931,29 +923,32 @@ $('view').addEventListener('keydown', e => {
 });
 let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(drawCharts, 150); });
 
-// Theme: follows the system unless the viewer picks light or dark.
-const THEMES = ['system', 'light', 'dark'];
+// Theme: light or dark, following the system until the viewer picks one.
+// Picking the system's own choice again goes back to following it.
+const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+const systemTheme = () => darkQuery.matches ? 'dark' : 'light';
 const themeIcon = {
-  system: '<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.5"/><path d="M7 17h6M10 13.5V17"/></svg>',
   light: '<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10" cy="10" r="3.5"/><path d="M10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2M4 4l1.4 1.4M14.6 14.6 16 16M4 16l1.4-1.4M14.6 5.4 16 4"/></svg>',
   dark: '<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M16.5 12.5A7 7 0 0 1 7.5 3.5a7 7 0 1 0 9 9Z"/></svg>'
 };
-function applyTheme(t) {
-  if (t === 'system') document.documentElement.removeAttribute('data-theme');
-  else document.documentElement.setAttribute('data-theme', t);
-  const next = THEMES[(THEMES.indexOf(t) + 1) % THEMES.length];
-  const label = t === 'system' ? 'Theme follows your system' : `Theme: ${t}`;
-  $('theme-btn').innerHTML = themeIcon[t];
-  $('theme-btn').setAttribute('aria-label', `${label}. Switch to ${next}.`);
-  $('theme-btn').title = `${label} (click for ${next})`;
+let themeChoice = null;
+try { const saved = localStorage.getItem('glacier-theme'); if (saved === 'light' || saved === 'dark') themeChoice = saved; } catch (_) {}
+function applyTheme() {
+  if (themeChoice) document.documentElement.setAttribute('data-theme', themeChoice);
+  else document.documentElement.removeAttribute('data-theme');
+  const now = themeChoice || systemTheme(), next = now === 'dark' ? 'light' : 'dark';
+  $('theme-btn').innerHTML = themeIcon[next];
+  $('theme-btn').setAttribute('aria-label', `Switch to ${next} theme`);
+  $('theme-btn').title = `Switch to ${next} theme`;
 }
-let theme = 'system';
-try { const saved = localStorage.getItem('glacier-theme'); if (THEMES.includes(saved)) theme = saved; } catch (_) {}
-applyTheme(theme);
+applyTheme();
+darkQuery.addEventListener('change', applyTheme);
 $('theme-btn').addEventListener('click', () => {
-  theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
-  try { localStorage.setItem('glacier-theme', theme); } catch (_) {}
-  applyTheme(theme);
+  const next = (themeChoice || systemTheme()) === 'dark' ? 'light' : 'dark';
+  themeChoice = next === systemTheme() ? null : next;
+  try { if (themeChoice) localStorage.setItem('glacier-theme', themeChoice); else localStorage.removeItem('glacier-theme'); } catch (_) {}
+  applyTheme();
+  drawCharts();
 });
 
 (async () => {
