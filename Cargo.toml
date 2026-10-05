@@ -6,6 +6,7 @@ members = [
     "services/alpaca-live",
     "services/alpaca-news",
     "services/alpaca-account",
+    "services/relay",
     "services/catalog",
     "services/console",
     "services/databento-live",
