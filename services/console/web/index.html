@@ -145,7 +145,7 @@ th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; l
 td { padding: 10px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: top; color: var(--fg-2); }
 tr:last-child td { border-bottom: 0; }
 
-.chart { position: relative; width: 100%; }
+.chart { position: relative; width: 100%; min-height: 110px; }
 .chart svg { display: block; overflow: visible; }
 .c-line { fill: none; stroke: var(--accent-mark); stroke-width: 2; stroke-linejoin: round; }
 .c-line.up { stroke: var(--up); } .c-line.down { stroke: var(--down); }
@@ -157,6 +157,33 @@ tr:last-child td { border-bottom: 0; }
 .tip { position: absolute; pointer-events: none; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font: 13px var(--mono); color: var(--fg); white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.12); z-index: 2; }
 .tip .muted { display: block; font-size: 12px; }
 .empty { padding: 16px; color: var(--muted); font-size: 14px; }
+#nav-collections { display: contents; }
+.doc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px; }
+.doc-card { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); text-align: left; font: inherit; cursor: pointer; }
+.doc-card:hover { border-color: var(--accent-2); background: var(--surface); }
+.doc-card b { color: var(--accent); font-weight: 600; }
+.doc-card span { font: 12px var(--mono); color: var(--muted); }
+.group-h { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 18px 0 8px; }
+.doc-layout { display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start; }
+.doc-nav { flex: 1 1 200px; max-width: 240px; display: flex; flex-direction: column; gap: 2px; }
+.doc-nav button { text-align: left; min-height: 32px; padding: 4px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--fg-2); font: inherit; font-size: 14px; cursor: pointer; }
+.doc-nav button:hover { background: var(--surface); }
+.doc-nav button[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.doc-nav .group-h { margin: 12px 10px 4px; }
+.back { align-self: flex-start; border: 0; background: none; color: var(--accent); font: 500 14px var(--sans); cursor: pointer; padding: 4px 0; }
+.prose { flex: 999 1 420px; min-width: 0; max-width: 76ch; color: var(--fg-2); line-height: 1.65; }
+.prose .path { font: 12px var(--mono); color: var(--muted); }
+.prose h1 { color: var(--fg); font-size: 26px; margin: 4px 0 12px; }
+.prose h2 { color: var(--fg); font-size: 20px; margin: 30px 0 10px; }
+.prose h3 { color: var(--fg); font-size: 16px; margin: 22px 0 8px; }
+.prose a { color: var(--accent); }
+.prose code { font-family: var(--mono); font-size: .95em; background: var(--surface); border: 1px solid var(--line-soft); border-radius: 4px; padding: 0 4px; }
+.prose pre { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
+.prose pre code { background: none; border: 0; padding: 0; color: var(--fg); }
+.prose table { display: block; overflow-x: auto; margin: 12px 0; }
+.prose th, .prose td { border-bottom: 1px solid var(--line-soft); text-align: left; }
+.prose blockquote { margin: 12px 0; padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--accent-soft); color: var(--fg-2); }
+.prose img { max-width: 100%; }
 .events { border-top: 1px solid var(--line-soft); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
 .ev-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
 .ev-head b { font-size: 14px; }
@@ -196,12 +223,13 @@ tr:last-child td { border-bottom: 0; }
     <div class="nav-label">Operate</div>
     <button type="button" data-tab="overview" aria-current="page">Overview</button>
     <button type="button" data-tab="services">Services</button>
+    <div id="nav-collections"></div>
   </nav>
   <main><div class="col" id="view"></div></main>
 </div>
 
 <script>
-const state = { tab: 'overview', topo: null, snap: null, node: undefined, lastOk: 0,
+const state = { tab: 'overview', topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null,
   ev: { service: null, after: 0, rows: [], paused: false, open: new Set(), times: [], fresh: new Set() } };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -480,6 +508,64 @@ function servicesTable() {
   <div class="box scroll"><table><thead><tr><th>Service</th><th>Host</th><th>Status</th><th>Detail</th><th>Up</th><th>Restarts</th><th>CPU</th><th>Memory</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
+// ---------- document collections ----------
+async function loadCollections() {
+  try {
+    const r = await fetch('/api/collections', { cache: 'no-store' });
+    if (!r.ok) return;
+    state.collections = await r.json();
+    $('nav-collections').innerHTML = state.collections.length
+      ? '<div class="nav-label" style="padding-top:14px">Reference</div>' + state.collections.map(c => `<button type="button" data-tab="col:${esc(c.id)}">${esc(c.name)}</button>`).join('')
+      : '';
+  } catch (_) {}
+}
+const currentCollection = () => state.collections.find(c => 'col:' + c.id === state.tab);
+function collectionView() {
+  const c = currentCollection();
+  if (!c) return '<div class="empty">Collection not found.</div>';
+  if (!c.docs.length) return `<div><h1>${esc(c.name)}</h1><p class="muted">No documents yet. Add Markdown files to this collection's folders.</p></div>`;
+  const groups = [...new Set(c.docs.map(d => d.group))];
+  if (state.doc === null) {
+    return `<div><h1>${esc(c.name)}</h1><p class="muted" style="margin:0">${c.docs.length} documents</p></div>` +
+      groups.map(g => `<section><div class="group-h">${esc(g)}</div><div class="doc-cards">${c.docs.filter(d => d.group === g).map(d =>
+        `<button type="button" class="doc-card" data-doc="${d.index}"><b>${esc(d.title)}</b><span>${esc(d.path)}</span></button>`).join('')}</div></section>`).join('');
+  }
+  return `<div class="doc-layout">
+    <nav class="doc-nav" aria-label="${esc(c.name)}"><button type="button" class="back" data-doc="">← All ${esc(c.name.toLowerCase())}</button>
+      ${groups.map(g => `<div class="group-h">${esc(g)}</div>` + c.docs.filter(d => d.group === g).map(d =>
+        `<button type="button" data-doc="${d.index}"${d.index === state.doc ? ' aria-current="page"' : ''}>${esc(d.title)}</button>`).join('')).join('')}
+    </nav>
+    <article class="prose" id="doc-body"><p class="muted">Loading…</p></article>
+  </div>`;
+}
+async function wireDoc() {
+  const c = currentCollection();
+  if (!c || state.doc === null) return;
+  const body = $('doc-body'); if (!body) return;
+  try {
+    const r = await fetch(`/api/collections/${encodeURIComponent(c.id)}/${state.doc}`, { cache: 'no-store' });
+    const d = await r.json();
+    body.innerHTML = `<div class="path">${esc(d.path)}</div>${d.html}`;
+  } catch (_) { body.innerHTML = '<p class="muted">Could not load this document.</p>'; }
+}
+function openDoc(index) {
+  state.doc = index; state.navigated = true;
+  const c = currentCollection();
+  try { history.replaceState(null, '', '#' + (c ? c.id + (index === null ? '' : '-' + index) : '')); } catch (_) {}
+  render(); window.scrollTo(0, 0);
+}
+// Relative links between Markdown documents open inside the console.
+function resolveDocLink(href) {
+  const c = currentCollection(); if (!c || state.doc === null) return null;
+  const from = c.docs.find(d => d.index === state.doc); if (!from) return null;
+  const [file] = href.split('#');
+  if (!file.endsWith('.md')) return null;
+  const parts = from.path.split('/').slice(0, -1);
+  for (const seg of file.split('/')) { if (seg === '..') parts.pop(); else if (seg && seg !== '.') parts.push(seg); }
+  const target = parts.join('/');
+  return c.docs.find(d => d.path === target) ?? null;
+}
+
 // ---------- charts ----------
 function tipAt(el, html, px, py) {
   let tip = el.querySelector('.tip'); if (!tip) { tip = document.createElement('div'); tip.className = 'tip'; el.appendChild(tip); }
@@ -523,17 +609,25 @@ function drawCharts() {
 
 // ---------- render & polling ----------
 function render() {
+  // Rebuilding the page must never move the reader: keep the scroll position.
+  const scrollY = window.scrollY;
   const focusId = document.activeElement?.dataset?.node;
   const openDetails = !!document.querySelector('.detail > details[open]');
   const evTop = $('ev-list')?.scrollTop ?? 0;
   state.ev.fresh = new Set();
-  $('view').innerHTML = state.tab === 'overview' ? topology() + cards() : servicesTable();
+  // Collections only change on navigation, not on every refresh.
+  if (state.tab.startsWith('col:') && !state.navigated) return status();
+  state.navigated = false;
+  $('view').innerHTML = state.tab === 'overview' ? topology() + cards()
+    : state.tab === 'services' ? servicesTable() : collectionView();
   if (openDetails) { const d = document.querySelector('.detail > details'); if (d) d.open = true; }
   if ($('ev-list')) $('ev-list').scrollTop = evTop;
   if (focusId) { const n = document.querySelector(`[data-node="${CSS.escape(focusId)}"]`); if (n) n.focus({ preventScroll: true }); }
   document.querySelectorAll('.nav button').forEach(b => { if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+  if (state.tab.startsWith('col:')) wireDoc();
   drawCharts();
   status();
+  if (window.scrollY !== scrollY) window.scrollTo(0, scrollY);
 }
 function status() {
   const age = state.lastOk ? (Date.now() - state.lastOk) / 1000 : null;
@@ -561,9 +655,24 @@ async function poll() {
 
 document.querySelector('.nav').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]'); if (!b) return;
-  state.tab = b.dataset.tab; render();
+  state.tab = b.dataset.tab; state.doc = null; state.navigated = true;
+  const c = currentCollection();
+  try { history.replaceState(null, '', '#' + (c ? c.id : state.tab)); } catch (_) {}
+  render(); window.scrollTo(0, 0);
 });
 $('view').addEventListener('click', e => {
+  const dc = e.target.closest('[data-doc]');
+  if (dc) { openDoc(dc.dataset.doc === '' ? null : +dc.dataset.doc); return; }
+  const a = e.target.closest('.prose a[href]');
+  if (a) {
+    const href = a.getAttribute('href');
+    if (href.startsWith('#')) return;
+    const target = resolveDocLink(href);
+    if (target) { e.preventDefault(); openDoc(target.index); }
+    else if (/^https?:/.test(href)) { a.target = '_blank'; a.rel = 'noopener'; }
+    else e.preventDefault();
+    return;
+  }
   const n = e.target.closest('[data-node]'); if (n) { state.node = state.node === n.dataset.node ? null : n.dataset.node; render(); }
 });
 $('view').addEventListener('toggle', e => {
@@ -606,6 +715,10 @@ $('theme-btn').addEventListener('click', () => {
 });
 
 (async () => {
+  await loadCollections();
+  const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
+  if (hc) { state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true; }
+  else if (h === 'services') state.tab = 'services';
   await loadTopology(); await poll();
   setInterval(poll, 2000);
   setInterval(pollEvents, 700);

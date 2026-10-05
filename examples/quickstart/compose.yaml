@@ -33,8 +33,10 @@ services:
       CONSOLE_TOPOLOGY: /etc/glacier/topology.json
       CONSOLE_DOCKER: http://docker-proxy:2375
       CONSOLE_COMPOSE_PROJECT: glacier-quickstart
+      CONSOLE_COLLECTIONS: Docs=/srv/docs
     volumes:
       - ./topology.json:/etc/glacier/topology.json:ro
+      - ../../docs:/srv/docs:ro
     ports:
       - "127.0.0.1:8080:8080"   # this machine only
     depends_on: [ticker, docker-proxy]

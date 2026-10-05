@@ -30,6 +30,10 @@
 //! - `CONSOLE_TOPOLOGY`: path to the optional topology file (default `topology.json`)
 //! - `CONSOLE_DOCKER`: Docker Engine API base URL, e.g. `http://docker-proxy:2375` (optional)
 //! - `CONSOLE_COMPOSE_PROJECT`: only show containers from this Compose project (optional)
+//! - `CONSOLE_COLLECTIONS`: document collections shown in the sidebar, e.g.
+//!   `Docs=/srv/docs;Research=/srv/research` (optional; see `collections.rs`)
+
+mod collections;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -50,6 +54,7 @@ const PAGE: &str = include_str!("../web/index.html");
 struct App {
     poller: Poller,
     polls: AtomicU64,
+    collections: Vec<collections::Collection>,
 }
 
 #[tokio::main]
@@ -75,6 +80,7 @@ async fn main() {
     let app = Arc::new(App {
         poller: Poller::new(config),
         polls: AtomicU64::new(0),
+        collections: collections::parse(&env("CONSOLE_COLLECTIONS", "")),
     });
 
     let observer = Observer::new("console", env!("CARGO_PKG_VERSION"));
@@ -101,6 +107,8 @@ async fn main() {
         .route("/api/topology", get(topology))
         .route("/api/state", get(state))
         .route("/api/events/{service}", get(events))
+        .route("/api/collections", get(list_collections))
+        .route("/api/collections/{id}/{index}", get(collection_doc))
         .with_state(app)
         .merge(observer.router());
     let listener = match tokio::net::TcpListener::bind(&listen).await {
@@ -166,6 +174,29 @@ async fn events(
             (StatusCode::BAD_GATEWAY, e.to_string()).into_response()
         }
     }
+}
+
+async fn list_collections(AxumState(app): AxumState<Arc<App>>) -> Response {
+    let list: Vec<serde_json::Value> = app
+        .collections
+        .iter()
+        .map(collections::Collection::index)
+        .collect();
+    no_store(axum::Json(list))
+}
+
+async fn collection_doc(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path((id, index)): axum::extract::Path<(String, usize)>,
+) -> Response {
+    app.collections
+        .iter()
+        .find(|c| c.id == id)
+        .and_then(|c| c.render(index))
+        .map_or_else(
+            || (StatusCode::NOT_FOUND, "no such document").into_response(),
+            |d| no_store(axum::Json(d)),
+        )
 }
 
 fn no_store(body: impl IntoResponse) -> Response {

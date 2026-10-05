@@ -3,9 +3,18 @@
 //! series, and exposes `/health`, `/metrics`, `/describe`, `/events` and
 //! `/recent`. Decoding is done by the official `dbn` crate.
 //!
-//! Symbols come from instrument definition and symbol mapping records.
-//! Trades are `trades` records, or `mbp-1` records with action `T`; other
-//! `mbp-1` records are shown as quotes.
+//! Symbols come from instrument definition and symbol mapping records and are
+//! keyed by name, since instrument ids can change between sessions. Trades
+//! are `trades` records, or `mbp-1` records with action `T`; other `mbp-1`
+//! records are shown as quotes.
+//!
+//! In-band markers of the form `hyphae:v=1 <kind> key=value ...` (sent by
+//! Hyphae feed relays) are acted on: `snapshot begin`/`end` bracket starting
+//! state, which is not shown as live data; `gap` records a reported loss;
+//! `reconnect` notes the source's own upstream reconnecting; `heartbeat`
+//! means quiet, not dead; a `slow-consumer` error triggers an immediate
+//! reconnect. Every reconnect rebuilds state from the fresh header,
+//! definitions and snapshot.
 //!
 //! Configuration (environment):
 //! - `DBN_TCP_ADDR`: `host:port` serving the stream (required)
@@ -33,6 +42,10 @@ struct Shared {
     events: Events,
     /// Trade prices per symbol, served at `/recent` for charts.
     series: Series,
+    gaps: AtomicU64,
+    last_gap: Mutex<Option<(f64, f64)>>,
+    upstream_reconnects: AtomicU64,
+    slow_consumer_drops: AtomicU64,
 }
 
 #[tokio::main]
@@ -108,40 +121,46 @@ async fn stream_once(addr: &str, observer: &Observer, shared: &Shared) -> Result
     shared.connected.store(true, Ordering::Relaxed);
     observer.set_state(State::Ready, "connected; waiting for records");
 
+    // State is rebuilt from scratch on every connection: the source sends its
+    // header, definitions and (for relays that support it) a snapshot again.
+    // Symbols are keyed by name, never by instrument id, because ids can change
+    // between sessions.
     let mut symbols: HashMap<u32, String> = HashMap::new();
+    let mut in_snapshot = false;
     while let Some(rec) = decoder
         .decode_record_ref()
         .await
         .map_err(|e| format!("read failed: {e}"))?
     {
         *lock(&shared.last_record) = Some(Instant::now());
-        let id = rec.header().instrument_id;
-        let symbol = |symbols: &HashMap<u32, String>| {
-            symbols.get(&id).cloned().unwrap_or_else(|| id.to_string())
-        };
+        let symbol = symbols.get(&rec.header().instrument_id).cloned();
         let kind = if let Some(d) = rec.get::<InstrumentDefMsg>() {
             if let Ok(s) = d.raw_symbol() {
-                symbols.insert(id, s.to_owned());
+                symbols.insert(d.hd.instrument_id, s.to_owned());
             }
             "definition"
         } else if let Some(m) = rec.get::<SymbolMappingMsg>() {
             if let Ok(s) = m.stype_out_symbol() {
-                symbols.insert(id, s.to_owned());
+                symbols.insert(m.hd.instrument_id, s.to_owned());
             }
             "symbol_mapping"
+        } else if in_snapshot && (rec.get::<TradeMsg>().is_some() || rec.get::<Mbp1Msg>().is_some())
+        {
+            // Starting state with its original timestamps, not time passing.
+            "snapshot"
         } else if let Some(t) = rec.get::<TradeMsg>() {
-            trade(shared, &symbol(&symbols), t.price, t.size, format!("{t:?}"));
+            trade(shared, symbol.as_deref(), t.price, t.size, format!("{t:?}"));
             "trade"
         } else if let Some(m) = rec.get::<Mbp1Msg>() {
-            let sym = symbol(&symbols);
             if m.action as u8 == b'T' {
-                trade(shared, &sym, m.price, m.size, format!("{m:?}"));
+                trade(shared, symbol.as_deref(), m.price, m.size, format!("{m:?}"));
                 "trade"
             } else {
                 let lvl = &m.levels[0];
                 shared.events.push(
                     format!(
-                        "{sym} {} × {} / {} × {}",
+                        "{} {} × {} / {} × {}",
+                        symbol.as_deref().unwrap_or("?"),
                         lvl.bid_sz,
                         px(lvl.bid_px),
                         px(lvl.ask_px),
@@ -152,14 +171,16 @@ async fn stream_once(addr: &str, observer: &Observer, shared: &Shared) -> Result
                 "quote"
             }
         } else if let Some(m) = rec.get::<SystemMsg>() {
-            if m.is_heartbeat() || m.msg().is_ok_and(|s| s.ends_with("heartbeat")) {
-                "heartbeat"
-            } else {
-                shared.events.push(
-                    format!("system: {}", m.msg().unwrap_or("?")),
-                    format!("{m:?}"),
-                );
-                "system"
+            let text = m.msg().unwrap_or("").to_owned();
+            match Marker::parse(&text) {
+                Some(mk) => handle_marker(&mk, &text, observer, shared, &mut in_snapshot),
+                None if m.is_heartbeat() => "heartbeat",
+                None => {
+                    shared
+                        .events
+                        .push(format!("system: {text}"), format!("{m:?}"));
+                    "system"
+                }
             }
         } else if let Some(m) = rec.get::<ErrorMsg>() {
             let text = m.err().unwrap_or("unknown error").to_owned();
@@ -167,6 +188,11 @@ async fn stream_once(addr: &str, observer: &Observer, shared: &Shared) -> Result
             shared
                 .events
                 .push(format!("error: {text}"), format!("{m:?}"));
+            if Marker::parse(&text).is_some_and(|mk| mk.kind == "slow-consumer") {
+                // The source drops us right after this; reconnect at once.
+                shared.slow_consumer_drops.fetch_add(1, Ordering::Relaxed);
+                return Err("dropped by the source as a slow consumer".into());
+            }
             "error"
         } else {
             "other"
@@ -179,11 +205,98 @@ async fn stream_once(addr: &str, observer: &Observer, shared: &Shared) -> Result
     Err("source closed the connection".into())
 }
 
-fn trade(shared: &Shared, symbol: &str, price: i64, size: u32, raw: String) {
-    shared
-        .events
-        .push(format!("{symbol} {size} @ {}", px(price)), raw);
-    if price != UNDEF_PRICE {
+/// An in-band marker: `hyphae:v=1 <kind> key=value ...`, as sent by Hyphae
+/// feed relays.
+struct Marker<'a> {
+    kind: &'a str,
+    fields: HashMap<&'a str, &'a str>,
+}
+
+impl<'a> Marker<'a> {
+    fn parse(text: &'a str) -> Option<Self> {
+        let mut words = text.trim_end_matches('\0').split_whitespace();
+        if words.next()? != "hyphae:v=1" {
+            return None;
+        }
+        let kind = words.next()?;
+        let fields = words.filter_map(|w| w.split_once('=')).collect();
+        Some(Self { kind, fields })
+    }
+
+    fn ns(&self, key: &str) -> Option<f64> {
+        self.fields.get(key)?.parse::<f64>().ok().map(|n| n / 1e9)
+    }
+}
+
+/// Act on a marker; returns the record kind to count it as.
+fn handle_marker(
+    mk: &Marker,
+    text: &str,
+    observer: &Observer,
+    shared: &Shared,
+    in_snapshot: &mut bool,
+) -> &'static str {
+    match (mk.kind, mk.fields.keys().next().copied()) {
+        ("snapshot", _) if text.contains("snapshot begin") => {
+            *in_snapshot = true;
+            shared.events.push(
+                format!(
+                    "snapshot: {} instruments as starting state",
+                    mk.fields.get("count").unwrap_or(&"?")
+                ),
+                text.to_owned(),
+            );
+            "marker"
+        }
+        ("snapshot", _) => {
+            *in_snapshot = false;
+            "marker"
+        }
+        ("heartbeat", _) => {
+            // Quiet, not dead. A relay whose own upstream is down says so here.
+            if mk.fields.get("upstream") == Some(&"down") {
+                observer.set_state(State::Degraded, "source reports its upstream is down");
+            }
+            "heartbeat"
+        }
+        ("gap", _) => {
+            shared.gaps.fetch_add(1, Ordering::Relaxed);
+            if let (Some(from), Some(to)) = (mk.ns("from_ns"), mk.ns("to_ns")) {
+                *lock(&shared.last_gap) = Some((from, to));
+            }
+            shared.events.push(
+                format!(
+                    "gap: data lost upstream ({})",
+                    mk.fields.get("reason").unwrap_or(&"no reason given")
+                ),
+                text.to_owned(),
+            );
+            "gap"
+        }
+        ("reconnect", _) => {
+            shared.upstream_reconnects.fetch_add(1, Ordering::Relaxed);
+            shared
+                .events
+                .push("source reconnected to its upstream".into(), text.to_owned());
+            "marker"
+        }
+        _ => {
+            shared
+                .events
+                .push(format!("system: {text}"), text.to_owned());
+            "marker"
+        }
+    }
+}
+
+fn trade(shared: &Shared, symbol: Option<&str>, price: i64, size: u32, raw: String) {
+    shared.events.push(
+        format!("{} {size} @ {}", symbol.unwrap_or("?"), px(price)),
+        raw,
+    );
+    if let Some(symbol) = symbol
+        && price != UNDEF_PRICE
+    {
         shared.series.push(symbol, price as f64 / 1e9);
     }
 }
@@ -223,6 +336,38 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>) {
                 *n as f64,
             );
         }
+        w.counter(
+            "glacier_dbn_tcp_gaps_total",
+            "Intervals the source reported as lost upstream.",
+            &[],
+            s.gaps.load(Ordering::Relaxed) as f64,
+        );
+        if let Some((from, to)) = *lock(&s.last_gap) {
+            w.gauge(
+                "glacier_dbn_tcp_last_gap_start_seconds",
+                "Start of the most recent reported gap.",
+                &[],
+                from,
+            );
+            w.gauge(
+                "glacier_dbn_tcp_last_gap_end_seconds",
+                "End of the most recent reported gap.",
+                &[],
+                to,
+            );
+        }
+        w.counter(
+            "glacier_dbn_tcp_upstream_reconnects_total",
+            "Times the source reported reconnecting to its own upstream.",
+            &[],
+            s.upstream_reconnects.load(Ordering::Relaxed) as f64,
+        );
+        w.counter(
+            "glacier_dbn_tcp_slow_consumer_drops_total",
+            "Times the source dropped this reader for falling behind.",
+            &[],
+            s.slow_consumer_drops.load(Ordering::Relaxed) as f64,
+        );
         if let Some(at) = *lock(&s.last_record) {
             w.gauge(
                 "glacier_dbn_tcp_last_record_age_seconds",
@@ -268,5 +413,23 @@ mod tests {
         assert_eq!(px(450_120_000_000), "450.12");
         assert_eq!(px(UNDEF_PRICE), "-");
         assert_eq!(slug("Hyphae relay (IEX)"), "hyphae-relay--iex-");
+    }
+
+    #[test]
+    fn parses_markers() {
+        let m = Marker::parse(
+            "hyphae:v=1 gap feed=x from_ns=1000000000 to_ns=3000000000 reason=upstream-closed",
+        )
+        .unwrap();
+        assert_eq!(m.kind, "gap");
+        assert_eq!(m.ns("from_ns"), Some(1.0));
+        assert_eq!(m.fields["reason"], "upstream-closed");
+        assert_eq!(
+            Marker::parse("hyphae:v=1 snapshot begin count=3")
+                .unwrap()
+                .fields["count"],
+            "3"
+        );
+        assert!(Marker::parse("heartbeat").is_none());
     }
 }
