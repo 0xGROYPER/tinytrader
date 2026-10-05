@@ -1,0 +1,13 @@
+name: check
+on:
+  push:
+  pull_request:
+jobs:
+  flake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Evaluate, test and lint everything
+        run: nix flake check --print-build-logs

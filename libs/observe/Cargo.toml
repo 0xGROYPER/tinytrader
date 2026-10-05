@@ -1,0 +1,13 @@
+[package]
+name = "glacier-observe"
+description = "Health and metrics endpoints shared by Glacier services"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,50 @@
+# Glacier Labs quickstart: a toy collector and the console, on one machine.
+#   docker compose up --build
+#   open http://localhost:8080
+name: glacier-quickstart
+
+services:
+  ticker:
+    build:
+      context: ../..
+      dockerfile: services/Dockerfile
+      args: { SERVICE: ticker }
+    image: glacier/ticker:dev
+    environment:
+      TICKER_PRODUCTS: BTC-USD,ETH-USD
+      TICKER_DATA_DIR: /data
+      TICKER_LISTEN: 0.0.0.0:9100   # reachable only on the Compose network
+    volumes:
+      - ticker-data:/data
+    restart: unless-stopped
+
+  console:
+    build:
+      context: ../..
+      dockerfile: services/Dockerfile
+      args: { SERVICE: console }
+    image: glacier/console:dev
+    environment:
+      CONSOLE_LISTEN: 0.0.0.0:8080
+      CONSOLE_TOPOLOGY: /etc/glacier/topology.json
+      CONSOLE_DOCKER: http://docker-proxy:2375
+      CONSOLE_COMPOSE_PROJECT: glacier-quickstart
+    volumes:
+      - ./topology.json:/etc/glacier/topology.json:ro
+    ports:
+      - "127.0.0.1:8080:8080"   # this machine only
+    depends_on: [ticker, docker-proxy]
+    restart: unless-stopped
+
+  # Read-only Docker API: container listing, inspection and stats only.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    environment:
+      CONTAINERS: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
+volumes:
+  ticker-data:

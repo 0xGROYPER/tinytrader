@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Glacier Labs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inconsolata:wght@400;500;600&family=Inter:wght@400;500;600&display=swap">
+<style>
+/* Layout: scientific-docs shell; follows the system theme unless the viewer picks one., NixOS-flavoured blue and light blue with an orange for attention. */
+:root {
+  color-scheme: light;
+  --bg: #FFFFFF; --surface: #F5F8FC; --line: #D5DFEB; --line-soft: #E8EEF5;
+  --fg: #1C283A; --fg-2: #3A4A60; --muted: #5C6B80;
+  --accent: #4167B3; --accent-mark: #5277C3; --accent-2: #7EBAE4; --accent-soft: #EAF3FB;
+  --ok: #17704F; --ok-soft: #E5F4ED;
+  --warn: #A3500C; --warn-mark: #E8862A; --warn-soft: #FDF1E4; --warn-line: #F2C9A0;
+  --crit: #A5232F; --crit-mark: #C8363F; --crit-soft: #FBECEE; --crit-line: #E9B9BF;
+  --idle: #4F5D72; --idle-soft: #ECF0F5;
+  --grid: #E3EAF2; --up: #1E8A5A; --down: #C8363F;
+  --sans: 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Inconsolata', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0D141F; --surface: #131C2A; --line: #26344A; --line-soft: #1B2636;
+  --fg: #E3EAF3; --fg-2: #B8C5D6; --muted: #8B9AB0;
+  --accent: #8EC3EA; --accent-mark: #7EBAE4; --accent-2: #5277C3; --accent-soft: #16273E;
+  --ok: #72CFA5; --ok-soft: #13291F;
+  --warn: #F2A660; --warn-mark: #E8862A; --warn-soft: #2C1E10; --warn-line: #5C3E1F;
+  --crit: #F29AA3; --crit-mark: #E0606A; --crit-soft: #2F171B; --crit-line: #5E2B32;
+  --idle: #A9B6C8; --idle-soft: #1E2838;
+  --grid: #1F2B3D; --up: #4CC38A; --down: #EF6B73;
+  color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --bg: #0D141F; --surface: #131C2A; --line: #26344A; --line-soft: #1B2636;
+  --fg: #E3EAF3; --fg-2: #B8C5D6; --muted: #8B9AB0;
+  --accent: #8EC3EA; --accent-mark: #7EBAE4; --accent-2: #5277C3; --accent-soft: #16273E;
+  --ok: #72CFA5; --ok-soft: #13291F;
+  --warn: #F2A660; --warn-mark: #E8862A; --warn-soft: #2C1E10; --warn-line: #5C3E1F;
+  --crit: #F29AA3; --crit-mark: #E0606A; --crit-soft: #2F171B; --crit-line: #5E2B32;
+  --idle: #A9B6C8; --idle-soft: #1E2838;
+  --grid: #1F2B3D; --up: #4CC38A; --down: #EF6B73;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.5 var(--sans); }
+h1, h2 { text-wrap: balance; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line);
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; }
+.brand { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.brand b { font-weight: 600; font-size: 16px; }
+.crumb-sep { color: var(--line); font-size: 20px; font-weight: 300; line-height: 1; margin: 0 -2px; }
+.deployment { font-size: 16px; color: var(--fg-2); }
+.live { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.pulse.stale { background: var(--warn-mark); }
+@media (prefers-reduced-motion: no-preference) { .pulse:not(.stale) { animation: pulse 2s ease-in-out infinite; } }
+@keyframes pulse { 50% { opacity: .35; } }
+
+.icon-btn { width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); cursor: pointer; }
+.icon-btn:hover { background: var(--surface); }
+.top-right { display: flex; align-items: center; gap: 14px; }
+.banner { padding: 10px 16px; background: var(--warn-soft); color: var(--warn); border-bottom: 1px solid var(--warn-line); font-size: 14px; }
+
+.shell { display: flex; flex-wrap: wrap; align-items: flex-start; }
+.nav { flex: 1 1 180px; padding: 20px 12px; border-right: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 2px; }
+.nav-label { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 4px 12px 6px; }
+.nav button { display: block; width: 100%; text-align: left; min-height: 38px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--fg-2); font: inherit; font-size: 14px; cursor: pointer; }
+.nav button:hover { background: var(--surface); }
+.nav button[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+main { flex: 999 1 560px; min-width: 0; padding: 24px 32px 64px; }
+.col { max-width: 1100px; display: flex; flex-direction: column; gap: 28px; }
+@media (max-width: 780px) {
+  .nav { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--line-soft); padding: 8px 12px; }
+  .nav-label { display: none; }
+  .nav button { width: auto; min-height: 44px; }
+  main { padding: 20px 16px 48px; }
+}
+h1 { margin: 0 0 6px; font-size: 26px; font-weight: 600; letter-spacing: -.01em; }
+h2 { margin: 0; font-size: 18px; font-weight: 600; }
+.sec-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 16px; margin-bottom: 10px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.lg { display: inline-block; width: 22px; height: 0; border-top: 2px dashed var(--accent-mark); }
+.lg-read { border-top: 2px dotted var(--muted); }
+
+.topo-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.topo { display: block; width: 100%; height: auto; }
+.host-box { fill: var(--bg); stroke: var(--line); }
+.host-name { font: 600 14px var(--mono); fill: var(--fg); }
+.host-sub { font: 12px var(--mono); fill: var(--muted); }
+.node { cursor: pointer; outline: none; }
+.node rect { fill: var(--bg); stroke: var(--line); stroke-width: 1.2; }
+.node.k-store rect { fill: var(--accent-soft); stroke: var(--accent-2); }
+.node.k-ext rect { fill: var(--surface); stroke-dasharray: 4 3; }
+.node.s-warn rect { fill: var(--warn-soft); stroke: var(--warn-mark); }
+.node.s-crit rect { fill: var(--crit-soft); stroke: var(--crit-mark); }
+.node:hover rect { stroke: var(--accent); }
+.node.sel rect { stroke: var(--accent); stroke-width: 2.2; }
+.n-label { font: 600 13px var(--mono); fill: var(--fg); pointer-events: none; }
+.n-sub { font: 12px var(--sans); fill: var(--muted); pointer-events: none; }
+.node.s-warn .n-sub { fill: var(--warn); } .node.s-crit .n-sub { fill: var(--crit); }
+.sdot { fill: var(--ok); } .s-warn .sdot { fill: var(--warn-mark); } .s-crit .sdot { fill: var(--crit-mark); } .s-idle .sdot { fill: var(--idle); }
+.e { fill: none; stroke-width: 1.8; }
+.e-flow { stroke: var(--accent-mark); stroke-dasharray: 6 5; }
+.e-flow.on { animation: flow 1.2s linear infinite; }
+.e-read { stroke: var(--muted); stroke-dasharray: 1.5 4; }
+.arrhead { fill: var(--muted); }
+.e-label { font: 12px var(--sans); fill: var(--fg-2); paint-order: stroke; stroke: var(--surface); stroke-width: 5px; stroke-linejoin: round; }
+@keyframes flow { to { stroke-dashoffset: -22; } }
+@media (prefers-reduced-motion: reduce) { .e-flow.on { animation: none; } }
+
+.detail { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+.d-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.d-head b { font: 600 16px var(--mono); }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 16px; }
+.facts .k { font-size: 12px; color: var(--muted); }
+.facts .v { font: 500 14px var(--mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+details summary { cursor: pointer; color: var(--accent); font-size: 14px; }
+.metrics-tbl td:last-child { text-align: right; }
+
+.pill { display: inline-block; font-size: 13px; font-weight: 500; border-radius: 4px; padding: 1px 8px; white-space: nowrap; }
+.p-ok { background: var(--ok-soft); color: var(--ok); } .p-warn { background: var(--warn-soft); color: var(--warn); }
+.p-crit { background: var(--crit-soft); color: var(--crit); } .p-idle { background: var(--idle-soft); color: var(--idle); }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 16px; }
+.card { border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.card h3 { margin: 0; font: 500 15px var(--mono); }
+.card .val { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.card .big { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.card .chg { font: 500 14px var(--mono); }
+.card .foot { font-size: 13px; color: var(--muted); }
+.pos { color: var(--up); } .neg { color: var(--down); }
+
+.box { border: 1px solid var(--line); border-radius: 8px; }
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; letter-spacing: .05em; text-transform: uppercase; padding: 10px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 10px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: top; color: var(--fg-2); }
+tr:last-child td { border-bottom: 0; }
+
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; overflow: visible; }
+.c-line { fill: none; stroke: var(--accent-mark); stroke-width: 2; stroke-linejoin: round; }
+.c-line.up { stroke: var(--up); } .c-line.down { stroke: var(--down); }
+.c-area { opacity: .08; fill: var(--accent-mark); } .c-area.up { fill: var(--up); } .c-area.down { fill: var(--down); }
+.c-ref { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 4; }
+.c-dot { fill: var(--accent-mark); stroke: var(--bg); stroke-width: 2; } .c-dot.up { fill: var(--up); } .c-dot.down { fill: var(--down); }
+.c-cross { stroke: var(--muted); stroke-width: 1; }
+.c-hit { fill: transparent; cursor: crosshair; }
+.tip { position: absolute; pointer-events: none; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font: 13px var(--mono); color: var(--fg); white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.12); z-index: 2; }
+.tip .muted { display: block; font-size: 12px; }
+.empty { padding: 16px; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke-width="1.8" aria-hidden="true"><path d="M12 2.5 20.2 7.25v9.5L12 21.5 3.8 16.75v-9.5Z" style="stroke:var(--accent-mark)"/><path d="M12 7.5 16 9.8v4.4L12 16.5 8 14.2V9.8Z" style="stroke:var(--accent-2)"/></svg>
+    <b>Glacier Labs</b>
+    <span class="crumb-sep" aria-hidden="true">/</span>
+    <span class="deployment" id="profile" title="Deployment shown">…</span>
+  </div>
+  <div class="top-right">
+    <span class="live"><span class="pulse stale" id="pulse"></span><span id="updated">connecting…</span></span>
+    <button type="button" class="icon-btn" id="theme-btn"></button>
+  </div>
+</header>
+<div class="banner" id="banner" hidden></div>
+
+<div class="shell">
+  <nav class="nav" aria-label="Sections">
+    <div class="nav-label">Operate</div>
+    <button type="button" data-tab="overview" aria-current="page">Overview</button>
+    <button type="button" data-tab="services">Services</button>
+  </nav>
+  <main><div class="col" id="view"></div></main>
+</div>
+
+<script>
+const state = { tab: 'overview', topo: null, snap: null, node: undefined, lastOk: 0 };
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+// ---------- data helpers ----------
+const svcState = id => state.snap?.services?.[id] || {};
+function metric(id, name, labels) {
+  const list = svcState(id).metrics?.[name] || [];
+  const hit = list.find(m => !labels || Object.entries(labels).every(([k, v]) => m.labels[k] === v));
+  return hit ? hit.value : null;
+}
+function statusOf(node) {
+  if (node.kind === 'ext') return null;
+  if (node.kind === 'store') {
+    const writer = writerOf(node.id);
+    return writer ? statusOf(writer) : 'idle';
+  }
+  const s = svcState(node.id), c = s.container, h = s.health;
+  if (c && ['exited', 'dead'].includes(c.state)) return 'crit';
+  if (c && c.state && c.state !== 'running') return 'warn';
+  if (h) {
+    if (h.error) return c ? 'warn' : 'crit';
+    if (h.body?.state && h.body.state !== 'ready') return 'warn';
+    return 'ok';
+  }
+  return c ? 'ok' : 'idle';
+}
+const statusText = { ok: ['Healthy', 'p-ok'], warn: ['Needs attention', 'p-warn'], crit: ['Down', 'p-crit'], idle: ['No data', 'p-idle'] };
+function writerOf(storeId) {
+  const e = (state.topo?.edges || []).find(e => e.to === storeId && e.kind === 'flow');
+  return e && nodesById()[e.from];
+}
+function nodesById() {
+  const t = state.topo || {};
+  const all = [
+    ...(t.external || []).map(n => ({ ...n, kind: 'ext' })),
+    ...(t.services || []).map(n => ({ ...n, kind: 'svc' })),
+    ...(t.stores || []).map(n => ({ ...n, kind: 'store' }))
+  ];
+  return Object.fromEntries(all.map(n => [n.id, n]));
+}
+function bytes(n) {
+  if (n == null) return '—';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n.toFixed(0)) + ' ' + u[i];
+}
+function duration(s) {
+  if (s == null || !isFinite(s)) return '—';
+  s = Math.max(0, Math.floor(s));
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : m ? `${m}m ${s % 60}s` : `${s}s`;
+}
+function uptimeOf(id) {
+  const s = svcState(id);
+  if (s.health?.body?.uptime_seconds != null) return s.health.body.uptime_seconds;
+  const started = s.container?.started_at && Date.parse(s.container.started_at);
+  return started ? (Date.now() - started) / 1000 : null;
+}
+function subOf(node) {
+  if (node.kind === 'ext') return node.sub || 'external';
+  if (node.kind === 'store') {
+    const v = node.metric && metric(node.metric.service, node.metric.name);
+    return v != null ? fmt(v, node.metric) : (node.sub || 'store');
+  }
+  const s = svcState(node.id);
+  if (s.health?.body?.detail) return s.health.body.detail;
+  if (s.health?.error) return 'unreachable';
+  if (s.container?.status) return s.container.status.toLowerCase();
+  return node.sub || 'no data';
+}
+// Display formats a topology can ask for. Nothing here knows about any particular service.
+function fmt(v, spec = {}) {
+  if (v == null || (typeof v === 'number' && !isFinite(v))) return '—';
+  let out;
+  switch (spec.format) {
+    case 'bytes': out = bytes(v); break;
+    case 'count': out = Math.round(v).toLocaleString(); break;
+    case 'age': out = v < 60 ? v.toFixed(1) + 's' : duration(v); break;
+    case 'percent': out = v.toFixed(1) + '%'; break;
+    default: { const d = spec.decimals ?? 2; out = v.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }); }
+  }
+  return (spec.prefix || '') + out + (spec.suffix || '');
+}
+
+// ---------- topology layout ----------
+const NW = 176, NH = 50, CG = 96, RG = 26, PAD = 24, HOST_TOP = 40;
+function layout() {
+  const byId = nodesById(), edges = state.topo?.edges || [];
+  const ids = Object.keys(byId);
+  const col = {};
+  ids.forEach(id => { col[id] = byId[id].kind === 'ext' ? 0 : 1; });
+  for (let i = 0; i < ids.length; i++) {
+    for (const e of edges) {
+      if (!byId[e.from] || !byId[e.to] || byId[e.to].kind === 'ext') continue;
+      const c = byId[e.from].kind === 'ext' ? 1 : col[e.from] + 1;
+      if (c > col[e.to]) col[e.to] = c;
+    }
+  }
+  const hosts = state.topo?.hosts || [{ id: 'local', label: 'local' }];
+  const hostOf = n => n.kind === 'ext' ? null : (n.host || hosts[0].id);
+  const maxCol = Math.max(1, ...Object.values(col));
+  const x = c => PAD + c * (NW + CG) + (c > 0 ? 16 : 0);
+  const pos = {}, boxes = [];
+  const ext = ids.filter(id => byId[id].kind === 'ext');
+  ext.forEach((id, r) => { pos[id] = { x: x(0), y: PAD + HOST_TOP + r * (NH + RG), w: NW - 30, h: NH }; });
+  let y = PAD;
+  for (const h of hosts) {
+    const members = ids.filter(id => hostOf(byId[id]) === h.id);
+    if (!members.length) continue;
+    const rowsByCol = {};
+    for (let c = 1; c <= maxCol; c++) {
+      const inCol = members.filter(id => col[id] === c);
+      inCol.sort((a, b) => avgRow(a) - avgRow(b));
+      inCol.forEach((id, r) => { pos[id] = { x: x(c), y: y + HOST_TOP + r * (NH + RG), w: NW, h: NH }; });
+      rowsByCol[c] = inCol.length;
+    }
+    const rows = Math.max(1, ...Object.values(rowsByCol));
+    const height = HOST_TOP + rows * (NH + RG) - RG + 18;
+    boxes.push({ x: x(1) - 18, y, w: maxCol * (NW + CG) - CG + 36, h: height, label: h.label || h.id, sub: h.sub || '' });
+    y += height + 28;
+  }
+  const width = x(maxCol) + NW + PAD + 2;
+  return { byId, edges, pos, boxes, width, height: Math.max(y - 28 + PAD, PAD * 2 + HOST_TOP + ext.length * (NH + RG)) };
+
+  function avgRow(id) {
+    const preds = edges.filter(e => e.to === id && pos[e.from]).map(e => pos[e.from].y);
+    return preds.length ? preds.reduce((a, b) => a + b, 0) / preds.length : 1e9;
+  }
+}
+
+function topology() {
+  if (!state.topo) return '<section><div class="empty">Loading topology…</div></section>';
+  const L = layout();
+  const anchor = (p, side) => side === 'r' ? [p.x + p.w, p.y + p.h / 2] : [p.x, p.y + p.h / 2];
+  const edges = L.edges.filter(e => L.pos[e.from] && L.pos[e.to]).map(e => {
+    const a = anchor(L.pos[e.from], 'r'), b = anchor(L.pos[e.to], 'l');
+    const k = Math.max(40, (b[0] - a[0]) / 2);
+    const d = `M${a}C${a[0] + k},${a[1]} ${b[0] - k},${b[1]} ${b}`;
+    const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const from = L.byId[e.from], to = L.byId[e.to];
+    const live = e.kind === 'flow' && statusOf(from.kind === 'ext' ? to : from) === 'ok';
+    return `<path class="e e-${esc(e.kind)}${live ? ' on' : ''}" d="${d}" marker-end="url(#arr)"/>` + (e.label ? `<text class="e-label" x="${mid[0]}" y="${mid[1] - 7}" text-anchor="middle">${esc(e.label)}</text>` : '');
+  }).join('');
+  const boxes = L.boxes.map(b => `<rect class="host-box" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="10"/><text class="host-name" x="${b.x + 14}" y="${b.y + 24}">${esc(b.label)}</text><text class="host-sub" x="${b.x + 14 + b.label.length * 7.4 + 10}" y="${b.y + 24}">${esc(b.sub)}</text>`).join('');
+  const nodes = Object.values(L.byId).filter(n => L.pos[n.id]).map(n => {
+    const p = L.pos[n.id], st = statusOf(n);
+    return `<g class="node k-${n.kind}${st ? ' s-' + st : ''}${state.node === n.id ? ' sel' : ''}" data-node="${esc(n.id)}" tabindex="0" role="button" aria-label="${esc(n.label || n.id)}">
+      <rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" rx="6"/>
+      ${st ? `<circle class="sdot" cx="${p.x + p.w - 12}" cy="${p.y + 13}" r="4"/>` : ''}
+      <text class="n-label" x="${p.x + 12}" y="${p.y + 20}">${esc(n.label || n.id)}</text>
+      <text class="n-sub" x="${p.x + 12}" y="${p.y + 37}">${esc(clip(subOf(n), 24))}</text></g>`;
+  }).join('');
+  return `<section>
+    <div class="sec-head"><h2>Deployed system</h2><span class="legend"><span><i class="lg"></i>data</span><span><i class="lg lg-read"></i>observation</span></span></div>
+    <div class="topo-wrap"><svg class="topo" viewBox="0 0 ${L.width} ${L.height}" style="min-width:${Math.min(L.width, 760)}px" role="group" aria-label="Deployed system">
+      <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 Z" class="arrhead"/></marker></defs>
+      ${boxes}${edges}${nodes}
+    </svg></div>
+    ${detail(L.byId[state.node])}
+  </section>`;
+}
+const clip = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
+
+function detail(node) {
+  if (!node) return '<div class="detail muted">Select any part of the system for details.</div>';
+  const st = statusOf(node), s = svcState(node.id), c = s.container, h = s.health?.body;
+  const facts = [];
+  if (node.kind === 'svc') {
+    facts.push(['Container', c ? `${c.state} · ${c.status}` : 'not reported']);
+    if (c?.image) facts.push(['Image', c.image]);
+    facts.push(['Uptime', duration(uptimeOf(node.id))]);
+    if (c) facts.push(['Restarts', c.restart_count ?? '—']);
+    if (c?.cpu_percent != null) facts.push(['CPU', c.cpu_percent.toFixed(1) + '%']);
+    if (c?.memory?.usage_bytes != null) facts.push(['Memory', bytes(c.memory.usage_bytes)]);
+    if (h) facts.push(['Health', `${h.state}${h.detail ? ' · ' + h.detail : ''}`], ['Build', h.build || '—']);
+    if (s.health?.error) facts.push(['Health', 'unreachable: ' + s.health.error]);
+    if (h?.last_error) facts.push(['Last error' + (h.last_error_at ? ` (${duration(Date.now() / 1000 - h.last_error_at)} ago)` : ''), h.last_error]);
+  } else if (node.kind === 'store') {
+    const w = writerOf(node.id);
+    facts.push(['Written by', w ? w.label || w.id : '—']);
+    if (node.metric) facts.push([node.metric.label || node.metric.name, fmt(metric(node.metric.service, node.metric.name), { ...node.metric, prefix: '', suffix: '' })]);
+  }
+  const metrics = s.metrics ? Object.entries(s.metrics).flatMap(([name, list]) => list.map(m => [name + labelText(m.labels), m.value])) : [];
+  return `<div class="detail">
+    <div class="d-head"><b>${esc(node.label || node.id)}</b>${st ? `<span class="pill ${statusText[st][1]}">${statusText[st][0]}</span>` : ''}<span class="muted" style="margin-left:auto">${esc(node.kind === 'ext' ? 'external' : (node.host || 'local'))}</span></div>
+    ${node.role ? `<div class="muted">${esc(node.role)}</div>` : ''}
+    ${facts.length ? `<div class="facts">${facts.map(([k, v]) => `<div><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('')}</div>` : ''}
+    ${metrics.length ? `<details><summary>All metrics (${metrics.length})</summary><div class="scroll" style="margin-top:8px"><table class="metrics-tbl"><tbody>${metrics.map(([k, v]) => `<tr><td class="mono">${esc(k)}</td><td class="mono">${esc(v == null ? 'NaN' : +v.toFixed(6))}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
+  </div>`;
+}
+const labelText = l => { const e = Object.entries(l || {}); return e.length ? '{' + e.map(([k, v]) => `${k}="${v}"`).join(',') + '}' : ''; };
+
+// ---------- panels: time series a topology declares ----------
+// A panel reads a service's series endpoint (an object of key -> [[unix_ms, value], ...])
+// and draws one card per key. Titles, formats and footer metrics come from the topology.
+function cards() {
+  const sections = [];
+  for (const panel of state.topo?.panels || []) {
+    const series = svcState(panel.service)[panel.source || 'recent'];
+    if (!series) continue;
+    const svc = nodesById()[panel.service];
+    const out = Object.entries(series).sort().map(([key, pts]) => {
+      const last = pts.length ? pts[pts.length - 1][1] : null, first = pts.length ? pts[0][1] : null;
+      const chg = first != null && last != null ? last - first : null;
+      const cls = chg > 0 ? 'pos' : chg < 0 ? 'neg' : '';
+      const span = pts.length > 1 ? duration((pts[pts.length - 1][0] - pts[0][0]) / 1000) : '';
+      const foot = (panel.footer || []).map(f => {
+        const v = metric(panel.service, f.metric, f.match ? { [f.match]: key } : undefined);
+        return v == null ? '' : fmt(v, f);
+      }).filter(Boolean).join(' · ');
+      const pct = first ? ((chg / first) * 100).toFixed(3) : '0';
+      return `<article class="card">
+        <h3>${esc((panel.title || '{key}').replace('{key}', key))} <span class="muted" style="font-family:var(--sans);font-size:12px">via ${esc(svc?.label || panel.service)}</span></h3>
+        <div class="val"><span class="big">${fmt(last, panel)}</span>${chg != null ? `<span class="chg ${cls}">${chg >= 0 ? '+' : '−'}${fmt(Math.abs(chg), { ...panel, prefix: '', suffix: '' })} (${pct}%) ${span}</span>` : ''}</div>
+        <div class="chart" data-chart="${esc(panel.service)}|${esc(panel.source || 'recent')}|${esc(key)}" data-decimals="${panel.decimals ?? 2}"></div>
+        <div class="foot">${esc(foot)}</div>
+      </article>`;
+    });
+    if (out.length) sections.push(`<section><div class="sec-head"><h2>${esc(panel.heading || 'Live data')}</h2>${panel.note ? `<span class="muted" style="font-size:13px">${esc(panel.note)}</span>` : ''}</div><div class="cards">${out.join('')}</div></section>`);
+  }
+  return sections.join('');
+}
+
+function servicesTable() {
+  const rows = (state.topo?.services || []).map(svc => {
+    const n = { ...svc, kind: 'svc' }, st = statusOf(n), c = svcState(svc.id).container;
+    return `<tr><td class="mono" style="color:var(--fg)">${esc(svc.label || svc.id)}</td><td class="mono">${esc(svc.host || 'local')}</td>
+      <td><span class="pill ${statusText[st][1]}">${statusText[st][0]}</span></td><td>${esc(subOf(n))}</td>
+      <td class="mono">${duration(uptimeOf(svc.id))}</td><td class="mono">${c?.restart_count ?? '—'}</td>
+      <td class="mono">${c?.cpu_percent != null ? c.cpu_percent.toFixed(1) + '%' : '—'}</td><td class="mono">${bytes(c?.memory?.usage_bytes)}</td></tr>`;
+  }).join('');
+  return `<div><h1>Services</h1><p class="muted" style="margin:0">Container state from Docker; health and metrics from each service's own endpoints.</p></div>
+  <div class="box scroll"><table><thead><tr><th>Service</th><th>Host</th><th>Status</th><th>Detail</th><th>Up</th><th>Restarts</th><th>CPU</th><th>Memory</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+// ---------- charts ----------
+function tipAt(el, html, px, py) {
+  let tip = el.querySelector('.tip'); if (!tip) { tip = document.createElement('div'); tip.className = 'tip'; el.appendChild(tip); }
+  tip.innerHTML = html; tip.hidden = false;
+  const w = tip.offsetWidth;
+  tip.style.left = Math.min(Math.max(px - w / 2, 0), el.clientWidth - w) + 'px';
+  tip.style.top = (py - tip.offsetHeight - 10) + 'px';
+}
+function drawCharts() {
+  document.querySelectorAll('[data-chart]').forEach(el => {
+    const [id, source, key] = el.dataset.chart.split('|');
+    const decimals = +el.dataset.decimals;
+    const pts = (svcState(id)[source] || {})[key] || [];
+    if (pts.length < 2) { el.innerHTML = '<div class="empty" style="padding:8px 0">Collecting…</div>'; return; }
+    const W = el.clientWidth || 320, H = 110, m = { l: 0, r: 6, t: 8, b: 8 };
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+    const x0 = xs[0], x1 = xs[xs.length - 1], lo = Math.min(...ys), hi = Math.max(...ys), pad = (hi - lo) * 0.12 || hi * 0.0005 || 1;
+    const X = x => m.l + (x - x0) / (x1 - x0 || 1) * (W - m.l - m.r), Y = y => m.t + (1 - (y - (lo - pad)) / (hi - lo + 2 * pad)) * (H - m.t - m.b);
+    const d = pts.map((p, i) => (i ? 'L' : 'M') + X(p[0]).toFixed(1) + ',' + Y(p[1]).toFixed(1)).join('');
+    const tone = ys[ys.length - 1] >= ys[0] ? 'up' : 'down', last = pts[pts.length - 1];
+    el.innerHTML = `<svg width="${W}" height="${H}" role="img" aria-label="${esc(key)}">
+      <line class="c-ref" x1="0" x2="${W}" y1="${Y(ys[0])}" y2="${Y(ys[0])}"/>
+      <path class="c-area ${tone}" d="${d}L${X(x1)},${H}L${X(x0)},${H}Z"/><path class="c-line ${tone}" d="${d}"/>
+      <circle class="c-dot ${tone}" cx="${X(last[0])}" cy="${Y(last[1])}" r="4"/>
+      <g class="hover" visibility="hidden"><line class="c-cross" y1="0" y2="${H}"/><circle class="c-dot ${tone}" r="4"/></g>
+      <rect class="c-hit" x="0" y="0" width="${W}" height="${H}"/></svg>`;
+    const svg = el.querySelector('svg'), hov = svg.querySelector('.hover'), cross = hov.querySelector('line'), dot = hov.querySelector('circle');
+    const move = e => {
+      const r = svg.getBoundingClientRect(), xv = x0 + (e.clientX - r.left) / W * (x1 - x0);
+      let best = pts[0]; for (const p of pts) if (Math.abs(p[0] - xv) < Math.abs(best[0] - xv)) best = p;
+      const cx = X(best[0]), cy = Y(best[1]);
+      cross.setAttribute('x1', cx); cross.setAttribute('x2', cx); dot.setAttribute('cx', cx); dot.setAttribute('cy', cy);
+      hov.setAttribute('visibility', 'visible');
+      tipAt(el, `${fmt(best[1], { decimals })}<span class="muted">${new Date(best[0]).toISOString().slice(11, 19)} UTC</span>`, cx, cy);
+    };
+    const hit = svg.querySelector('.c-hit');
+    hit.addEventListener('pointermove', move); hit.addEventListener('pointerdown', move);
+    hit.addEventListener('pointerleave', () => { hov.setAttribute('visibility', 'hidden'); const t = el.querySelector('.tip'); if (t) t.hidden = true; });
+  });
+}
+
+// ---------- render & polling ----------
+function render() {
+  const focusId = document.activeElement?.dataset?.node;
+  const openDetails = !!document.querySelector('.detail details[open]');
+  $('view').innerHTML = state.tab === 'overview' ? topology() + cards() : servicesTable();
+  if (openDetails) { const d = document.querySelector('.detail details'); if (d) d.open = true; }
+  if (focusId) { const n = document.querySelector(`[data-node="${CSS.escape(focusId)}"]`); if (n) n.focus({ preventScroll: true }); }
+  document.querySelectorAll('.nav button').forEach(b => { if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+  drawCharts();
+  status();
+}
+function status() {
+  const age = state.lastOk ? (Date.now() - state.lastOk) / 1000 : null;
+  const stale = age == null || age > 6;
+  $('pulse').classList.toggle('stale', stale);
+  $('updated').textContent = age == null ? 'connecting…' : stale ? `no update for ${Math.round(age)}s` : 'live';
+  const problems = [];
+  if (stale && age != null) problems.push('The console backend is not responding. Data shown may be out of date.');
+  const d = state.snap?.docker;
+  if (d?.configured && d.error) problems.push('Docker API unavailable: ' + d.error + '. Container state is missing.');
+  if (state.snap?.error) problems.push(state.snap.error);
+  $('banner').hidden = !problems.length;
+  $('banner').textContent = problems.join(' ');
+}
+async function loadTopology() {
+  try { const r = await fetch('/api/topology', { cache: 'no-store' }); if (r.ok) { state.topo = await r.json(); $('profile').textContent = state.topo.name || 'deployment'; if (state.node === undefined) state.node = state.topo.focus ?? state.topo.services?.[0]?.id ?? null; } } catch (_) {}
+}
+async function poll() {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    if (r.ok) { state.snap = await r.json(); state.lastOk = Date.now(); }
+  } catch (_) {}
+  if (!document.querySelector('.tip:not([hidden])')) render(); else status();
+}
+
+document.querySelector('.nav').addEventListener('click', e => {
+  const b = e.target.closest('button[data-tab]'); if (!b) return;
+  state.tab = b.dataset.tab; render();
+});
+$('view').addEventListener('click', e => {
+  const n = e.target.closest('[data-node]'); if (n) { state.node = state.node === n.dataset.node ? null : n.dataset.node; render(); }
+});
+$('view').addEventListener('keydown', e => {
+  const n = e.target.closest && e.target.closest('[data-node]');
+  if (n && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); n.dispatchEvent(new MouseEvent('click', { bubbles: true })); }
+});
+let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(drawCharts, 150); });
+
+// Theme: follows the system unless the viewer picks light or dark.
+const THEMES = ['system', 'light', 'dark'];
+const themeIcon = {
+  system: '<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.5"/><path d="M7 17h6M10 13.5V17"/></svg>',
+  light: '<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10" cy="10" r="3.5"/><path d="M10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2M4 4l1.4 1.4M14.6 14.6 16 16M4 16l1.4-1.4M14.6 5.4 16 4"/></svg>',
+  dark: '<svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M16.5 12.5A7 7 0 0 1 7.5 3.5a7 7 0 1 0 9 9Z"/></svg>'
+};
+function applyTheme(t) {
+  if (t === 'system') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', t);
+  const next = THEMES[(THEMES.indexOf(t) + 1) % THEMES.length];
+  const label = t === 'system' ? 'Theme follows your system' : `Theme: ${t}`;
+  $('theme-btn').innerHTML = themeIcon[t];
+  $('theme-btn').setAttribute('aria-label', `${label}. Switch to ${next}.`);
+  $('theme-btn').title = `${label} (click for ${next})`;
+}
+let theme = 'system';
+try { const saved = localStorage.getItem('glacier-theme'); if (THEMES.includes(saved)) theme = saved; } catch (_) {}
+applyTheme(theme);
+$('theme-btn').addEventListener('click', () => {
+  theme = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
+  try { localStorage.setItem('glacier-theme', theme); } catch (_) {}
+  applyTheme(theme);
+});
+
+(async () => {
+  await loadTopology(); await poll();
+  setInterval(poll, 2000);
+  setInterval(loadTopology, 30000);
+})();
+</script>
+</body>
+</html>

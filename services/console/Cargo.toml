@@ -1,0 +1,17 @@
+[package]
+name = "console"
+description = "Glacier Labs console: deployment graph and live service state"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+glacier-observe.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
