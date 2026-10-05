@@ -50,9 +50,19 @@ struct Args {
     #[arg(long, env = "RELAY_SYMBOLS", value_delimiter = ',', required = true)]
     symbols: Vec<String>,
 
-    /// Schema to relay; instrument definitions are always included.
+    /// Schema to relay live.
     #[arg(long, env = "RELAY_SCHEMA", default_value = "cmbp-1")]
     schema: String,
+
+    /// Reference schemas sent live too, and replayed for clients catching
+    /// up, comma-separated.
+    #[arg(
+        long,
+        env = "RELAY_REFERENCE",
+        value_delimiter = ',',
+        default_value = "definition,statistics"
+    )]
+    reference: Vec<String>,
 
     /// Symbology of `--symbols`: `parent`, `raw_symbol`, ...
     #[arg(long, env = "RELAY_STYPE_IN", default_value = "parent")]
@@ -89,6 +99,11 @@ async fn run(args: Args) -> Result<(), String> {
         Schema::from_str(&args.schema).map_err(|e| format!("--schema {}: {e}", args.schema))?;
     let stype_in = SType::from_str(&args.stype_in)
         .map_err(|e| format!("--stype-in {}: {e}", args.stype_in))?;
+    let reference = args
+        .reference
+        .iter()
+        .map(|s| Schema::from_str(s).map_err(|e| format!("--reference {s}: {e}")))
+        .collect::<Result<Vec<_>, _>>()?;
     let Source::Databento = args.source;
     let key = secret("DATABENTO_API_KEY")?;
 
@@ -110,6 +125,7 @@ async fn run(args: Args) -> Result<(), String> {
         dataset: args.dataset.clone(),
         symbols: args.symbols.clone(),
         schema,
+        reference,
         stype_in,
         replays: tokio::sync::Semaphore::new(args.max_replays),
     });

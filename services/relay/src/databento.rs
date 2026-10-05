@@ -1,9 +1,10 @@
 //! Databento source: one standing live session feeds the hub. A client that
-//! asks to catch up gets its own session, which replays the day's instrument
-//! definitions and then continues live.
+//! asks to catch up gets its own session, which replays the day's reference
+//! data (instrument definitions and statistics, by default) and then
+//! continues live.
 //!
-//! Only definitions are replayed: Databento refuses intraday replay for
-//! `cmbp-1`, and missed quotes come from the next day's historical data.
+//! Quotes are not replayed: Databento refuses intraday replay for `cmbp-1`,
+//! and missed quotes come from the next day's historical data.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +29,9 @@ pub struct Databento {
     pub dataset: String,
     pub symbols: Vec<String>,
     pub schema: Schema,
+    /// Reference schemas sent live alongside `schema` and replayed for
+    /// clients catching up, such as `definition` and `statistics`.
+    pub reference: Vec<Schema>,
     pub stype_in: SType,
     /// Limits concurrent replay sessions, which count against Databento's
     /// per-dataset session limit.
@@ -36,9 +40,9 @@ pub struct Databento {
 
 impl Databento {
     /// A started session for the configured symbols: the schema, live, plus
-    /// instrument definitions. With `catch_up`, definitions are replayed from
-    /// as early as Databento has them (up to 24 hours), so the client knows
-    /// every instrument it will see.
+    /// the reference schemas. With `catch_up`, the reference schemas are
+    /// replayed from as early as Databento has them (up to 24 hours), so the
+    /// client knows every instrument and the day's statistics.
     async fn session(
         &self,
         catch_up: bool,
@@ -55,13 +59,10 @@ impl Databento {
             .build()
             .await
             .map_err(|e| format!("cannot connect to Databento: {e}"))?;
-        for (schema, from) in [
-            (self.schema, None),
-            (
-                Schema::Definition,
-                catch_up.then_some(OffsetDateTime::UNIX_EPOCH),
-            ),
-        ] {
+        let replay = catch_up.then_some(OffsetDateTime::UNIX_EPOCH);
+        let subs =
+            std::iter::once((self.schema, None)).chain(self.reference.iter().map(|s| (*s, replay)));
+        for (schema, from) in subs {
             let sub = Subscription::builder()
                 .symbols(self.symbols.clone())
                 .schema(schema)
@@ -137,7 +138,8 @@ impl Databento {
     }
 
     /// Serve one client from its own catch-up session until either side ends.
-    /// `start` is recorded but not used: only definitions can be replayed.
+    /// `start` sets the header; the reference schemas replay from as early as
+    /// Databento has them, whatever it is.
     pub async fn replay(&self, start: OffsetDateTime, mut out: OwnedWriteHalf, hub: &Hub) {
         let Ok(_permit) = self.replays.try_acquire() else {
             hub.refuse(
@@ -153,14 +155,17 @@ impl Databento {
             format!("catch-up requested from {start}"),
             format!("catch-up requested from {start}"),
         );
-        let (mut session, metadata) = match self.session(true, hub.heartbeat()).await {
+        let (mut session, _) = match self.session(true, hub.heartbeat()).await {
             Ok(s) => s,
             Err(e) => {
                 hub.refuse(out, ErrorCode::InternalError, &e).await;
                 return;
             }
         };
-        let Ok(header) = protocol::header(&metadata).await else {
+        // The relay's own header, not the session's, so every client sees
+        // the same dataset, symbols and symbology.
+        let start = u64::try_from(start.unix_timestamp_nanos()).unwrap_or(0);
+        let Ok(header) = protocol::header(&hub.metadata(start)).await else {
             return;
         };
         if out.write_all(&header).await.is_err() {

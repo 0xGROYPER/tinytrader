@@ -87,6 +87,14 @@ impl Hub {
         self.heartbeat
     }
 
+    /// The relay's stream header, the same for every client, with `start`
+    /// set to where this client's stream begins.
+    pub fn metadata(&self, start: u64) -> Metadata {
+        let mut m = self.metadata.clone();
+        m.start = start;
+        m
+    }
+
     #[cfg(test)]
     fn with_write_timeout(mut self, t: Duration) -> Self {
         self.write_timeout = t;
@@ -161,9 +169,7 @@ impl Hub {
     /// Stream live records to a client until it disconnects or falls behind.
     pub async fn serve_live(&self, mut out: OwnedWriteHalf) {
         let mut rx = self.tx.subscribe();
-        let mut metadata = self.metadata.clone();
-        metadata.start = protocol::now_ns();
-        let Ok(mut first) = protocol::header(&metadata).await else {
+        let Ok(mut first) = protocol::header(&self.metadata(protocol::now_ns())).await else {
             return;
         };
         if let Upstream::Down(since) = self.upstream() {
