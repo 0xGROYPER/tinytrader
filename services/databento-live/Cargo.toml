@@ -1,0 +1,15 @@
+[package]
+name = "databento-live"
+description = "Example service: streams a Databento live subscription and exposes health, metrics and events"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+databento = { version = "0.63", default-features = false, features = ["live"] }
+glacier-observe.workspace = true
+tokio.workspace = true

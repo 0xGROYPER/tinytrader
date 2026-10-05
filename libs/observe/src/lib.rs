@@ -10,7 +10,9 @@
 //! (`glacier.observe/1`): changes are additive only. Labels stay low
 //! cardinality: service, venue, product; never per-order or per-instrument ids.
 
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -233,6 +235,102 @@ impl MetricsWriter {
     }
 }
 
+/// A bounded log of recent events, served at `GET /events` for live tails.
+///
+/// `GET /events?after=<seq>&limit=<n>` returns events newer than `after`,
+/// newest last, at most `limit` (default 100, capped at the capacity):
+/// `{ "events": [{ "seq", "received_ms", "summary", "raw" }], "next": <latest seq> }`.
+#[derive(Clone)]
+pub struct Events {
+    inner: Arc<EventsInner>,
+}
+
+struct EventsInner {
+    capacity: usize,
+    next_seq: AtomicU64,
+    log: Mutex<VecDeque<Event>>,
+}
+
+struct Event {
+    seq: u64,
+    received_ms: f64,
+    summary: String,
+    raw: String,
+}
+
+impl Events {
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            inner: Arc::new(EventsInner {
+                capacity: capacity.max(1),
+                next_seq: AtomicU64::new(0),
+                log: Mutex::new(VecDeque::new()),
+            }),
+        }
+    }
+
+    /// Default capacity: the last 500 events.
+    pub const DEFAULT_CAPACITY: usize = 500;
+
+    /// Record an event: a one-line summary and the raw message it came from.
+    pub fn push(&self, summary: String, raw: String) {
+        let seq = self.inner.next_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut log = lock(&self.inner.log);
+        log.push_back(Event {
+            seq,
+            received_ms: unix_seconds() * 1000.0,
+            summary,
+            raw,
+        });
+        if log.len() > self.inner.capacity {
+            log.pop_front();
+        }
+    }
+
+    /// Events newer than `after`, newest last, at most `limit`.
+    #[must_use]
+    pub fn since(&self, after: u64, limit: usize) -> serde_json::Value {
+        let log = lock(&self.inner.log);
+        let newer: Vec<&Event> = log.iter().filter(|e| e.seq > after).collect();
+        let start = newer.len().saturating_sub(limit.min(self.inner.capacity));
+        let list: Vec<serde_json::Value> = newer[start..]
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "seq": e.seq,
+                    "received_ms": e.received_ms,
+                    "summary": e.summary,
+                    "raw": e.raw,
+                })
+            })
+            .collect();
+        serde_json::json!({ "events": list, "next": self.inner.next_seq.load(Ordering::Relaxed) })
+    }
+
+    /// Router with `/events`, to merge into the service's app.
+    pub fn router(&self) -> Router {
+        Router::new()
+            .route("/events", get(events))
+            .with_state(self.clone())
+    }
+}
+
+impl Default for Events {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_CAPACITY)
+    }
+}
+
+async fn events(
+    AxumState(e): AxumState<Events>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> axum::Json<serde_json::Value> {
+    let after = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let limit = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100);
+    axum::Json(e.since(after, limit))
+}
+
 /// Seconds since the Unix epoch, as a float.
 #[must_use]
 pub fn unix_seconds() -> f64 {
@@ -266,6 +364,21 @@ mod tests {
         assert!(text.contains("demo_total{product=\"BTC-USD\"} 3"));
         assert!(text.contains("demo_total{product=\"a\\\"b\"} 1"));
         assert!(text.contains("glacier_ready{service=\"demo\"} 0"));
+    }
+
+    #[test]
+    fn events_are_bounded_and_resumable() {
+        let e = Events::new(3);
+        for i in 0..5 {
+            e.push(format!("event {i}"), String::new());
+        }
+        let all = e.since(0, 100);
+        assert_eq!(all["next"], 5);
+        assert_eq!(all["events"].as_array().unwrap().len(), 3);
+        assert_eq!(all["events"][0]["seq"], 3);
+        let newer = e.since(4, 100);
+        assert_eq!(newer["events"].as_array().unwrap().len(), 1);
+        assert_eq!(newer["events"][0]["summary"], "event 4");
     }
 
     #[test]

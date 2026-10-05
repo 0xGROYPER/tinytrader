@@ -2,6 +2,7 @@
 members = [
     "libs/observe",
     "services/console",
+    "services/databento-live",
     "services/ticker",
 ]
 resolver = "3"

@@ -15,6 +15,7 @@
           ../Cargo.lock
           ../libs/observe
           ../services/ticker
+          ../services/databento-live
           (lib.fileset.fileFilter (f: f.hasExt "rs" || f.name == "Cargo.toml") ../services/console)
           ../services/console/web
         ];
@@ -46,11 +47,12 @@
 
       ticker = service "ticker" "Toy service streaming Coinbase public tickers to disk";
       console = service "console" "Glacier Labs console";
+      databento-live = service "databento-live" "Example service streaming a Databento live subscription";
 
     in
     {
       packages = {
-        inherit ticker console;
+        inherit ticker console databento-live;
       };
 
       checks = {

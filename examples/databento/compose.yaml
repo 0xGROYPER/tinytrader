@@ -1,0 +1,56 @@
+# Glacier example: a Databento live subscription and the Glacier console.
+#   export DATABENTO_API_KEY=...        # never commit it
+#   docker compose up --build -d
+#   open http://localhost:8080
+#
+# Live data can be billed by usage. Check what the subscription below costs on
+# your Databento plan before starting it.
+name: glacier-databento
+
+services:
+  databento-live:
+    build:
+      context: ../..
+      dockerfile: services/Dockerfile
+      args: { SERVICE: databento-live }
+    image: glacier/databento-live:dev
+    environment:
+      DATABENTO_API_KEY_FILE: /run/secrets/databento_api_key
+      DATABENTO_DATASET: ${DATABENTO_DATASET:-OPRA.PILLAR}
+      DATABENTO_SYMBOLS: ${DATABENTO_SYMBOLS:-SPY.OPT}
+      DATABENTO_SCHEMA: ${DATABENTO_SCHEMA:-trades}
+      DATABENTO_STYPE_IN: ${DATABENTO_STYPE_IN:-parent}
+      DATABENTO_LISTEN: 0.0.0.0:9101   # reachable only on the Compose network
+    secrets: [databento_api_key]
+    restart: unless-stopped
+
+  console:
+    build:
+      context: ../..
+      dockerfile: services/Dockerfile
+      args: { SERVICE: console }
+    image: glacier/console:dev
+    environment:
+      CONSOLE_LISTEN: 0.0.0.0:8080
+      CONSOLE_TOPOLOGY: /etc/glacier/topology.json
+      CONSOLE_DOCKER: http://docker-proxy:2375
+      CONSOLE_COMPOSE_PROJECT: glacier-databento
+    volumes:
+      - ./topology.json:/etc/glacier/topology.json:ro
+    ports:
+      - "127.0.0.1:8080:8080"   # this machine only
+    depends_on: [databento-live, docker-proxy]
+    restart: unless-stopped
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    environment:
+      CONTAINERS: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
+secrets:
+  databento_api_key:
+    environment: DATABENTO_API_KEY   # taken from your shell, never written to disk

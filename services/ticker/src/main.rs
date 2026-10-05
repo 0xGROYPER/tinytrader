@@ -25,23 +25,12 @@ use axum::Router;
 use axum::extract::State as AxumState;
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
-use glacier_observe::{Observer, State, unix_seconds};
+use glacier_observe::{Events, Observer, State, unix_seconds};
 use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_FEED: &str = "wss://ws-feed.exchange.coinbase.com";
 /// Points kept per product for `/recent`, sampled at most once per second.
 const RECENT_POINTS: usize = 900;
-/// Messages kept for `/events`, the live tail shown by the console.
-const EVENT_BUFFER: usize = 500;
-
-/// One received message, as served by `/events`.
-struct Event {
-    seq: u64,
-    received_ms: f64,
-    summary: String,
-    raw: String,
-}
-
 #[derive(Default)]
 struct Product {
     messages: u64,
@@ -59,8 +48,8 @@ struct Shared {
     bytes_written: AtomicU64,
     gaps: AtomicU64,
     last_gap: Mutex<Option<(f64, f64)>>,
-    events: Mutex<VecDeque<Event>>,
-    next_seq: AtomicU64,
+    /// Recent messages, served at `/events` for the console's live tail.
+    events: Events,
 }
 
 #[tokio::main]
@@ -88,9 +77,9 @@ async fn main() {
 
     let app = Router::new()
         .route("/recent", get(recent))
-        .route("/events", get(events))
         .with_state(shared.clone())
-        .merge(observer.router());
+        .merge(observer.router())
+        .merge(shared.events.router());
     let listener = match tokio::net::TcpListener::bind(&listen).await {
         Ok(l) => l,
         Err(e) => {
@@ -248,18 +237,7 @@ async fn stream_once(
             v["last_size"].as_str().unwrap_or("-"),
             v["price"].as_str().unwrap_or("-"),
         );
-        {
-            let mut events = lock(&shared.events);
-            events.push_back(Event {
-                seq: shared.next_seq.fetch_add(1, Ordering::Relaxed) + 1,
-                received_ms: now_s * 1000.0,
-                summary,
-                raw: text.to_string(),
-            });
-            if events.len() > EVENT_BUFFER {
-                events.pop_front();
-            }
-        }
+        shared.events.push(summary, text.to_string());
 
         let mut map = lock(&shared.products);
         let p = map.entry(product.to_owned()).or_default();
@@ -352,38 +330,6 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>) {
             }
         }
     });
-}
-
-/// Messages received after sequence `after` (default 0), newest last, at most
-/// `limit` (default 100, max 500): `{ "events": [...], "next": <latest seq> }`.
-async fn events(
-    AxumState(s): AxumState<Arc<Shared>>,
-    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
-) -> axum::Json<serde_json::Value> {
-    let after: u64 = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let limit: usize = q
-        .get("limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(100)
-        .min(EVENT_BUFFER);
-    let events = lock(&s.events);
-    let newer: Vec<&Event> = events.iter().filter(|e| e.seq > after).collect();
-    let start = newer.len().saturating_sub(limit);
-    let list: Vec<serde_json::Value> = newer[start..]
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "seq": e.seq,
-                "received_ms": e.received_ms,
-                "summary": e.summary,
-                "raw": e.raw,
-            })
-        })
-        .collect();
-    axum::Json(serde_json::json!({
-        "events": list,
-        "next": s.next_seq.load(Ordering::Relaxed),
-    }))
 }
 
 /// Recent sampled prices per product: `{ "BTC-USD": [[unix_ms, price], ...] }`.
