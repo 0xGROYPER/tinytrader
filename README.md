@@ -1,9 +1,9 @@
 # Glacier Labs
 
 A platform for running small trading and research operations: services,
-deployment modules and an operator console. NixOS hosts run services under
-systemd from Nix; any other machine runs the same services as Docker
-containers.
+deployment modules and an operator console. Services run under NixOS, under
+systemd on any Linux with Nix, or as Docker containers on any operating
+system.
 
 Glacier is the platform, not anyone's deployment. Your hosts, data, secrets,
 strategies and research live in your own repository, which uses Glacier as a
