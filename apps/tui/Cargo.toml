@@ -1,0 +1,14 @@
+[package]
+name = "glacier-tui"
+description = "Terminal view of a Glacier deployment: services, health and live events"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+glacier-fleet.workspace = true
+ratatui = "0.30"
+tokio.workspace = true
