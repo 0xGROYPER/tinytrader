@@ -13,6 +13,8 @@ uses the same one.
 | `COINBASE.EXCHANGE` | Coinbase | Coinbase Exchange market data (websocket) |
 | `KRAKEN.SPOT` | Kraken | Kraken spot market data |
 | `KRAKEN.FUTURES` | Kraken | Kraken derivatives market data |
+| `ALPACA.IEX` | Alpaca | IEX market data as served by Alpaca |
+| `ALPACA.SIP` | Alpaca | Consolidated (SIP) US equities data as served by Alpaca |
 
 Schema names are lower case, using Databento's names where the meaning
 matches (`trades`, `mbp-1`, `mbo`, `definition`). Glacier's own schemas are

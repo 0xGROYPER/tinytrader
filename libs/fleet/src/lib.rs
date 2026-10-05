@@ -230,9 +230,8 @@ async fn discover(app: &Poller, containers: &HashMap<String, Value>, addressed: 
     }
     if let Some(console) = &f.console {
         for name in f.observed.iter().filter(|n| *n != console) {
-            f.edges.push(
-                json!({ "from": name, "to": console, "kind": "read", "label": "health · metrics" }),
-            );
+            f.edges
+                .push(json!({ "from": name, "to": console, "kind": "read" }));
         }
     }
     let host_sub = if containers.is_empty() {

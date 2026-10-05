@@ -2,6 +2,9 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-05
+- **Amended:** 2026-10-05: provider roots, provenance and migration
+  ledgers, raw pages from request/response sources, the intraday store,
+  incorporating provider batches, and keeping roots clean
 
 ## Context
 
@@ -64,6 +67,24 @@ Parquet or JSON Lines.
 
 ### Layout
 
+Each provider's data lives under its own root, shaped like a Databento
+download that has been incorporated into a long-lived store:
+
+```text
+<root>/                                one provider, e.g. Databento, Alpaca, Coinbase
+├── <DATASET>/                         ... (below)
+├── provenance/
+│   └── <batch-or-capture-id>/         how the data was obtained: the provider's
+│                                      manifest.json, metadata.json and condition.json
+│                                      for a purchased batch; requests and receipts
+│                                      for a capture
+└── migrations/
+    ├── <YYYY-MM-DD>-<name>.json       every move or release: source, destination,
+    └── <YYYY-MM-DD>-<name>.events.jsonl  size and SHA-256, and each step as it happened
+```
+
+Within a provider root:
+
 ```text
 <root>/
 └── <DATASET>/                         e.g. COINBASE.EXCHANGE
@@ -89,7 +110,11 @@ Parquet or JSON Lines.
   registry of these names (`docs/datasets.md`) so deployments agree.
 - Files hold every symbol by default, one file per dataset, schema and day.
   A dataset that captures only some symbols can opt into a symbol level,
-  `<DATASET>/<symbol>/<schema>/`, declared in its `dataset.json`.
+  `<DATASET>/<symbol>/<schema>/` (and `<DATASET>/<symbol>/raw/`), declared in
+  its `dataset.json`. Databento batches requested by parent symbol, such as
+  `OPRA.PILLAR/SPY.OPT/cmbp-1/`, use this level.
+- A closed day is a file, never a folder. Per-day receipts and manifests go
+  to `provenance/`, not beside the data.
 - A deployment refers to a store by its logical data root, never by a path.
 
 ### Segments and sealing
@@ -144,6 +169,65 @@ and existing readers in Rust, Python, Wireshark and others. Each connection is
 an interface whose description records the endpoint and subscription; each
 message is a packet using a user-defined link type. A custom framed log would
 be simpler to write but has no existing tooling.
+
+### Raw pages from request/response sources
+
+Some sources are historical APIs answered page by page, not streams; Alpaca's
+historical trades and quotes are an example. For these, the raw form is the
+pages exactly as received, each with a receipt (the request, when it was
+made, the response status and the page's SHA-256), bundled one archive per
+day: `<DATASET>/[<symbol>/]raw/<YYYY-MM-DD>.tar`. The day's page list and
+receipts are recorded in `provenance/`. A day is complete only when the
+source confirms the last page.
+
+### Incorporating provider batches
+
+A purchased batch (a Databento download, for example) is incorporated, not
+left where it was downloaded:
+
+1. Download it to a named incoming directory on the same volume as its
+   provider root.
+2. Verify every file's size and SHA-256 against the provider's manifest.
+3. Move each data file to `<DATASET>/[<symbol>/]<schema>/<YYYY-MM-DD>.dbn.zst`
+   (a rename on the same volume), refusing to overwrite a different file.
+4. Move the provider's manifest, metadata and condition files to
+   `provenance/<batch-id>/`.
+5. Record the batch in a `migrations/` ledger, then remove the incoming
+   directory once it is empty. Nothing is removed recursively.
+
+An interrupted incorporation resumes from its ledger.
+
+### The intraday store
+
+Some authoritative data arrives only after the day ends (historical
+downloads, for example), while recovering from a disconnect during the day
+needs data now. A deployment may therefore record a provider's live feed to
+an **intraday store**: a separate root, never mixed into a provider root,
+with the same hierarchy (`<DATASET>/[<symbol>/]<schema>/<YYYY-MM-DD>.dbn.zst`,
+`.partial` while open).
+
+Intraday data is a stopgap, not a source of truth. Readers use it only when
+asked to or when the authoritative day doesn't exist yet. Once the
+authoritative day is sealed and verified, the intraday day is released: a
+recorded entry in `migrations/`, never an unrecorded deletion. A deployment
+that wants to compare live and historical data can keep intraday days
+instead.
+
+### Keeping roots clean
+
+A provider root holds only its datasets, `provenance/`, `migrations/` and the
+store's own files. Everything else goes elsewhere:
+
+- Test runs, pilots, soaks and partial experiments write to disposable roots
+  outside provider roots, each named for its purpose and with a stated
+  lifetime (for example `tmp/<purpose>/` on a large volume when it doesn't
+  fit on the local disk).
+- Writers create a directory when they write its first file, and remove
+  directories they created and didn't use. No empty directories are left
+  behind.
+- Catalogs ignore operating-system metadata (`.DS_Store`, `.Spotlight-V100`,
+  `.fseventsd`, `.Trashes`) and report anything else they don't recognize, so
+  litter is visible rather than silently tolerated.
 
 ### Recovery
 
@@ -284,3 +368,12 @@ CLI until there is a reason to add them, behind confirmation and an audit log.
 - Custom schemas have prefixed, versioned names, implemented by `dbn-ext`
   over the official `dbn` crate.
 - Raw captures are kept indefinitely and tiered down, never pruned by policy.
+- Each provider has its own root with `provenance/` and `migrations/`, as a
+  Databento download incorporated into a store looks.
+- Closed days are files, never folders; per-day receipts live in `provenance/`.
+- Raw data from request/response sources is the pages as received, one
+  archive per day.
+- Provider batches are incorporated by verified, recorded renames.
+- Live recordings kept only to bridge until authoritative data arrives live in
+  a separate intraday store and are released, with a record, once superseded.
+- Provider roots contain nothing but data, provenance and migration ledgers.
