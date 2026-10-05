@@ -1,0 +1,17 @@
+[package]
+name = "alpaca-news"
+description = "Example service: polls Alpaca's news feed (supplied by Benzinga) and serves recent stories"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+glacier-observe.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

@@ -157,7 +157,19 @@ tr:last-child td { border-bottom: 0; }
 .tip { position: absolute; pointer-events: none; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font: 13px var(--mono); color: var(--fg); white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.12); z-index: 2; }
 .tip .muted { display: block; font-size: 12px; }
 .empty { padding: 16px; color: var(--muted); font-size: 14px; }
-#nav-collections, #nav-store { display: contents; }
+#nav-collections, #nav-store, .nav-group { display: contents; }
+.nav-group[hidden] { display: none; }
+.ws { display: inline-flex; margin-left: 8px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.ws button { min-height: 30px; padding: 0 12px; border: 0; border-right: 1px solid var(--line); background: var(--bg); color: var(--fg-2); font: 500 13px var(--sans); cursor: pointer; }
+.ws button:last-child { border-right: 0; }
+.ws button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.news { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; }
+.story { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border-bottom: 1px solid var(--line-soft); }
+.story:last-child { border-bottom: 0; }
+.story-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 12px; color: var(--muted); }
+.story a { color: var(--fg); font-weight: 600; font-size: 15px; text-decoration: none; line-height: 1.4; }
+.story a:hover { color: var(--accent); text-decoration: underline; }
+.story p { margin: 0; color: var(--fg-2); font-size: 14px; max-width: 80ch; }
 .ds-row { cursor: pointer; }
 .ds-row:hover td { background: var(--surface); }
 .ds-row.sel td { background: var(--accent-soft); }
@@ -232,6 +244,10 @@ tr:last-child td { border-bottom: 0; }
     <b>Glacier Labs</b>
     <span class="crumb-sep" aria-hidden="true">/</span>
     <span class="deployment" id="profile" title="Deployment shown">…</span>
+    <div class="ws" role="group" aria-label="Workspace">
+      <button type="button" data-ws="ops" aria-pressed="true">Ops</button>
+      <button type="button" data-ws="market" aria-pressed="false">Market</button>
+    </div>
   </div>
   <div class="top-right">
     <span class="live"><span class="pulse stale" id="pulse"></span><span id="updated">connecting…</span></span>
@@ -242,17 +258,24 @@ tr:last-child td { border-bottom: 0; }
 
 <div class="shell">
   <nav class="nav" aria-label="Sections">
-    <div class="nav-label">Operate</div>
-    <button type="button" data-tab="overview" aria-current="page">Overview</button>
-    <button type="button" data-tab="services">Services</button>
-    <div id="nav-store"></div>
-    <div id="nav-collections"></div>
+    <div class="nav-group" id="nav-ops">
+      <div class="nav-label">Operate</div>
+      <button type="button" data-tab="overview" aria-current="page">Overview</button>
+      <button type="button" data-tab="services">Services</button>
+      <div id="nav-store"></div>
+      <div id="nav-collections"></div>
+    </div>
+    <div class="nav-group" id="nav-market" hidden>
+      <div class="nav-label">Market</div>
+      <button type="button" data-tab="charts">Charts</button>
+      <button type="button" data-tab="news">News</button>
+    </div>
   </nav>
   <main><div class="col" id="view"></div></main>
 </div>
 
 <script>
-const state = { tab: 'overview', topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
+const state = { tab: 'overview', workspace: 'ops', lastTab: { ops: 'overview', market: 'charts' }, newsSymbol: null, topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
   ev: { service: null, after: 0, rows: [], paused: false, open: new Set(), times: [], fresh: new Set() } };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -531,6 +554,50 @@ function servicesTable() {
   <div class="box scroll"><table><thead><tr><th>Service</th><th>Host</th><th>Status</th><th>Detail</th><th>Up</th><th>Restarts</th><th>CPU</th><th>Memory</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
+// ---------- market: charts and news ----------
+function chartsView() {
+  const c = cards();
+  return `<div><h1>Charts</h1><p class="muted" style="margin:0">Live prices from this deployment's market data services.</p></div>` +
+    (c || '<p class="muted">No service is publishing price series yet.</p>');
+}
+function newsItems() {
+  const seen = new Map();
+  for (const st of Object.values(state.snap?.services || {})) {
+    for (const n of st.news?.items || []) if (!seen.has(n.id)) seen.set(n.id, n);
+  }
+  return [...seen.values()].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+}
+function ago(iso) {
+  const s = (Date.now() - Date.parse(iso)) / 1000;
+  if (!isFinite(s)) return '';
+  return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`;
+}
+function newsView() {
+  const items = newsItems();
+  if (!items.length) return '<div><h1>News</h1><p class="muted">No news service is running, or it has no stories yet.</p></div>';
+  const counts = new Map();
+  for (const n of items) for (const sym of n.symbols || []) counts.set(sym, (counts.get(sym) || 0) + 1);
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14).map(([sym]) => sym);
+  const shown = state.newsSymbol ? items.filter(n => (n.symbols || []).includes(state.newsSymbol)) : items;
+  const chip = (sym, label) => `<button type="button" class="chip-btn" data-news-symbol="${esc(sym ?? '')}" aria-pressed="${(state.newsSymbol ?? null) === sym}">${esc(label)}</button>`;
+  return `<div><h1>News</h1><p class="muted" style="margin:0">${items.length} recent stories, newest first.</p></div>
+    <div class="chips">${chip(null, 'All')}${top.map(sym => chip(sym, sym)).join('')}</div>
+    <div class="news">${shown.slice(0, 100).map(n => `<article class="story">
+      <div class="story-meta"><span>${esc(ago(n.created_at))}</span><span>${esc(n.source || '')}${n.author ? ' · ' + esc(n.author) : ''}</span>
+        ${(n.symbols || []).slice(0, 8).map(sym => `<span class="tag">${esc(sym)}</span>`).join('')}</div>
+      ${/^https?:/.test(n.url || '') ? `<a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.headline)}</a>` : `<b>${esc(n.headline)}</b>`}
+      ${n.summary ? `<p>${esc(n.summary)}</p>` : ''}
+    </article>`).join('') || '<p class="muted" style="padding:16px;margin:0">No stories for this symbol.</p>'}</div>`;
+}
+function setWorkspace(ws, tab) {
+  state.workspace = ws;
+  state.tab = tab || state.lastTab[ws];
+  $('nav-ops').hidden = ws !== 'ops';
+  $('nav-market').hidden = ws !== 'market';
+  document.querySelectorAll('[data-ws]').forEach(b => b.setAttribute('aria-pressed', b.dataset.ws === ws));
+}
+const workspaceOf = tab => ['charts', 'news'].includes(tab) ? 'market' : 'ops';
+
 // ---------- store: data and storage ----------
 // Catalogs come from services that describe a `catalog` stream. Every root of
 // every catalog is shown; nothing here knows about particular datasets.
@@ -734,7 +801,9 @@ function render() {
   if ((state.tab === 'data' || state.tab === 'storage') && !state.navigated && catalogStamp() === state.catalogAt) return status();
   state.navigated = false;
   state.catalogAt = catalogStamp();
-  $('view').innerHTML = state.tab === 'overview' ? topology() + cards()
+  $('view').innerHTML = state.tab === 'overview' ? topology()
+    : state.tab === 'charts' ? chartsView()
+    : state.tab === 'news' ? newsView()
     : state.tab === 'services' ? servicesTable()
     : state.tab === 'data' ? dataView()
     : state.tab === 'storage' ? storageView() : collectionView();
@@ -774,11 +843,20 @@ async function poll() {
 document.querySelector('.nav').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]'); if (!b) return;
   state.tab = b.dataset.tab; state.doc = null; state.navigated = true;
+  state.lastTab[workspaceOf(state.tab)] = state.tab;
   const c = currentCollection();
   try { history.replaceState(null, '', '#' + (c ? c.id : state.tab)); } catch (_) {}
   render(); window.scrollTo(0, 0);
 });
+document.querySelector('.ws').addEventListener('click', e => {
+  const b = e.target.closest('[data-ws]'); if (!b || b.dataset.ws === state.workspace) return;
+  setWorkspace(b.dataset.ws); state.doc = null; state.navigated = true;
+  try { history.replaceState(null, '', '#' + state.tab); } catch (_) {}
+  render(); window.scrollTo(0, 0);
+});
 $('view').addEventListener('click', e => {
+  const ns = e.target.closest('[data-news-symbol]');
+  if (ns) { state.newsSymbol = ns.dataset.newsSymbol || null; render(); return; }
   const dr = e.target.closest('[data-ds]');
   if (dr) { state.ds = dr.dataset.ds; state.navigated = true; render(); return; }
   const sc = e.target.closest('[data-schema]');
@@ -841,6 +919,7 @@ $('theme-btn').addEventListener('click', () => {
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
   if (hc) { state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true; }
   else if (['services', 'data', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
+  else if (['charts', 'news'].includes(h)) { setWorkspace('market', h); state.lastTab.market = h; state.navigated = true; }
   await loadTopology(); await poll();
   setInterval(poll, 2000);
   setInterval(pollEvents, 700);

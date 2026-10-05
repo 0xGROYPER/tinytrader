@@ -54,6 +54,7 @@ pub struct ServiceInfo {
     pub events: Option<String>,
     pub recent: Option<String>,
     pub catalog: Option<String>,
+    pub news: Option<String>,
 }
 
 impl ServiceInfo {
@@ -123,6 +124,8 @@ pub struct ServiceState {
     pub recent: Option<Value>,
     /// The service's catalog of data roots, if it serves one.
     pub catalog: Option<Value>,
+    /// The service's news stories, if it serves them.
+    pub news: Option<Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

@@ -34,12 +34,13 @@ console the same way.
 | `libs/fleet` | Discovers and polls a deployment; the data layer behind every front end |
 | `services/Dockerfile` | Container image build for any service |
 | `apps/tui` | Terminal view of a deployment (Ratatui) |
-| `services/console` | The operator console: deployment graph, live service state, panels |
+| `services/console` | The operator console: an **Ops** workspace (deployment graph, services, data, storage, docs) and a **Market** workspace (charts, news) |
 | `services/ticker` | Toy service used by the quickstart |
 | `services/databento-live` | Example service streaming a Databento live subscription |
 | `services/alpaca-live` | Example service streaming Alpaca's free real-time IEX data |
 | `services/dbn-tcp` | Example service reading any live DBN stream served over TCP |
 | `services/catalog` | Read-only catalog of data roots: datasets, coverage, disk space |
+| `services/alpaca-news` | Example service serving market news from Alpaca (supplied by Benzinga) |
 | `infra/modules` | NixOS modules, such as `glacier.services.<name>` |
 | `nix/` | Flake modules: Rust builds and checks |
 | `examples/` | Complete deployments you can run or copy |

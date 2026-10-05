@@ -4,6 +4,7 @@ members = [
     "libs/fleet",
     "libs/observe",
     "services/alpaca-live",
+    "services/alpaca-news",
     "services/catalog",
     "services/console",
     "services/databento-live",

@@ -32,6 +32,24 @@ services:
     mem_limit: 256m
     cpus: 1.0
 
+  alpaca-news:
+    build:
+      context: ../..
+      dockerfile: services/Dockerfile
+      args: { SERVICE: alpaca-news }
+    image: glacier/alpaca-news:dev
+    labels:
+      glacier.observe: "9106"
+    environment:
+      APCA_API_KEY_ID_FILE: /run/secrets/apca_api_key_id
+      APCA_API_SECRET_KEY_FILE: /run/secrets/apca_api_secret_key
+      ALPACA_NEWS_SYMBOLS: ${ALPACA_SYMBOLS:-SPY,QQQ,AAPL}
+      ALPACA_NEWS_LISTEN: 0.0.0.0:9106
+    secrets: [apca_api_key_id, apca_api_secret_key]
+    <<: *service
+    mem_limit: 128m
+    cpus: 0.5
+
   console:
     build:
       context: ../..
