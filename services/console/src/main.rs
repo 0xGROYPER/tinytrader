@@ -314,8 +314,11 @@ async fn describe(app: &App, id: &str, base: &str) -> Value {
             lock(&app.describes).insert(id.to_owned(), (Instant::now(), d.clone()));
             d
         }
-        // Not cached, so a service is described as soon as it answers.
-        Err(_) => json!({}),
+        // A stopped or restarting service keeps its last known description;
+        // one never described is retried on every poll.
+        Err(_) => lock(&app.describes)
+            .get(id)
+            .map_or_else(|| json!({}), |(_, d)| d.clone()),
     }
 }
 
