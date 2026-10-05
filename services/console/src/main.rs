@@ -19,7 +19,7 @@
 //! labels: `glacier.role` (a description for containers without
 //! `/describe`), `glacier.label` and `glacier.host`. Without Docker, or for
 //! services Docker doesn't run, a topology entry such as
-//! `{ "id": "ticker", "observe": "http://127.0.0.1:9100" }` is described and
+//! `{ "id": "ticker", "observe": "http://127.0.0.1:9105" }` is described and
 //! polled the same way.
 //!
 //! **Overrides.** The topology file is optional. When present, it is layered

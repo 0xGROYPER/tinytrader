@@ -19,11 +19,11 @@ services:
       args: { SERVICE: ticker }
     image: glacier/ticker:dev
     labels:
-      glacier.observe: "9100"
+      glacier.observe: "9105"
     environment:
       TICKER_PRODUCTS: BTC-USD,ETH-USD
       TICKER_DATA_DIR: /data
-      TICKER_LISTEN: 0.0.0.0:9100   # reachable only on the Compose network
+      TICKER_LISTEN: 0.0.0.0:9105   # reachable only on the Compose network
     volumes:
       - ticker-data:/data
     <<: *service

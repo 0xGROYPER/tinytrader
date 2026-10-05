@@ -1,5 +1,10 @@
-//! Terminal view of a Glacier deployment: every service with its status,
-//! details of the selected one, and its live event tail.
+//! Terminal view of a Glacier deployment, with two screens:
+//!
+//! - **Services:** every service with its status, details of the selected
+//!   one, and its live event tail.
+//! - **Hosts:** an htop-style view of one machine: CPU, memory, swap, load
+//!   and disks (from the host's node_exporter), and the Glacier services on
+//!   it with CPU and memory against their limits.
 //!
 //! ```text
 //! glacier-tui --console http://localhost:8080          # read a running console
@@ -13,17 +18,22 @@
 //! `--console` works from anywhere the console is reachable, including over
 //! SSH.
 //!
-//! Keys: ↑/↓ or j/k select · p pause events · q quit.
+//! Keys: Tab switch screen · ↑/↓ or j/k select · p pause events ·
+//! ←/→ or h/l switch host · c/m/n sort by CPU, memory, name · q quit.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use glacier_fleet::{FleetEvent, Poller, PollerConfig, Snapshot, Source, Status, Topology};
+use glacier_fleet::{
+    FleetEvent, HostState, Poller, PollerConfig, ServiceState, Snapshot, Source, Status, Topology,
+};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Cell, Gauge, LineGauge, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
+};
 use ratatui::{DefaultTerminal, Frame};
 
 /// What the screen shows, filled in by the background refresh task.
@@ -38,6 +48,24 @@ struct View {
     paused: bool,
     error: Option<String>,
     updated: Option<Instant>,
+    screen: Screen,
+    host: usize,
+    sort: Sort,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Screen {
+    #[default]
+    Services,
+    Hosts,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Sort {
+    #[default]
+    Cpu,
+    Memory,
+    Name,
 }
 
 fn main() {
@@ -156,8 +184,20 @@ fn run(terminal: &mut DefaultTerminal, view: &Mutex<View>, label: &str) -> std::
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Char('p') => v.paused = !v.paused,
+                KeyCode::Tab => {
+                    v.screen = if v.screen == Screen::Services {
+                        Screen::Hosts
+                    } else {
+                        Screen::Services
+                    };
+                }
                 KeyCode::Down | KeyCode::Char('j') => move_selection(&mut v, 1),
                 KeyCode::Up | KeyCode::Char('k') => move_selection(&mut v, -1),
+                KeyCode::Right | KeyCode::Char('l') => v.host = v.host.saturating_add(1),
+                KeyCode::Left | KeyCode::Char('h') => v.host = v.host.saturating_sub(1),
+                KeyCode::Char('c') => v.sort = Sort::Cpu,
+                KeyCode::Char('m') => v.sort = Sort::Memory,
+                KeyCode::Char('n') => v.sort = Sort::Name,
                 _ => {}
             }
         }
@@ -209,6 +249,18 @@ fn draw(f: &mut Frame, v: &View, label: &str) {
     }
     f.render_widget(Line::from(header), top);
 
+    match v.screen {
+        Screen::Services => draw_services(f, body, v),
+        Screen::Hosts => draw_hosts(f, body, v),
+    }
+    let help = match v.screen {
+        Screen::Services => "Tab hosts · ↑/↓ select · p pause events · q quit",
+        Screen::Hosts => "Tab services · ←/→ host · c/m/n sort by CPU, memory, name · q quit",
+    };
+    f.render_widget(Line::from(help.dark_gray()), keys);
+}
+
+fn draw_services(f: &mut Frame, body: Rect, v: &View) {
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(34), Constraint::Min(30)]).areas(body);
     let items: Vec<ListItem> = v
@@ -321,11 +373,6 @@ fn draw(f: &mut Frame, v: &View, label: &str) {
         List::new(rows).block(Block::bordered().title(title)),
         events,
     );
-
-    f.render_widget(
-        Line::from("↑/↓ select · p pause events · q quit".dark_gray()),
-        keys,
-    );
 }
 
 fn field(name: &str, value: Option<String>) -> Line<'static> {
@@ -371,6 +418,261 @@ fn clock(ms: f64) -> String {
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn draw_hosts(f: &mut Frame, body: Rect, v: &View) {
+    let hosts = &v.topology.hosts;
+    if hosts.is_empty() {
+        f.render_widget(
+            Paragraph::new("No hosts in this deployment's topology.".dark_gray()),
+            body,
+        );
+        return;
+    }
+    let index = v.host.min(hosts.len() - 1);
+    let host = &hosts[index];
+    let state = v.snapshot.hosts.get(&host.id);
+    let disk_rows = state.map_or(1, |h| h.disks.len().max(1)) as u16;
+    let [machine, disks, services] = Layout::vertical([
+        Constraint::Length(6),
+        Constraint::Length(2 + disk_rows),
+        Constraint::Min(4),
+    ])
+    .areas(body);
+
+    let title = format!(
+        " {} {}{}",
+        host.label.as_deref().unwrap_or(&host.id),
+        host.sub
+            .as_deref()
+            .map(|s| format!("· {s} "))
+            .unwrap_or_default(),
+        if hosts.len() > 1 {
+            format!("({}/{}) ", index + 1, hosts.len())
+        } else {
+            String::new()
+        },
+    );
+    let block = Block::bordered().title(title);
+    let inner = block.inner(machine);
+    f.render_widget(block, machine);
+    match state {
+        None => f.render_widget(
+            Paragraph::new(
+                "No machine figures: give this host an `exporter` (its node_exporter metrics URL) in the topology."
+                    .dark_gray(),
+            )
+            .wrap(Wrap { trim: true }),
+            inner,
+        ),
+        Some(h) if h.error.is_some() => f.render_widget(
+            Paragraph::new(format!(
+                "node_exporter unreachable: {}",
+                h.error.as_deref().unwrap_or("")
+            ))
+            .yellow(),
+            inner,
+        ),
+        Some(h) => draw_machine(f, inner, h),
+    }
+
+    let block = Block::bordered().title(" Disks ");
+    let inner = block.inner(disks);
+    f.render_widget(block, disks);
+    if let Some(h) = state {
+        let rows = Layout::vertical(vec![Constraint::Length(1); h.disks.len()]).split(inner);
+        for (d, area) in h.disks.iter().zip(rows.iter()) {
+            let used = if d.total_bytes > 0.0 {
+                1.0 - d.available_bytes / d.total_bytes
+            } else {
+                0.0
+            };
+            f.render_widget(
+                LineGauge::default()
+                    .label(format!(
+                        "{:<20} {:>4.0}% {:>10} free ",
+                        d.mount,
+                        used * 100.0,
+                        bytes(d.available_bytes)
+                    ))
+                    .ratio(used.clamp(0.0, 1.0))
+                    .filled_style(Style::new().fg(threshold_colour(used * 100.0))),
+                *area,
+            );
+        }
+    }
+
+    let mut rows: Vec<(&glacier_fleet::ServiceInfo, Option<&ServiceState>)> = v
+        .topology
+        .services
+        .iter()
+        .filter(|s| s.host.as_deref().unwrap_or("local") == host.id)
+        .map(|s| (s, v.snapshot.services.get(&s.id)))
+        .collect();
+    let cpu = |s: Option<&ServiceState>| {
+        s.and_then(|s| s.container.as_ref())
+            .and_then(|c| c.cpu_percent)
+            .unwrap_or(-1.0)
+    };
+    let mem = |s: Option<&ServiceState>| {
+        s.and_then(|s| s.container.as_ref())
+            .and_then(|c| c.memory_use().0)
+            .unwrap_or(-1.0)
+    };
+    match v.sort {
+        Sort::Cpu => rows.sort_by(|a, b| cpu(b.1).total_cmp(&cpu(a.1))),
+        Sort::Memory => rows.sort_by(|a, b| mem(b.1).total_cmp(&mem(a.1))),
+        Sort::Name => rows.sort_by(|a, b| a.0.name().cmp(b.0.name())),
+    }
+    let table: Vec<Row> = rows
+        .iter()
+        .map(|(svc, st)| {
+            let status = st.map_or(Status::Idle, |s| s.status());
+            let c = st.and_then(|s| s.container.as_ref());
+            let (used, limit) = c
+                .map(glacier_fleet::Container::memory_use)
+                .unwrap_or_default();
+            let health = st
+                .and_then(|s| s.health.as_ref())
+                .and_then(|h| h.body.as_ref());
+            Row::new(vec![
+                Cell::from(Line::from(vec![
+                    Span::styled("● ", Style::new().fg(colour(status))),
+                    Span::raw(svc.name().to_owned()),
+                ])),
+                Cell::from(
+                    health
+                        .and_then(|h| h.state.clone())
+                        .or_else(|| c.and_then(|c| c.state.clone()))
+                        .unwrap_or_default(),
+                ),
+                Cell::from(
+                    c.and_then(|c| c.cpu_percent)
+                        .map_or_else(|| "—".into(), |p| format!("{p:.1}%")),
+                ),
+                Cell::from(match (used, limit) {
+                    (Some(u), Some(l)) => format!("{} / {}", bytes(u), bytes(l)),
+                    (Some(u), None) => bytes(u),
+                    _ => "—".into(),
+                }),
+                Cell::from(
+                    c.and_then(|c| c.restart_count)
+                        .map_or_else(|| "—".into(), |r| r.to_string()),
+                ),
+                Cell::from(
+                    health
+                        .and_then(|h| h.uptime_seconds)
+                        .map_or_else(|| "—".into(), duration),
+                ),
+                Cell::from(st.map(ServiceState::detail).unwrap_or_default()).dark_gray(),
+            ])
+        })
+        .collect();
+    let sort = match v.sort {
+        Sort::Cpu => "CPU",
+        Sort::Memory => "memory",
+        Sort::Name => "name",
+    };
+    f.render_widget(
+        Table::new(
+            table,
+            [
+                Constraint::Length(20),
+                Constraint::Length(10),
+                Constraint::Length(7),
+                Constraint::Length(21),
+                Constraint::Length(9),
+                Constraint::Length(9),
+                Constraint::Min(10),
+            ],
+        )
+        .header(
+            Row::new([
+                "SERVICE",
+                "STATE",
+                "CPU",
+                "MEM / LIMIT",
+                "RESTARTS",
+                "UP",
+                "DETAIL",
+            ])
+            .bold(),
+        )
+        .block(Block::bordered().title(format!(" Glacier services · sorted by {sort} "))),
+        services,
+    );
+}
+
+fn draw_machine(f: &mut Frame, area: Rect, h: &HostState) {
+    let [cpu, mem, swap, info] = Layout::vertical([Constraint::Length(1); 4]).areas(area);
+    let pct = h.cpu_percent.unwrap_or(0.0);
+    f.render_widget(
+        Gauge::default()
+            .label(format!(
+                "CPU {} · {} cores",
+                h.cpu_percent
+                    .map_or_else(|| "…".into(), |p| format!("{p:.0}%")),
+                h.cores.unwrap_or(0)
+            ))
+            .ratio((pct / 100.0).clamp(0.0, 1.0))
+            .gauge_style(Style::new().fg(threshold_colour(pct))),
+        cpu,
+    );
+    for (name, u, area) in [("Memory", &h.memory, mem), ("Swap", &h.swap, swap)] {
+        let (label, ratio) = match (u.used_bytes, u.total_bytes) {
+            (Some(used), Some(total)) if total > 0.0 => (
+                format!("{name} {} / {}", bytes(used), bytes(total)),
+                (used / total).clamp(0.0, 1.0),
+            ),
+            _ => (format!("{name} —"), 0.0),
+        };
+        f.render_widget(
+            Gauge::default()
+                .label(label)
+                .ratio(ratio)
+                .gauge_style(Style::new().fg(threshold_colour(ratio * 100.0))),
+            area,
+        );
+    }
+    let load: Vec<String> = h.load.iter().flatten().map(|l| format!("{l:.2}")).collect();
+    f.render_widget(
+        Line::from(format!(
+            "load {}   up {}",
+            if load.is_empty() {
+                "—".into()
+            } else {
+                load.join(" ")
+            },
+            h.uptime_seconds.map_or_else(|| "—".into(), duration)
+        ))
+        .dark_gray(),
+        info,
+    );
+}
+
+/// Green below the store's warning threshold, then yellow, then red.
+fn threshold_colour(pct: f64) -> Color {
+    if pct >= 90.0 {
+        Color::Red
+    } else if pct >= 80.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    }
+}
+
+fn bytes(n: f64) -> String {
+    let units = ["B", "KB", "MB", "GB", "TB"];
+    let (mut n, mut i) = (n.max(0.0), 0);
+    while n >= 1024.0 && i < units.len() - 1 {
+        n /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n:.0} {}", units[i])
+    } else {
+        format!("{n:.1} {}", units[i])
+    }
 }
 
 #[cfg(test)]

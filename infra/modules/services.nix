@@ -4,7 +4,7 @@
 #   glacier.services.ticker = {
 #     enable = true;
 #     package = glacier.packages.x86_64-linux.ticker;
-#     observe.port = 9100;
+#     observe.port = 9105;
 #   };
 #
 # Each service gets its own transient user, a private state directory
@@ -160,6 +160,15 @@ in
       default = { };
       description = "Further topology overrides (focus, panels, hide, labels).";
     };
+    nodeExporter = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Run Prometheus node_exporter on loopback (port 9100) and name it as this
+        host's `exporter`, so consoles and terminal views show the machine's
+        CPU, memory, swap, load and disks.
+      '';
+    };
     file = mkOption {
       type = types.str;
       readOnly = true;
@@ -232,6 +241,12 @@ in
       }
     ) enabled;
 
+    services.prometheus.exporters.node = lib.mkIf cfg.nodeExporter {
+      enable = lib.mkDefault true;
+      listenAddress = lib.mkDefault "127.0.0.1";
+      port = lib.mkDefault 9100;
+    };
+
     # Logs can't fill the disk: cap the journal unless the host says otherwise.
     services.journald.extraConfig = lib.mkDefault ''
       SystemMaxUse=1G
@@ -242,11 +257,16 @@ in
       {
         inherit (cfg) name;
         hosts = [
-          {
-            id = host;
-            label = host;
-            sub = "NixOS";
-          }
+          (
+            {
+              id = host;
+              label = host;
+              sub = "NixOS";
+            }
+            // lib.optionalAttrs cfg.nodeExporter {
+              exporter = "http://127.0.0.1:${toString config.services.prometheus.exporters.node.port}/metrics";
+            }
+          )
         ];
       }
       // cfg.overrides

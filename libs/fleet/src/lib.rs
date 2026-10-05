@@ -16,8 +16,8 @@ mod model;
 mod source;
 
 pub use model::{
-    Container, Edge, EventsPage, FleetEvent, Health, HealthResult, Host, Node, ServiceInfo,
-    ServiceState, Snapshot, Status, Topology,
+    Container, Disk, Edge, EventsPage, FleetEvent, Health, HealthResult, Host, HostState, Node,
+    ServiceInfo, ServiceState, Snapshot, Status, Topology, Usage,
 };
 pub use source::Source;
 
@@ -53,6 +53,8 @@ pub struct Poller {
     /// Catalogs per URL, with when they were fetched; they are large and
     /// change slowly, so they are refreshed at most every 30 seconds.
     catalogs: Mutex<HashMap<String, (Instant, Value)>>,
+    /// Previous CPU totals per host: (busy seconds, all seconds).
+    host_cpu: Mutex<HashMap<String, (f64, f64)>>,
 }
 
 impl Poller {
@@ -70,6 +72,7 @@ impl Poller {
             describes: Mutex::new(HashMap::new()),
             cpu: Mutex::new(HashMap::new()),
             catalogs: Mutex::new(HashMap::new()),
+            host_cpu: Mutex::new(HashMap::new()),
         }
     }
 
@@ -311,6 +314,126 @@ async fn observe_into(
     }
 }
 
+/// A machine summary from node_exporter metrics: CPU use since the last
+/// poll, memory, swap, load, uptime and real filesystems (one per volume).
+fn host_summary(app: &Poller, id: &str, m: &Value) -> Value {
+    let one = |name: &str| m[name][0]["value"].as_f64();
+    let series = |name: &str| m[name].as_array().cloned().unwrap_or_default();
+
+    let cpu = series("node_cpu_seconds_total");
+    let (mut busy, mut all) = (0.0, 0.0);
+    let mut cores = std::collections::BTreeSet::new();
+    for s in &cpu {
+        let v = s["value"].as_f64().unwrap_or(0.0);
+        all += v;
+        if s["labels"]["mode"] != "idle" && s["labels"]["mode"] != "iowait" {
+            busy += v;
+        }
+        if let Some(c) = s["labels"]["cpu"].as_str() {
+            cores.insert(c.to_owned());
+        }
+    }
+    let cpu_percent = {
+        let mut prev = lock(&app.host_cpu);
+        let r = prev.get(id).and_then(|(pb, pa)| {
+            let (db, da) = (busy - pb, all - pa);
+            (da > 0.0 && db >= 0.0).then(|| db / da * 100.0)
+        });
+        prev.insert(id.to_owned(), (busy, all));
+        r
+    };
+
+    // Linux reports what is available; macOS reports what is in use by type.
+    let (mem_total, mem_used) = match (
+        one("node_memory_MemTotal_bytes"),
+        one("node_memory_MemAvailable_bytes"),
+    ) {
+        (Some(t), Some(a)) => (Some(t), Some(t - a)),
+        _ => (
+            one("node_memory_total_bytes"),
+            match (
+                one("node_memory_internal_bytes"),
+                one("node_memory_wired_bytes"),
+                one("node_memory_compressed_bytes"),
+            ) {
+                (Some(i), Some(w), Some(c)) => {
+                    Some(i - one("node_memory_purgeable_bytes").unwrap_or(0.0) + w + c)
+                }
+                _ => None,
+            },
+        ),
+    };
+    let (swap_total, swap_used) = match (
+        one("node_memory_SwapTotal_bytes"),
+        one("node_memory_SwapFree_bytes"),
+    ) {
+        (Some(t), Some(f)) => (Some(t), Some(t - f)),
+        _ => (
+            one("node_memory_swap_total_bytes"),
+            one("node_memory_swap_used_bytes"),
+        ),
+    };
+
+    // Real filesystems only, one per volume: volumes sharing their space
+    // (APFS containers, bind mounts) collapse to their shortest mount point.
+    const SKIP_FS: [&str; 10] = [
+        "tmpfs", "devfs", "autofs", "nullfs", "overlay", "squashfs", "devtmpfs", "ramfs", "proc",
+        "sysfs",
+    ];
+    let avail = series("node_filesystem_avail_bytes");
+    let mut disks: Vec<(String, f64, f64)> = Vec::new();
+    for s in series("node_filesystem_size_bytes") {
+        let l = &s["labels"];
+        let (Some(mount), Some(fs)) = (l["mountpoint"].as_str(), l["fstype"].as_str()) else {
+            continue;
+        };
+        let system = [
+            "/System/",
+            "/dev",
+            "/run",
+            "/sys",
+            "/proc",
+            "/boot",
+            "/var/lib/docker",
+            "/private/var/vm",
+        ]
+        .iter()
+        .any(|p| mount.starts_with(p));
+        if SKIP_FS.contains(&fs) || system {
+            continue;
+        }
+        let size = s["value"].as_f64().unwrap_or(0.0);
+        let free = avail
+            .iter()
+            .find(|a| a["labels"]["mountpoint"] == mount)
+            .and_then(|a| a["value"].as_f64())
+            .unwrap_or(0.0);
+        if size <= 0.0 {
+            continue;
+        }
+        match disks.iter_mut().find(|d| d.1 == size && d.2 == free) {
+            Some(d) if mount.len() < d.0.len() => d.0 = mount.to_owned(),
+            Some(_) => {}
+            None => disks.push((mount.to_owned(), size, free)),
+        }
+    }
+    disks.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let uptime = match (one("node_time_seconds"), one("node_boot_time_seconds")) {
+        (Some(now), Some(boot)) => Some(now - boot),
+        _ => None,
+    };
+    json!({
+        "cpu_percent": cpu_percent,
+        "cores": cores.len(),
+        "load": [one("node_load1"), one("node_load5"), one("node_load15")],
+        "memory": { "total_bytes": mem_total, "used_bytes": mem_used },
+        "swap": { "total_bytes": swap_total, "used_bytes": swap_used },
+        "uptime_seconds": uptime,
+        "disks": disks.iter().map(|(m, t, a)| json!({ "mount": m, "total_bytes": t, "available_bytes": a })).collect::<Vec<_>>(),
+    })
+}
+
 /// A catalog, refreshed at most every 30 seconds; the last one is kept while
 /// its service is unreachable.
 async fn catalog(app: &Poller, url: &str) -> Value {
@@ -512,8 +635,25 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
         services.insert(id.to_owned(), Value::Object(entry));
     }
 
+    // Hosts that name a node_exporter: machine-wide CPU, memory and disks.
+    let mut hosts = serde_json::Map::new();
+    for h in topo["hosts"].as_array().into_iter().flatten() {
+        let (Some(id), Some(url)) = (h["id"].as_str(), h["exporter"].as_str()) else {
+            continue;
+        };
+        let summary = match app.http.get(url).send().await {
+            Ok(r) => match r.text().await {
+                Ok(text) => host_summary(app, id, &parse_metrics(&text)),
+                Err(e) => json!({ "error": short_error(&e) }),
+            },
+            Err(e) => json!({ "error": short_error(&e) }),
+        };
+        hosts.insert(id.to_owned(), summary);
+    }
+
     let snapshot = json!({
         "generated_at": unix_seconds(),
+        "hosts": hosts,
         "docker": { "configured": app.config.docker.is_some(), "error": docker_error },
         "services": services,
     });
@@ -709,6 +849,55 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summarises_hosts_on_macos_and_linux() {
+        let p = Poller::new(PollerConfig::default());
+        let mac = parse_metrics(concat!(
+            "node_cpu_seconds_total{cpu=\"0\",mode=\"idle\"} 90\n",
+            "node_cpu_seconds_total{cpu=\"0\",mode=\"user\"} 10\n",
+            "node_cpu_seconds_total{cpu=\"1\",mode=\"idle\"} 90\n",
+            "node_cpu_seconds_total{cpu=\"1\",mode=\"user\"} 10\n",
+            "node_memory_total_bytes 8e9\nnode_memory_internal_bytes 1e9\nnode_memory_purgeable_bytes 0\n",
+            "node_memory_wired_bytes 3e9\nnode_memory_compressed_bytes 2e9\n",
+            "node_memory_swap_total_bytes 8e9\nnode_memory_swap_used_bytes 7e9\n",
+            "node_filesystem_size_bytes{fstype=\"apfs\",mountpoint=\"/\"} 100\n",
+            "node_filesystem_avail_bytes{fstype=\"apfs\",mountpoint=\"/\"} 40\n",
+            "node_filesystem_size_bytes{fstype=\"apfs\",mountpoint=\"/nix\"} 100\n",
+            "node_filesystem_avail_bytes{fstype=\"apfs\",mountpoint=\"/nix\"} 40\n",
+            "node_filesystem_size_bytes{fstype=\"apfs\",mountpoint=\"/System/Volumes/VM\"} 100\n",
+            "node_filesystem_size_bytes{fstype=\"apfs\",mountpoint=\"/Volumes/Data\"} 1000\n",
+            "node_filesystem_avail_bytes{fstype=\"apfs\",mountpoint=\"/Volumes/Data\"} 140\n",
+        ));
+        let first = host_summary(&p, "mac", &mac);
+        assert_eq!(first["cores"], 2);
+        assert!(first["cpu_percent"].is_null(), "needs two readings");
+        assert_eq!(first["memory"]["used_bytes"], 6e9);
+        assert_eq!(first["swap"]["used_bytes"], 7e9);
+        let disks: Vec<&str> = first["disks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["mount"].as_str().unwrap())
+            .collect();
+        assert_eq!(disks, ["/", "/Volumes/Data"]);
+
+        let later = parse_metrics(concat!(
+            "node_cpu_seconds_total{cpu=\"0\",mode=\"idle\"} 100\n",
+            "node_cpu_seconds_total{cpu=\"0\",mode=\"user\"} 20\n",
+            "node_cpu_seconds_total{cpu=\"1\",mode=\"idle\"} 100\n",
+            "node_cpu_seconds_total{cpu=\"1\",mode=\"user\"} 20\n",
+        ));
+        // 20 busy seconds out of 40 elapsed across both cores.
+        assert_eq!(host_summary(&p, "mac", &later)["cpu_percent"], 50.0);
+
+        let linux = parse_metrics(
+            "node_memory_MemTotal_bytes 16e9\nnode_memory_MemAvailable_bytes 10e9\nnode_load1 0.5\n",
+        );
+        let l = host_summary(&p, "nas", &linux);
+        assert_eq!(l["memory"]["used_bytes"], 6e9);
+        assert_eq!(l["load"][0], 0.5);
+    }
 
     #[test]
     fn parses_prometheus_text() {

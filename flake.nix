@@ -75,7 +75,7 @@
                 glacier.services.ticker = {
                   enable = true;
                   package = packages.ticker;
-                  observe.port = 9100;
+                  observe.port = 9105;
                   environment.TICKER_DATA_DIR = "/var/lib/glacier/ticker";
                 };
                 glacier.services.console = {

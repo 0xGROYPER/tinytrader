@@ -62,7 +62,7 @@ on NixOS directly and in the `systemdUnits` output for other distributions.
 A service started any other way joins a deployment by being listed by address:
 
 ```json
-{ "services": [{ "id": "ticker", "observe": "http://127.0.0.1:9100" }] }
+{ "services": [{ "id": "ticker", "observe": "http://127.0.0.1:9105" }] }
 ```
 
 ## Terminal view
@@ -70,6 +70,11 @@ A service started any other way joins a deployment by being listed by address:
 ```sh
 cargo run -p glacier-tui -- --console http://localhost:8080
 ```
+
+Tab switches between **Services** (status, details, live events) and
+**Hosts**, an htop-style view of one machine: CPU, memory, swap, load and
+disks from its node_exporter, with each Glacier service's CPU and memory
+against its limits.
 
 `--console` reads a running console from anywhere it is reachable, over SSH
 included. `--topology FILE` polls the services the file lists by address

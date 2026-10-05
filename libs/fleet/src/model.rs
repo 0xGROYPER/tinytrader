@@ -27,6 +27,8 @@ pub struct Host {
     pub id: String,
     pub label: Option<String>,
     pub sub: Option<String>,
+    /// URL of the host's node_exporter metrics, if it runs one.
+    pub exporter: Option<String>,
 }
 
 /// An external source or a store.
@@ -79,6 +81,37 @@ pub struct Snapshot {
     pub error: Option<String>,
     pub docker: Option<Value>,
     pub services: BTreeMap<String, ServiceState>,
+    /// Machine summaries for hosts with a node_exporter.
+    pub hosts: BTreeMap<String, HostState>,
+}
+
+/// A machine's CPU, memory, swap, load, uptime and filesystems.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct HostState {
+    pub error: Option<String>,
+    pub cpu_percent: Option<f64>,
+    pub cores: Option<u32>,
+    pub load: Vec<Option<f64>>,
+    pub memory: Usage,
+    pub swap: Usage,
+    pub uptime_seconds: Option<f64>,
+    pub disks: Vec<Disk>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Usage {
+    pub total_bytes: Option<f64>,
+    pub used_bytes: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Disk {
+    pub mount: String,
+    pub total_bytes: f64,
+    pub available_bytes: f64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -103,6 +136,18 @@ pub struct Container {
     pub restart_count: Option<u64>,
     pub cpu_percent: Option<f64>,
     pub memory: Option<Value>,
+}
+
+impl Container {
+    /// Memory in use and the container's limit, in bytes.
+    #[must_use]
+    pub fn memory_use(&self) -> (Option<f64>, Option<f64>) {
+        let m = self.memory.as_ref();
+        (
+            m.and_then(|m| m["usage_bytes"].as_f64()),
+            m.and_then(|m| m["limit_bytes"].as_f64()),
+        )
+    }
 }
 
 /// The outcome of asking a service for `/health`.
