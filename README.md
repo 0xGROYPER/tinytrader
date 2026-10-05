@@ -44,6 +44,23 @@ console the same way.
 | `examples/` | Complete deployments you can run or copy |
 | `docs/` | Platform decisions and contracts |
 
+## Running Glacier
+
+Glacier's contracts are plain HTTP, JSON and files, so services run on any
+operating system ([decision 0004](docs/decisions/0004-nix-not-nixos.md)):
+
+| On | Run services with | They're found by |
+|---|---|---|
+| Any OS with Docker | Docker Compose (see `examples/`) | `glacier.observe` container labels |
+| Any Linux with Nix | systemd unit files generated from `glacier.services` | `observe` addresses in the topology file |
+| NixOS | the `glacier.services` NixOS module | `observe` addresses in the topology file |
+
+A service started any other way joins a deployment by being listed by address:
+
+```json
+{ "services": [{ "id": "ticker", "observe": "http://127.0.0.1:9100" }] }
+```
+
 ## Terminal view
 
 ```sh
@@ -51,8 +68,8 @@ cargo run -p glacier-tui -- --console http://localhost:8080
 ```
 
 `--console` reads a running console from anywhere it is reachable, over SSH
-included. Inside a deployment's network, `--docker URL --project NAME` polls
-the services directly instead.
+included. `--topology FILE` polls the services the file lists by address
+directly, with no console needed.
 
 ## Using Glacier in your own deployment
 

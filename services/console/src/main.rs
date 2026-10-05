@@ -17,7 +17,10 @@
 //! asked for its `/describe` document, which supplies its role, upstream
 //! sources, stores, event and series endpoints and suggested panels. Other
 //! labels: `glacier.role` (a description for containers without
-//! `/describe`), `glacier.label` and `glacier.host`.
+//! `/describe`), `glacier.label` and `glacier.host`. Without Docker, or for
+//! services Docker doesn't run, a topology entry such as
+//! `{ "id": "ticker", "observe": "http://127.0.0.1:9100" }` is described and
+//! polled the same way.
 //!
 //! **Overrides.** The topology file is optional. When present, it is layered
 //! over what was discovered: `name`, `focus` and `hosts` replace; `services`,

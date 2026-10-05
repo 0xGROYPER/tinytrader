@@ -29,6 +29,23 @@
       flake = {
         nixosModules.services = ./infra/modules/services.nix;
 
+        # The example host's services as plain systemd unit files, for Linux
+        # distributions other than NixOS that have Nix installed: copy them to
+        # /etc/systemd/system. Generated from the same glacier.services
+        # definitions, so they match what NixOS runs.
+        systemdUnits.x86_64-linux.example =
+          let
+            pkgs = nixpkgs.legacyPackages.x86_64-linux;
+            units = self.nixosConfigurations.example.config.systemd.units;
+            ours = nixpkgs.lib.filterAttrs (name: _: nixpkgs.lib.hasPrefix "glacier-" name) units;
+          in
+          pkgs.linkFarm "glacier-example-units" (
+            nixpkgs.lib.mapAttrsToList (name: unit: {
+              inherit name;
+              path = pkgs.writeText name unit.text;
+            }) ours
+          );
+
         # A minimal host running the quickstart services under systemd. It shows
         # the module in use and is evaluated by `nix flake check`.
         nixosConfigurations.example = nixpkgs.lib.nixosSystem {

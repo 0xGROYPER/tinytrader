@@ -1,8 +1,10 @@
 //! The fleet data layer shared by every Glacier front end.
 //!
 //! [`Poller`] discovers a deployment and polls its services: with Docker it
-//! lists the project's containers, asks those labelled `glacier.observe` to
-//! `/describe` themselves, applies the optional topology overrides, and
+//! lists the project's containers and asks those labelled `glacier.observe`
+//! to `/describe` themselves; services listed in the topology file with an
+//! `observe` address are described the same way, whatever runs them. It
+//! then applies the topology overrides, and
 //! collects each service's health, metrics and series into a snapshot. The
 //! web console serves what the poller collects; a terminal UI can embed a
 //! poller directly or read a running console through [`Source::Console`].
@@ -163,94 +165,146 @@ fn read_overrides(path: &str) -> Result<Value, String> {
     }
 }
 
-/// Build the deployment from running containers and their `/describe` documents.
-async fn discover(app: &Poller, containers: &HashMap<String, Value>) -> Value {
+/// What discovery has found so far.
+#[derive(Default)]
+struct Found {
+    services: Vec<Value>,
+    external: Vec<Value>,
+    stores: Vec<Value>,
+    edges: Vec<Value>,
+    panels: Vec<Value>,
+    observed: Vec<String>,
+    console: Option<String>,
+}
+
+/// Build the deployment from two sources: running containers (with Docker),
+/// and services listed by address in the topology file (`"observe": URL`),
+/// which works whatever started them.
+async fn discover(app: &Poller, containers: &HashMap<String, Value>, addressed: &[Value]) -> Value {
+    let mut f = Found::default();
     let mut names: Vec<&String> = containers.keys().collect();
     names.sort();
-    let (mut services, mut external, mut stores, mut edges, mut panels) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut observed = Vec::new();
-    let mut console = None;
     for name in names {
         let c = &containers[name];
         let labels = &c["labels"];
         let label = |k: &str| labels[k].as_str().map(str::to_owned);
-        let host = label("glacier.host").unwrap_or_else(|| "local".into());
         let mut svc = json!({
             "id": name,
-            "host": host,
+            "host": label("glacier.host").unwrap_or_else(|| "local".into()),
             "label": label("glacier.label").unwrap_or_else(|| name.clone()),
             "role": label("glacier.role"),
         });
         if let Some(port) = label("glacier.observe") {
             let base = format!("http://{name}:{port}");
-            let d = describe(app, c["id"].as_str().unwrap_or(name), &base).await;
-            if d["service"].as_str() == Some("console") {
-                console = Some(name.clone());
-            }
-            observed.push(name.clone());
-            svc["health"] = json!(format!("{base}/health"));
-            svc["metrics"] = json!(format!("{base}/metrics"));
-            if let Some(r) = d["role"].as_str() {
-                svc["role"] = json!(r);
-            }
-            if let Some(path) = d["streams"]["events"].as_str() {
-                svc["events"] = json!(format!("{base}{path}"));
-            }
-            if let Some(path) = d["streams"]["series"].as_str() {
-                svc["recent"] = json!(format!("{base}{path}"));
-            }
-            for u in d["upstream"].as_array().into_iter().flatten() {
-                let kind = u["kind"].as_str().unwrap_or("flow");
-                let from = if let Some(other) = u["service"].as_str() {
-                    other.to_owned()
-                } else if let Some(id) = u["id"].as_str() {
-                    if !external.iter().any(|e: &Value| e["id"] == id) {
-                        external.push(json!({ "id": id, "label": u["label"].as_str().unwrap_or(id), "sub": u["sub"], "role": u["role"] }));
-                    }
-                    id.to_owned()
-                } else {
-                    continue;
-                };
-                edges.push(json!({ "from": from, "to": name, "kind": kind, "label": u["via"] }));
-            }
-            for st in d["stores"].as_array().into_iter().flatten() {
-                let id = format!("{name}-{}", st["id"].as_str().unwrap_or("store"));
-                let mut store = json!({ "id": id, "host": svc["host"], "label": st["label"], "sub": st["sub"] });
-                if let Some(m) = st["metric"].as_str() {
-                    store["metric"] = json!({ "service": name, "name": m, "label": "Bytes written", "format": "bytes", "suffix": " written" });
-                }
-                stores.push(store);
-                edges.push(json!({ "from": name, "to": id, "kind": "flow" }));
-            }
-            for p in d["panels"].as_array().into_iter().flatten() {
-                let mut p = p.clone();
-                p["service"] = json!(name);
-                p["source"] = json!("recent");
-                panels.push(p);
-            }
+            observe_into(
+                app,
+                c["id"].as_str().unwrap_or(name),
+                name,
+                &base,
+                &mut svc,
+                &mut f,
+            )
+            .await;
         }
-        services.push(svc);
+        f.services.push(svc);
     }
-    if let Some(console) = &console {
-        for name in observed.iter().filter(|n| *n != console) {
-            edges.push(
+    for entry in addressed {
+        let (Some(id), Some(base)) = (entry["id"].as_str(), entry["observe"].as_str()) else {
+            continue;
+        };
+        if f.services.iter().any(|s| s["id"] == id) {
+            continue;
+        }
+        let base = base.trim_end_matches('/');
+        let mut svc =
+            json!({ "id": id, "host": entry["host"].as_str().unwrap_or("local"), "label": id });
+        observe_into(app, &format!("addr:{base}"), id, base, &mut svc, &mut f).await;
+        f.services.push(svc);
+    }
+    if let Some(console) = &f.console {
+        for name in f.observed.iter().filter(|n| *n != console) {
+            f.edges.push(
                 json!({ "from": name, "to": console, "kind": "read", "label": "health · metrics" }),
             );
         }
     }
+    let host_sub = if containers.is_empty() {
+        Value::Null
+    } else {
+        json!("Docker Compose")
+    };
     json!({
         "name": app.config.project.clone().unwrap_or_else(|| "deployment".into()),
-        "hosts": [{ "id": "local", "label": "local", "sub": "Docker Compose" }],
-        "external": external,
-        "services": services,
-        "stores": stores,
-        "edges": edges,
-        "panels": panels,
+        "hosts": [{ "id": "local", "label": "local", "sub": host_sub }],
+        "external": f.external,
+        "services": f.services,
+        "stores": f.stores,
+        "edges": f.edges,
+        "panels": f.panels,
     })
 }
 
-/// A container's `/describe` document, refreshed at most every 30 seconds.
+/// Ask the service at `base` to describe itself, and record what it says:
+/// its endpoints, role, upstream sources, stores and suggested panels.
+async fn observe_into(
+    app: &Poller,
+    cache_key: &str,
+    name: &str,
+    base: &str,
+    svc: &mut Value,
+    f: &mut Found,
+) {
+    let d = describe(app, cache_key, base).await;
+    if d["service"].as_str() == Some("console") {
+        f.console = Some(name.to_owned());
+    }
+    f.observed.push(name.to_owned());
+    svc["health"] = json!(format!("{base}/health"));
+    svc["metrics"] = json!(format!("{base}/metrics"));
+    if let Some(r) = d["role"].as_str() {
+        svc["role"] = json!(r);
+    }
+    if let Some(path) = d["streams"]["events"].as_str() {
+        svc["events"] = json!(format!("{base}{path}"));
+    }
+    if let Some(path) = d["streams"]["series"].as_str() {
+        svc["recent"] = json!(format!("{base}{path}"));
+    }
+    for u in d["upstream"].as_array().into_iter().flatten() {
+        let kind = u["kind"].as_str().unwrap_or("flow");
+        let from = if let Some(other) = u["service"].as_str() {
+            other.to_owned()
+        } else if let Some(id) = u["id"].as_str() {
+            if !f.external.iter().any(|e| e["id"] == id) {
+                f.external.push(json!({ "id": id, "label": u["label"].as_str().unwrap_or(id), "sub": u["sub"], "role": u["role"] }));
+            }
+            id.to_owned()
+        } else {
+            continue;
+        };
+        f.edges
+            .push(json!({ "from": from, "to": name, "kind": kind, "label": u["via"] }));
+    }
+    for st in d["stores"].as_array().into_iter().flatten() {
+        let id = format!("{name}-{}", st["id"].as_str().unwrap_or("store"));
+        let mut store =
+            json!({ "id": id, "host": svc["host"], "label": st["label"], "sub": st["sub"] });
+        if let Some(m) = st["metric"].as_str() {
+            store["metric"] = json!({ "service": name, "name": m, "label": "Bytes written", "format": "bytes", "suffix": " written" });
+        }
+        f.stores.push(store);
+        f.edges
+            .push(json!({ "from": name, "to": id, "kind": "flow" }));
+    }
+    for p in d["panels"].as_array().into_iter().flatten() {
+        let mut p = p.clone();
+        p["service"] = json!(name);
+        p["source"] = json!("recent");
+        f.panels.push(p);
+    }
+}
+
+/// A service's `/describe` document, refreshed at most every 30 seconds.
 async fn describe(app: &Poller, id: &str, base: &str) -> Value {
     if let Some((at, d)) = lock(&app.describes).get(id)
         && at.elapsed() < Duration::from_secs(30)
@@ -365,8 +419,15 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
         },
         None => (HashMap::new(), None),
     };
-    let discovered = if app.config.docker.is_some() {
-        discover(app, &containers).await
+    let addressed: Vec<Value> = overrides["services"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|s| s["observe"].is_string())
+        .cloned()
+        .collect();
+    let discovered = if app.config.docker.is_some() || !addressed.is_empty() {
+        discover(app, &containers, &addressed).await
     } else {
         json!({ "name": "deployment", "services": [] })
     };

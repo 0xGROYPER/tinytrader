@@ -48,6 +48,19 @@ format or a module option instead.
 - **Topology format** (read by the console): every deployment depends on it.
   Add optional fields; don't break existing files.
 
+## Portability
+
+Services build and run on Linux and macOS by default. Platform-specific
+capability is the exception ([decision 0004](docs/decisions/0004-nix-not-nixos.md)):
+
+- Put it behind a small interface in a library, under
+  `#[cfg(target_os = "linux")]`.
+- Provide an honest fallback where one exists, and report which
+  implementation is in use in `/describe` and metrics.
+- If there is no honest fallback, make the whole service Linux-only: target
+  -specific dependencies, a clear compile error elsewhere, and
+  `meta.platforms = lib.platforms.linux` on its Nix package.
+
 ## Guardrails
 
 - `nix flake check` runs `checks.<system>.generic`, which fails on the most

@@ -3,14 +3,15 @@
 //!
 //! ```text
 //! glacier-tui --console http://localhost:8080          # read a running console
-//! glacier-tui --docker http://localhost:2375 \
-//!             --project NAME [--topology FILE]          # poll the deployment directly
+//! glacier-tui --topology FILE                           # poll the services it lists
+//!             [--docker URL --project NAME]             # ...and a Compose project
 //! ```
 //!
-//! Direct mode needs to reach the services at the addresses discovery finds
-//! (Compose service names), so it suits running inside the deployment's
-//! network or on its host; `--console` works from anywhere the console is
-//! reachable, including over SSH.
+//! Direct mode polls services itself: those listed in the topology file with
+//! an `observe` address, and with `--docker`, a Compose project's labelled
+//! containers (reachable only from inside that project's network).
+//! `--console` works from anywhere the console is reachable, including over
+//! SSH.
 //!
 //! Keys: ↑/↓ or j/k select · p pause events · q quit.
 
@@ -44,7 +45,7 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "glacier-tui: {e}\n\nusage: glacier-tui --console URL\n       glacier-tui --docker URL --project NAME [--topology FILE]"
+                "glacier-tui: {e}\n\nusage: glacier-tui --console URL\n       glacier-tui --topology FILE [--docker URL --project NAME]"
             );
             std::process::exit(2);
         }
@@ -71,10 +72,12 @@ fn parse_args() -> Result<(Source, String), String> {
     if let Some(url) = value("--console") {
         return Ok((Source::console(&url), format!("console {url}")));
     }
-    if let Some(docker) = value("--docker") {
+    let docker = value("--docker");
+    let topology = value("--topology");
+    if docker.is_some() || topology.is_some() {
         let config = PollerConfig {
-            topology: value("--topology").unwrap_or_else(|| "topology.json".into()),
-            docker: Some(docker),
+            topology: topology.unwrap_or_else(|| "topology.json".into()),
+            docker,
             project: value("--project"),
         };
         return Ok((
@@ -82,7 +85,7 @@ fn parse_args() -> Result<(Source, String), String> {
             "direct".into(),
         ));
     }
-    Err("choose --console or --docker".into())
+    Err("choose --console URL, or --topology FILE and/or --docker URL".into())
 }
 
 /// Poll the source about once a second, plus the selected service's events.
