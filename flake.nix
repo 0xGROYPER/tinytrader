@@ -5,6 +5,10 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-parts.url = "github:hercules-ci/flake-parts";
     crane.url = "github:ipetkov/crane";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -30,13 +34,15 @@
         nixosModules.services = ./infra/modules/services.nix;
 
         # The example host's services as plain systemd unit files, for Linux
-        # distributions other than NixOS that have Nix installed: copy them to
-        # /etc/systemd/system. Generated from the same glacier.services
-        # definitions, so they match what NixOS runs.
+        # distributions other than NixOS that have Nix installed: copy the
+        # units to /etc/systemd/system and topology.json to /etc/glacier.
+        # Generated from the same glacier.services definitions, so they match
+        # what NixOS runs.
         systemdUnits.x86_64-linux.example =
           let
             pkgs = nixpkgs.legacyPackages.x86_64-linux;
-            units = self.nixosConfigurations.example.config.systemd.units;
+            config = self.nixosConfigurations.example.config;
+            units = config.systemd.units;
             ours = nixpkgs.lib.filterAttrs (name: _: nixpkgs.lib.hasPrefix "glacier-" name) units;
           in
           pkgs.linkFarm "glacier-example-units" (
@@ -44,6 +50,13 @@
               inherit name;
               path = pkgs.writeText name unit.text;
             }) ours
+            ++ [
+              {
+                # Copy to /etc/glacier/topology.json alongside the units.
+                name = "topology.json";
+                path = pkgs.writeText "topology.json" config.environment.etc."glacier/topology.json".text;
+              }
+            ]
           );
 
         # A minimal host running the quickstart services under systemd. It shows
@@ -53,27 +66,26 @@
           modules = [
             self.nixosModules.services
             (
-              { pkgs, ... }:
+              { config, ... }:
               let
                 packages = self.packages.x86_64-linux;
               in
               {
+                networking.hostName = "example";
                 glacier.services.ticker = {
                   enable = true;
                   package = packages.ticker;
-                  environment = {
-                    TICKER_DATA_DIR = "/var/lib/glacier/ticker";
-                    TICKER_LISTEN = "127.0.0.1:9100";
-                  };
+                  observe.port = 9100;
+                  environment.TICKER_DATA_DIR = "/var/lib/glacier/ticker";
                 };
                 glacier.services.console = {
                   enable = true;
                   package = packages.console;
-                  environment = {
-                    CONSOLE_LISTEN = "127.0.0.1:8080";
-                    CONSOLE_TOPOLOGY = "${./examples/quickstart/topology.json}";
-                  };
+                  observe.port = 8080;
+                  # Reads the topology this module generates from the services above.
+                  environment.CONSOLE_TOPOLOGY = config.glacier.topology.file;
                 };
+                glacier.topology.overrides.focus = "ticker";
 
                 boot.loader.grub.enable = false;
                 fileSystems."/" = {
@@ -88,8 +100,17 @@
       };
 
       perSystem =
-        { pkgs, ... }:
+        { system, ... }:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ inputs.rust-overlay.overlays.default ];
+          };
+          # The toolchain named in rust-toolchain.toml, as rustup would install it.
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        in
         {
+          _module.args = { inherit pkgs toolchain; };
           formatter = pkgs.nixfmt;
 
           devShells.default = pkgs.mkShell {
@@ -99,10 +120,7 @@
               jq
               sops
               age
-              cargo
-              rustc
-              clippy
-              rustfmt
+              toolchain
               rust-analyzer
             ];
           };

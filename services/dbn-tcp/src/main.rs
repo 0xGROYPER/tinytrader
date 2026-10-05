@@ -19,7 +19,7 @@
 //! Configuration (environment):
 //! - `DBN_TCP_ADDR`: `host:port` serving the stream (required)
 //! - `DBN_TCP_SOURCE`: name of the source in the console graph (default: the address)
-//! - `DBN_TCP_LISTEN`: address for the HTTP endpoints (default `127.0.0.1:9103`)
+//! - `DBN_TCP_LISTEN` (or `GLACIER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9103`)
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -55,7 +55,7 @@ async fn main() {
         std::process::exit(2);
     };
     let source = env("DBN_TCP_SOURCE", &addr);
-    let listen = env("DBN_TCP_LISTEN", "127.0.0.1:9103");
+    let listen = glacier_observe::listen_address("DBN_TCP_LISTEN", "127.0.0.1:9103");
     let observer = Observer::new("dbn-tcp", env!("CARGO_PKG_VERSION"));
     let shared = Arc::new(Shared::default());
     register_metrics(&observer, &shared);

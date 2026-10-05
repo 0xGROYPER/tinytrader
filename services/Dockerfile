@@ -1,6 +1,6 @@
 # Builds one Glacier service from the workspace into a minimal, non-root image.
 #   docker build -f services/Dockerfile --build-arg SERVICE=ticker -t glacier/ticker .
-FROM rust:1.96-bookworm AS build
+FROM rust:1.96.1-bookworm AS build
 ARG SERVICE
 WORKDIR /src
 COPY . .

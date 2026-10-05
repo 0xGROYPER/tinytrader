@@ -10,7 +10,7 @@
 //!   `_FILE` suffix pointing at files containing them
 //! - `ALPACA_SYMBOLS`: comma-separated (required)
 //! - `ALPACA_CHANNELS`: any of `trades`, `quotes` (default `trades,quotes`)
-//! - `ALPACA_LISTEN`: address for the HTTP endpoints (default `127.0.0.1:9102`)
+//! - `ALPACA_LISTEN` (or `GLACIER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9102`)
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -54,7 +54,7 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let listen = env("ALPACA_LISTEN", "127.0.0.1:9102");
+    let listen = glacier_observe::listen_address("ALPACA_LISTEN", "127.0.0.1:9102");
     let observer = Observer::new("alpaca-live", env!("CARGO_PKG_VERSION"));
     let shared = Arc::new(Shared::default());
     register_metrics(&observer, &shared);

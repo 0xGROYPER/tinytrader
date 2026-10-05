@@ -1,19 +1,49 @@
-# glacier.services.<name>: run a Glacier service as a hardened systemd unit.
+# glacier.services.<name>: run a Glacier service as a hardened systemd unit,
+# and describe the host's services for consoles and terminal views.
 #
 #   glacier.services.ticker = {
 #     enable = true;
 #     package = glacier.packages.x86_64-linux.ticker;
-#     environment.TICKER_LISTEN = "127.0.0.1:9100";
+#     observe.port = 9100;
 #   };
 #
 # Each service gets its own transient user, a private state directory
 # (/var/lib/glacier/<name>), write access to nothing else unless granted
-# through `writablePaths`, and restart on failure. Health and metrics stay on
-# loopback; exposing them beyond the host is a separate, explicit choice.
+# through `writablePaths`, and restart on failure.
+#
+# A service with `observe.port` listens there (via GLACIER_LISTEN) and is
+# listed in /etc/glacier/topology.json, which consoles and terminal views on
+# this host read, so nothing is declared by hand. Health and metrics stay on
+# loopback unless `observe.bind` says otherwise. To show services from other
+# hosts, add their `glacier.topology.exported` lists to `extraServices`.
 { config, lib, ... }:
 let
   inherit (lib) mkOption types;
   enabled = lib.filterAttrs (_: s: s.enable) config.glacier.services;
+  observed = lib.filterAttrs (_: s: s.observe.port != null) enabled;
+  host = config.networking.hostName;
+  cfg = config.glacier.topology;
+  # Where a service's endpoints are reached: from another host via the
+  # advertised name, locally via loopback when bound to all interfaces, else
+  # at the specific address it is bound to.
+  local =
+    s:
+    if
+      lib.elem s.observe.bind [
+        "0.0.0.0"
+        "::"
+      ]
+    then
+      "127.0.0.1"
+    else
+      s.observe.bind;
+  entries =
+    advertise:
+    lib.mapAttrsToList (name: s: {
+      id = name;
+      inherit host;
+      observe = "http://${if advertise == null then local s else advertise}:${toString s.observe.port}";
+    }) observed;
 in
 {
   options.glacier.services = mkOption {
@@ -47,53 +77,128 @@ in
                 else outside its state directory is read-only to it.
               '';
             };
+            observe = {
+              port = mkOption {
+                type = types.nullOr types.port;
+                default = null;
+                description = "Port for the service's health, metrics and other endpoints.";
+              };
+              bind = mkOption {
+                type = types.str;
+                default = "127.0.0.1";
+                description = "Address to bind the endpoints to; loopback unless exposed on purpose.";
+              };
+            };
           };
         }
       )
     );
   };
 
-  config.systemd.services = lib.mapAttrs' (
-    name: svc:
-    lib.nameValuePair "glacier-${name}" {
-      description = "Glacier ${name}";
-      wantedBy = [ "multi-user.target" ];
-      wants = [ "network-online.target" ];
-      after = [ "network-online.target" ];
-      environment = svc.environment;
-      serviceConfig = {
-        ExecStart = lib.escapeShellArgs ([ (lib.getExe svc.package) ] ++ svc.args);
-        Restart = "on-failure";
-        RestartSec = 2;
-        DynamicUser = true;
-        StateDirectory = "glacier/${name}";
-        WorkingDirectory = "/var/lib/glacier/${name}";
-        ReadWritePaths = svc.writablePaths;
-        # Sandboxing
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        PrivateTmp = true;
-        PrivateDevices = true;
-        NoNewPrivileges = true;
-        CapabilityBoundingSet = "";
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectKernelLogs = true;
-        ProtectControlGroups = true;
-        ProtectClock = true;
-        ProtectHostname = true;
-        RestrictSUIDSGID = true;
-        RestrictNamespaces = true;
-        RestrictRealtime = true;
-        LockPersonality = true;
-        MemoryDenyWriteExecute = true;
-        SystemCallArchitectures = "native";
-        RestrictAddressFamilies = [
-          "AF_INET"
-          "AF_INET6"
-          "AF_UNIX"
+  options.glacier.topology = {
+    name = mkOption {
+      type = types.str;
+      default = host;
+      description = "Deployment name shown by consoles.";
+    };
+    advertise = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "vps";
+      description = ''
+        Address other hosts use to reach this host's services, such as its
+        tailnet name. Needed only when another host's console shows them,
+        and the services must then bind to an address that host can reach.
+      '';
+    };
+    extraServices = mkOption {
+      type = types.listOf types.attrs;
+      default = [ ];
+      description = "Services on other hosts to include, usually their `exported` lists.";
+    };
+    overrides = mkOption {
+      type = types.attrs;
+      default = { };
+      description = "Further topology overrides (focus, panels, hide, labels).";
+    };
+    file = mkOption {
+      type = types.str;
+      readOnly = true;
+      default = "/etc/glacier/topology.json";
+      description = "Where the generated topology is written.";
+    };
+    exported = mkOption {
+      type = types.listOf types.attrs;
+      readOnly = true;
+      default = if cfg.advertise == null then [ ] else entries cfg.advertise;
+      description = "This host's observed services as other hosts reach them.";
+    };
+  };
+
+  config = lib.mkIf (enabled != { }) {
+    systemd.services = lib.mapAttrs' (
+      name: svc:
+      lib.nameValuePair "glacier-${name}" {
+        description = "Glacier ${name}";
+        wantedBy = [ "multi-user.target" ];
+        wants = [ "network-online.target" ];
+        after = [ "network-online.target" ];
+        environment =
+          lib.optionalAttrs (svc.observe.port != null) {
+            GLACIER_LISTEN = "${svc.observe.bind}:${toString svc.observe.port}";
+          }
+          // svc.environment;
+        serviceConfig = {
+          ExecStart = lib.escapeShellArgs ([ (lib.getExe svc.package) ] ++ svc.args);
+          Restart = "on-failure";
+          RestartSec = 2;
+          DynamicUser = true;
+          StateDirectory = "glacier/${name}";
+          WorkingDirectory = "/var/lib/glacier/${name}";
+          ReadWritePaths = svc.writablePaths;
+          # Sandboxing
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          PrivateTmp = true;
+          PrivateDevices = true;
+          NoNewPrivileges = true;
+          CapabilityBoundingSet = "";
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectKernelLogs = true;
+          ProtectControlGroups = true;
+          ProtectClock = true;
+          ProtectHostname = true;
+          RestrictSUIDSGID = true;
+          RestrictNamespaces = true;
+          RestrictRealtime = true;
+          LockPersonality = true;
+          MemoryDenyWriteExecute = true;
+          SystemCallArchitectures = "native";
+          RestrictAddressFamilies = [
+            "AF_INET"
+            "AF_INET6"
+            "AF_UNIX"
+          ];
+        };
+      }
+    ) enabled;
+
+    environment.etc."glacier/topology.json".text = builtins.toJSON (
+      {
+        inherit (cfg) name;
+        hosts = [
+          {
+            id = host;
+            label = host;
+            sub = "NixOS";
+          }
         ];
-      };
-    }
-  ) enabled;
+      }
+      // cfg.overrides
+      // {
+        services = entries null ++ cfg.extraServices ++ (cfg.overrides.services or [ ]);
+      }
+    );
+  };
 }

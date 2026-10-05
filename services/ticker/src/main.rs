@@ -10,7 +10,7 @@
 //! Configuration (environment):
 //! - `TICKER_PRODUCTS`: comma-separated product ids (default `BTC-USD,ETH-USD`)
 //! - `TICKER_DATA_DIR`: output directory (default `./data`)
-//! - `TICKER_LISTEN`: address for the HTTP endpoints (default `127.0.0.1:9100`)
+//! - `TICKER_LISTEN` (or `GLACIER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9100`)
 //! - `TICKER_FEED`: websocket URL (default Coinbase Exchange public feed)
 
 use std::collections::HashMap;
@@ -58,7 +58,7 @@ async fn main() {
         .filter(|p| !p.is_empty())
         .collect();
     let data_dir = PathBuf::from(env("TICKER_DATA_DIR", "./data"));
-    let listen = env("TICKER_LISTEN", "127.0.0.1:9100");
+    let listen = glacier_observe::listen_address("TICKER_LISTEN", "127.0.0.1:9100");
     let feed = env("TICKER_FEED", DEFAULT_FEED);
 
     let observer = Observer::new("ticker", env!("CARGO_PKG_VERSION"));

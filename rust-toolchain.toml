@@ -1,0 +1,7 @@
+# The one Rust toolchain for this repository. rustup reads it directly, Nix
+# builds and dev shells use it through rust-overlay, and services/Dockerfile
+# must name the same version (checks.<system>.toolchain enforces that).
+[toolchain]
+channel = "1.96.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -53,8 +53,11 @@ operating system ([decision 0004](docs/decisions/0004-nix-not-nixos.md)):
 |---|---|---|
 | Any OS with Docker | Docker Compose (see `examples/`) | `glacier.observe` container labels |
 | Any Linux with Nix | systemd unit files generated from `glacier.services` | `observe` addresses in the topology file |
-| NixOS | the `glacier.services` NixOS module | `observe` addresses in the topology file |
+| NixOS | the `glacier.services` NixOS module | the topology file the module generates |
 
+With `glacier.services`, giving a service `observe.port` is enough: it
+listens there, and the module writes `/etc/glacier/topology.json` listing it,
+on NixOS directly and in the `systemdUnits` output for other distributions.
 A service started any other way joins a deployment by being listed by address:
 
 ```json

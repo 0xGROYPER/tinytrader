@@ -29,7 +29,7 @@
 //! leave out. Without Docker, the file alone describes the deployment.
 //!
 //! Configuration (environment):
-//! - `CONSOLE_LISTEN`: address to serve on (default `127.0.0.1:8080`)
+//! - `CONSOLE_LISTEN` (or `GLACIER_LISTEN`): address to serve on (default `127.0.0.1:8080`)
 //! - `CONSOLE_TOPOLOGY`: path to the optional topology file (default `topology.json`)
 //! - `CONSOLE_DOCKER`: Docker Engine API base URL, e.g. `http://docker-proxy:2375` (optional)
 //! - `CONSOLE_COMPOSE_PROJECT`: only show containers from this Compose project (optional)
@@ -62,7 +62,7 @@ struct App {
 
 #[tokio::main]
 async fn main() {
-    let listen = env("CONSOLE_LISTEN", "127.0.0.1:8080");
+    let listen = glacier_observe::listen_address("CONSOLE_LISTEN", "127.0.0.1:8080");
     let config = PollerConfig {
         topology: env("CONSOLE_TOPOLOGY", "topology.json"),
         docker: std::env::var("CONSOLE_DOCKER")

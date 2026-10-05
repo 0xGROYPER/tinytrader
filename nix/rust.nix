@@ -3,9 +3,14 @@
 { inputs, ... }:
 {
   perSystem =
-    { pkgs, lib, ... }:
+    {
+      pkgs,
+      lib,
+      toolchain,
+      ...
+    }:
     let
-      craneLib = inputs.crane.mkLib pkgs;
+      craneLib = (inputs.crane.mkLib pkgs).overrideToolchain (_: toolchain);
 
       # Only what the Rust build reads, so docs and Nix edits don't trigger rebuilds.
       src = lib.fileset.toSource {

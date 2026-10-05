@@ -11,7 +11,7 @@
 //! - `DATABENTO_SYMBOLS`: comma-separated (required)
 //! - `DATABENTO_SCHEMA`: default `trades`
 //! - `DATABENTO_STYPE_IN`: default `parent`
-//! - `DATABENTO_LISTEN`: address for the HTTP endpoints (default `127.0.0.1:9101`)
+//! - `DATABENTO_LISTEN` (or `GLACIER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9101`)
 //!
 //! Live data can be billed by usage. Check what a subscription costs on your
 //! plan before running this against a new dataset or schema.
@@ -58,7 +58,7 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let listen = env("DATABENTO_LISTEN", "127.0.0.1:9101");
+    let listen = glacier_observe::listen_address("DATABENTO_LISTEN", "127.0.0.1:9101");
     let observer = Observer::new("databento-live", env!("CARGO_PKG_VERSION"));
     let shared = Arc::new(Shared {
         // Options feeds have thousands of instruments; chart the six most traded.

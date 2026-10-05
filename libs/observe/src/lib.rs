@@ -485,6 +485,16 @@ async fn recent(AxumState(s): AxumState<Series>) -> axum::Json<serde_json::Value
     axum::Json(s.snapshot())
 }
 
+/// The address a service serves its endpoints on: its own variable (such as
+/// `TICKER_LISTEN`) if set, otherwise `GLACIER_LISTEN`, which deployment
+/// tooling sets for every service, otherwise `default`.
+#[must_use]
+pub fn listen_address(service_var: &str, default: &str) -> String {
+    std::env::var(service_var)
+        .or_else(|_| std::env::var("GLACIER_LISTEN"))
+        .unwrap_or_else(|_| default.to_owned())
+}
+
 /// Seconds since the Unix epoch, as a float.
 #[must_use]
 pub fn unix_seconds() -> f64 {
