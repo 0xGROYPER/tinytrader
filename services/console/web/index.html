@@ -157,7 +157,29 @@ tr:last-child td { border-bottom: 0; }
 .tip { position: absolute; pointer-events: none; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font: 13px var(--mono); color: var(--fg); white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.12); z-index: 2; }
 .tip .muted { display: block; font-size: 12px; }
 .empty { padding: 16px; color: var(--muted); font-size: 14px; }
-#nav-collections { display: contents; }
+#nav-collections, #nav-store { display: contents; }
+.ds-row { cursor: pointer; }
+.ds-row:hover td { background: var(--surface); }
+.ds-row.sel td { background: var(--accent-soft); }
+.panel { border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip-btn { min-height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 500 13px var(--mono); cursor: pointer; }
+.chip-btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-2); color: var(--accent); }
+.cal-wrap { overflow-x: auto; padding-bottom: 4px; }
+.cal { display: inline-grid; grid-auto-flow: column; grid-template-rows: repeat(7, 13px); gap: 3px; }
+.cal i { display: block; width: 13px; height: 13px; border-radius: 3px; background: var(--line-soft); }
+.cal i.has { background: var(--accent-mark); }
+.cal i.weekend { background: transparent; outline: 1px dashed var(--line-soft); outline-offset: -1px; }
+.cal i.out { background: transparent; }
+.cal-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--muted); }
+.cal-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.cal-legend i { display: inline-block; width: 11px; height: 11px; border-radius: 3px; }
+.roots { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; }
+.usage { position: relative; height: 10px; background: var(--line-soft); border-radius: 5px; overflow: visible; }
+.usage > b { display: block; height: 100%; border-radius: 5px; background: var(--accent-mark); }
+.usage > b.warning { background: var(--warn-mark); } .usage > b.critical, .usage > b.floor { background: var(--crit-mark); }
+.usage > em { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fg-2); opacity: .35; }
+.tag { display: inline-block; font: 12px var(--mono); padding: 1px 8px; border-radius: 4px; background: var(--surface); border: 1px solid var(--line); color: var(--fg-2); }
 .doc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px; }
 .doc-card { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); text-align: left; font: inherit; cursor: pointer; }
 .doc-card:hover { border-color: var(--accent-2); background: var(--surface); }
@@ -223,13 +245,14 @@ tr:last-child td { border-bottom: 0; }
     <div class="nav-label">Operate</div>
     <button type="button" data-tab="overview" aria-current="page">Overview</button>
     <button type="button" data-tab="services">Services</button>
+    <div id="nav-store"></div>
     <div id="nav-collections"></div>
   </nav>
   <main><div class="col" id="view"></div></main>
 </div>
 
 <script>
-const state = { tab: 'overview', topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null,
+const state = { tab: 'overview', topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
   ev: { service: null, after: 0, rows: [], paused: false, open: new Set(), times: [], fresh: new Set() } };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -508,6 +531,96 @@ function servicesTable() {
   <div class="box scroll"><table><thead><tr><th>Service</th><th>Host</th><th>Status</th><th>Detail</th><th>Up</th><th>Restarts</th><th>CPU</th><th>Memory</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
+// ---------- store: data and storage ----------
+// Catalogs come from services that describe a `catalog` stream. Every root of
+// every catalog is shown; nothing here knows about particular datasets.
+function catalogRoots() {
+  const out = [];
+  for (const [svc, st] of Object.entries(state.snap?.services || {})) {
+    for (const r of st.catalog?.roots || []) out.push({ ...r, service: svc, thresholds: st.catalog.thresholds });
+  }
+  return out;
+}
+const catalogStamp = () => Object.values(state.snap?.services || {}).map(s => s.catalog?.generated_at ?? '').join('|');
+function updateStoreNav() {
+  const has = catalogRoots().length > 0, el = $('nav-store');
+  if (has === !!el.childElementCount) return;
+  el.innerHTML = has ? '<div class="nav-label" style="padding-top:14px">Store</div><button type="button" data-tab="data">Data</button><button type="button" data-tab="storage">Storage</button>' : '';
+}
+function dsRange(d) {
+  const days = Object.values(d.schemas).flatMap(s => Object.keys(s.days || {})).sort();
+  return days.length ? [days[0], days[days.length - 1], new Set(days).size] : [null, null, 0];
+}
+function dataView() {
+  const rows = catalogRoots().flatMap(r => (r.datasets || []).map(d => ({ r, d, key: r.service + '|' + r.name + '|' + d.id })));
+  if (!rows.length) return '<div><h1>Data</h1><p class="muted">No datasets found in the configured roots yet.</p></div>';
+  if (!rows.some(x => x.key === state.ds)) state.ds = rows[0].key;
+  const table = rows.map(({ r, d, key }) => {
+    const [first, last, n] = dsRange(d);
+    const bytesTotal = Object.values(d.schemas).reduce((a, s) => a + s.bytes, 0);
+    return `<tr class="ds-row${key === state.ds ? ' sel' : ''}" data-ds="${esc(key)}"><td class="mono" style="color:var(--fg)">${esc(d.id)}</td><td class="mono">${esc(r.name)}</td>
+      <td class="mono">${Object.keys(d.schemas).map(esc).join(', ')}</td><td class="mono" style="white-space:nowrap">${first ?? '—'} → ${last ?? '—'}</td>
+      <td class="mono">${n}</td><td class="mono">${bytes(bytesTotal)}</td><td>${d.sources.length}</td></tr>`;
+  }).join('');
+  const sel = rows.find(x => x.key === state.ds);
+  return `<div><h1>Data</h1><p class="muted" style="margin:0">Datasets found in this deployment's data roots. Read-only.</p></div>
+    <div class="box scroll"><table><thead><tr><th>Dataset</th><th>Root</th><th>Schemas</th><th>Range</th><th>Days</th><th>Size</th><th>Sources</th></tr></thead><tbody>${table}</tbody></table></div>
+    ${sel ? datasetPanel(sel.r, sel.d) : ''}`;
+}
+function datasetPanel(r, d) {
+  const schemas = Object.keys(d.schemas);
+  if (!schemas.includes(state.dsSchema)) state.dsSchema = schemas.slice().sort((a, b) => d.schemas[b].bytes - d.schemas[a].bytes)[0];
+  const s = d.schemas[state.dsSchema], days = s.days || {};
+  const keys = Object.keys(days).sort();
+  let cal = '';
+  if (keys.length) {
+    const first = Date.parse(keys[0] + 'T00:00:00Z'), last = Date.parse(keys[keys.length - 1] + 'T00:00:00Z');
+    const start = first - ((new Date(first).getUTCDay() + 6) % 7) * 864e5; // back to Monday
+    for (let t = start; t <= last + 6 * 864e5; t += 864e5) {
+      const k = new Date(t).toISOString().slice(0, 10), wd = new Date(t).getUTCDay();
+      const cls = t < first || t > last ? 'out' : days[k] ? 'has' : (wd === 0 || wd === 6) ? 'weekend' : '';
+      cal += `<i class="${cls}" title="${k}${days[k] ? ' · ' + bytes(days[k]) : cls === '' ? ' · no data' : ''}"></i>`;
+    }
+  }
+  return `<section class="panel">
+    <div class="sec-head" style="margin:0"><h2 class="mono" style="font-weight:500">${esc(d.id)} <span class="muted" style="font-size:13px;font-family:var(--sans)">in ${esc(r.name)}</span></h2></div>
+    <div class="chips">${schemas.map(x => `<button type="button" class="chip-btn" data-schema="${esc(x)}" aria-pressed="${x === state.dsSchema}">${esc(x)}</button>`).join('')}</div>
+    <div class="facts">
+      <div><div class="k">Files</div><div class="v">${s.files.toLocaleString()}</div></div>
+      <div><div class="k">Size</div><div class="v">${bytes(s.bytes)}</div></div>
+      <div><div class="k">Days with data</div><div class="v">${keys.length}</div></div>
+      <div><div class="k">Range</div><div class="v">${keys[0] ?? '—'} → ${keys[keys.length - 1] ?? '—'}</div></div>
+      ${(s.symbols || []).length ? `<div><div class="k">Symbols</div><div class="v">${s.symbols.map(esc).join(', ')}</div></div>` : ''}
+      ${(s.encodings || []).length ? `<div><div class="k">Encoding</div><div class="v">${s.encodings.map(esc).join(', ')}</div></div>` : ''}
+    </div>
+    ${keys.length ? `<div class="cal-wrap"><div class="cal" aria-label="Days with data">${cal}</div></div>
+    <div class="cal-legend"><span><i style="background:var(--accent-mark)"></i>data</span><span><i style="background:var(--line-soft)"></i>weekday without data</span><span><i style="outline:1px dashed var(--line-soft)"></i>weekend</span></div>` : ''}
+    <div><div class="k" style="font-size:12px;color:var(--muted);margin-bottom:4px">Sources</div>${d.sources.map(x => `<div class="mono" style="font-size:13px">${esc(x)}</div>`).join('')}</div>
+  </section>`;
+}
+function storageView() {
+  const roots = catalogRoots();
+  const statusPill = { ok: ['OK', 'p-ok'], warning: ['Warning', 'p-warn'], critical: ['Critical', 'p-crit'], floor: ['Full', 'p-crit'], unknown: ['Space unknown', 'p-idle'] };
+  const t = roots[0]?.thresholds || {};
+  const cards = roots.map(r => {
+    const v = r.volume || {}, used = (v.used_fraction ?? 0) * 100, st = statusPill[v.status] || ['Missing', 'p-crit'];
+    const marks = [t.warning, t.critical, t.floor].filter(Boolean).map(x => `<em style="left:${x}%" title="${x}%"></em>`).join('');
+    return `<article class="panel">
+      <div class="d-head"><b>${esc(r.name)}</b><span class="pill ${r.present ? st[1] : 'p-crit'}">${r.present ? st[0] : 'Missing'}</span><span class="muted mono" style="margin-left:auto;font-size:12px">${esc(r.path)}</span></div>
+      ${r.present ? `${v.status === 'unknown' ? `<p class="muted" style="margin:0;font-size:14px">${esc(v.reason || 'Disk space is not available for this root.')}</p>` : `<div class="usage"><b class="${esc(v.status)}" style="width:${used.toFixed(1)}%"></b>${marks}</div>`}
+      <div class="facts">
+        ${v.status === 'unknown' ? '' : `<div><div class="k">Used</div><div class="v">${used.toFixed(0)}% of ${bytes(v.total_bytes)}</div></div>
+        <div><div class="k">Free</div><div class="v">${bytes(v.available_bytes)}</div></div>`}
+        <div><div class="k">In datasets</div><div class="v">${bytes(r.dataset_bytes)} · ${(r.datasets || []).length} datasets</div></div>
+      </div>
+      ${(r.unrecognised || []).length ? `<div><div class="k" style="font-size:12px;color:var(--muted);margin-bottom:6px">Not in the store layout</div><div class="chips">${r.unrecognised.map(x => `<span class="tag">${esc(x)}</span>`).join('')}</div></div>` : ''}`
+      : '<p class="muted" style="margin:0">This root\'s path is not available: the drive may be unplugged.</p>'}
+    </article>`;
+  }).join('');
+  return `<div><h1>Storage</h1><p class="muted" style="margin:0">Each data root and the volume it lives on. Marks show the thresholds: ${t.warning ?? 80}% warn, ${t.critical ?? 90}% pause non-capture writers, ${t.floor ?? 97}% stop capture. Nothing is ever deleted automatically.</p></div>
+    <div class="roots">${cards || '<p class="muted">No data roots configured.</p>'}</div>`;
+}
+
 // ---------- document collections ----------
 async function loadCollections() {
   try {
@@ -616,10 +729,15 @@ function render() {
   const evTop = $('ev-list')?.scrollTop ?? 0;
   state.ev.fresh = new Set();
   // Collections only change on navigation, not on every refresh.
+  updateStoreNav();
   if (state.tab.startsWith('col:') && !state.navigated) return status();
+  if ((state.tab === 'data' || state.tab === 'storage') && !state.navigated && catalogStamp() === state.catalogAt) return status();
   state.navigated = false;
+  state.catalogAt = catalogStamp();
   $('view').innerHTML = state.tab === 'overview' ? topology() + cards()
-    : state.tab === 'services' ? servicesTable() : collectionView();
+    : state.tab === 'services' ? servicesTable()
+    : state.tab === 'data' ? dataView()
+    : state.tab === 'storage' ? storageView() : collectionView();
   if (openDetails) { const d = document.querySelector('.detail > details'); if (d) d.open = true; }
   if ($('ev-list')) $('ev-list').scrollTop = evTop;
   if (focusId) { const n = document.querySelector(`[data-node="${CSS.escape(focusId)}"]`); if (n) n.focus({ preventScroll: true }); }
@@ -661,6 +779,10 @@ document.querySelector('.nav').addEventListener('click', e => {
   render(); window.scrollTo(0, 0);
 });
 $('view').addEventListener('click', e => {
+  const dr = e.target.closest('[data-ds]');
+  if (dr) { state.ds = dr.dataset.ds; state.navigated = true; render(); return; }
+  const sc = e.target.closest('[data-schema]');
+  if (sc) { state.dsSchema = sc.dataset.schema; state.navigated = true; render(); return; }
   const dc = e.target.closest('[data-doc]');
   if (dc) { openDoc(dc.dataset.doc === '' ? null : +dc.dataset.doc); return; }
   const a = e.target.closest('.prose a[href]');
@@ -718,7 +840,7 @@ $('theme-btn').addEventListener('click', () => {
   await loadCollections();
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
   if (hc) { state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true; }
-  else if (h === 'services') state.tab = 'services';
+  else if (['services', 'data', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
   await loadTopology(); await poll();
   setInterval(poll, 2000);
   setInterval(pollEvents, 700);

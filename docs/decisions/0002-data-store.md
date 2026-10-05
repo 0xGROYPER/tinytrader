@@ -183,6 +183,16 @@ manual operation, never a policy. Normalized and derived data follow the same
 rule by default, and derived data (such as Parquet exports) may be pruned and
 rebuilt freely.
 
+### Disk thresholds
+
+Each data root's volume is classified by how full it is: at **80%** a
+warning is raised; at **90%** writers other than capture pause; at **97%**
+capture stops cleanly and the stop is recorded as a gap. Nothing is ever
+deleted to make room. The thresholds are defaults that can be changed, not
+settings anyone must choose. Where a volume's free space cannot be measured
+(a folder shared into a container by Docker Desktop, for example), it is
+reported as unknown rather than guessed.
+
 ### Coverage and gaps
 
 `condition.json` follows Databento's per-day availability (`available`,

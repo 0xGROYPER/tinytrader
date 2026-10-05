@@ -50,6 +50,9 @@ pub struct Poller {
     describes: Mutex<HashMap<String, (Instant, Value)>>,
     /// Previous CPU readings per container id: (container total, system total).
     cpu: Mutex<HashMap<String, (f64, f64)>>,
+    /// Catalogs per URL, with when they were fetched; they are large and
+    /// change slowly, so they are refreshed at most every 30 seconds.
+    catalogs: Mutex<HashMap<String, (Instant, Value)>>,
 }
 
 impl Poller {
@@ -66,6 +69,7 @@ impl Poller {
             topology: RwLock::new(json!({ "services": [] })),
             describes: Mutex::new(HashMap::new()),
             cpu: Mutex::new(HashMap::new()),
+            catalogs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -270,6 +274,9 @@ async fn observe_into(
     if let Some(path) = d["streams"]["series"].as_str() {
         svc["recent"] = json!(format!("{base}{path}"));
     }
+    if let Some(path) = d["streams"]["catalog"].as_str() {
+        svc["catalog"] = json!(format!("{base}{path}"));
+    }
     for u in d["upstream"].as_array().into_iter().flatten() {
         let kind = u["kind"].as_str().unwrap_or("flow");
         let from = if let Some(other) = u["service"].as_str() {
@@ -301,6 +308,25 @@ async fn observe_into(
         p["service"] = json!(name);
         p["source"] = json!("recent");
         f.panels.push(p);
+    }
+}
+
+/// A catalog, refreshed at most every 30 seconds; the last one is kept while
+/// its service is unreachable.
+async fn catalog(app: &Poller, url: &str) -> Value {
+    if let Some((at, c)) = lock(&app.catalogs).get(url)
+        && at.elapsed() < Duration::from_secs(30)
+    {
+        return c.clone();
+    }
+    match get_json::<Value>(app, url).await {
+        Ok(c) => {
+            lock(&app.catalogs).insert(url.to_owned(), (Instant::now(), c.clone()));
+            c
+        }
+        Err(_) => lock(&app.catalogs)
+            .get(url)
+            .map_or(Value::Null, |(_, c)| c.clone()),
     }
 }
 
@@ -479,6 +505,9 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
                 "recent".into(),
                 r.json::<Value>().await.unwrap_or(Value::Null),
             );
+        }
+        if let Some(url) = svc["catalog"].as_str() {
+            entry.insert("catalog".into(), catalog(app, url).await);
         }
         services.insert(id.to_owned(), Value::Object(entry));
     }

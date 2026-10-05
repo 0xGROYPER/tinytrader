@@ -9,7 +9,9 @@
 #
 # Each service gets its own transient user, a private state directory
 # (/var/lib/glacier/<name>), write access to nothing else unless granted
-# through `writablePaths`, and restart on failure.
+# through `writablePaths`, restart on failure (giving up after repeated fast
+# failures), and resource limits with sensible defaults (`resources`). The
+# journal is capped so logs can't fill the disk.
 #
 # A service with `observe.port` listens there (via GLACIER_LISTEN) and is
 # listed in /etc/glacier/topology.json, which consoles and terminal views on
@@ -22,6 +24,20 @@ let
   enabled = lib.filterAttrs (_: s: s.enable) config.glacier.services;
   observed = lib.filterAttrs (_: s: s.observe.port != null) enabled;
   host = config.networking.hostName;
+  # "512M", "1G" or a byte count, as bytes.
+  memoryBytes =
+    size:
+    let
+      unit = lib.toUpper (lib.substring (lib.stringLength size - 1) 1 size);
+      number = lib.toInt (lib.removeSuffix unit (lib.toUpper size));
+      factor = {
+        K = 1024;
+        M = 1024 * 1024;
+        G = 1024 * 1024 * 1024;
+        T = 1024 * 1024 * 1024 * 1024;
+      };
+    in
+    if factor ? ${unit} then number * factor.${unit} else lib.toInt size;
   cfg = config.glacier.topology;
   # Where a service's endpoints are reached: from another host via the
   # advertised name, locally via loopback when bound to all interfaces, else
@@ -76,6 +92,29 @@ in
                 Extra paths the service may write, such as a data root. Everything
                 else outside its state directory is read-only to it.
               '';
+            };
+            resources = {
+              memory = mkOption {
+                type = types.str;
+                default = "1G";
+                description = "Hard memory limit (systemd MemoryMax); throttling starts at 85% of it.";
+              };
+              cpu = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                example = "150%";
+                description = "CPU cap (systemd CPUQuota), e.g. 150% for one and a half cores. Unlimited by default.";
+              };
+              tasks = mkOption {
+                type = types.ints.positive;
+                default = 512;
+                description = "Maximum threads and processes (TasksMax).";
+              };
+              openFiles = mkOption {
+                type = types.ints.positive;
+                default = 65536;
+                description = "Maximum open files and sockets (LimitNOFILE).";
+              };
             };
             observe = {
               port = mkOption {
@@ -143,6 +182,9 @@ in
         wantedBy = [ "multi-user.target" ];
         wants = [ "network-online.target" ];
         after = [ "network-online.target" ];
+        # Stop restarting after five failures in a minute rather than loop forever.
+        startLimitIntervalSec = 60;
+        startLimitBurst = 5;
         environment =
           lib.optionalAttrs (svc.observe.port != null) {
             GLACIER_LISTEN = "${svc.observe.bind}:${toString svc.observe.port}";
@@ -152,6 +194,12 @@ in
           ExecStart = lib.escapeShellArgs ([ (lib.getExe svc.package) ] ++ svc.args);
           Restart = "on-failure";
           RestartSec = 2;
+          # Resources
+          MemoryMax = svc.resources.memory;
+          MemoryHigh = "${toString (memoryBytes svc.resources.memory * 85 / 100)}";
+          CPUQuota = lib.mkIf (svc.resources.cpu != null) svc.resources.cpu;
+          TasksMax = svc.resources.tasks;
+          LimitNOFILE = svc.resources.openFiles;
           DynamicUser = true;
           StateDirectory = "glacier/${name}";
           WorkingDirectory = "/var/lib/glacier/${name}";
@@ -183,6 +231,12 @@ in
         };
       }
     ) enabled;
+
+    # Logs can't fill the disk: cap the journal unless the host says otherwise.
+    services.journald.extraConfig = lib.mkDefault ''
+      SystemMaxUse=1G
+      MaxRetentionSec=1month
+    '';
 
     environment.etc."glacier/topology.json".text = builtins.toJSON (
       {

@@ -25,6 +25,7 @@
           ../services/databento-live
           ../services/alpaca-live
           ../services/dbn-tcp
+          ../services/catalog
           (lib.fileset.fileFilter (f: f.hasExt "rs" || f.name == "Cargo.toml") ../services/console)
           ../services/console/web
         ];
@@ -62,6 +63,7 @@
       alpaca-live = service "alpaca-live" "Example service streaming Alpaca real-time IEX data";
       dbn-tcp = service "dbn-tcp" "Example service reading a live DBN stream over TCP";
       glacier-tui = service "glacier-tui" "Terminal view of a Glacier deployment";
+      catalog = service "catalog" "Read-only catalog of data roots";
 
     in
     {
@@ -73,6 +75,7 @@
           alpaca-live
           dbn-tcp
           glacier-tui
+          catalog
           ;
       };
 

@@ -3,6 +3,14 @@
 #   open http://localhost:8080
 name: glacier-quickstart
 
+# Every service: restarts, rotated logs (Docker keeps them forever by
+# default) and a memory cap.
+x-service: &service
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
 services:
   ticker:
     build:
@@ -18,7 +26,9 @@ services:
       TICKER_LISTEN: 0.0.0.0:9100   # reachable only on the Compose network
     volumes:
       - ticker-data:/data
-    restart: unless-stopped
+    <<: *service
+    mem_limit: 256m
+    cpus: 1.0
 
   console:
     build:
@@ -40,7 +50,9 @@ services:
     ports:
       - "127.0.0.1:8080:8080"   # this machine only
     depends_on: [ticker, docker-proxy]
-    restart: unless-stopped
+    <<: *service
+    mem_limit: 256m
+    cpus: 1.0
 
   # Read-only Docker API: container listing, inspection and stats only.
   docker-proxy:
@@ -52,7 +64,9 @@ services:
       POST: 0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    restart: unless-stopped
+    <<: *service
+    mem_limit: 64m
+    cpus: 1.0
 
 volumes:
   ticker-data:

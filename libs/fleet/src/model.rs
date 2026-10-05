@@ -51,6 +51,7 @@ pub struct ServiceInfo {
     pub metrics: Option<String>,
     pub events: Option<String>,
     pub recent: Option<String>,
+    pub catalog: Option<String>,
 }
 
 impl ServiceInfo {
@@ -87,6 +88,8 @@ pub struct ServiceState {
     pub health: Option<HealthResult>,
     pub metrics: Option<Value>,
     pub recent: Option<Value>,
+    /// The service's catalog of data roots, if it serves one.
+    pub catalog: Option<Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

@@ -4,6 +4,14 @@
 #   open http://localhost:8080
 name: glacier-alpaca
 
+# Every service: restarts, rotated logs (Docker keeps them forever by
+# default) and a memory cap.
+x-service: &service
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
 services:
   alpaca-live:
     build:
@@ -20,7 +28,9 @@ services:
       ALPACA_CHANNELS: ${ALPACA_CHANNELS:-trades,quotes}
       ALPACA_LISTEN: 0.0.0.0:9102   # reachable only on the Compose network
     secrets: [apca_api_key_id, apca_api_secret_key]
-    restart: unless-stopped
+    <<: *service
+    mem_limit: 256m
+    cpus: 1.0
 
   console:
     build:
@@ -40,7 +50,9 @@ services:
     ports:
       - "127.0.0.1:8080:8080"   # this machine only
     depends_on: [alpaca-live, docker-proxy]
-    restart: unless-stopped
+    <<: *service
+    mem_limit: 256m
+    cpus: 1.0
 
   docker-proxy:
     image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
@@ -51,7 +63,9 @@ services:
       POST: 0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    restart: unless-stopped
+    <<: *service
+    mem_limit: 64m
+    cpus: 1.0
 
 secrets:
   apca_api_key_id:

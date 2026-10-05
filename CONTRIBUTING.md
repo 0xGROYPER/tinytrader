@@ -68,6 +68,15 @@ capability is the exception ([decision 0004](docs/decisions/0004-nix-not-nixos.m
   It is a backstop, not a substitute for the rules above.
 - It also runs the Rust tests and clippy, and evaluates the example NixOS host.
 
+## Resource bounds
+
+- No unbounded queue, buffer, cache or log inside a service: every one has a
+  fixed capacity (as `Events` and `Series` do).
+- Services get supervisor limits by default: `resources` in the
+  `glacier.services` module (memory, CPU, tasks, open files, restart loops,
+  a capped journal) and memory caps plus log rotation in Compose files.
+- Disk is bounded by the store's thresholds, never by deleting data.
+
 ## Toolchain
 
 `rust-toolchain.toml` names the one Rust version for the repository. rustup

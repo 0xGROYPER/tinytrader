@@ -1,0 +1,17 @@
+[package]
+name = "catalog"
+description = "Read-only catalog of a Glacier deployment's data roots: datasets, coverage and disk space"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+fs4 = "1.1"
+glacier-observe.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
