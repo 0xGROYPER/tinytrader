@@ -27,6 +27,7 @@
           ../services/dbn-tcp
           ../services/catalog
           ../services/alpaca-news
+          ../services/alpaca-account
           (lib.fileset.fileFilter (f: f.hasExt "rs" || f.name == "Cargo.toml") ../services/console)
           ../services/console/web
         ];
@@ -66,6 +67,7 @@
       glacier-tui = service "glacier-tui" "Terminal view of a Glacier deployment";
       catalog = service "catalog" "Read-only catalog of data roots";
       alpaca-news = service "alpaca-news" "Example service serving market news from Alpaca (Benzinga)";
+      alpaca-account = service "alpaca-account" "Example service serving an Alpaca account's balances and positions";
 
     in
     {
@@ -79,6 +81,7 @@
           glacier-tui
           catalog
           alpaca-news
+          alpaca-account
           ;
       };
 

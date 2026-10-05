@@ -1,9 +1,10 @@
 # Alpaca example
 
 Alpaca's free real-time IEX trades and quotes streamed into the Glacier
-console, with market news (supplied by Benzinga through Alpaca). Select
-`alpaca-live` in the deployment graph to watch trades arrive, and switch to
-**Market** for charts and news.
+console, with market news (supplied by Benzinga through Alpaca) and the
+balances and positions of your account. The home page shows the account,
+charts and news; select `alpaca-live` under **Overview** to watch trades
+arrive.
 
 You need Docker with Compose and an Alpaca account (a free paper-trading
 account is enough). Create API keys in Alpaca's dashboard.

@@ -1,0 +1,17 @@
+[package]
+name = "alpaca-account"
+description = "Example service: reads an Alpaca account's balances and positions and serves them"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+glacier-observe.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

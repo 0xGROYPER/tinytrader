@@ -143,6 +143,16 @@ details summary { cursor: pointer; color: var(--accent); font-size: 14px; }
 .card .chg { font: 500 14px var(--mono); }
 .card .foot { font-size: 13px; color: var(--muted); }
 .pos { color: var(--up); } .neg { color: var(--down); }
+.acct h3 { display: flex; align-items: center; gap: 8px; font-family: var(--sans); font-weight: 600; }
+.env { font: 600 11px var(--sans); letter-spacing: .06em; text-transform: uppercase; border-radius: 4px; padding: 2px 7px; }
+.env-live { background: var(--accent-soft); color: var(--accent); } .env-paper { background: var(--surface); color: var(--muted); border: 1px solid var(--line); }
+.acct-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px 16px; margin: 2px 0; }
+.acct-stats div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.acct-stats span { font-size: 12px; color: var(--muted); }
+.acct-stats b { font: 500 14px var(--mono); font-variant-numeric: tabular-nums; }
+.pos-tbl { font-size: 13px; }
+.pos-tbl th { padding: 6px 8px; font-size: 11px; } .pos-tbl td { padding: 6px 8px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.pos-tbl th:not(:first-child), .pos-tbl td:not(:first-child) { text-align: right; }
 
 .box { border: 1px solid var(--line); border-radius: 8px; }
 .scroll { overflow-x: auto; }
@@ -554,11 +564,53 @@ function servicesTable() {
   <div class="box scroll"><table><thead><tr><th>Service</th><th>Host</th><th>Status</th><th>Detail</th><th>Up</th><th>Restarts</th><th>CPU</th><th>Memory</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
-// ---------- market: charts and news ----------
+// ---------- market: accounts, charts and news ----------
 function marketView() {
   const c = cards();
-  return `<div><h1>Market</h1><p class="muted" style="margin:0">Live prices from this deployment's market data services, with the latest news below.</p></div>` +
-    (c || '<p class="muted">No service is publishing price series yet.</p>') + newsView();
+  return `<div><h1>Market</h1><p class="muted" style="margin:0">Accounts, live prices from this deployment's market data services, and the latest news.</p></div>` +
+    accountsView() + (c || '<p class="muted">No service is publishing price series yet.</p>') + newsView();
+}
+// Every service that serves an `account` stream gets a card: live accounts first.
+function accountsView() {
+  const accts = (state.topo?.services || []).filter(s => s.account)
+    .map(s => ({ svc: s, a: svcState(s.id).account }))
+    .sort((x, y) => (x.a?.environment === 'live' ? 0 : 1) - (y.a?.environment === 'live' ? 0 : 1) || (x.a?.label || x.svc.id).localeCompare(y.a?.label || y.svc.id));
+  if (!accts.length) return '';
+  return `<section><div class="sec-head"><h2>Accounts</h2><span class="muted" style="font-size:13px">Balances and positions, read only</span></div>
+    <div class="cards">${accts.map(({ svc, a }) => accountCard(svc, a)).join('')}</div></section>`;
+}
+function money(v, cur) {
+  if (v == null || !isFinite(v)) return '—';
+  const s = Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return (v < 0 ? '−' : '') + (cur === 'USD' || !cur ? '$' : cur + ' ') + s;
+}
+function signed(v, cur) { return v == null ? '—' : (v > 0 ? '+' : '') + money(v, cur); }
+function pct(v) { return v == null || !isFinite(v) ? '—' : (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v * 100).toFixed(2) + '%'; }
+const tone = v => v > 0 ? 'pos' : v < 0 ? 'neg' : '';
+function accountCard(svc, a) {
+  const acc = a?.account || {}, cur = acc.currency, env = a?.environment || 'paper';
+  const head = `<h3>${esc(a?.label || svc.label || svc.id)}<span class="env env-${env === 'live' ? 'live' : 'paper'}">${esc(env)}</span>
+    ${acc.status && acc.status !== 'ACTIVE' ? `<span class="pill p-warn">${esc(acc.status.toLowerCase())}</span>` : ''}
+    ${acc.trading_blocked || acc.account_blocked ? '<span class="pill p-crit">blocked</span>' : ''}</h3>`;
+  if (!a?.updated_at) {
+    const err = svcState(svc.id).health?.body?.last_error;
+    return `<article class="card acct">${head}<p class="muted" style="margin:0">${esc(err ? 'Cannot read the account: ' + err : 'Waiting for the first reading…')}</p></article>`;
+  }
+  const day = acc.equity != null && acc.last_equity != null ? acc.equity - acc.last_equity : null;
+  const stats = [['Cash', money(acc.cash, cur)], ['Buying power', money(acc.buying_power, cur)], ['Long', money(acc.long_market_value, cur)]];
+  if (acc.short_market_value) stats.push(['Short', money(acc.short_market_value, cur)]);
+  const pos = a.positions || [];
+  const rows = pos.slice().sort((x, y) => Math.abs(y.market_value || 0) - Math.abs(x.market_value || 0)).slice(0, 8).map(p => `<tr>
+    <td style="color:var(--fg)">${esc(p.symbol)}</td><td>${esc(String(p.qty ?? '—'))}</td><td>${money(p.market_value, cur)}</td>
+    <td class="${tone(p.unrealized_pl)}">${signed(p.unrealized_pl, cur)} <span class="muted">${pct(p.unrealized_plpc)}</span></td>
+    <td class="${tone(p.change_today)}">${pct(p.change_today)}</td></tr>`).join('');
+  return `<article class="card acct">${head}
+    <div class="val"><span class="big">${money(acc.equity, cur)}</span>${day != null ? `<span class="chg ${tone(day)}">${signed(day, cur)} (${pct(acc.last_equity ? day / acc.last_equity : null)}) today</span>` : ''}</div>
+    <div class="acct-stats">${stats.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('')}</div>
+    <div class="chart" data-chart="${esc(svc.id)}|recent|equity" data-decimals="2"></div>
+    ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Symbol</th><th>Qty</th><th>Value</th><th>Unrealized</th><th>Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted" style="margin:0;font-size:13px">No open positions.</p>'}
+    <div class="foot">${pos.length > 8 ? `${pos.length} positions, largest 8 shown · ` : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
+  </article>`;
 }
 function newsItems() {
   const seen = new Map();

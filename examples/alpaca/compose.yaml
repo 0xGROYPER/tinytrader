@@ -50,6 +50,25 @@ services:
     mem_limit: 128m
     cpus: 0.5
 
+  # Balances and positions of the account the keys belong to (paper or
+  # live, told apart by the key). Read only: it never places orders.
+  alpaca-account:
+    build:
+      context: ../..
+      dockerfile: services/Dockerfile
+      args: { SERVICE: alpaca-account }
+    image: glacier/alpaca-account:dev
+    labels:
+      glacier.observe: "9107"
+    environment:
+      APCA_API_KEY_ID_FILE: /run/secrets/apca_api_key_id
+      APCA_API_SECRET_KEY_FILE: /run/secrets/apca_api_secret_key
+      ALPACA_ACCOUNT_LISTEN: 0.0.0.0:9107
+    secrets: [apca_api_key_id, apca_api_secret_key]
+    <<: *service
+    mem_limit: 64m
+    cpus: 0.25
+
   console:
     build:
       context: ../..

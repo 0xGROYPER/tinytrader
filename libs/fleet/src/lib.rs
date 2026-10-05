@@ -283,6 +283,9 @@ async fn observe_into(
     if let Some(path) = d["streams"]["news"].as_str() {
         svc["news"] = json!(format!("{base}{path}"));
     }
+    if let Some(path) = d["streams"]["account"].as_str() {
+        svc["account"] = json!(format!("{base}{path}"));
+    }
     for u in d["upstream"].as_array().into_iter().flatten() {
         let kind = u["kind"].as_str().unwrap_or("flow");
         let from = if let Some(other) = u["service"].as_str() {
@@ -644,6 +647,9 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
         }
         if let Some(url) = svc["catalog"].as_str() {
             entry.insert("catalog".into(), slow(app, url, 30).await);
+        }
+        if let Some(url) = svc["account"].as_str() {
+            entry.insert("account".into(), slow(app, url, 5).await);
         }
         if let Some(url) = svc["news"].as_str() {
             entry.insert("news".into(), slow(app, url, 15).await);
