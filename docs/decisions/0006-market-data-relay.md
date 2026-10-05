@@ -1,6 +1,6 @@
 # 0006: The market data relay
 
-- **Status:** Proposed
+- **Status:** Proposed (open questions resolved 2026-10-05)
 - **Date:** 2026-10-05
 
 ## Context
@@ -28,8 +28,24 @@ informed by it but simpler:
 ## Scope
 
 First version: **Alpaca IEX** (US equities trades and quotes) and **Databento
-OPRA** (`OPRA.PILLAR`, CMBP-1 and definitions). One relay process per source.
-Crypto venues come later, with their capture work.
+OPRA** (`OPRA.PILLAR`, CMBP-1 and definitions). Crypto venues come later, with
+their capture work.
+
+Each relay instance serves one port and holds one provider connection. The
+first deployment runs:
+
+| Relay | Symbols | Provider sessions |
+|---|---|---|
+| IEX | `SPY`, `QQQ` | Alpaca's single stream |
+| OPRA SPY | `SPY.OPT` | 1 Databento session |
+| OPRA QQQ | `QQQ.OPT` | 1 |
+| OPRA XSP | `XSP.OPT` | 1 |
+| OPRA index | `SPX.OPT`, `SPXW.OPT` | 1 |
+
+Splitting OPRA by root lets a client take only the roots it wants without the
+relay filtering anything. Four standing sessions plus a cap of four catch-up
+sessions stays within Databento's 10 per dataset on Standard plans. Symbols
+are configuration, so adding more is a deployment change.
 
 Out of scope for now: recording, a relay-side snapshot or cache, filtering by
 instrument or expiry, and quote conditions.
@@ -62,9 +78,23 @@ The relay answers with a DBN v3 stream: a metadata header (dataset, schema,
 - **Symbols.** After the header, one `SymbolMappingMsg` per symbol, as
   Databento's live API sends. For IEX, the relay assigns instrument ids, stable
   for a symbol across connections and restarts.
-- **Records.** IEX: `MBP-1` for quotes and `TradeMsg`-equivalent rows encoded
-  as Hyphae's relay does today (to be confirmed record by record). OPRA: the
-  provider's bytes unchanged.
+- **Records.** OPRA: the provider's bytes unchanged. IEX: `MBP-1`, encoded
+  the way Databento normalizes a single exchange's top of book, which is the
+  reference wherever another source differs:
+  - Quotes update the book; trades are `MBP-1` records with action `T`
+    carrying the book as it stood before the trade.
+  - `ts_event` is the exchange's timestamp; `ts_recv` is when the relay
+    received the websocket frame, the same for every message in a frame.
+  - `F_LAST` marks the last record of each event.
+  - Sizes are in shares and prices are fixed-point as DBN defines them; the
+    units Alpaca reports are checked, not assumed.
+  - Rows replayed from history have no true receive time: they carry
+    `ts_recv = ts_event` and DBN's `F_BAD_TS_RECV` flag. The same encoder
+    serves live and history.
+- **Trade conditions.** Standard DBN has no field for trade condition codes.
+  A client that asks with `"conditions": true` receives a Glacier extension
+  record, `glacier.trade-conditions/1`, immediately after each trade, holding
+  that trade's conditions. Other clients receive only standard DBN.
 - **Catch-up.** When `start` is in the past:
   - IEX: the relay pages Alpaca's historical trades and quotes from `start`,
     merges them by event time and encodes them exactly as live data, then
@@ -123,17 +153,11 @@ is disconnected rather than slowing the provider connection or other clients.
    IEX relay, start Glacier's.
 5. Retire Hyphae's relays and their recordings.
 
-## Open questions
+## Resolved
 
-1. **Billing:** is Databento's intraday replay included in the plan with no
-   extra charge? Until confirmed, OPRA catch-up stays off.
-2. **Trade conditions:** Hyphae's IEX conditions record (`0xD4`) is a custom
-   DBN record. Keep it as a Glacier extension record, or carry conditions
-   another way?
-3. **IEX encoding:** confirm that Hyphae's quote and trade encoding (receive
-   timestamps per frame, trades carrying the prior quote, the `F_LAST` rule)
-   is what Reactor needs, or simplify it.
-4. **Symbols:** which IEX symbols, and is the OPRA universe still `SPY.OPT`
-   and `XSP.OPT`?
-5. **Instrument ids:** may the IEX ids change from Hyphae's, given that
-   clients will be updated anyway?
+- Databento intraday replay is assumed to cost nothing extra on the plan.
+- Trade conditions are an opt-in Glacier extension record.
+- IEX encoding follows Databento's MBP-1 conventions, with replayed rows
+  flagged `F_BAD_TS_RECV`.
+- IEX instrument ids are the relay's own and need not match Hyphae's.
+- Symbols as in the table above.
