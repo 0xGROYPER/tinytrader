@@ -76,10 +76,8 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 .nav > .nav-sec:first-child, #nav-store:first-child > .nav-sec { margin-top: 0; padding-top: 4px; border-top: 0; }
 .nav-label { font-size: 12px; font-weight: 600; line-height: 20px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); padding: 0 8px 6px; }
 .nav-items { display: contents; }
-.nav button { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; min-height: 36px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: var(--fg-2); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; }
-.nav button svg { flex: none; width: 18px; height: 18px; color: var(--muted); }
+.nav button { display: flex; align-items: center; width: 100%; text-align: left; min-height: 36px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: var(--fg-2); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; }
 .nav button:hover { background: var(--surface); color: var(--accent); }
-.nav button:hover svg, .nav button[aria-current="page"] svg { color: var(--accent); }
 .nav button[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 main { flex: 999 1 560px; min-width: 0; padding: 24px 32px 64px; }
 .col { max-width: 1100px; display: flex; flex-direction: column; gap: 28px; }
@@ -259,8 +257,8 @@ tr:last-child td { border-bottom: 0; }
     <div class="nav-sec">
       <div class="nav-label">Operate</div>
       <div class="nav-items">
-        <button type="button" data-tab="overview" data-icon="overview">Overview</button>
-        <button type="button" data-tab="services" data-icon="services">Services</button>
+        <button type="button" data-tab="overview">Overview</button>
+        <button type="button" data-tab="services">Services</button>
       </div>
     </div>
     <div id="nav-store"></div>
@@ -270,14 +268,6 @@ tr:last-child td { border-bottom: 0; }
 </div>
 
 <script>
-const NAV_ICONS = {
-  overview: '<circle cx="4.5" cy="10" r="2"/><circle cx="15.5" cy="5" r="2"/><circle cx="15.5" cy="15" r="2"/><path d="M6.5 9.2 13.5 5.8M6.5 10.8l7 3.4"/>',
-  services: '<rect x="3" y="3.5" width="14" height="5" rx="1.2"/><rect x="3" y="11.5" width="14" height="5" rx="1.2"/><path d="M6 6h.01M6 14h.01"/>',
-  data: '<ellipse cx="10" cy="5" rx="6" ry="2.2"/><path d="M4 5v10c0 1.2 2.7 2.2 6 2.2s6-1 6-2.2V5M4 10c0 1.2 2.7 2.2 6 2.2s6-1 6-2.2"/>',
-  storage: '<rect x="2.5" y="11" width="15" height="5.5" rx="1.2"/><path d="M4.5 11 6 4h8l1.5 7M13.5 13.75h.01"/>',
-  doc: '<path d="M4 3.5h8.5L16 7v9.5H4z"/><path d="M12 3.5V7h4M7 10.5h6M7 13.5h6"/>',
-};
-const navIcon = k => `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${NAV_ICONS[k]}</svg>`;
 const state = { tab: 'market', newsSymbol: null, topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
   ev: { service: null, after: 0, rows: [], paused: false, open: new Set(), times: [], fresh: new Set() } };
 const $ = id => document.getElementById(id);
@@ -614,7 +604,7 @@ const catalogStamp = () => Object.values(state.snap?.services || {}).map(s => s.
 function updateStoreNav() {
   const has = catalogRoots().length > 0, el = $('nav-store');
   if (has === !!el.childElementCount) return;
-  el.innerHTML = has ? `<div class="nav-sec"><div class="nav-label">Store</div><div class="nav-items"><button type="button" data-tab="data">${navIcon('data')}Data</button><button type="button" data-tab="storage">${navIcon('storage')}Storage</button></div></div>` : '';
+  el.innerHTML = has ? `<div class="nav-sec"><div class="nav-label">Store</div><div class="nav-items"><button type="button" data-tab="data">Data</button><button type="button" data-tab="storage">Storage</button></div></div>` : '';
 }
 function dsRange(d) {
   const days = Object.values(d.schemas).flatMap(s => Object.keys(s.days || {})).sort();
@@ -697,7 +687,7 @@ async function loadCollections() {
     if (!r.ok) return;
     state.collections = await r.json();
     $('nav-collections').innerHTML = state.collections.length
-      ? '<div class="nav-sec"><div class="nav-label">Reference</div><div class="nav-items">' + state.collections.map(c => `<button type="button" data-tab="col:${esc(c.id)}">${navIcon('doc')}${esc(c.name)}</button>`).join('') + '</div></div>'
+      ? '<div class="nav-sec"><div class="nav-label">Reference</div><div class="nav-items">' + state.collections.map(c => `<button type="button" data-tab="col:${esc(c.id)}">${esc(c.name)}</button>`).join('') + '</div></div>'
       : '';
   } catch (_) {}
 }
@@ -841,7 +831,6 @@ async function poll() {
   if (!document.querySelector('.tip:not([hidden])')) render(); else status();
 }
 
-document.querySelectorAll('.nav [data-icon]').forEach(b => b.insertAdjacentHTML('afterbegin', navIcon(b.dataset.icon)));
 document.querySelector('.home').addEventListener('click', e => {
   e.preventDefault();
   state.tab = 'market'; state.doc = null; state.node = undefined; state.navigated = true;
