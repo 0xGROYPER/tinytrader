@@ -146,7 +146,8 @@ tr.today td { background: var(--accent-soft); }
 .acct-stats div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .acct-stats span { font-size: 12px; color: var(--muted); }
 .acct-stats b { font: 500 14px var(--mono); font-variant-numeric: tabular-nums; }
-.pos-tbl { font-size: 13px; }
+.acct-cards { grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); }
+.pos-tbl { font-size: 13px; } .pos-tbl td, .pos-tbl th { white-space: nowrap; }
 .pos-tbl th { padding: 6px 8px; font-size: 11px; } .pos-tbl td { padding: 6px 8px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .pos-tbl th:not(:first-child), .pos-tbl td:not(:first-child) { text-align: right; }
 
@@ -579,7 +580,7 @@ function accountsView(withHeading = true) {
     .map(s => ({ svc: s, a: svcState(s.id).account }))
     .sort((x, y) => (x.a?.environment === 'live' ? 0 : 1) - (y.a?.environment === 'live' ? 0 : 1) || (x.a?.label || x.svc.id).localeCompare(y.a?.label || y.svc.id));
   if (!accts.length) return '';
-  const grid = `<div class="cards">${accts.map(({ svc, a }) => accountCard(svc, a)).join('')}</div>`;
+  const grid = `<div class="cards acct-cards">${accts.map(({ svc, a }) => accountCard(svc, a)).join('')}</div>`;
   return withHeading ? `<section><div class="sec-head"><h2>Accounts</h2><span class="muted" style="font-size:13px">Balances and positions, read only</span></div>${grid}</section>` : grid;
 }
 // The US market calendar, from the first service that serves one.
