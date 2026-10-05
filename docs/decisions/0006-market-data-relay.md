@@ -43,11 +43,11 @@ first deployment runs:
 | OPRA index | `SPX.OPT`, `SPXW.OPT` | 1 |
 
 Splitting OPRA by root lets a client take only the roots it wants without the
-relay filtering anything. Four standing sessions plus a cap of four catch-up
-sessions stays within Databento's 10 per dataset on Standard plans. Symbols
-are configuration, so adding more is a deployment change.
+relay filtering anything. That is four Databento sessions in all, however
+many clients connect, within Databento's 10 per dataset on Standard plans.
+Symbols are configuration, so adding more is a deployment change.
 
-Out of scope for now: recording, a relay-side snapshot or cache, filtering by
+Out of scope for now: recording, caching market data, filtering by
 instrument or expiry, and quote conditions.
 
 ## Protocol (`glacier.relay/1`)
