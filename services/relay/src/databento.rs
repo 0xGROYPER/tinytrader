@@ -1,6 +1,9 @@
-//! Databento source: one standing live session feeds the hub; a client that
-//! asks to start in the past gets its own session with intraday replay, which
-//! Databento continues live after catching up.
+//! Databento source: one standing live session feeds the hub. A client that
+//! asks to catch up gets its own session, which replays the day's instrument
+//! definitions and then continues live.
+//!
+//! Only definitions are replayed: Databento refuses intraday replay for
+//! `cmbp-1`, and missed quotes come from the next day's historical data.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,13 +35,13 @@ pub struct Databento {
 }
 
 impl Databento {
-    /// A started session for the configured symbols: the schema plus
-    /// instrument definitions. With `start`, the schema is replayed from then
-    /// and definitions from as early as Databento has them (up to 24 hours),
-    /// so the client knows every instrument it sees.
+    /// A started session for the configured symbols: the schema, live, plus
+    /// instrument definitions. With `catch_up`, definitions are replayed from
+    /// as early as Databento has them (up to 24 hours), so the client knows
+    /// every instrument it will see.
     async fn session(
         &self,
-        start: Option<OffsetDateTime>,
+        catch_up: bool,
         heartbeat: Duration,
     ) -> Result<(LiveClient, Metadata), String> {
         let mut client = LiveClient::builder()
@@ -53,10 +56,10 @@ impl Databento {
             .await
             .map_err(|e| format!("cannot connect to Databento: {e}"))?;
         for (schema, from) in [
-            (self.schema, start),
+            (self.schema, None),
             (
                 Schema::Definition,
-                start.map(|_| OffsetDateTime::UNIX_EPOCH),
+                catch_up.then_some(OffsetDateTime::UNIX_EPOCH),
             ),
         ] {
             let sub = Subscription::builder()
@@ -102,7 +105,7 @@ impl Databento {
     }
 
     async fn stream(&self, hub: &Hub, observer: &Observer) -> Result<(), String> {
-        let (mut client, _) = self.session(None, hub.heartbeat()).await?;
+        let (mut client, _) = self.session(false, hub.heartbeat()).await?;
         hub.upstream_up();
         observer.set_state(State::Ready, "live");
         eprintln!(
@@ -133,7 +136,8 @@ impl Databento {
         }
     }
 
-    /// Serve one client from its own replay session until either side ends.
+    /// Serve one client from its own catch-up session until either side ends.
+    /// `start` is recorded but not used: only definitions can be replayed.
     pub async fn replay(&self, start: OffsetDateTime, mut out: OwnedWriteHalf, hub: &Hub) {
         let Ok(_permit) = self.replays.try_acquire() else {
             hub.refuse(
@@ -146,10 +150,10 @@ impl Databento {
         };
         let _client = ClientGuard::new(&hub.clients);
         hub.events.push(
-            format!("replay from {start}"),
-            format!("replay from {start}"),
+            format!("catch-up requested from {start}"),
+            format!("catch-up requested from {start}"),
         );
-        let (mut session, metadata) = match self.session(Some(start), hub.heartbeat()).await {
+        let (mut session, metadata) = match self.session(true, hub.heartbeat()).await {
             Ok(s) => s,
             Err(e) => {
                 hub.refuse(out, ErrorCode::InternalError, &e).await;
