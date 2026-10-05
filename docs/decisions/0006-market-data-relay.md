@@ -100,18 +100,22 @@ The relay answers with a DBN v3 stream: a metadata header (dataset, schema,
     merges them by event time and encodes them exactly as live data, then
     switches to the live tail. Rows before the first live message come from
     history; that message and everything after comes from the live stream.
-  - OPRA: the client gets its own Databento session, which replays the
-    day's instrument definitions (as far back as Databento keeps them, up to
-    24 hours) and then continues with live `cmbp-1`. Quotes are not replayed:
-    Databento refuses intraday replay for `cmbp-1` (tested 2026-10-05; it
-    does replay `trades`, `tcbbo`, `cbbo-1s`, `cbbo-1m` and `definition`).
-    Missed quotes come from the next day's historical data. If that becomes
-    a problem, this decision is reopened: replaying `tcbbo` and `cbbo-1s` for
-    the missed stretch is the first option. These sessions count against
-    Databento's session limit, so the relay caps them (default 4) and refuses
-    beyond the cap with an `ErrorMsg`.
-  - Either way, a `SystemMsg` with code `ReplayCompleted` marks the switch to
-    live data.
+  - OPRA: nothing is replayed per client. Databento refuses intraday replay
+    for `cmbp-1` (tested 2026-10-05; it does replay `trades`, `tcbbo`,
+    `cbbo-1s`, `cbbo-1m`, `definition` and `statistics`), so missed quotes
+    come from the next day's historical data. If that becomes a problem, this
+    decision is reopened: replaying `tcbbo` and `cbbo-1s` for the missed
+    stretch is the first option.
+- **Reference data.** The relay keeps the latest instrument definitions and
+  statistics (open interest and the like, some published before the open) in
+  memory: it replays them from Databento when its own session starts, keeps
+  them current from the live feed, and drops instruments once they expire.
+  Every client receives them as soon as it joins, before any live data, so
+  any number of clients share one provider session. Market data itself is
+  never cached.
+- A `SystemMsg` with code `ReplayCompleted` marks the end of what the relay
+  sends on joining (reference data, and for IEX any catch-up) and the start of
+  live data.
 
 ### System and error records
 
@@ -124,7 +128,6 @@ The relay answers with a DBN v3 stream: a metadata header (dataset, schema,
 | Client falling behind (queue half full) | `SystemMsg`, code `SlowReaderWarning` |
 | Client too slow (queue full) | `ErrorMsg`, then the connection closes |
 | Malformed or unsupported request | `ErrorMsg`, code `InvalidSubscription`, then close |
-| Catch-up session cap reached | `ErrorMsg`, code `ConnectionLimitExceeded`, then close |
 
 All codes are the ones DBN v3 defines for Databento's live API.
 
@@ -162,8 +165,9 @@ is disconnected rather than slowing the provider connection or other clients.
 ## Resolved
 
 - Databento intraday replay is assumed to cost nothing extra on the plan.
-- OPRA catch-up replays definitions only, since Databento can't replay
-  `cmbp-1`; reopen if missed quotes become a problem.
+- OPRA quotes are not replayed, since Databento can't replay `cmbp-1`; the
+  relay holds definitions and statistics and sends them to every joining
+  client. Reopen if missed quotes become a problem.
 - Trade conditions are an opt-in Glacier extension record.
 - IEX encoding follows Databento's MBP-1 conventions, with replayed rows
   flagged `F_BAD_TS_RECV`.

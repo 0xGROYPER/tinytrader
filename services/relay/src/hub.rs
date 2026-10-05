@@ -4,12 +4,22 @@
 //! them from a bounded broadcast queue. A client that falls behind is warned
 //! at half the queue and disconnected when it overflows, so it never slows the
 //! provider connection or other clients.
+//!
+//! The hub also keeps the latest reference records (instrument definitions
+//! and statistics) and sends them to each client when it joins, followed by
+//! a `ReplayCompleted` system record, so every client knows every instrument
+//! without its own provider session. Market data itself is never cached.
 
+use std::collections::BTreeMap;
+use std::mem::{offset_of, size_of};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use databento::dbn::{ErrorCode, Metadata, SystemCode};
+use databento::dbn::{
+    ErrorCode, InstrumentDefMsg, Metadata, RecordHeader, StatMsg, SystemCode, UNDEF_TIMESTAMP,
+    rtype,
+};
 use glacier_observe::Events;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
@@ -35,6 +45,82 @@ enum Sent {
     Stalled,
 }
 
+/// The latest reference records, by instrument.
+#[derive(Default)]
+struct Reference {
+    /// Definition bytes and expiration, by instrument id.
+    definitions: BTreeMap<u32, (u64, Vec<u8>)>,
+    /// Statistic bytes, by instrument id and statistic type.
+    statistics: BTreeMap<(u32, u16), Vec<u8>>,
+}
+
+fn u16_at(b: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
+}
+fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
+}
+fn u64_at(b: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(b.get(at..at + 8)?.try_into().ok()?))
+}
+
+impl Reference {
+    /// Keep the reference records in a chunk of DBN records.
+    fn absorb(&mut self, chunk: &[u8]) {
+        let mut at = 0;
+        while at < chunk.len() {
+            let len = usize::from(chunk[at]) * 4;
+            let Some(rec) = chunk.get(at..at + len).filter(|r| r.len() >= 16) else {
+                return;
+            };
+            at += len;
+            let Some(id) = u32_at(rec, offset_of!(RecordHeader, instrument_id)) else {
+                continue;
+            };
+            match rec[1] {
+                rtype::INSTRUMENT_DEF if len >= size_of::<InstrumentDefMsg>() => {
+                    let expires = u64_at(rec, offset_of!(InstrumentDefMsg, expiration))
+                        .unwrap_or(UNDEF_TIMESTAMP);
+                    self.definitions.insert(id, (expires, rec.to_vec()));
+                }
+                rtype::STATISTICS if len >= size_of::<StatMsg>() => {
+                    let Some(kind) = u16_at(rec, offset_of!(StatMsg, stat_type)) else {
+                        continue;
+                    };
+                    // update_action 2 deletes a statistic.
+                    if rec.get(offset_of!(StatMsg, update_action)) == Some(&2) {
+                        self.statistics.remove(&(id, kind));
+                    } else {
+                        self.statistics.insert((id, kind), rec.to_vec());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Every current definition, then every statistic, dropping instruments
+    /// that have expired.
+    fn snapshot(&mut self, now: u64) -> Vec<u8> {
+        self.definitions
+            .retain(|_, (expires, _)| *expires == UNDEF_TIMESTAMP || *expires > now);
+        let defs = &self.definitions;
+        self.statistics.retain(|(id, _), _| defs.contains_key(id));
+        let mut out = Vec::new();
+        for (_, rec) in self.definitions.values() {
+            out.extend_from_slice(rec);
+        }
+        for rec in self.statistics.values() {
+            out.extend_from_slice(rec);
+        }
+        out
+    }
+
+    fn len(&self) -> usize {
+        self.definitions.len() + self.statistics.len()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Upstream {
     /// Not connected yet since start.
@@ -53,6 +139,9 @@ pub struct Hub {
     /// Header for live clients; `start` is set per client.
     metadata: Metadata,
     upstream: Mutex<Upstream>,
+    /// Held while publishing, so a joining client's snapshot and its live
+    /// queue meet with nothing missed or repeated.
+    reference: Mutex<Reference>,
     pub events: Events,
     pub clients: AtomicU64,
     pub records: AtomicU64,
@@ -73,6 +162,7 @@ impl Hub {
             write_timeout: Duration::from_secs(10),
             metadata,
             upstream: Mutex::new(Upstream::Starting),
+            reference: Mutex::new(Reference::default()),
             events: Events::default(),
             clients: AtomicU64::new(0),
             records: AtomicU64::new(0),
@@ -120,12 +210,19 @@ impl Hub {
         let _ = tokio::time::timeout(Duration::from_secs(1), out.shutdown()).await;
     }
 
-    /// Send records to every live client.
+    /// Send records to every live client, keeping any reference records.
     pub fn publish(&self, chunk: Vec<u8>, records: u64) {
         self.records.fetch_add(records, Ordering::Relaxed);
         self.bytes.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        let mut reference = lock(&self.reference);
+        reference.absorb(&chunk);
         // No receivers is fine: nobody is listening right now.
         let _ = self.tx.send(chunk.into());
+    }
+
+    /// Reference records held for joining clients.
+    pub fn reference_len(&self) -> usize {
+        lock(&self.reference).len()
     }
 
     pub fn upstream(&self) -> Upstream {
@@ -166,12 +263,18 @@ impl Hub {
         let _ = out.shutdown().await;
     }
 
-    /// Stream live records to a client until it disconnects or falls behind.
-    pub async fn serve_live(&self, mut out: OwnedWriteHalf) {
-        let mut rx = self.tx.subscribe();
-        let Ok(mut first) = protocol::header(&self.metadata(protocol::now_ns())).await else {
+    /// Send a client the reference records, then live records until it
+    /// disconnects or falls behind. `start` goes in its stream header.
+    pub async fn serve(&self, mut out: OwnedWriteHalf, start: u64) {
+        let (mut rx, snapshot) = {
+            let mut reference = lock(&self.reference);
+            (self.tx.subscribe(), reference.snapshot(protocol::now_ns()))
+        };
+        let Ok(mut first) = protocol::header(&self.metadata(start)).await else {
             return;
         };
+        first.extend(snapshot);
+        first.extend(protocol::system_code(SystemCode::ReplayCompleted));
         if let Upstream::Down(since) = self.upstream() {
             first.extend(protocol::system_text(&format!(
                 "upstream-down since={since}"
@@ -289,7 +392,7 @@ mod tests {
                 let hub = hub.clone();
                 tokio::spawn(async move {
                     if let Some((_, out)) = read_join(s, &hub).await {
-                        hub.serve_live(out).await;
+                        hub.serve(out, protocol::now_ns()).await;
                     }
                 });
             }
@@ -317,18 +420,73 @@ mod tests {
         hub.upstream_down();
         hub.upstream_up();
         let mut texts = Vec::new();
-        while texts.len() < 4 {
+        while texts.len() < 5 {
             let r = dec.decode_record_ref().await.unwrap().unwrap();
             if let RecordRefEnum::System(m) = r.as_enum().unwrap() {
                 texts.push(m.msg().unwrap().to_owned());
             }
         }
+        // Nothing cached yet, so ReplayCompleted comes straight away.
+        texts.remove(0);
         assert_eq!(texts[0], "from the provider");
         assert!(texts[1].starts_with("upstream-down since="));
         assert!(texts[2].starts_with("upstream-up gap_from="));
         // Then a heartbeat after a second of silence.
         assert_eq!(texts[3], "");
         assert_eq!(hub.reconnects.load(Ordering::Relaxed), 1);
+    }
+
+    fn definition(id: u32, expiration: u64, strike: i64) -> Vec<u8> {
+        let rec = InstrumentDefMsg {
+            hd: RecordHeader::new::<InstrumentDefMsg>(rtype::INSTRUMENT_DEF, 1, id, 0),
+            expiration,
+            strike_price: strike,
+            ..Default::default()
+        };
+        databento::dbn::RecordRef::from(&rec).as_ref().to_vec()
+    }
+
+    fn statistic(id: u32, kind: u16, quantity: i64) -> Vec<u8> {
+        let rec = StatMsg {
+            hd: RecordHeader::new::<StatMsg>(rtype::STATISTICS, 1, id, 0),
+            stat_type: kind,
+            quantity,
+            update_action: 1,
+            ..Default::default()
+        };
+        databento::dbn::RecordRef::from(&rec).as_ref().to_vec()
+    }
+
+    #[tokio::test]
+    async fn sends_reference_records_to_joining_clients() {
+        let hub = Arc::new(Hub::new(metadata(), 64, Duration::from_secs(10)));
+        let addr = serving(hub.clone()).await;
+        let mut chunk = definition(7, u64::MAX, 100);
+        chunk.extend(definition(8, 1, 200)); // expired long ago
+        chunk.extend(definition(7, u64::MAX, 150)); // replaces the first
+        chunk.extend(statistic(7, 9, 1000));
+        chunk.extend(statistic(8, 9, 5)); // for the expired instrument
+        hub.publish(chunk, 5);
+
+        let mut dec = join(&addr, "{\"protocol\":\"glacier.relay/1\"}\n").await;
+        let mut seen = Vec::new();
+        loop {
+            let r = dec.decode_record_ref().await.unwrap().unwrap();
+            match r.as_enum().unwrap() {
+                RecordRefEnum::InstrumentDef(d) => {
+                    seen.push(format!("def {} {}", d.hd.instrument_id, d.strike_price))
+                }
+                RecordRefEnum::Stat(m) => {
+                    seen.push(format!("stat {} {}", m.hd.instrument_id, m.quantity))
+                }
+                RecordRefEnum::System(m) if m.code().ok() == Some(SystemCode::ReplayCompleted) => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(seen, ["def 7 150", "stat 7 1000"]);
+        assert_eq!(hub.reference_len(), 2);
     }
 
     #[tokio::test]

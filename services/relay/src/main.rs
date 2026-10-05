@@ -3,9 +3,11 @@
 //! keeps no recording. See decision 0006 for the protocol.
 //!
 //! A client connects over TCP and sends one line of JSON,
-//! `{"protocol":"glacier.relay/1"}` for live data from now, or with
-//! `"start":"<RFC 3339 time>"` to replay from then and continue live. The
-//! relay answers with a DBN v3 stream.
+//! `{"protocol":"glacier.relay/1"}`. The relay answers with a DBN v3 stream:
+//! the day's reference records (definitions and statistics), a
+//! `ReplayCompleted` system record, then live data. An optional
+//! `"start":"<RFC 3339 time>"` is recorded in the stream header; market data
+//! before joining is not replayed.
 //!
 //! Sources: `databento` (any live dataset; OPRA by default).
 //!
@@ -72,10 +74,6 @@ struct Args {
     #[arg(long, env = "RELAY_LISTEN", default_value = "127.0.0.1:7600")]
     listen: String,
 
-    /// Most clients catching up at once (each holds its own provider session).
-    #[arg(long, env = "RELAY_MAX_REPLAYS", default_value_t = 4)]
-    max_replays: usize,
-
     /// Chunks of up to 64 KiB queued per client before it is disconnected.
     #[arg(long, env = "RELAY_CLIENT_QUEUE", default_value_t = 1024)]
     client_queue: usize,
@@ -127,7 +125,6 @@ async fn run(args: Args) -> Result<(), String> {
         schema,
         reference,
         stype_in,
-        replays: tokio::sync::Semaphore::new(args.max_replays),
     });
 
     let observer = Observer::new("relay", env!("CARGO_PKG_VERSION"));
@@ -138,7 +135,7 @@ async fn run(args: Args) -> Result<(), String> {
         "streams": { "events": "/events" },
         "relay": { "protocol": protocol::PROTOCOL, "listen": args.listen, "symbols": args.symbols },
     }));
-    register_metrics(&observer, &hub, &source, args.max_replays);
+    register_metrics(&observer, &hub);
 
     let observe_at = listen_address("RELAY_OBSERVE_LISTEN", "127.0.0.1:9110");
     let app = observer.router().merge(hub.events.router());
@@ -168,7 +165,7 @@ async fn run(args: Args) -> Result<(), String> {
             accepted = clients.accept() => {
                 let Ok((stream, peer)) = accepted else { continue };
                 let _ = stream.set_nodelay(true);
-                let (hub, source) = (hub.clone(), source.clone());
+                let hub = hub.clone();
                 tokio::spawn(async move {
                     let Some((join, out)) = hub::read_join(stream, &hub).await else { return };
                     if join.conditions {
@@ -176,14 +173,13 @@ async fn run(args: Args) -> Result<(), String> {
                             "this source has no trade conditions").await;
                         return;
                     }
-                    match join.start {
-                        Some(start) => source.replay(start, out, &hub).await,
-                        None => {
-                            hub.events.push(format!("client {peer} joined live"), format!("client {peer} joined live"));
-                            let _guard = ClientGuard::new(&hub.clients);
-                            hub.serve_live(out).await;
-                        }
-                    }
+                    let start = join
+                        .start
+                        .and_then(|t| u64::try_from(t.unix_timestamp_nanos()).ok())
+                        .unwrap_or_else(protocol::now_ns);
+                    hub.events.push(format!("client {peer} joined"), format!("client {peer} joined"));
+                    let _guard = ClientGuard::new(&hub.clients);
+                    hub.serve(out, start).await;
                 });
             }
             _ = shutdown() => {
@@ -194,8 +190,8 @@ async fn run(args: Args) -> Result<(), String> {
     }
 }
 
-fn register_metrics(observer: &Observer, hub: &Arc<Hub>, source: &Arc<Databento>, max: usize) {
-    let (hub, source) = (hub.clone(), source.clone());
+fn register_metrics(observer: &Observer, hub: &Arc<Hub>) {
+    let hub = hub.clone();
     observer.set_metrics(move |w| {
         let c = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed) as f64;
         w.gauge(
@@ -205,10 +201,10 @@ fn register_metrics(observer: &Observer, hub: &Arc<Hub>, source: &Arc<Databento>
             c(&hub.clients),
         );
         w.gauge(
-            "glacier_relay_replay_sessions",
-            "Clients catching up on their own provider session.",
+            "glacier_relay_reference_records",
+            "Reference records (definitions, statistics) held for joining clients.",
             &[],
-            (max - source.replays.available_permits()) as f64,
+            hub.reference_len() as f64,
         );
         w.gauge(
             "glacier_relay_upstream_up",
