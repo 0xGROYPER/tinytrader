@@ -1,6 +1,6 @@
 # 0002: The Glacier data store
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-05
 
 ## Context
@@ -223,6 +223,35 @@ starting over, and nothing is released before it is verified.
 Closed days are ordinary `.dbn.zst` files, so the standard DBN tools and the
 Databento client libraries can read them too, apart from Glacier's custom
 schemas.
+
+### Configuration
+
+Each deployment configures its stores as data; nothing about a particular
+deployment lives in Glacier. One format, `store.toml`, holds:
+
+- **roots:** logical names mapped to paths on that machine;
+- **seal policy:** `max_age`, `max_bytes` and `at_day_end`, with defaults per
+  store and overrides per dataset;
+- **compaction:** when closed days are compacted;
+- **tiering:** destination roots and the age at which data moves.
+
+On NixOS, the `glacier.store` module options write `store.toml`; with Docker,
+the file is mounted into the container. Both use the same format and the same
+documentation.
+
+### Viewing
+
+Each store root runs a small read-only catalog service beside it, serving
+`/catalog`, `/health` and `/metrics`. The console aggregates those services,
+as it does every other service, so it never needs filesystem access to the
+machines that hold data. The console's Data page shows, for every dataset:
+schemas, range, size and where it is stored; a per-day coverage calendar from
+`condition.json`; for a chosen day, its files with state, records, size, time
+range, hash, location and copy status; and a preview of up to 100 decoded
+records from normalized schemas.
+
+The viewer is read-only. Store operations (verify, compact, sync) stay in the
+CLI until there is a reason to add them, behind confirmation and an audit log.
 
 ## Consequences
 
