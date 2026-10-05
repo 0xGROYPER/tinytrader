@@ -55,6 +55,8 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; }
 .brand { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
 .brand b { font-weight: 600; font-size: 16px; }
+.home { display: inline-flex; align-items: center; gap: 10px; color: var(--fg); text-decoration: none; border-radius: 6px; }
+.home:hover b { color: var(--accent); }
 .crumb-sep { color: var(--line); font-size: 20px; font-weight: 300; line-height: 1; margin: 0 -2px; }
 .deployment { font-size: 16px; color: var(--fg-2); }
 .live { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
@@ -69,15 +71,21 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 .banner { padding: 10px 16px; background: var(--warn-soft); color: var(--warn); border-bottom: 1px solid var(--warn-line); font-size: 14px; }
 
 .shell { display: flex; flex-wrap: wrap; align-items: flex-start; }
-.nav { flex: 1 1 180px; padding: 20px 12px; border-right: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 2px; }
-.nav-label { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 4px 12px 6px; }
-.nav button { display: block; width: 100%; text-align: left; min-height: 38px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--fg-2); font: inherit; font-size: 14px; cursor: pointer; }
-.nav button:hover { background: var(--surface); }
+.nav { flex: 1 1 210px; max-width: 250px; padding: 12px 12px 24px; border-right: 1px solid var(--line-soft); display: flex; flex-direction: column; }
+.nav-sec { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+.nav > .nav-sec:first-child, #nav-store:first-child > .nav-sec { margin-top: 0; padding-top: 4px; border-top: 0; }
+.nav-label { font-size: 12px; font-weight: 600; line-height: 20px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); padding: 0 8px 6px; }
+.nav-items { display: contents; }
+.nav button { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; min-height: 36px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: var(--fg-2); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; }
+.nav button svg { flex: none; width: 18px; height: 18px; color: var(--muted); }
+.nav button:hover { background: var(--surface); color: var(--accent); }
+.nav button:hover svg, .nav button[aria-current="page"] svg { color: var(--accent); }
 .nav button[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 main { flex: 999 1 560px; min-width: 0; padding: 24px 32px 64px; }
 .col { max-width: 1100px; display: flex; flex-direction: column; gap: 28px; }
 @media (max-width: 780px) {
-  .nav { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--line-soft); padding: 8px 12px; }
+  .nav { flex-direction: row; flex-wrap: wrap; max-width: none; border-right: 0; border-bottom: 1px solid var(--line-soft); padding: 8px 12px; }
+  .nav-sec, .nav-items { display: contents; }
   .nav-label { display: none; }
   .nav button { width: auto; min-height: 44px; }
   main { padding: 20px 16px 48px; }
@@ -235,8 +243,7 @@ tr:last-child td { border-bottom: 0; }
 <body>
 <header class="top">
   <div class="brand">
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke-width="1.8" aria-hidden="true"><path d="M12 2.5 20.2 7.25v9.5L12 21.5 3.8 16.75v-9.5Z" style="stroke:var(--accent-mark)"/><path d="M12 7.5 16 9.8v4.4L12 16.5 8 14.2V9.8Z" style="stroke:var(--accent-2)"/></svg>
-    <b>Glacier Labs</b>
+    <a class="home" href="#market" title="Home"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke-width="1.8" aria-hidden="true"><path d="M12 2.5 20.2 7.25v9.5L12 21.5 3.8 16.75v-9.5Z" style="stroke:var(--accent-mark)"/><path d="M12 7.5 16 9.8v4.4L12 16.5 8 14.2V9.8Z" style="stroke:var(--accent-2)"/></svg><b>Glacier Labs</b></a>
     <span class="crumb-sep" aria-hidden="true">/</span>
     <span class="deployment" id="profile" title="Deployment shown">…</span>
   </div>
@@ -249,10 +256,17 @@ tr:last-child td { border-bottom: 0; }
 
 <div class="shell">
   <nav class="nav" aria-label="Sections">
-    <div class="nav-label">Operate</div>
-    <button type="button" data-tab="overview" aria-current="page">Overview</button>
-    <button type="button" data-tab="services">Services</button>
-    <button type="button" data-tab="market">Market</button>
+    <div class="nav-sec">
+      <div class="nav-label">Market</div>
+      <div class="nav-items"><button type="button" data-tab="market" aria-current="page" data-icon="market">Prices and news</button></div>
+    </div>
+    <div class="nav-sec">
+      <div class="nav-label">Operate</div>
+      <div class="nav-items">
+        <button type="button" data-tab="overview" data-icon="overview">Overview</button>
+        <button type="button" data-tab="services" data-icon="services">Services</button>
+      </div>
+    </div>
     <div id="nav-store"></div>
     <div id="nav-collections"></div>
   </nav>
@@ -260,7 +274,16 @@ tr:last-child td { border-bottom: 0; }
 </div>
 
 <script>
-const state = { tab: 'overview', newsSymbol: null, topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
+const NAV_ICONS = {
+  market: '<path d="M3 15l4-5 3 3 4-6 3 4"/><path d="M3 18h14"/>',
+  overview: '<circle cx="4.5" cy="10" r="2"/><circle cx="15.5" cy="5" r="2"/><circle cx="15.5" cy="15" r="2"/><path d="M6.5 9.2 13.5 5.8M6.5 10.8l7 3.4"/>',
+  services: '<rect x="3" y="3.5" width="14" height="5" rx="1.2"/><rect x="3" y="11.5" width="14" height="5" rx="1.2"/><path d="M6 6h.01M6 14h.01"/>',
+  data: '<ellipse cx="10" cy="5" rx="6" ry="2.2"/><path d="M4 5v10c0 1.2 2.7 2.2 6 2.2s6-1 6-2.2V5M4 10c0 1.2 2.7 2.2 6 2.2s6-1 6-2.2"/>',
+  storage: '<rect x="2.5" y="11" width="15" height="5.5" rx="1.2"/><path d="M4.5 11 6 4h8l1.5 7M13.5 13.75h.01"/>',
+  doc: '<path d="M4 3.5h8.5L16 7v9.5H4z"/><path d="M12 3.5V7h4M7 10.5h6M7 13.5h6"/>',
+};
+const navIcon = k => `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${NAV_ICONS[k]}</svg>`;
+const state = { tab: 'market', newsSymbol: null, topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
   ev: { service: null, after: 0, rows: [], paused: false, open: new Set(), times: [], fresh: new Set() } };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -596,7 +619,7 @@ const catalogStamp = () => Object.values(state.snap?.services || {}).map(s => s.
 function updateStoreNav() {
   const has = catalogRoots().length > 0, el = $('nav-store');
   if (has === !!el.childElementCount) return;
-  el.innerHTML = has ? '<div class="nav-label" style="padding-top:14px">Store</div><button type="button" data-tab="data">Data</button><button type="button" data-tab="storage">Storage</button>' : '';
+  el.innerHTML = has ? `<div class="nav-sec"><div class="nav-label">Store</div><div class="nav-items"><button type="button" data-tab="data">${navIcon('data')}Data</button><button type="button" data-tab="storage">${navIcon('storage')}Storage</button></div></div>` : '';
 }
 function dsRange(d) {
   const days = Object.values(d.schemas).flatMap(s => Object.keys(s.days || {})).sort();
@@ -679,7 +702,7 @@ async function loadCollections() {
     if (!r.ok) return;
     state.collections = await r.json();
     $('nav-collections').innerHTML = state.collections.length
-      ? '<div class="nav-label" style="padding-top:14px">Reference</div>' + state.collections.map(c => `<button type="button" data-tab="col:${esc(c.id)}">${esc(c.name)}</button>`).join('')
+      ? '<div class="nav-sec"><div class="nav-label">Reference</div><div class="nav-items">' + state.collections.map(c => `<button type="button" data-tab="col:${esc(c.id)}">${navIcon('doc')}${esc(c.name)}</button>`).join('') + '</div></div>'
       : '';
   } catch (_) {}
 }
@@ -823,6 +846,13 @@ async function poll() {
   if (!document.querySelector('.tip:not([hidden])')) render(); else status();
 }
 
+document.querySelectorAll('.nav [data-icon]').forEach(b => b.insertAdjacentHTML('afterbegin', navIcon(b.dataset.icon)));
+document.querySelector('.home').addEventListener('click', e => {
+  e.preventDefault();
+  state.tab = 'market'; state.doc = null; state.node = undefined; state.navigated = true;
+  try { history.replaceState(null, '', '#market'); } catch (_) {}
+  render(); window.scrollTo(0, 0);
+});
 document.querySelector('.nav').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]'); if (!b) return;
   state.tab = b.dataset.tab; state.doc = null; state.navigated = true;
@@ -894,7 +924,7 @@ $('theme-btn').addEventListener('click', () => {
   await loadCollections();
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
   if (hc) { state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true; }
-  else if (['services', 'market', 'data', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
+  else if (['overview', 'services', 'market', 'data', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
   else if (['charts', 'news'].includes(h)) { state.tab = 'market'; state.navigated = true; }
   await loadTopology(); await poll();
   setInterval(poll, 2000);
