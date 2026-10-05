@@ -4,6 +4,7 @@ members = [
     "services/alpaca-live",
     "services/console",
     "services/databento-live",
+    "services/dbn-tcp",
     "services/ticker",
 ]
 resolver = "3"

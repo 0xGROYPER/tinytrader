@@ -36,6 +36,7 @@ console the same way.
 | `services/ticker` | Toy service used by the quickstart |
 | `services/databento-live` | Example service streaming a Databento live subscription |
 | `services/alpaca-live` | Example service streaming Alpaca's free real-time IEX data |
+| `services/dbn-tcp` | Example service reading any live DBN stream served over TCP |
 | `infra/modules` | NixOS modules, such as `glacier.services.<name>` |
 | `nix/` | Flake modules: Rust builds and checks |
 | `examples/` | Complete deployments you can run or copy |

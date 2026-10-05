@@ -510,6 +510,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbn-tcp"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "dbn",
+ "glacier-observe",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
