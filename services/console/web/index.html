@@ -138,6 +138,7 @@ details summary { cursor: pointer; color: var(--accent); font-size: 14px; }
 .card .chg { font: 500 14px var(--mono); }
 .card .foot { font-size: 13px; color: var(--muted); }
 .pos { color: var(--up); } .neg { color: var(--down); }
+tr.today td { background: var(--accent-soft); }
 .acct h3 { display: flex; align-items: center; gap: 8px; font-family: var(--sans); font-weight: 600; }
 .env { font: 600 11px var(--sans); letter-spacing: .06em; text-transform: uppercase; border-radius: 4px; padding: 2px 7px; }
 .env-live { background: var(--accent-soft); color: var(--accent); } .env-paper { background: var(--surface); color: var(--muted); border: 1px solid var(--line); }
@@ -258,6 +259,14 @@ tr:last-child td { border-bottom: 0; }
 
 <div class="shell">
   <nav class="nav" aria-label="Sections">
+    <div class="nav-sec">
+      <div class="nav-label">Markets</div>
+      <div class="nav-items">
+        <button type="button" data-tab="accounts">Accounts</button>
+        <button type="button" data-tab="news">News</button>
+        <button type="button" data-tab="calendar">Calendar</button>
+      </div>
+    </div>
     <div class="nav-sec">
       <div class="nav-label">Operate</div>
       <div class="nav-items">
@@ -565,13 +574,40 @@ function marketView() {
     accountsView() + (c || '<p class="muted">No service is publishing price series yet.</p>') + newsView();
 }
 // Every service that serves an `account` stream gets a card: live accounts first.
-function accountsView() {
+function accountsView(withHeading = true) {
   const accts = (state.topo?.services || []).filter(s => s.account)
     .map(s => ({ svc: s, a: svcState(s.id).account }))
     .sort((x, y) => (x.a?.environment === 'live' ? 0 : 1) - (y.a?.environment === 'live' ? 0 : 1) || (x.a?.label || x.svc.id).localeCompare(y.a?.label || y.svc.id));
   if (!accts.length) return '';
-  return `<section><div class="sec-head"><h2>Accounts</h2><span class="muted" style="font-size:13px">Balances and positions, read only</span></div>
-    <div class="cards">${accts.map(({ svc, a }) => accountCard(svc, a)).join('')}</div></section>`;
+  const grid = `<div class="cards">${accts.map(({ svc, a }) => accountCard(svc, a)).join('')}</div>`;
+  return withHeading ? `<section><div class="sec-head"><h2>Accounts</h2><span class="muted" style="font-size:13px">Balances and positions, read only</span></div>${grid}</section>` : grid;
+}
+// The US market calendar, from the first service that serves one.
+function calendarView() {
+  const cal = (state.topo?.services || []).map(s => svcState(s.id).calendar).find(c => c?.days?.length);
+  const head = '<div><h1>Calendar</h1><p class="muted" style="margin:0">US equity market sessions, in New York time.</p></div>';
+  if (!cal) return head + '<p class="muted">No service is serving a market calendar yet.</p>';
+  const ny = iso => new Date(iso).toLocaleString(undefined, { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const until = iso => duration((Date.parse(iso) - Date.now()) / 1000);
+  const c = cal.clock || {};
+  const now = c.is_open
+    ? `<span class="pill p-ok">Open</span> Closes ${esc(ny(c.next_close))} (in ${until(c.next_close)})`
+    : `<span class="pill p-idle">Closed</span> Opens ${esc(ny(c.next_open))} (in ${until(c.next_open)})`;
+  // Weekdays missing from the calendar are holidays; closes before 16:00 are early closes.
+  const sessions = new Map(cal.days.map(d => [d.date, d]));
+  const first = new Date(cal.days[0].date + 'T12:00:00Z'), last = new Date(cal.days[cal.days.length - 1].date + 'T12:00:00Z');
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const rows = [];
+  for (let d = first; d <= last; d = new Date(d.getTime() + 86400000)) {
+    const date = d.toISOString().slice(0, 10), wd = d.getUTCDay();
+    if (wd === 0 || wd === 6) continue;
+    const s = sessions.get(date), label = d.toLocaleDateString(undefined, { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' });
+    const note = !s ? '<span class="pill p-warn">Holiday</span>' : s.close < '16:00' ? '<span class="pill p-warn">Early close</span>' : '';
+    rows.push(`<tr${date === today ? ' class="today"' : ''}${date < today ? ' style="opacity:.55"' : ''}><td style="color:var(--fg)">${esc(label)}${date === today ? ' <span class="muted">today</span>' : ''}</td>
+      <td class="mono">${s ? esc(s.open) : '—'}</td><td class="mono">${s ? esc(s.close) : '—'}</td><td>${note}</td></tr>`);
+  }
+  return head + `<div class="box" style="padding:14px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">${now}</div>
+    <div class="box scroll"><table><thead><tr><th>Day</th><th>Open</th><th>Close</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
 }
 function money(v, cur) {
   if (v == null || !isFinite(v)) return '—';
@@ -606,6 +642,8 @@ function accountCard(svc, a) {
     <div class="foot">${pos.length > 8 ? `${pos.length} positions, largest 8 shown · ` : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
   </article>`;
 }
+// Stories may carry HTML entities (&#39;); decode them to text, which esc() then escapes.
+function unentity(str) { const t = document.createElement('textarea'); t.innerHTML = str || ''; return t.value; }
 function newsItems() {
   const seen = new Map();
   for (const st of Object.values(state.snap?.services || {})) {
@@ -618,21 +656,21 @@ function ago(iso) {
   if (!isFinite(s)) return '';
   return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`;
 }
-function newsView() {
-  const items = newsItems();
-  if (!items.length) return '<div><h2>News</h2><p class="muted">No news service is running, or it has no stories yet.</p></div>';
+function newsView(page = false) {
+  const items = newsItems(), h = page ? 'h1' : 'h2';
+  if (!items.length) return `<div><${h}>News</${h}><p class="muted">No news service is running, or it has no stories yet.</p></div>`;
   const counts = new Map();
   for (const n of items) for (const sym of n.symbols || []) counts.set(sym, (counts.get(sym) || 0) + 1);
   const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14).map(([sym]) => sym);
   const shown = state.newsSymbol ? items.filter(n => (n.symbols || []).includes(state.newsSymbol)) : items;
   const chip = (sym, label) => `<button type="button" class="chip-btn" data-news-symbol="${esc(sym ?? '')}" aria-pressed="${(state.newsSymbol ?? null) === sym}">${esc(label)}</button>`;
-  return `<div><h2>News</h2><p class="muted" style="margin:0">${items.length} recent stories, newest first.</p></div>
+  return `<div><${h}>News</${h}><p class="muted" style="margin:0">${items.length} recent stories, newest first.</p></div>
     <div class="chips">${chip(null, 'All')}${top.map(sym => chip(sym, sym)).join('')}</div>
     <div class="news">${shown.slice(0, 100).map(n => `<article class="story">
       <div class="story-meta"><span>${esc(ago(n.created_at))}</span><span>${esc(n.source || '')}${n.author ? ' · ' + esc(n.author) : ''}</span>
         ${(n.symbols || []).slice(0, 8).map(sym => `<span class="tag">${esc(sym)}</span>`).join('')}</div>
-      ${/^https?:/.test(n.url || '') ? `<a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.headline)}</a>` : `<b>${esc(n.headline)}</b>`}
-      ${n.summary ? `<p>${esc(n.summary)}</p>` : ''}
+      ${/^https?:/.test(n.url || '') ? `<a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(unentity(n.headline))}</a>` : `<b>${esc(unentity(n.headline))}</b>`}
+      ${n.summary ? `<p>${esc(unentity(n.summary))}</p>` : ''}
     </article>`).join('') || '<p class="muted" style="padding:16px;margin:0">No stories for this symbol.</p>'}</div>`;
 }
 
@@ -841,6 +879,9 @@ function render() {
   state.catalogAt = catalogStamp();
   $('view').innerHTML = state.tab === 'overview' ? topology()
     : state.tab === 'market' ? marketView()
+    : state.tab === 'accounts' ? `<div><h1>Accounts</h1><p class="muted" style="margin:0">Balances and positions of every brokerage account this deployment reads. Read only.</p></div>` + (accountsView(false) || '<p class="muted">No account service is running.</p>')
+    : state.tab === 'news' ? newsView(true)
+    : state.tab === 'calendar' ? calendarView()
     : state.tab === 'services' ? servicesTable()
     : state.tab === 'data' ? dataView()
     : state.tab === 'storage' ? storageView() : collectionView();
@@ -956,7 +997,8 @@ $('theme-btn').addEventListener('click', () => {
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
   if (hc) { state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true; }
   else if (['overview', 'services', 'market', 'data', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
-  else if (['charts', 'news'].includes(h)) { state.tab = 'market'; state.navigated = true; }
+  else if (['accounts', 'news', 'calendar'].includes(h)) { state.tab = h; state.navigated = true; }
+  else if (h === 'charts') { state.tab = 'market'; state.navigated = true; }
   await loadTopology(); await poll();
   setInterval(poll, 2000);
   setInterval(pollEvents, 700);

@@ -11,6 +11,11 @@
 //!   "positions": [{ "symbol": "SPY", "qty": 10.0, "market_value": 6690.0, ... }] }
 //! ```
 //!
+//! Also serves `/calendar`, the US market clock and trading sessions from
+//! a week ago to six weeks ahead (`{ "clock": { "is_open", "next_open",
+//! "next_close", "timestamp" }, "days": [{ "date", "open", "close" }] }`,
+//! times in New York), refreshed every ten minutes.
+//!
 //! Numeric fields are numbers, not Alpaca's strings. Account numbers and
 //! ids are never served. Equity is also kept as a series at `/recent`
 //! (key `equity`), and position changes are a live tail at `/events`.
@@ -106,6 +111,7 @@ struct Args {
 #[derive(Default)]
 struct Shared {
     doc: Mutex<Value>,
+    calendar: Mutex<Value>,
     polls: AtomicU64,
     errors: AtomicU64,
     events: Events,
@@ -138,7 +144,7 @@ async fn main() {
     observer.describe(json!({
         "role": format!("Balances and positions of an Alpaca {} account{named}. Read only.", env.name()),
         "upstream": [{ "id": "alpaca-trading", "label": "alpaca", "sub": "trading API", "kind": "flow", "via": "REST, read only" }],
-        "streams": { "events": "/events", "series": "/recent", "account": "/account" },
+        "streams": { "events": "/events", "series": "/recent", "account": "/account", "calendar": "/calendar" },
     }));
     {
         let s = shared.clone();
@@ -179,6 +185,13 @@ async fn main() {
                 move || async move { axum::Json(lock(&s.doc).clone()) }
             }),
         )
+        .route(
+            "/calendar",
+            get({
+                let s = shared.clone();
+                move || async move { axum::Json(lock(&s.calendar).clone()) }
+            }),
+        )
         .merge(observer.router())
         .merge(shared.events.router())
         .merge(shared.series.router());
@@ -201,7 +214,17 @@ async fn main() {
         .build()
         .expect("http client");
     let every = Duration::from_secs(args.interval.max(5));
+    let mut calendar_due: Option<std::time::Instant> = None;
     loop {
+        if calendar_due.is_none_or(|t| t.elapsed() > Duration::from_secs(600)) {
+            match read_calendar(&http, env, &key, &secret).await {
+                Ok(c) => {
+                    *lock(&shared.calendar) = c;
+                    calendar_due = Some(std::time::Instant::now());
+                }
+                Err(e) => eprintln!("alpaca-account: calendar: {e}"),
+            }
+        }
         let read = async {
             let account = get_json(&http, env, &key, &secret, "/v2/account").await?;
             let positions = get_json(&http, env, &key, &secret, "/v2/positions").await?;
@@ -255,6 +278,54 @@ async fn get_json(
     r.json()
         .await
         .map_err(|e| format!("{path}: unreadable response: {e}"))
+}
+
+/// The market clock, and trading sessions from a week ago to six weeks ahead.
+async fn read_calendar(
+    http: &reqwest::Client,
+    env: Environment,
+    key: &str,
+    secret: &str,
+) -> Result<Value, String> {
+    let clock = get_json(http, env, key, secret, "/v2/clock").await?;
+    let today = (unix_seconds() / 86_400.0) as i64;
+    let path = format!(
+        "/v2/calendar?start={}&end={}",
+        civil_date(today - 7),
+        civil_date(today + 45)
+    );
+    let days = get_json(http, env, key, secret, &path).await?;
+    let days: Vec<Value> = days
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|d| json!({ "date": d["date"], "open": d["open"], "close": d["close"] }))
+        .collect();
+    Ok(json!({
+        "updated_at": unix_seconds(),
+        "clock": {
+            "is_open": clock["is_open"],
+            "timestamp": clock["timestamp"],
+            "next_open": clock["next_open"],
+            "next_close": clock["next_close"],
+        },
+        "days": days,
+    }))
+}
+
+/// `YYYY-MM-DD` for a count of days since 1970-01-01 (Howard Hinnant's
+/// civil-from-days).
+fn civil_date(days: i64) -> String {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Keep the allowed fields, as numbers where Alpaca sends numeric strings.
@@ -353,6 +424,13 @@ mod tests {
             a,
             json!({ "status": "ACTIVE", "equity": 1000.5, "pattern_day_trader": false })
         );
+    }
+
+    #[test]
+    fn civil_dates() {
+        assert_eq!(civil_date(0), "1970-01-01");
+        assert_eq!(civil_date(20_366), "2025-10-05");
+        assert_eq!(civil_date(19_782), "2024-02-29");
     }
 
     #[test]
