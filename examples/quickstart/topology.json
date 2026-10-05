@@ -24,7 +24,8 @@
       "role": "Toy service: streams Coinbase tickers to JSON Lines files and reports health and metrics.",
       "health": "http://ticker:9100/health",
       "metrics": "http://ticker:9100/metrics",
-      "recent": "http://ticker:9100/recent"
+      "recent": "http://ticker:9100/recent",
+      "events": "http://ticker:9100/events"
     },
     {
       "id": "docker-proxy",

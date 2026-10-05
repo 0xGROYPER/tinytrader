@@ -89,6 +89,7 @@ async fn main() {
         .route("/", get(page))
         .route("/api/topology", get(topology))
         .route("/api/state", get(state))
+        .route("/api/events/{service}", get(events))
         .with_state(app)
         .merge(observer.router());
     let listener = match tokio::net::TcpListener::bind(&listen).await {
@@ -134,6 +135,46 @@ async fn state(AxumState(app): AxumState<Arc<App>>) -> Response {
         body,
     )
         .into_response()
+}
+
+/// Live tail of a service's events: forwards `after` and `limit` to the
+/// `events` URL the topology declares for that service.
+async fn events(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(service): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    let not_found = |m: String| (axum::http::StatusCode::NOT_FOUND, m).into_response();
+    let topo = match read_topology(&app.config.topology) {
+        Ok(t) => t,
+        Err(e) => return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let url = topo["services"]
+        .as_array()
+        .and_then(|list| {
+            list.iter()
+                .find(|s| s["id"].as_str() == Some(service.as_str()))
+        })
+        .and_then(|s| s["events"].as_str())
+        .map(str::to_owned);
+    let Some(url) = url else {
+        return not_found(format!("service {service} declares no events"));
+    };
+    let after: u64 = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let limit: u64 = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100);
+    let sep = if url.contains('?') { '&' } else { '?' };
+    match app
+        .http
+        .get(format!("{url}{sep}after={after}&limit={limit}"))
+        .send()
+        .await
+    {
+        Ok(r) => match r.json::<Value>().await {
+            Ok(v) => ([(header::CACHE_CONTROL, "no-store")], axum::Json(v)).into_response(),
+            Err(e) => (axum::http::StatusCode::BAD_GATEWAY, short_error(&e)).into_response(),
+        },
+        Err(e) => (axum::http::StatusCode::BAD_GATEWAY, short_error(&e)).into_response(),
+    }
 }
 
 fn read_topology(path: &str) -> Result<Value, String> {

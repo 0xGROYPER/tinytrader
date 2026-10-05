@@ -157,6 +157,23 @@ tr:last-child td { border-bottom: 0; }
 .tip { position: absolute; pointer-events: none; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font: 13px var(--mono); color: var(--fg); white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.12); z-index: 2; }
 .tip .muted { display: block; font-size: 12px; }
 .empty { padding: 16px; color: var(--muted); font-size: 14px; }
+.events { border-top: 1px solid var(--line-soft); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.ev-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.ev-head b { font-size: 14px; }
+.ev-head .btn-sm { margin-left: auto; min-height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 500 13px var(--sans); cursor: pointer; }
+.ev-head .btn-sm:hover { background: var(--surface); }
+.ev-list { max-height: 340px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.ev-row { border-bottom: 1px solid var(--line-soft); }
+.ev-row:last-child { border-bottom: 0; }
+.ev-row summary { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; padding: 6px 12px; cursor: pointer; list-style: none; font: 13px var(--mono); font-variant-numeric: tabular-nums; }
+.ev-row summary::-webkit-details-marker { display: none; }
+.ev-row summary:hover { background: var(--accent-soft); }
+.ev-row .ev-t { color: var(--muted); }
+.ev-row .ev-s { color: var(--fg); overflow-wrap: anywhere; }
+.ev-row pre { margin: 0; padding: 8px 12px 10px 136px; font: 12px var(--mono); color: var(--fg-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ev-row.new summary { animation: evflash 1.4s ease-out; }
+@keyframes evflash { from { background: var(--accent-soft); } to { background: transparent; } }
+@media (prefers-reduced-motion: reduce) { .ev-row.new summary { animation: none; } }
 </style>
 </head>
 <body>
@@ -184,7 +201,8 @@ tr:last-child td { border-bottom: 0; }
 </div>
 
 <script>
-const state = { tab: 'overview', topo: null, snap: null, node: undefined, lastOk: 0 };
+const state = { tab: 'overview', topo: null, snap: null, node: undefined, lastOk: 0,
+  ev: { service: null, after: 0, rows: [], paused: false, open: new Set(), times: [], fresh: new Set() } };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
@@ -372,9 +390,51 @@ function detail(node) {
     <div class="d-head"><b>${esc(node.label || node.id)}</b>${st ? `<span class="pill ${statusText[st][1]}">${statusText[st][0]}</span>` : ''}<span class="muted" style="margin-left:auto">${esc(node.kind === 'ext' ? 'external' : (node.host || 'local'))}</span></div>
     ${node.role ? `<div class="muted">${esc(node.role)}</div>` : ''}
     ${facts.length ? `<div class="facts">${facts.map(([k, v]) => `<div><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('')}</div>` : ''}
+    ${node.kind === 'svc' && node.events ? eventsPanel(node) : ''}
     ${metrics.length ? `<details><summary>All metrics (${metrics.length})</summary><div class="scroll" style="margin-top:8px"><table class="metrics-tbl"><tbody>${metrics.map(([k, v]) => `<tr><td class="mono">${esc(k)}</td><td class="mono">${esc(v == null ? 'NaN' : +v.toFixed(6))}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
   </div>`;
 }
+// ---------- live events ----------
+// A service that declares an `events` URL in the topology gets a live tail here.
+function eventsPanel(node) {
+  if (state.ev.service !== node.id) Object.assign(state.ev, { service: node.id, after: 0, rows: [], open: new Set(), times: [], fresh: new Set() });
+  return `<div class="events">
+    <div class="ev-head"><b>Live events</b><span class="muted mono" id="ev-rate" style="font-size:13px">${evRate()}</span>
+      <button type="button" class="btn-sm" id="ev-pause" aria-pressed="${state.ev.paused}">${state.ev.paused ? 'Resume' : 'Pause'}</button></div>
+    <div class="ev-list" id="ev-list" aria-live="off">${evRows()}</div>
+  </div>`;
+}
+function evRows() {
+  if (!state.ev.rows.length) return '<div class="empty">Waiting for events…</div>';
+  return state.ev.rows.map(e => `<details class="ev-row${state.ev.fresh.has(e.seq) ? ' new' : ''}" data-seq="${e.seq}"${state.ev.open.has(e.seq) ? ' open' : ''}>
+    <summary><span class="ev-t">${new Date(e.received_ms).toISOString().slice(11, 23)}</span><span class="ev-s">${esc(e.summary)}</span></summary>
+    <pre>${esc(prettyRaw(e.raw))}</pre></details>`).join('');
+}
+function prettyRaw(raw) { try { return JSON.stringify(JSON.parse(raw), null, 2); } catch (_) { return raw; } }
+function evRate() {
+  const now = Date.now(); state.ev.times = state.ev.times.filter(t => now - t[0] < 10000);
+  const n = state.ev.times.reduce((a, t) => a + t[1], 0);
+  return state.ev.rows.length ? `${(n / 10).toFixed(1)} msg/s` : '';
+}
+async function pollEvents() {
+  const node = state.tab === 'overview' && nodesById()[state.node];
+  if (!node || node.kind !== 'svc' || !node.events || state.ev.paused || state.ev.service !== node.id) return;
+  try {
+    const r = await fetch(`/api/events/${encodeURIComponent(node.id)}?after=${state.ev.after}&limit=100`, { cache: 'no-store' });
+    if (!r.ok) return;
+    const body = await r.json();
+    if (state.ev.service !== node.id) return;
+    const fresh = body.events || [];
+    if (body.next < state.ev.after) state.ev.rows = []; // service restarted
+    state.ev.after = body.next ?? state.ev.after;
+    state.ev.fresh = new Set(fresh.map(e => e.seq));
+    if (fresh.length) { state.ev.times.push([Date.now(), fresh.length]); state.ev.rows = [...fresh.reverse(), ...state.ev.rows].slice(0, 200); }
+    const list = $('ev-list');
+    if (list) { const top = list.scrollTop; list.innerHTML = evRows(); list.scrollTop = top; }
+    const rate = $('ev-rate'); if (rate) rate.textContent = evRate();
+  } catch (_) {}
+}
+
 const labelText = l => { const e = Object.entries(l || {}); return e.length ? '{' + e.map(([k, v]) => `${k}="${v}"`).join(',') + '}' : ''; };
 
 // ---------- panels: time series a topology declares ----------
@@ -464,9 +524,12 @@ function drawCharts() {
 // ---------- render & polling ----------
 function render() {
   const focusId = document.activeElement?.dataset?.node;
-  const openDetails = !!document.querySelector('.detail details[open]');
+  const openDetails = !!document.querySelector('.detail > details[open]');
+  const evTop = $('ev-list')?.scrollTop ?? 0;
+  state.ev.fresh = new Set();
   $('view').innerHTML = state.tab === 'overview' ? topology() + cards() : servicesTable();
-  if (openDetails) { const d = document.querySelector('.detail details'); if (d) d.open = true; }
+  if (openDetails) { const d = document.querySelector('.detail > details'); if (d) d.open = true; }
+  if ($('ev-list')) $('ev-list').scrollTop = evTop;
   if (focusId) { const n = document.querySelector(`[data-node="${CSS.escape(focusId)}"]`); if (n) n.focus({ preventScroll: true }); }
   document.querySelectorAll('.nav button').forEach(b => { if (b.dataset.tab === state.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   drawCharts();
@@ -503,6 +566,14 @@ document.querySelector('.nav').addEventListener('click', e => {
 $('view').addEventListener('click', e => {
   const n = e.target.closest('[data-node]'); if (n) { state.node = state.node === n.dataset.node ? null : n.dataset.node; render(); }
 });
+$('view').addEventListener('toggle', e => {
+  const row = e.target.closest && e.target.closest('.ev-row'); if (!row) return;
+  const seq = +row.dataset.seq; if (row.open) state.ev.open.add(seq); else state.ev.open.delete(seq);
+}, true);
+$('view').addEventListener('click', e => {
+  if (e.target.id !== 'ev-pause') return;
+  state.ev.paused = !state.ev.paused; e.target.textContent = state.ev.paused ? 'Resume' : 'Pause'; e.target.setAttribute('aria-pressed', state.ev.paused);
+});
 $('view').addEventListener('keydown', e => {
   const n = e.target.closest && e.target.closest('[data-node]');
   if (n && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); n.dispatchEvent(new MouseEvent('click', { bubbles: true })); }
@@ -537,6 +608,7 @@ $('theme-btn').addEventListener('click', () => {
 (async () => {
   await loadTopology(); await poll();
   setInterval(poll, 2000);
+  setInterval(pollEvents, 700);
   setInterval(loadTopology, 30000);
 })();
 </script>
