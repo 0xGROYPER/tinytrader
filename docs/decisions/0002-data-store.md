@@ -5,6 +5,8 @@
 - **Amended:** 2026-10-05: provider roots, provenance and migration
   ledgers, raw pages from request/response sources, the intraday store,
   incorporating provider batches, and keeping roots clean
+- **See also:** [0005](0005-store-service-and-supervision.md), which makes
+  the store a service reached over the network
 
 ## Context
 
