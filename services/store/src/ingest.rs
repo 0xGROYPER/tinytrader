@@ -247,7 +247,44 @@ pub fn incorporate_databento(
     batch: &str,
     today: &str,
 ) -> Result<Value, String> {
-    let inc = root.join(INCOMING).join(batch);
+    file_databento(
+        &root.join(INCOMING).join(batch),
+        root,
+        elsewhere,
+        batch,
+        today,
+    )
+}
+
+/// File a Databento download folder where it already is (`dir`, on the same
+/// volume as the provider directory `root`), on exactly the same terms as an
+/// incoming batch. Nothing is copied: files move by link on the same volume.
+/// If any check fails, the folder is left exactly as it was.
+///
+/// # Errors
+/// As [`incorporate_databento`].
+pub fn adopt_databento(
+    dir: &Path,
+    root: &Path,
+    elsewhere: &[PathBuf],
+    today: &str,
+) -> Result<Value, String> {
+    let batch = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| safe(n))
+        .ok_or("not a batch folder")?;
+    file_databento(dir, root, elsewhere, batch, today)
+}
+
+fn file_databento(
+    inc: &Path,
+    root: &Path,
+    elsewhere: &[PathBuf],
+    batch: &str,
+    today: &str,
+) -> Result<Value, String> {
+    let inc = inc.to_path_buf();
     let read_json = |name: &str| -> Result<Value, String> {
         let p = inc.join(name);
         let text = fs::read_to_string(&p).map_err(|e| format!("{name}: {e}"))?;
@@ -465,6 +502,23 @@ pub fn incorporate_databento(
         }
         ledger.record(json!({ "step": "receipt", "file": to }));
     }
+    // Other receipts left in the folder (such as a downloader's own listing)
+    // are kept beside the provider's; anything else stays where it is.
+    for e in fs::read_dir(&inc).map_err(|e| e.to_string())?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name == "manifest.json" || !name.ends_with(".json") || !safe(&name) {
+            continue;
+        }
+        let to = prov.join(&name);
+        if to.exists() {
+            if hash_file(&to)? == hash_file(&e.path())? {
+                fs::remove_file(e.path()).map_err(|e| e.to_string())?;
+            }
+            continue;
+        }
+        place_new(&e.path(), &to).map_err(|e| format!("{}: {e}", to.display()))?;
+        ledger.record(json!({ "step": "receipt", "file": to }));
+    }
     // The manifest doesn't list itself; it is always kept.
     if !kept.exists() {
         write_new(&kept, kept_manifest.as_bytes())
@@ -473,12 +527,19 @@ pub fn incorporate_databento(
     let from = inc.join("manifest.json");
     let _ = fs::remove_file(&from);
     ledger.record(json!({ "step": "receipt", "file": kept }));
-    // The incoming directory is empty now; remove it (never recursively).
+    // The folder is empty now; remove it (never recursively). Anything the
+    // store didn't recognise keeps it there, and is reported.
+    let left: Vec<String> = fs::read_dir(&inc)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
     let _ = fs::remove_dir(&inc);
     let _ = fs::remove_dir(root.join(INCOMING));
     let summary = json!({
         "batch": batch, "dataset": dataset, "schema": schema, "symbols": symbols,
-        "files": placed, "receipts": receipts, "provenance": prov, "completed_at": tinytrader_observe::unix_seconds(),
+        "files": placed, "receipts": receipts, "provenance": prov, "from": inc, "left_behind": left, "completed_at": tinytrader_observe::unix_seconds(),
     });
     let text = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
     let mut out = root
@@ -683,6 +744,31 @@ mod tests {
         assert!(root.join("provenance/OPRA-8/manifest.json").exists());
         assert!(!root.join(INCOMING).exists());
         let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn adopts_a_download_folder_in_place() {
+        let base = scratch("adopt");
+        let root = base.join("Databento");
+        // A download folder at the top of the volume, with an extra receipt.
+        stage(&base, "OPRA-9", &["SPX.OPT"], b"day one");
+        let dir = base.join("OPRA-9");
+        fs::rename(base.join(INCOMING).join("OPRA-9"), &dir).unwrap();
+        fs::write(dir.join("_batch_listing.json"), "[]").unwrap();
+        let s = adopt_databento(&dir, &root, &[], "2026-10-06").unwrap();
+        assert_eq!(fs::read(root.join(DAY)).unwrap(), b"day one");
+        assert!(root.join("provenance/OPRA-9/_batch_listing.json").exists());
+        assert!(!dir.exists(), "the folder is gone once filed");
+        assert_eq!(s["left_behind"], json!([]));
+
+        // A folder that fails a check is left exactly as it was.
+        stage(&base, "OPRA-10", &["SPX.OPT"], b"different day one");
+        let bad = base.join("OPRA-10");
+        fs::rename(base.join(INCOMING).join("OPRA-10"), &bad).unwrap();
+        assert!(adopt_databento(&bad, &root, &[], "2026-10-06").is_err());
+        assert_eq!(fs::read_dir(&bad).unwrap().count(), 3);
+        assert_eq!(fs::read(root.join(DAY)).unwrap(), b"day one");
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

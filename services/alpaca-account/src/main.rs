@@ -150,6 +150,8 @@ struct Account {
     doc: Mutex<Value>,
     polls: AtomicU64,
     errors: AtomicU64,
+    /// Whether the equity history has been loaded since start.
+    history: std::sync::atomic::AtomicBool,
 }
 
 impl Account {
@@ -169,16 +171,29 @@ impl Account {
             secret,
             polls: AtomicU64::new(0),
             errors: AtomicU64::new(0),
+            history: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
 
-#[derive(Default)]
 struct Shared {
     accounts: Vec<Account>,
     calendar: Mutex<Value>,
     events: Events,
+    /// Each account's equity, one point a minute: the latest session, loaded
+    /// from Alpaca's portfolio history on start, then kept live.
     series: Series,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Self {
+            accounts: Vec::new(),
+            calendar: Mutex::default(),
+            events: Events::default(),
+            series: Series::new(1500, 60_000, 16),
+        }
+    }
 }
 
 /// The accounts to read, from `--accounts` and the secrets directory, or the
@@ -448,6 +463,9 @@ async fn read_one(
         Ok((account, positions)) => {
             a.polls.fetch_add(1, Ordering::Relaxed);
             update(shared, a, &account, &positions);
+            if !a.history.load(Ordering::Relaxed) {
+                load_history(shared, a, http).await;
+            }
             if let Some(e) = lock(&a.doc)["account"]["equity"].as_f64() {
                 shared.series.push(&a.label, e);
             }
@@ -459,6 +477,29 @@ async fn read_one(
             observer.record_error(&format!("{}: {e}", a.label));
             false
         }
+    }
+}
+
+/// Load the account's equity over its latest session (extended hours, one
+/// point a minute) from Alpaca's portfolio history, so a restart doesn't lose
+/// the curve. Alpaca's history uses its own marks; live points use ours.
+async fn load_history(shared: &Shared, a: &Account, http: &reqwest::Client) {
+    let path =
+        "/v2/account/portfolio/history?period=1D&timeframe=1Min&intraday_reporting=extended_hours";
+    match get_json(http, a.env, &a.key, &a.secret, path).await {
+        Ok(h) => {
+            let times = h["timestamp"].as_array().cloned().unwrap_or_default();
+            let equity = h["equity"].as_array().cloned().unwrap_or_default();
+            let points: Vec<(f64, f64)> = times
+                .iter()
+                .zip(&equity)
+                .filter_map(|(t, e)| Some((t.as_f64()? * 1000.0, e.as_f64()?)))
+                .filter(|(_, e)| *e > 0.0)
+                .collect();
+            shared.series.seed(&a.label, &points);
+            a.history.store(true, Ordering::Relaxed);
+        }
+        Err(e) => eprintln!("alpaca-account: {}: no equity history: {e}", a.label),
     }
 }
 

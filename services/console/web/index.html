@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>tinytrader</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&family=Inconsolata:wght@400;500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;600;700&family=Inconsolata:wght@400;500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Sora:wght@400;600;800&display=swap">
 <style>
 /* Layout: docs-style shell; light or dark, following the system unless the viewer picks one. Monochrome, after tinygrad: ink on paper, with colour only where it means something (green and red for prices, status colours for health). */
 :root {
@@ -65,7 +65,7 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 
 .icon-btn { width: 46px; height: 46px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); cursor: pointer; }
 .icon-btn:hover { background: var(--surface); }
-/* Palettes, chosen in the header: Frost (the default), Spruce, PB&J, Amber, Swiss Signal and PB&J v2. */
+/* Palettes, chosen in the header: Frost (the default), Spruce, PB&J, Amber, Swiss Signal, PB&J v2, Harbor Fog and Dusk. */
 :root[data-palette="spruce"] { --nav-bg: #FAF6F0; --accent: #2E5E4E; --accent-mark: #3B7562; --accent-2: #B8916A; --accent-soft: #E6F0EB; --nav-hover: rgba(46, 94, 78, .07); --link: var(--accent); }
 @media (prefers-color-scheme: dark) { :root[data-palette="spruce"]:not([data-theme="light"]) { --nav-bg: #15130F; --accent: #8DC9AC; --accent-mark: #6FB394; --accent-2: #A8835C; --accent-soft: #16261F; --nav-hover: rgba(141, 201, 172, .08); --link: var(--accent); } }
 :root[data-palette="spruce"][data-theme="dark"] { --nav-bg: #15130F; --accent: #8DC9AC; --accent-mark: #6FB394; --accent-2: #A8835C; --accent-soft: #16261F; --nav-hover: rgba(141, 201, 172, .08); --link: var(--accent); }
@@ -102,6 +102,25 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 :root[data-palette="pbj2"] h1 { font: 800 clamp(30px, 4vw, 44px)/1 var(--sans); letter-spacing: -0.04em; }
 :root[data-palette="pbj2"] h2 { font-family: var(--sans); font-weight: 800; letter-spacing: -0.02em; }
 :root[data-palette="pbj2"] .panel, :root[data-palette="pbj2"] .box { background: var(--surface); border-color: var(--accent-2); }
+/* Harbor Fog: fog-grey page, steel water for structure, night navy ink, buoy orange for whatever needs attention. IBM Plex. */
+:root[data-palette="harbor"] { --bg: #E9EEF0; --surface: #FFFFFF; --line: #CBD7DD; --line-soft: #DCE5E9; --nav-bg: #F2F5F6; --nav-hover: rgba(62, 106, 133, .08); --fg: #0E2236; --fg-2: #2A3E52; --muted: #46607A; --accent: #3E6A85; --accent-mark: #3E6A85; --accent-2: #8FB0C4; --accent-soft: #D4E2EA; --warn: #B5491A; --warn-mark: #E8743B; --warn-soft: #FBE5D9; --warn-line: #F2B898; --idle: #46607A; --idle-soft: #DCE5E9; --grid: #DCE5E9; --link: var(--accent);
+  --sans: 'IBM Plex Sans', -apple-system, 'Segoe UI', system-ui, sans-serif; --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace; }
+@media (prefers-color-scheme: dark) { :root[data-palette="harbor"]:not([data-theme="light"]) { --bg: #0E2236; --surface: #142C44; --line: #2A4560; --line-soft: #1B3550; --nav-bg: #0B1C2E; --nav-hover: rgba(143, 176, 196, .08); --fg: #E9EEF0; --fg-2: #C9D8E0; --muted: #8FB0C4; --accent: #8FB0C4; --accent-mark: #8FB0C4; --accent-2: #4F7690; --accent-soft: #1C3852; --warn: #F2925E; --warn-mark: #E8743B; --warn-soft: #3A2014; --warn-line: #7A3E1F; --idle: #8FB0C4; --idle-soft: #1B3550; --grid: #1B3550; --link: var(--accent); } }
+:root[data-palette="harbor"][data-theme="dark"] { --bg: #0E2236; --surface: #142C44; --line: #2A4560; --line-soft: #1B3550; --nav-bg: #0B1C2E; --nav-hover: rgba(143, 176, 196, .08); --fg: #E9EEF0; --fg-2: #C9D8E0; --muted: #8FB0C4; --accent: #8FB0C4; --accent-mark: #8FB0C4; --accent-2: #4F7690; --accent-soft: #1C3852; --warn: #F2925E; --warn-mark: #E8743B; --warn-soft: #3A2014; --warn-line: #7A3E1F; --idle: #8FB0C4; --idle-soft: #1B3550; --grid: #1B3550; --link: var(--accent); }
+:root[data-palette="harbor"] .top { border-top: 6px solid var(--accent); }
+:root[data-palette="harbor"] h1 { font: 700 clamp(30px, 4vw, 44px)/1 var(--sans); letter-spacing: -0.04em; }
+:root[data-palette="harbor"] h2 { font-family: var(--sans); font-weight: 700; letter-spacing: -0.02em; }
+:root[data-palette="harbor"] .panel, :root[data-palette="harbor"] .box { background: var(--surface); }
+/* Dusk: night-indigo page, violet for structure, peach (the last light) for whatever needs attention. Sora. */
+:root[data-palette="dusk"] { --bg: #F7F2FF; --surface: #EFE7FC; --line: #D6CBEE; --line-soft: #E6DCF7; --nav-bg: #F2EBFD; --nav-hover: rgba(123, 92, 214, .08); --fg: #1B1633; --fg-2: #352C63; --muted: #5E5485; --accent: #5B3FBF; --accent-mark: #7B5CD6; --accent-2: #E07A45; --accent-soft: #E6DCFA; --warn: #B8541E; --warn-mark: #E07A45; --warn-soft: #FCE6D9; --warn-line: #F2BC9C; --idle: #5E5485; --idle-soft: #E6DCF7; --grid: #E6DCF7; --link: var(--accent);
+  --sans: 'Sora', -apple-system, 'Segoe UI', system-ui, sans-serif; --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace; }
+@media (prefers-color-scheme: dark) { :root[data-palette="dusk"]:not([data-theme="light"]) { --bg: #1B1633; --surface: #2A2250; --line: #433A7A; --line-soft: #352C63; --nav-bg: #17122C; --nav-hover: rgba(255, 180, 138, .07); --fg: #F3E9FF; --fg-2: #D9CCF2; --muted: #B3A6D6; --accent: #B9A2F2; --accent-mark: #7B5CD6; --accent-2: #FFB48A; --accent-soft: #2E2557; --warn: #FFB48A; --warn-mark: #FFB48A; --warn-soft: #3A2630; --warn-line: #7A4A3E; --idle: #B3A6D6; --idle-soft: #2A2250; --grid: #2A2250; --link: var(--accent); } }
+:root[data-palette="dusk"][data-theme="dark"] { --bg: #1B1633; --surface: #2A2250; --line: #433A7A; --line-soft: #352C63; --nav-bg: #17122C; --nav-hover: rgba(255, 180, 138, .07); --fg: #F3E9FF; --fg-2: #D9CCF2; --muted: #B3A6D6; --accent: #B9A2F2; --accent-mark: #7B5CD6; --accent-2: #FFB48A; --accent-soft: #2E2557; --warn: #FFB48A; --warn-mark: #FFB48A; --warn-soft: #3A2630; --warn-line: #7A4A3E; --idle: #B3A6D6; --idle-soft: #2A2250; --grid: #2A2250; --link: var(--accent); }
+:root[data-palette="dusk"] .top { border-top: 6px solid var(--accent-2); }
+:root[data-palette="dusk"] h1 { font: 800 clamp(30px, 4vw, 44px)/1 var(--sans); letter-spacing: -0.05em; }
+:root[data-palette="dusk"] h1::after { content: "."; color: var(--accent-2); }
+:root[data-palette="dusk"] h2 { font-family: var(--sans); font-weight: 800; letter-spacing: -0.03em; }
+:root[data-palette="dusk"] .panel, :root[data-palette="dusk"] .box { border-radius: 10px; }
 .palette { height: 46px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 13px var(--ui); cursor: pointer; }
 
 .top-right { display: flex; align-items: center; gap: 14px; }
@@ -324,7 +343,7 @@ tr:last-child td { border-bottom: 0; }
   </div>
   <div class="top-right">
     <select class="palette" id="palette" aria-label="Palette" title="Palette">
-      <option value="frost">Frost</option><option value="spruce">Spruce</option><option value="pbj">PB&amp;J</option><option value="amber">Amber</option><option value="swiss">Swiss Signal</option><option value="pbj2">PB&amp;J v2</option>
+      <option value="frost">Frost</option><option value="spruce">Spruce</option><option value="pbj">PB&amp;J</option><option value="amber">Amber</option><option value="swiss">Swiss Signal</option><option value="pbj2">PB&amp;J v2</option><option value="harbor">Harbor Fog</option><option value="dusk">Dusk</option>
     </select>
     <button type="button" class="icon-btn" id="theme-btn"></button>
   </div>
@@ -1302,7 +1321,7 @@ darkQuery.addEventListener('change', applyTheme);
 // Palette: Frost by default; the choice is remembered per browser.
 (() => {
   const set = v => { if (v) document.documentElement.setAttribute('data-palette', v); else document.documentElement.removeAttribute('data-palette'); };
-  const palettes = ['frost', 'spruce', 'pbj', 'amber', 'swiss', 'pbj2'];
+  const palettes = ['frost', 'spruce', 'pbj', 'amber', 'swiss', 'pbj2', 'harbor', 'dusk'];
   let saved = 'frost'; try { const v = localStorage.getItem('tinytrader-palette'); if (palettes.includes(v)) saved = v; } catch (_) {}
   set(saved); $('palette').value = saved;
   $('palette').addEventListener('change', e => { set(e.target.value); try { localStorage.setItem('tinytrader-palette', e.target.value); } catch (_) {} drawCharts(); });

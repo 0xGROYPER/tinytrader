@@ -452,6 +452,39 @@ impl Series {
         }
     }
 
+    /// Load past points for `key` (milliseconds since the epoch, value), such
+    /// as history read back from a provider after a restart. Points newer than
+    /// what the series already holds are ignored; the newest are kept.
+    pub fn seed(&self, key: &str, points: &[(f64, f64)]) {
+        let mut s = lock(&self.inner);
+        let cap = s.points;
+        let k = s.keys.entry(key.to_owned()).or_insert(SeriesKey {
+            samples: VecDeque::new(),
+            last_sample_ms: f64::NEG_INFINITY,
+            updated_ms: 0.0,
+            updates: 0,
+        });
+        let first = k.samples.front().map_or(f64::INFINITY, |p| p.0);
+        let mut older: Vec<(f64, f64)> = points
+            .iter()
+            .copied()
+            .filter(|(t, v)| *t < first && v.is_finite())
+            .collect();
+        older.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some(last) = older.last() {
+            k.updated_ms = k.updated_ms.max(last.0);
+            if k.samples.is_empty() {
+                k.last_sample_ms = last.0;
+            }
+        }
+        for p in older.into_iter().rev() {
+            k.samples.push_front(p);
+        }
+        while k.samples.len() > cap {
+            k.samples.pop_front();
+        }
+    }
+
     /// The most active series, as served at `/recent`.
     #[must_use]
     pub fn snapshot(&self) -> serde_json::Value {
@@ -513,6 +546,31 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeded_history_goes_before_live_points() {
+        let s = Series::new(4, 1000, 4);
+        s.push_at("a", 10.0, 10_000.0);
+        s.seed(
+            "a",
+            &[
+                (1000.0, 1.0),
+                (2000.0, 2.0),
+                (3000.0, 3.0),
+                (20_000.0, 99.0),
+            ],
+        );
+        let v = s.snapshot();
+        assert_eq!(
+            v["a"],
+            serde_json::json!([
+                [1000.0, 1.0],
+                [2000.0, 2.0],
+                [3000.0, 3.0],
+                [10_000.0, 10.0]
+            ])
+        );
+    }
 
     #[test]
     fn metrics_text_has_help_once_and_escapes_labels() {

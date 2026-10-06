@@ -11,7 +11,9 @@
 //!   `GET /incoming` lists batches waiting; `POST /incorporate/{provider}/{batch}`
 //!   files a complete batch into the standard layout, with provenance and a
 //!   migration ledger (see the ingest module). `GET /batches/{provider}`
-//!   says which batches the volumes hold, and how.
+//!   says which batches the volumes hold, and how. `POST /adopt/{provider}`
+//!   with `{ "path": … }` files a provider download folder already on a
+//!   writable volume where it is, on the same terms.
 //!
 //! It runs natively (under launchd on a Mac), not in a container, so it sees
 //! the real disks, and binds to loopback by default.
@@ -19,7 +21,7 @@
 mod catalog;
 mod ingest;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -188,6 +190,7 @@ async fn main() {
         .route("/incoming/{provider}/{batch}/{file}", put(upload))
         .route("/incorporate/{provider}/{batch}", post(incorporate))
         .route("/batches/{provider}", get(batches))
+        .route("/adopt/{provider}", post(adopt))
         .with_state(store.clone())
         .merge(observer.router())
         .merge(store.events.router());
@@ -455,7 +458,14 @@ async fn batches(AxState(store): AxState<Shared>, UrlPath(provider): UrlPath<Str
         for v in &volumes {
             let root = v.path.join(pdir);
             // Raw download folders first, so a filed copy wins.
-            for parent in [v.path.clone(), root.clone()] {
+            let mut parents = vec![v.path.clone(), root.clone()];
+            parents.extend(
+                dirs(&v.path)
+                    .iter()
+                    .map(std::fs::DirEntry::path)
+                    .filter(|p| *p != root),
+            );
+            for parent in parents {
                 for e in dirs(&parent) {
                     if e.path().join("manifest.json").is_file()
                         && e.path().join("metadata.json").is_file()
@@ -488,6 +498,89 @@ async fn batches(AxState(store): AxState<Shared>, UrlPath(provider): UrlPath<Str
         StatusCode::OK,
         json!({ "provider": pdir, "batches": found }),
     )
+}
+
+#[derive(Deserialize)]
+struct AdoptRequest {
+    path: PathBuf,
+}
+
+/// File a download folder already on a volume, where it is. It must sit at
+/// the top of a writable volume, or one level down (such as a downloader's
+/// own folder), and be named for its batch.
+async fn adopt(
+    AxState(store): AxState<Shared>,
+    UrlPath(provider): UrlPath<String>,
+    Json(req): Json<AdoptRequest>,
+) -> Reply {
+    let Some(pdir) = ingest::provider_dir(&provider) else {
+        return refused(
+            StatusCode::NOT_FOUND,
+            format!("unknown provider {provider}"),
+        );
+    };
+    let Ok(dir) = req.path.canonicalize() else {
+        return refused(
+            StatusCode::NOT_FOUND,
+            format!("no folder {}", req.path.display()),
+        );
+    };
+    let Some(volume) = store.volumes.iter().find(|v| {
+        v.path.canonicalize().is_ok_and(|vp| {
+            dir.parent() == Some(vp.as_path())
+                || dir.parent().and_then(Path::parent) == Some(vp.as_path())
+        })
+    }) else {
+        return refused(
+            StatusCode::BAD_REQUEST,
+            "the folder must be at the top of a volume, or one level down",
+        );
+    };
+    if !volume.writable {
+        return refused(
+            StatusCode::FORBIDDEN,
+            format!("{} is read-only", volume.name),
+        );
+    }
+    if !dir.join("manifest.json").is_file() || !dir.join("metadata.json").is_file() {
+        return refused(
+            StatusCode::BAD_REQUEST,
+            "not a provider download folder (no manifest.json and metadata.json)",
+        );
+    }
+    let root = volume.path.join(pdir);
+    let elsewhere: Vec<PathBuf> = store
+        .volumes
+        .iter()
+        .map(|v| v.path.join(pdir))
+        .filter(|p| *p != root)
+        .collect();
+    let _one_at_a_time = store.filing.lock().await;
+    let today = today();
+    let d = dir.clone();
+    match tokio::task::spawn_blocking(move || {
+        ingest::adopt_databento(&d, &root, &elsewhere, &today)
+    })
+    .await
+    {
+        Ok(Ok(summary)) => {
+            store.batches_in.fetch_add(1, Ordering::Relaxed);
+            let n = summary["files"].as_array().map_or(0, Vec::len);
+            store.events.push(
+                format!("filed {} in place: {n} files", dir.display()),
+                summary.to_string(),
+            );
+            store.rescan.notify_one();
+            reply(StatusCode::OK, summary)
+        }
+        Ok(Err(e)) => {
+            store
+                .events
+                .push(format!("refused {}: {e}", dir.display()), e.clone());
+            refused(StatusCode::CONFLICT, e)
+        }
+        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 
 /// Today's UTC date, `YYYY-MM-DD`.
