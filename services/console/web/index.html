@@ -778,12 +778,14 @@ async function loadCollections() {
     updateCollectionsNav();
   } catch (_) {}
 }
-const groupLabel = g => g.split('/').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' › ');
+const groupLabel = g => g.split('/').map(p => folderLabel(p)).join(' › ');
 // The Docs section, after Databento's sidebar: folders form a tree (a
 // group `tinytrader/decisions` sits inside `tinytrader`), opening a folder closes
 // its siblings and opens its first document, and the open document's folders
 // are marked. With one collection its folders are the top level; with
 // several, each collection is a top-level folder.
+// Folder names are capitalized, except the platform's own lowercase name.
+const folderLabel = n => n === 'tinytrader' ? n : n.charAt(0).toUpperCase() + n.slice(1);
 const CHEV = '<span class="chev"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M8.3 13.3 11.7 10 8.3 6.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"/></svg></span>';
 function docTree(c) {
   const root = { path: '', docs: [], kids: new Map() };
@@ -828,7 +830,7 @@ function updateCollectionsNav() {
     for (const kid of node.kids.values()) {
       const k = folderKey(c, kid.path), expanded = state.openGroups.has(k);
       const trail = current && c === open && (current.group === kid.path || current.group.startsWith(kid.path + '/'));
-      out += `<button type="button" class="doc-item${lvl ? ' sub' : ''}${trail ? ' trail' : ''}" style="--lvl:${lvl}" data-col="${esc(c.id)}" data-folder="${esc(kid.path)}" aria-expanded="${expanded}">${CHEV}<span class="lbl">${esc(kid.name.charAt(0).toUpperCase() + kid.name.slice(1))}</span></button>`;
+      out += `<button type="button" class="doc-item${lvl ? ' sub' : ''}${trail ? ' trail' : ''}" style="--lvl:${lvl}" data-col="${esc(c.id)}" data-folder="${esc(kid.path)}" aria-expanded="${expanded}">${CHEV}<span class="lbl">${esc(folderLabel(kid.name))}</span></button>`;
       if (expanded) out += rows(c, kid, lvl + 1);
     }
     return out;
