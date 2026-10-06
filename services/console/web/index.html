@@ -612,94 +612,16 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 </div>
 
 <script src="/vendor/dockview-core-8.4.1.min.js"></script>
-<script>
-const state = { openGroups: new Set(), navKey: '', tab: 'workspace', wsMax: null, newsSymbol: null, topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
+<script type="module">
+import { esc, bytes, duration, fmt, ago } from '/lib/format.js';
+import { fleet, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf, newsItems } from '/lib/fleet.js';
+import { widget, widgetNames } from '/lib/widgets.js';
+import '/widgets/schedule.js';
+import '/widgets/news.js';
+const state = { openGroups: new Set(), navKey: '', tab: 'workspace', wsMax: null,  node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
   ev: { service: null, after: 0, rows: [], paused: false, open: new Set(), times: [], fresh: new Set() } };
 const $ = id => document.getElementById(id);
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-// ---------- data helpers ----------
-const svcState = id => state.snap?.services?.[id] || {};
-function metric(id, name, labels) {
-  const list = svcState(id).metrics?.[name] || [];
-  const hit = list.find(m => !labels || Object.entries(labels).every(([k, v]) => m.labels[k] === v));
-  return hit ? hit.value : null;
-}
-function statusOf(node) {
-  if (node.kind === 'ext') return null;
-  if (node.kind === 'store') {
-    const writer = writerOf(node.id);
-    return writer ? statusOf(writer) : 'idle';
-  }
-  const s = svcState(node.id), c = s.container, h = s.health;
-  if (c && ['exited', 'dead'].includes(c.state)) return 'crit';
-  if (c && c.state && c.state !== 'running') return 'warn';
-  if (h) {
-    if (h.error) return c ? 'warn' : 'crit';
-    if (h.body?.state === 'idle') return 'off';
-    if (h.body?.state === 'starting') return 'start';
-    if (h.body?.state && h.body.state !== 'ready') return 'warn';
-    return 'ok';
-  }
-  return c ? 'ok' : 'idle';
-}
-const statusText = { ok: ['Healthy', 'p-ok'], warn: ['Needs attention', 'p-warn'], crit: ['Down', 'p-crit'], idle: ['No data', 'p-idle'], off: ['Off schedule', 'p-idle'], start: ['Starting', 'p-idle'] };
-function writerOf(storeId) {
-  const e = (state.topo?.edges || []).find(e => e.to === storeId && e.kind === 'flow');
-  return e && nodesById()[e.from];
-}
-function nodesById() {
-  const t = state.topo || {};
-  const all = [
-    ...(t.external || []).map(n => ({ ...n, kind: 'ext' })),
-    ...(t.services || []).map(n => ({ ...n, kind: 'svc' })),
-    ...(t.stores || []).map(n => ({ ...n, kind: 'store' }))
-  ];
-  return Object.fromEntries(all.map(n => [n.id, n]));
-}
-function bytes(n) {
-  if (n == null) return '—';
-  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return (i ? n.toFixed(1) : n.toFixed(0)) + ' ' + u[i];
-}
-function duration(s) {
-  if (s == null || !isFinite(s)) return '—';
-  s = Math.max(0, Math.floor(s));
-  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
-  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : m ? `${m}m ${s % 60}s` : `${s}s`;
-}
-function uptimeOf(id) {
-  const s = svcState(id);
-  if (s.health?.body?.uptime_seconds != null) return s.health.body.uptime_seconds;
-  const started = s.container?.started_at && Date.parse(s.container.started_at);
-  return started ? (Date.now() - started) / 1000 : null;
-}
-function subOf(node) {
-  if (node.kind === 'ext') return node.sub || 'external';
-  if (node.kind === 'store') {
-    const v = node.metric && metric(node.metric.service, node.metric.name);
-    return v != null ? fmt(v, node.metric) : (node.sub || 'store');
-  }
-  const s = svcState(node.id);
-  if (s.health?.body?.detail) return s.health.body.detail;
-  if (s.health?.error) return 'unreachable';
-  if (s.container?.status) return s.container.status.toLowerCase();
-  return node.sub || 'no data';
-}
-// Display formats a topology can ask for. Nothing here knows about any particular service.
-function fmt(v, spec = {}) {
-  if (v == null || (typeof v === 'number' && !isFinite(v))) return '—';
-  let out;
-  switch (spec.format) {
-    case 'bytes': out = bytes(v); break;
-    case 'count': out = Math.round(v).toLocaleString(); break;
-    case 'age': out = v < 60 ? v.toFixed(1) + 's' : duration(v); break;
-    case 'percent': out = v.toFixed(1) + '%'; break;
-    default: { const d = spec.decimals ?? 2; out = v.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }); }
-  }
-  return (spec.prefix || '') + out + (spec.suffix || '');
-}
 
 // ---------- topology layout ----------
 const NW = 176, NH = 50, CG = 96, RG = 26, PAD = 24, HOST_TOP = 40;
@@ -708,7 +630,7 @@ const NW = 176, NH = 50, CG = 96, RG = 26, PAD = 24, HOST_TOP = 40;
 // outside source nothing active is connected to. The Services table still
 // lists them.
 function activeGraph() {
-  const all = nodesById(), edges = state.topo?.edges || [];
+  const all = nodesById(), edges = fleet.topo?.edges || [];
   const off = new Set(Object.values(all).filter(n => n.kind === 'svc' && statusOf(n) === 'off').map(n => n.id));
   const kept = edges.filter(e => !off.has(e.from) && !off.has(e.to));
   const used = new Set(kept.flatMap(e => [e.from, e.to]));
@@ -734,7 +656,7 @@ function layout() {
     return (col[id] = c);
   };
   ids.forEach(colOf);
-  const hosts = state.topo?.hosts || [{ id: 'local', label: 'local' }];
+  const hosts = fleet.topo?.hosts || [{ id: 'local', label: 'local' }];
   const hostOf = n => n.kind === 'ext' ? null : (n.host || hosts[0].id);
   const maxCol = Math.max(1, ...Object.values(col));
   const x = c => PAD + c * (NW + CG) + (c > 0 ? 16 : 0);
@@ -767,7 +689,7 @@ function layout() {
 }
 
 function topology() {
-  if (!state.topo) return '<section><div class="empty">Loading topology…</div></section>';
+  if (!fleet.topo) return '<section><div class="empty">Loading topology…</div></section>';
   const L = layout();
   const anchor = (p, side) => side === 'r' ? [p.x + p.w, p.y + p.h / 2] : [p.x, p.y + p.h / 2];
   const edges = L.edges.filter(e => L.pos[e.from] && L.pos[e.to]).map(e => {
@@ -875,7 +797,7 @@ const labelText = l => { const e = Object.entries(l || {}); return e.length ? '{
 // and draws one card per key. Titles, formats and footer metrics come from the topology.
 function cards() {
   const sections = [];
-  for (const panel of state.topo?.panels || []) {
+  for (const panel of fleet.topo?.panels || []) {
     const series = svcState(panel.service)[panel.source || 'recent'];
     if (!series) continue;
     const svc = nodesById()[panel.service];
@@ -902,7 +824,7 @@ function cards() {
 }
 
 function servicesTable() {
-  const rows = (state.topo?.services || []).map(svc => {
+  const rows = (fleet.topo?.services || []).map(svc => {
     const n = { ...svc, kind: 'svc' }, st = statusOf(n), c = svcState(svc.id).container;
     return `<tr><td class="mono" style="color:var(--fg)">${esc(svc.label || svc.id)}</td><td class="mono">${esc(svc.host || 'local')}</td>
       <td><span class="pill ${statusText[st][1]}">${statusText[st][0]}</span></td><td>${esc(subOf(n))}</td>
@@ -913,16 +835,10 @@ function servicesTable() {
   <div class="box scroll"><table><thead><tr><th>Service</th><th>Host</th><th>Status</th><th>Detail</th><th>Up</th><th>Restarts</th><th>CPU</th><th>Memory</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
-// ---------- market: accounts, charts and news ----------
-function marketView() {
-  const c = cards();
-  return `<div><h1>Market</h1><p class="muted" style="margin:0">Accounts, live prices from this deployment's market data services, and the latest news.</p></div>` +
-    accountsView() + (c || '<p class="muted">No service is publishing price series yet.</p>') + newsView();
-}
 // Every service that serves an `account` stream gets a card: live accounts first.
 function accountsView(withHeading = true) {
   // Every account of every service that serves an `accounts` stream.
-  const accts = (state.topo?.services || []).filter(s => s.accounts)
+  const accts = (fleet.topo?.services || []).filter(s => s.accounts)
     .flatMap(s => (svcState(s.id).accounts?.accounts || []).map(a => ({ svc: s, a })))
     .sort((x, y) => (x.a?.environment === 'live' ? 0 : 1) - (y.a?.environment === 'live' ? 0 : 1) || (x.a?.label || x.svc.id).localeCompare(y.a?.label || y.svc.id));
   if (!accts.length) return '';
@@ -933,9 +849,9 @@ function accountsView(withHeading = true) {
 // The market calendar as a month: one widget that reads well as a page or
 // in a narrow tile (it sizes itself to its container, not the window).
 function calendarView() {
-  const cal = (state.topo?.services || []).map(s => svcState(s.id).calendar).find(c => c?.days?.length);
+  const cal = (fleet.topo?.services || []).map(s => svcState(s.id).calendar).find(c => c?.days?.length);
   const head = '<div><h1>Calendar</h1><p class="muted" style="margin:0">US equity market sessions, in New York time.</p></div>';
-  if (!cal) return head + `<p class="muted">${(state.topo?.services || []).some(s => s.id === 'accounts') ? 'Loading the market calendar…' : 'No service is serving a market calendar.'}</p>`;
+  if (!cal) return head + `<p class="muted">${(fleet.topo?.services || []).some(s => s.id === 'accounts') ? 'Loading the market calendar…' : 'No service is serving a market calendar.'}</p>`;
   const ny = iso => new Date(iso).toLocaleString(undefined, { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   const until = iso => duration((Date.parse(iso) - Date.now()) / 1000);
   // The clock is a reading from when the calendar was fetched; carry it
@@ -1028,49 +944,18 @@ function accountCard(svc, a) {
     <div class="foot">${pos.length > 8 ? `${pos.length} positions, largest 8 shown · ` : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
   </article>`;
 }
-// Stories may carry HTML entities (&#39;); decode them to text, which esc() then escapes.
-function unentity(str) { const t = document.createElement('textarea'); t.innerHTML = str || ''; return t.value; }
-function newsItems() {
-  const seen = new Map();
-  for (const st of Object.values(state.snap?.services || {})) {
-    for (const n of st.news?.items || []) if (!seen.has(n.id)) seen.set(n.id, n);
-  }
-  return [...seen.values()].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
-}
-function ago(iso) {
-  const s = (Date.now() - Date.parse(iso)) / 1000;
-  if (!isFinite(s)) return '';
-  return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`;
-}
-function newsView(page = false) {
-  const items = newsItems(), h = page ? 'h1' : 'h2';
-  if (!items.length) return `<div><${h}>News</${h}><p class="muted">No news service is running, or it has no stories yet.</p></div>`;
-  const counts = new Map();
-  for (const n of items) for (const sym of n.symbols || []) counts.set(sym, (counts.get(sym) || 0) + 1);
-  const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14).map(([sym]) => sym);
-  const shown = state.newsSymbol ? items.filter(n => (n.symbols || []).includes(state.newsSymbol)) : items;
-  const chip = (sym, label) => `<button type="button" class="chip-btn" data-news-symbol="${esc(sym ?? '')}" aria-pressed="${(state.newsSymbol ?? null) === sym}">${esc(label)}</button>`;
-  return `<div><${h}>News</${h}><p class="muted" style="margin:0">${items.length} recent stories, newest first.</p></div>
-    <div class="chips">${chip(null, 'All')}${top.map(sym => chip(sym, sym)).join('')}</div>
-    <div class="news">${shown.slice(0, 100).map(n => `<article class="story">
-      <div class="story-meta"><span>${esc(ago(n.created_at))}</span><span>${esc(n.source || '')}${n.author ? ' · ' + esc(n.author) : ''}</span>
-        ${(n.symbols || []).slice(0, 8).map(sym => `<span class="tag">${esc(sym)}</span>`).join('')}</div>
-      ${/^https?:/.test(n.url || '') ? `<a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(unentity(n.headline))}</a>` : `<b>${esc(unentity(n.headline))}</b>`}
-      ${n.summary ? `<p>${esc(unentity(n.summary))}</p>` : ''}
-    </article>`).join('') || '<p class="muted" style="padding:16px;margin:0">No stories for this symbol.</p>'}</div>`;
-}
 
 // ---------- store: data and storage ----------
 // Catalogs come from services that describe a `catalog` stream. Every root of
 // every catalog is shown; nothing here knows about particular datasets.
 function catalogRoots() {
   const out = [];
-  for (const [svc, st] of Object.entries(state.snap?.services || {})) {
+  for (const [svc, st] of Object.entries(fleet.snap?.services || {})) {
     for (const r of st.catalog?.roots || []) out.push({ ...r, service: svc, thresholds: st.catalog.thresholds });
   }
   return out;
 }
-const catalogStamp = () => Object.values(state.snap?.services || {}).map(s => s.catalog?.generated_at ?? '').join('|');
+const catalogStamp = () => Object.values(fleet.snap?.services || {}).map(s => s.catalog?.generated_at ?? '').join('|');
 function updateStoreNav() {
   const has = catalogRoots().length > 0, el = $('nav-store');
   if (!el) return;
@@ -1514,65 +1399,6 @@ $('view').addEventListener('click', async e => {
 });
 setInterval(() => { if ($('jobs-list')) loadJobs(); }, 2000);
 
-// Schedule: what every service runs and when, from each service's
-// `/describe`. The deployment graph shows the present; this shows intent:
-// active hours on a day timeline (New York time), then every schedule.
-function scheduleView() {
-  const svcs = (state.topo?.services || []).filter(s => Array.isArray(s.schedule));
-  const head = '<div><h1>Schedule</h1><p class="muted" style="margin:0">What each service runs and when, in New York time.</p></div>';
-  if (!svcs.length) return head + '<p class="muted">No service describes a schedule yet.</p>';
-  // Services carrying the same feed on the same hours (the relays) are one row.
-  const rows = [];
-  for (const s of svcs) for (const x of s.schedule) {
-    const same = x.feed && rows.find(r => r.x.feed === x.feed && r.x.hours === x.hours && r.x.kind === x.kind);
-    if (same) { same.group.push(s); same.symbols.push(...(x.symbols || [])); }
-    else rows.push({ s, x, group: [s], symbols: [...(x.symbols || [])] });
-  }
-  const who = r => r.x.feed ? r.x.feed : (r.s.label || r.s.id);
-  const what = r => r.x.feed ? `${r.x.name}: ${r.symbols.join(', ')}${r.group.length > 1 ? ` (${r.group.length} relays)` : ''}` : r.x.name;
-  // A group's state is its worst member's.
-  const rank = { crit: 0, warn: 1, start: 2, ok: 3, off: 4, idle: 5 };
-  const worst = r => r.group.slice().sort((a, b) => (rank[statusOf({ ...a, kind: 'svc' })] ?? 9) - (rank[statusOf({ ...b, kind: 'svc' })] ?? 9))[0];
-  const mins = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
-  const nyNow = new Date().toLocaleString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short' });
-  const [wd, hm] = nyNow.split(' '), nowMin = mins(hm), pctNow = (nowMin / 1440 * 100).toFixed(2);
-  const cal = svcs.map(s => svcState(s.id).calendar).find(c => c?.days?.length);
-  const todayNy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const session = cal?.days.find(d => d.date === todayNy);
-  const trading = cal ? !!session : !['Sat', 'Sun'].includes(wd);
-  // A window is set relative to the 09:30–16:00 session: an early close ends it early by as much.
-  const shift = session && session.close < '16:00' ? mins(session.close) - 16 * 60 : 0;
-  const windows = rows.filter(r => r.x.kind === 'window' && r.x.hours);
-  const ticks = [0, 3, 6, 9, 12, 15, 18, 21, 24].map(h => `<span style="left:${(h / 24 * 100).toFixed(2)}%">${String(h).padStart(2, '0')}</span>`).join('');
-  const session0 = `<div class="tl-session" style="left:${(570 / 1440 * 100).toFixed(2)}%;width:${(((session ? mins(session.close) : 960) - 570) / 1440 * 100).toFixed(2)}%" title="Regular session"></div>`;
-  const timeline = windows.length ? `<div class="tl">
-      <div class="tl-row tl-axis"><span class="tl-label">${trading ? 'Today, a trading day' : 'Today, markets closed'}</span><div class="tl-track">${ticks}</div></div>
-      ${windows.map(r => {
-        const { x } = r, s = worst(r);
-        const [a, b] = x.hours.split('-').map(mins), end = b <= 16 * 60 + 60 ? b + shift : b;
-        const st = statusOf({ ...s, kind: 'svc' });
-        return `<div class="tl-row"><span class="tl-label" title="${esc(what(r))}">${esc(who(r))}</span><div class="tl-track">${session0}
-          <div class="tl-bar${trading ? '' : ' off'}${st === 'ok' ? ' live' : ''}" style="left:${(a / 1440 * 100).toFixed(2)}%;width:${((end - a) / 1440 * 100).toFixed(2)}%" title="${esc(x.when)}"></div>
-          <div class="tl-now" style="left:${pctNow}%"></div></div></div>`;
-      }).join('')}
-      <div class="tl-legend"><span><i class="tl-key bar"></i>active hours</span><span><i class="tl-key session"></i>regular session</span><span><i class="tl-key now"></i>now, ${esc(hm)} ET</span></div>
-    </div>` : '';
-  const order = { window: 0, always: 1, interval: 2, event: 3 };
-  const nowText = (s, x) => {
-    const h = svcState(s.id).health?.body || {}, st = statusOf({ ...s, kind: 'svc' });
-    if (st === 'crit') return '<span class="pill p-crit">Down</span>';
-    if (x.kind === 'window') {
-      const until = /until (.+)$/.exec(h.detail || '')?.[1];
-      return h.state === 'idle' ? `<span class="muted">next ${esc(until || 'session')}</span>` : '<span class="pill p-ok">Running</span>';
-    }
-    if (x.kind === 'always') return st === 'warn' ? '<span class="pill p-warn">Needs attention</span>' : '<span class="pill p-ok">Running</span>';
-    if (x.kind === 'interval') return h.state === 'idle' ? '<span class="muted">paused off-hours</span>' : '<span class="muted">repeating</span>';
-    return '<span class="muted">on event</span>';
-  };
-  const table = rows.slice().sort((p, q) => order[p.x.kind] - order[q.x.kind] || who(p).localeCompare(who(q))).map(r =>
-    `<tr><td class="mono" style="color:var(--fg)">${esc(who(r))}</td><td>${esc(what(r))}</td><td class="mono">${esc(r.x.when)}</td><td>${nowText(worst(r), r.x)}</td></tr>`).join('');
-  return head + timeline + `<div class="box scroll"><table class="sched"><thead><tr><th>Service or feed</th><th>What</th><th>When</th><th>Now</th></tr></thead><tbody>${table}</tbody></table></div>`;
-}
 
 // Roadmap: the console's reminders, after iOS Reminders. Lists on the left
 // (with All, Flagged and Completed), the chosen list's items on the right:
@@ -1678,10 +1504,8 @@ setInterval(() => { const box = $('rem'); if (box && !box.contains(document.acti
 // One view's HTML, for the page or for a workspace tile.
 function viewHtml(tab) {
   return tab === 'overview' ? topology()
-    : tab === 'market' ? marketView()
     : tab === 'prices' ? (cards() || '<p class="muted">No prices yet: they appear while the market data relays are running (from 07:55 ET for stocks, 09:25 ET for options).</p>')
     : tab === 'accounts' ? `<div><h1>Accounts</h1><p class="muted" style="margin:0">Balances and positions of every brokerage account this deployment reads. Read only.</p></div>` + (accountsView(false) || '<p class="muted">No account service is running.</p>')
-    : tab === 'news' ? newsView(true)
     : tab === 'calendar' ? calendarView()
     : tab === 'services' ? servicesTable()
     : tab === 'data' ? dataView()
@@ -1689,7 +1513,6 @@ function viewHtml(tab) {
     : tab === 'storage' ? storageView()
     : tab === 'shell' ? shellView()
     : tab === 'docs' ? docsWidget()
-    : tab === 'schedule' ? scheduleView()
     : tab === 'roadmap' ? remView()
     : tab === 'workspace' ? workspaceView() : collectionView();
 }
@@ -1699,7 +1522,9 @@ function viewHtml(tab) {
 // tabs (the current group's), the switcher (⌥W) and keys. Only the open
 // workspace runs: a panel renders while it is shown, and others are saved
 // layouts, which is all the switcher's previews read.
-const VIEWS = { roadmap: 'Roadmap', docs: 'Docs', overview: 'System graph', schedule: 'Schedule', market: 'Market', prices: 'Prices', accounts: 'Accounts and equity', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
+const VIEWS = { roadmap: 'Roadmap', docs: 'Docs', overview: 'System graph', prices: 'Prices', accounts: 'Accounts and equity', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
+// Widgets registered as modules (decision 0010) bring their own titles.
+for (const n of widgetNames()) VIEWS[n] = widget(n).title;
 // Views that hold their own state (forms, input) and update themselves.
 const STEADY = new Set(['jobs', 'shell', 'data', 'storage', 'roadmap']);
 const tileIcon = {
@@ -1724,15 +1549,26 @@ const panelId = () => 'p' + Date.now().toString(36) + (panelSeq++);
 const openViews = () => (dock?.panels || []).map(p => p.params?.view);
 const activePanel = () => dock?.activePanel || dock?.panels[0];
 function workspaceView() { return '<div class="ws dv-tt" id="ws-root"></div>'; }
+// A registered widget is mounted into its panel and kept as an instance;
+// older views are HTML from viewHtml.
+const mounted = new Map(); // panel body → widget instance
+function unmount(body) { mounted.get(body)?.dispose?.(); mounted.delete(body); }
 function renderPanel(body, view) {
-  body.dataset.view = view; body.innerHTML = viewHtml(view);
+  unmount(body);
+  body.dataset.view = view;
+  const w = widget(view);
+  if (w) { body.innerHTML = ''; mounted.set(body, w.mount(body) || {}); return; }
+  if (!VIEWS[view]) { body.innerHTML = `<p class="muted" style="padding:16px">There's no widget called “${esc(view)}” any more. Close this panel, or show another widget here from the palette (⌘K).</p>`; return; }
+  body.innerHTML = viewHtml(view);
   if (view === 'jobs') jobsOpened(); if (view === 'roadmap') remLoad();
   const out = body.querySelector('#term-out'); if (out) out.scrollTop = out.scrollHeight;
 }
 // On each refresh, only visible panels without state of their own redraw.
 function refreshTiles() {
   for (const body of panelBody.values()) {
-    if (!body.isConnected || STEADY.has(body.dataset.view)) continue;
+    if (!body.isConnected) continue;
+    if (mounted.has(body)) { mounted.get(body).update?.(); continue; }
+    if (STEADY.has(body.dataset.view) || !VIEWS[body.dataset.view]) continue;
     const top = body.scrollTop; body.innerHTML = viewHtml(body.dataset.view); body.scrollTop = top;
   }
 }
@@ -1745,6 +1581,7 @@ function buildTree(tree) {
   const p = add(first(tree).view); fill(tree, p);
 }
 function mountWorkspace() {
+  for (const body of mounted.keys()) unmount(body);
   dock?.dispose(); dock = null; panelBody.clear();
   const el = $('ws-root'); if (!el) return;
   if (!DV) { el.innerHTML = '<p class="msg-err" style="padding:16px">The window manager did not load (/vendor/dockview-core).</p>'; return; }
@@ -1787,7 +1624,7 @@ function mountWorkspace() {
     catch (e) { dock.clear(); buildTree(cur?.tree || LAYOUTS.Market()); }
   }
   if (state.focusView) { dock.panels.find(p => p.params?.view === state.focusView)?.api.setActive(); state.focusView = null; }
-  dock.onDidRemovePanel(p => panelBody.delete(p.id));
+  dock.onDidRemovePanel(p => { const body = panelBody.get(p.id); if (body) unmount(body); panelBody.delete(p.id); });
   dock.onDidActivePanelChange(e => { wsFocus = (e?.panel || e)?.id ?? null; });
   dock.onDidLayoutChange(() => { clearTimeout(mountWorkspace.t); mountWorkspace.t = setTimeout(laySave, 300); drawCharts(); });
   laySave();
@@ -2140,13 +1977,13 @@ const pad = (v, n) => String(v ?? '').padEnd(n);
 const row = s => { const h = svcState(s.id).health?.body || {}; return pad(s.id, 20) + pad(h.state || '?', 10) + (h.detail || ''); };
 const SHELL = {
   help: () => ['help                 this list', 'status               every service and its state', 'relays               market data relays and their hours', 'accounts             equity and positions of each account', 'store                drives, free space and status', 'jobs                 provider jobs not yet on disk', 'news [n]             the latest n stories (5)', 'calendar             the next trading sessions', 'clear                clear the screen'].join('\n'),
-  status: () => (state.topo?.services || []).map(row).join('\n') || 'no services',
-  relays: () => (state.topo?.services || []).filter(s => s.id.startsWith('relay')).map(row).join('\n') || 'no relays',
-  accounts: () => (state.topo?.services || []).flatMap(s => svcState(s.id).accounts?.accounts || []).map(a => pad(a.label, 10) + pad(a.environment, 8) + pad('$' + Number(a.account?.equity ?? NaN).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }), 14) + (a.positions?.length ? a.positions.map(p => `${p.symbol} ${p.qty}`).join(', ') : 'no positions')).join('\n') || 'no accounts',
+  status: () => (fleet.topo?.services || []).map(row).join('\n') || 'no services',
+  relays: () => (fleet.topo?.services || []).filter(s => s.id.startsWith('relay')).map(row).join('\n') || 'no relays',
+  accounts: () => (fleet.topo?.services || []).flatMap(s => svcState(s.id).accounts?.accounts || []).map(a => pad(a.label, 10) + pad(a.environment, 8) + pad('$' + Number(a.account?.equity ?? NaN).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }), 14) + (a.positions?.length ? a.positions.map(p => `${p.symbol} ${p.qty}`).join(', ') : 'no positions')).join('\n') || 'no accounts',
   store: () => catalogRoots().map(r => { const v = r.volume || {}; return pad(r.name, 10) + (r.present ? pad(`${((v.used_fraction ?? 0) * 100).toFixed(0)}% used`, 11) + pad(bytes(v.available_bytes) + ' free', 14) + pad(v.status, 9) + (r.writable ? 'writable' : 'read-only') : 'MISSING'); }).join('\n') || 'no store',
   jobs: async () => { const v = await jobsApi('jobs'); const w = (v.jobs || []).filter(j => !j.held); return w.length ? w.map(j => pad(j.id, 26) + pad(`${j.symbols} ${j.schema}`, 24) + pad(j.state, 12) + (j.bytes ? bytes(j.bytes) : '')).join('\n') : 'nothing waiting: every job is on disk'; },
   news: n => newsItems().slice(0, +n || 5).map(x => `${pad(ago(x.created_at), 10)} ${x.headline}`).join('\n') || 'no news',
-  calendar: () => { const cal = (state.topo?.services || []).map(s => svcState(s.id).calendar).find(c => c?.days?.length); const today = new Date().toISOString().slice(0, 10); return cal ? cal.days.filter(d => d.date >= today).slice(0, 5).map(d => `${d.date}  ${d.open}–${d.close} ET`).join('\n') : 'no calendar'; },
+  calendar: () => { const cal = (fleet.topo?.services || []).map(s => svcState(s.id).calendar).find(c => c?.days?.length); const today = new Date().toISOString().slice(0, 10); return cal ? cal.days.filter(d => d.date >= today).slice(0, 5).map(d => `${d.date}  ${d.open}–${d.close} ET`).join('\n') : 'no calendar'; },
 };
 async function runShell(line) {
   const [cmd, ...args] = line.trim().split(/\s+/);
@@ -2191,7 +2028,7 @@ function render() {
   document.body.classList.toggle('docs-mode', state.tab.startsWith('col:') || state.tab === 'roadmap');
   document.documentElement.style.setProperty('--top-h', document.querySelector('.top').offsetHeight + 'px');
   $('view').innerHTML = viewHtml(state.tab);
-  if (state.tab === 'workspace') mountWorkspace(); else if (dock) { dock.dispose(); dock = null; panelBody.clear(); }
+  if (state.tab === 'workspace') mountWorkspace(); else if (dock) { for (const body of mounted.keys()) unmount(body); dock.dispose(); dock = null; panelBody.clear(); }
   if ($('jobs-list')) jobsOpened();
   if ($('rem')) remLoad();
   if ($('ds-filter') && state.dsFilter) $('ds-filter').dispatchEvent(new Event('input', { bubbles: true }));
@@ -2211,11 +2048,11 @@ function render() {
 // Alerts: the bell beside the theme button. Its count is the services down
 // or needing attention; the list says which and why, and opens each one.
 function alerts() {
-  return (state.topo?.services || []).map(s => ({ s, st: statusOf({ ...s, kind: 'svc' }) })).filter(x => x.st === 'crit' || x.st === 'warn')
+  return (fleet.topo?.services || []).map(s => ({ s, st: statusOf({ ...s, kind: 'svc' }) })).filter(x => x.st === 'crit' || x.st === 'warn')
     .sort((a, b) => (a.st === 'crit' ? 0 : 1) - (b.st === 'crit' ? 0 : 1));
 }
 function updateHeaderStatus() {
-  if (!state.topo) return;
+  if (!fleet.topo) return;
   const list = alerts(), n = $('bell-n'), crit = list.some(x => x.st === 'crit');
   n.hidden = !list.length; n.textContent = list.length; n.classList.toggle('crit', crit);
   $('bell').title = list.length ? `${list.length} alert${list.length === 1 ? '' : 's'}` : 'No alerts';
@@ -2245,28 +2082,26 @@ function status() {
   const stale = age == null || age > 6;
   const problems = [];
   if (stale && age != null) problems.push('The console backend is not responding. Data shown may be out of date.');
-  const d = state.snap?.docker;
+  const d = fleet.snap?.docker;
   if (d?.configured && d.error) problems.push('Docker API unavailable: ' + d.error + '. Container state is missing.');
-  if (state.snap?.error) problems.push(state.snap.error);
+  if (fleet.snap?.error) problems.push(fleet.snap.error);
   $('banner').hidden = !problems.length;
   $('banner').textContent = problems.join(' ');
 }
 async function loadTopology() {
-  try { const r = await fetch('/api/topology', { cache: 'no-store' }); if (r.ok) { state.topo = await r.json(); document.title = state.topo.name ? `tinytrader · ${state.topo.name}` : 'tinytrader'; if (state.node === undefined) state.node = state.topo.focus ?? state.topo.services?.[0]?.id ?? null; } } catch (_) {}
+  try { const r = await fetch('/api/topology', { cache: 'no-store' }); if (r.ok) { fleet.topo = await r.json(); document.title = fleet.topo.name ? `tinytrader · ${fleet.topo.name}` : 'tinytrader'; if (state.node === undefined) state.node = fleet.topo.focus ?? fleet.topo.services?.[0]?.id ?? null; } } catch (_) {}
 }
 async function poll() {
   try {
     const r = await fetch('/api/state', { cache: 'no-store' });
-    if (r.ok) { state.snap = await r.json(); state.lastOk = Date.now(); }
+    if (r.ok) { fleet.snap = await r.json(); state.lastOk = Date.now(); }
   } catch (_) {}
   if (!document.querySelector('.tip:not([hidden])')) render(); else status();
 }
 
 document.querySelector('.home').addEventListener('click', e => {
   e.preventDefault();
-  state.tab = 'market'; state.doc = null; state.node = undefined; state.navigated = true;
-  try { history.replaceState(null, '', '#market'); } catch (_) {}
-  render(); window.scrollTo(0, 0);
+  if (lay.list[0]) laySwitch(lay.list[0].name);
 });
 document.querySelector('.nav').addEventListener('click', e => {
   const f = e.target.closest('[data-folder]');
@@ -2288,8 +2123,6 @@ document.querySelector('.nav').addEventListener('click', e => {
   render(); window.scrollTo(0, 0);
 });
 $('view').addEventListener('click', e => {
-  const ns = e.target.closest('[data-news-symbol]');
-  if (ns) { state.newsSymbol = ns.dataset.newsSymbol || null; render(); return; }
   const sc = e.target.closest('[data-schema]:not([data-cov])');
   if (sc) { state.dsSchema = sc.dataset.schema; state.navigated = true; render(); return; }
   const dc = e.target.closest('[data-doc]');

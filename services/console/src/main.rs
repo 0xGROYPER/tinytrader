@@ -39,9 +39,9 @@
 //!   (optional). The one exception to read-only: `/api/jobs/...` is passed to
 //!   it, so the Data page can price, submit and download jobs. The jobs
 //!   service itself insists on an exact confirmation before any charge.
-//! - `CONSOLE_PAGE`: serve the page from this file, read on each request,
-//!   instead of the copy built in (optional; lets the page change without a
-//!   rebuild).
+//! - `CONSOLE_PAGE`: serve the page from this file, and its modules and
+//!   libraries from beside it, read on each request, instead of the copies
+//!   built in (optional; lets the page change without a rebuild).
 //! - `CONSOLE_REMINDERS`: a JSON file for the roadmap's reminders, which the
 //!   console edits (`/api/reminders`); `CONSOLE_REMINDERS_SEED`: a Markdown
 //!   roadmap to start it from (optional).
@@ -57,19 +57,16 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::State as AxumState;
 use axum::http::{StatusCode, header};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde_json::json;
 use tinytrader_fleet::{EventsError, Poller, PollerConfig};
 use tinytrader_observe::{Observer, State};
 
-const PAGE: &str = include_str!("../web/index.html");
-/// Libraries the page loads, built in (and read from beside `CONSOLE_PAGE`
-/// when that is set). Names carry their versions, so browsers may cache them.
-const VENDOR: &[(&str, &[u8])] = &[(
-    "dockview-core-8.4.1.min.js",
-    include_bytes!("../web/vendor/dockview-core-8.4.1.min.js"),
-)];
+/// Every file under `web/`, built in.
+mod web {
+    include!(concat!(env!("OUT_DIR"), "/web.rs"));
+}
 
 struct App {
     poller: Poller,
@@ -147,7 +144,9 @@ async fn main() {
         .route("/", get(page))
         .route("/docs", get(page))
         .route("/docs/", get(page))
-        .route("/vendor/{file}", get(vendor))
+        .route("/vendor/{file}", get(file))
+        .route("/lib/{file}", get(file))
+        .route("/widgets/{file}", get(file))
         .route("/api/topology", get(topology))
         .route("/api/state", get(state))
         .route("/api/events/{service}", get(events))
@@ -191,38 +190,77 @@ async fn poll_forever(app: Arc<App>, observer: Observer) {
     }
 }
 
-async fn vendor(axum::extract::Path(file): axum::extract::Path<String>) -> Response {
-    let Some((name, built_in)) = VENDOR.iter().find(|(n, _)| *n == file) else {
+/// A file of the page, from the directory `CONSOLE_PAGE` names when set
+/// (read on each request, so the page changes without a rebuild), or else
+/// as built in. One source either way: neither falls back to the other.
+fn web_file(path: &str) -> Option<std::borrow::Cow<'static, [u8]>> {
+    match std::env::var("CONSOLE_PAGE") {
+        Ok(page) => {
+            let ok = path.split('/').all(|s| {
+                !s.is_empty()
+                    && !s.starts_with('.')
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+            });
+            let dir = std::path::Path::new(&page).parent()?;
+            let file = if path == "index.html" {
+                std::path::PathBuf::from(&page)
+            } else {
+                dir.join(path)
+            };
+            ok.then(|| std::fs::read(file).ok())
+                .flatten()
+                .map(std::borrow::Cow::Owned)
+        }
+        Err(_) => web::FILES
+            .iter()
+            .find(|(n, _)| *n == path)
+            .map(|(_, b)| std::borrow::Cow::Borrowed(*b)),
+    }
+}
+
+async fn file(uri: axum::http::Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let Some(body) = web_file(path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let body: Vec<u8> = std::env::var("CONSOLE_PAGE")
-        .ok()
-        .and_then(|p| {
-            std::path::Path::new(&p)
-                .parent()
-                .map(|d| d.join("vendor").join(name))
-        })
-        .and_then(|p| std::fs::read(p).ok())
-        .unwrap_or_else(|| built_in.to_vec());
+    let kind = match path.rsplit('.').next() {
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("json") => "application/json",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    };
+    // Libraries carry their versions in their names; the page's own modules change.
+    let cache = if path.starts_with("vendor/") {
+        "public, max-age=86400"
+    } else {
+        "no-cache"
+    };
     (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
+        [(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, cache)],
         body,
     )
         .into_response()
 }
 
-async fn page() -> Html<std::borrow::Cow<'static, str>> {
-    // A page file, when configured, is read fresh: the page can change
-    // without rebuilding the console.
-    if let Ok(path) = std::env::var("CONSOLE_PAGE")
-        && let Ok(text) = std::fs::read_to_string(&path)
-    {
-        return Html(std::borrow::Cow::Owned(text));
+async fn page() -> Response {
+    match web_file("index.html") {
+        Some(body) => (
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            body,
+        )
+            .into_response(),
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the console page is missing (CONSOLE_PAGE)",
+        )
+            .into_response(),
     }
-    Html(std::borrow::Cow::Borrowed(PAGE))
 }
 
 async fn topology(AxumState(app): AxumState<Arc<App>>) -> Response {
