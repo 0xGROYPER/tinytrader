@@ -23,6 +23,7 @@
   /* The interface is monospace, after tinygrad; long reading stays proportional. */
   --ui: var(--mono);
   --link: var(--fg);
+  --dot: var(--accent);
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #0E0E0E; --surface: #171717; --line: #2E2E2E; --line-soft: #1F1F1F; --nav-bg: #121212; --nav-hover: rgba(255, 255, 255, .06);
@@ -62,6 +63,8 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 .home:hover { color: var(--accent); }
 /* The wordmark is drawn from a 5-row bitmap font as squares, so it stays crisp. */
 .wordmark { display: block; height: 25px; width: auto; }
+/* The dot in tinytrader takes each palette's signature colour. */
+.wordmark .wm-dot { fill: var(--dot); }
 
 .icon-btn { width: 46px; height: 46px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); cursor: pointer; }
 .icon-btn:hover { background: var(--surface); }
@@ -85,6 +88,7 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
   --sans: 'Archivo', -apple-system, 'Segoe UI', system-ui, sans-serif; --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace; }
 @media (prefers-color-scheme: dark) { :root[data-palette="swiss"]:not([data-theme="light"]) { --bg: #0A0A0A; --surface: #151514; --line: #33332F; --line-soft: #1F1F1D; --nav-bg: #0A0A0A; --nav-hover: rgba(250, 250, 250, .06); --fg: #FAFAFA; --fg-2: #D9D9D4; --muted: #A3A39C; --accent: #FAFAFA; --accent-mark: #FAFAFA; --accent-2: #FF5A24; --accent-soft: #24241F; --warn: #FF7A4A; --warn-mark: #FF5A24; --warn-soft: #2E140A; --warn-line: #6B2A12; --idle: #A3A39C; --idle-soft: #1F1F1D; --grid: #1F1F1D; --link: var(--fg); } }
 :root[data-palette="swiss"][data-theme="dark"] { --bg: #0A0A0A; --surface: #151514; --line: #33332F; --line-soft: #1F1F1D; --nav-bg: #0A0A0A; --nav-hover: rgba(250, 250, 250, .06); --fg: #FAFAFA; --fg-2: #D9D9D4; --muted: #A3A39C; --accent: #FAFAFA; --accent-mark: #FAFAFA; --accent-2: #FF5A24; --accent-soft: #24241F; --warn: #FF7A4A; --warn-mark: #FF5A24; --warn-soft: #2E140A; --warn-line: #6B2A12; --idle: #A3A39C; --idle-soft: #1F1F1D; --grid: #1F1F1D; --link: var(--fg); }
+:root[data-palette="swiss"] { --dot: var(--accent-2); }
 :root[data-palette="swiss"] .top { border-top: 6px solid var(--fg); border-bottom: 2px solid var(--fg); }
 :root[data-palette="swiss"] h1 { font: 800 clamp(30px, 4vw, 44px)/1 var(--sans); letter-spacing: -0.04em; }
 :root[data-palette="swiss"] h1::after { content: "."; color: var(--accent-2); }
@@ -103,19 +107,29 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 :root[data-palette="pbj2"] h2 { font-family: var(--sans); font-weight: 800; letter-spacing: -0.02em; }
 :root[data-palette="pbj2"] .panel, :root[data-palette="pbj2"] .box { background: var(--surface); border-color: var(--accent-2); }
 /* Harbor Fog: fog-grey page, steel water for structure, night navy ink, buoy orange for whatever needs attention. IBM Plex. */
-:root[data-palette="harbor"] { --bg: #E9EEF0; --surface: #FFFFFF; --line: #CBD7DD; --line-soft: #DCE5E9; --nav-bg: #F2F5F6; --nav-hover: rgba(62, 106, 133, .08); --fg: #0E2236; --fg-2: #2A3E52; --muted: #46607A; --accent: #3E6A85; --accent-mark: #3E6A85; --accent-2: #8FB0C4; --accent-soft: #D4E2EA; --warn: #B5491A; --warn-mark: #E8743B; --warn-soft: #FBE5D9; --warn-line: #F2B898; --idle: #46607A; --idle-soft: #DCE5E9; --grid: #DCE5E9; --link: var(--accent);
+:root[data-palette="harbor"] { --bg: #E9EEF0; --surface: #FFFFFF; --line: #CBD7DD; --line-soft: #DCE5E9; --nav-bg: #D7E3EA; --nav-hover: rgba(62, 106, 133, .08); --fg: #0E2236; --fg-2: #2A3E52; --muted: #46607A; --accent: #3E6A85; --accent-mark: #3E6A85; --accent-2: #8FB0C4; --accent-soft: #D4E2EA; --warn: #B5491A; --warn-mark: #E8743B; --warn-soft: #FBE5D9; --warn-line: #F2B898; --idle: #46607A; --idle-soft: #DCE5E9; --grid: #DCE5E9; --link: var(--accent);
   --sans: 'IBM Plex Sans', -apple-system, 'Segoe UI', system-ui, sans-serif; --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace; }
 @media (prefers-color-scheme: dark) { :root[data-palette="harbor"]:not([data-theme="light"]) { --bg: #0E2236; --surface: #142C44; --line: #2A4560; --line-soft: #1B3550; --nav-bg: #0B1C2E; --nav-hover: rgba(143, 176, 196, .08); --fg: #E9EEF0; --fg-2: #C9D8E0; --muted: #8FB0C4; --accent: #8FB0C4; --accent-mark: #8FB0C4; --accent-2: #4F7690; --accent-soft: #1C3852; --warn: #F2925E; --warn-mark: #E8743B; --warn-soft: #3A2014; --warn-line: #7A3E1F; --idle: #8FB0C4; --idle-soft: #1B3550; --grid: #1B3550; --link: var(--accent); } }
 :root[data-palette="harbor"][data-theme="dark"] { --bg: #0E2236; --surface: #142C44; --line: #2A4560; --line-soft: #1B3550; --nav-bg: #0B1C2E; --nav-hover: rgba(143, 176, 196, .08); --fg: #E9EEF0; --fg-2: #C9D8E0; --muted: #8FB0C4; --accent: #8FB0C4; --accent-mark: #8FB0C4; --accent-2: #4F7690; --accent-soft: #1C3852; --warn: #F2925E; --warn-mark: #E8743B; --warn-soft: #3A2014; --warn-line: #7A3E1F; --idle: #8FB0C4; --idle-soft: #1B3550; --grid: #1B3550; --link: var(--accent); }
+:root[data-palette="harbor"] { --dot: var(--warn-mark); }
 :root[data-palette="harbor"] .top { border-top: 6px solid var(--accent); }
 :root[data-palette="harbor"] h1 { font: 700 clamp(30px, 4vw, 44px)/1 var(--sans); letter-spacing: -0.04em; }
 :root[data-palette="harbor"] h2 { font-family: var(--sans); font-weight: 700; letter-spacing: -0.02em; }
 :root[data-palette="harbor"] .panel, :root[data-palette="harbor"] .box { background: var(--surface); }
+:root[data-palette="harbor"] .panel { border-top: 3px solid var(--accent-2); }
+:root[data-palette="harbor"] .top { border-bottom: 3px solid var(--warn-mark); }
+:root[data-palette="harbor"] h1::after { content: "."; color: var(--warn-mark); }
+:root[data-palette="harbor"] .nav-label { color: var(--accent); }
+:root[data-palette="harbor"] .nav button[aria-current="page"] { background: var(--accent-2); color: var(--fg); box-shadow: inset 4px 0 0 var(--warn-mark); }
+:root[data-palette="harbor"] .btn.primary { background: var(--warn-mark); border-color: var(--warn-mark); color: #0E2236; }
+:root[data-palette="harbor"] .btn.primary:hover:not(:disabled) { background: #F08A55; }
+:root[data-palette="harbor"] .chip-btn[aria-pressed="true"] { background: var(--accent-2); color: var(--fg); border-color: var(--accent); }
 /* Dusk: night-indigo page, violet for structure, peach (the last light) for whatever needs attention. Sora. */
 :root[data-palette="dusk"] { --bg: #F7F2FF; --surface: #EFE7FC; --line: #D6CBEE; --line-soft: #E6DCF7; --nav-bg: #F2EBFD; --nav-hover: rgba(123, 92, 214, .08); --fg: #1B1633; --fg-2: #352C63; --muted: #5E5485; --accent: #5B3FBF; --accent-mark: #7B5CD6; --accent-2: #E07A45; --accent-soft: #E6DCFA; --warn: #B8541E; --warn-mark: #E07A45; --warn-soft: #FCE6D9; --warn-line: #F2BC9C; --idle: #5E5485; --idle-soft: #E6DCF7; --grid: #E6DCF7; --link: var(--accent);
   --sans: 'Sora', -apple-system, 'Segoe UI', system-ui, sans-serif; --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace; }
 @media (prefers-color-scheme: dark) { :root[data-palette="dusk"]:not([data-theme="light"]) { --bg: #1B1633; --surface: #2A2250; --line: #433A7A; --line-soft: #352C63; --nav-bg: #17122C; --nav-hover: rgba(255, 180, 138, .07); --fg: #F3E9FF; --fg-2: #D9CCF2; --muted: #B3A6D6; --accent: #B9A2F2; --accent-mark: #7B5CD6; --accent-2: #FFB48A; --accent-soft: #2E2557; --warn: #FFB48A; --warn-mark: #FFB48A; --warn-soft: #3A2630; --warn-line: #7A4A3E; --idle: #B3A6D6; --idle-soft: #2A2250; --grid: #2A2250; --link: var(--accent); } }
 :root[data-palette="dusk"][data-theme="dark"] { --bg: #1B1633; --surface: #2A2250; --line: #433A7A; --line-soft: #352C63; --nav-bg: #17122C; --nav-hover: rgba(255, 180, 138, .07); --fg: #F3E9FF; --fg-2: #D9CCF2; --muted: #B3A6D6; --accent: #B9A2F2; --accent-mark: #7B5CD6; --accent-2: #FFB48A; --accent-soft: #2E2557; --warn: #FFB48A; --warn-mark: #FFB48A; --warn-soft: #3A2630; --warn-line: #7A4A3E; --idle: #B3A6D6; --idle-soft: #2A2250; --grid: #2A2250; --link: var(--accent); }
+:root[data-palette="dusk"] { --dot: var(--accent-2); }
 :root[data-palette="dusk"] .top { border-top: 6px solid var(--accent-2); }
 :root[data-palette="dusk"] h1 { font: 800 clamp(30px, 4vw, 44px)/1 var(--sans); letter-spacing: -0.05em; }
 :root[data-palette="dusk"] h1::after { content: "."; color: var(--accent-2); }
@@ -175,7 +189,7 @@ h2 { margin: 0; font-size: 18px; font-weight: 600; }
 .n-label { font: 600 13px var(--mono); fill: var(--fg); pointer-events: none; }
 .n-sub { font: 12px var(--ui); fill: var(--muted); pointer-events: none; }
 .node.s-warn .n-sub { fill: var(--warn); } .node.s-crit .n-sub { fill: var(--crit); }
-.sdot { fill: var(--ok); } .s-warn .sdot { fill: var(--warn-mark); } .s-crit .sdot { fill: var(--crit-mark); } .s-idle .sdot { fill: var(--idle); }
+.sdot { fill: var(--ok); } .s-warn .sdot { fill: var(--warn-mark); } .s-crit .sdot { fill: var(--crit-mark); } .s-idle .sdot, .s-start .sdot { fill: var(--idle); }
 .e { fill: none; stroke-width: 1.8; }
 .e-flow { stroke: var(--accent-mark); stroke-dasharray: 6 5; }
 .e-flow.on { animation: flow 1.2s linear infinite; }
@@ -251,7 +265,7 @@ tr:last-child td { border-bottom: 0; }
 .ds-row.sel td { background: var(--accent-soft); }
 .panel { border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-/* Databento jobs: the request form and the jobs list. */
+/* Jobs: acquisition from data providers (Databento for now): the request form and the jobs list. */
 .job-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 12px 16px; }
 .field { min-width: 0; }
 .field label { display: block; font-size: 12px; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 4px; }
@@ -339,7 +353,7 @@ tr:last-child td { border-bottom: 0; }
 <body>
 <header class="top">
   <div class="brand">
-    <a class="home" href="#market" title="tinytrader: home"><svg class="wordmark" viewBox="0 0 37 5" width="185" height="25" fill="currentColor" shape-rendering="crispEdges" role="img" aria-label="tinytrader"><rect x="1" y="0" width="1" height="1"/><rect x="0" y="1" width="1" height="1"/><rect x="1" y="1" width="1" height="1"/><rect x="2" y="1" width="1" height="1"/><rect x="1" y="2" width="1" height="1"/><rect x="1" y="3" width="1" height="1"/><rect x="2" y="3" width="1" height="1"/><rect x="4" y="0" width="1" height="1"/><rect x="4" y="2" width="1" height="1"/><rect x="4" y="3" width="1" height="1"/><rect x="6" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/><rect x="6" y="2" width="1" height="1"/><rect x="8" y="2" width="1" height="1"/><rect x="6" y="3" width="1" height="1"/><rect x="8" y="3" width="1" height="1"/><rect x="10" y="1" width="1" height="1"/><rect x="12" y="1" width="1" height="1"/><rect x="10" y="2" width="1" height="1"/><rect x="11" y="2" width="1" height="1"/><rect x="12" y="2" width="1" height="1"/><rect x="12" y="3" width="1" height="1"/><rect x="10" y="4" width="1" height="1"/><rect x="11" y="4" width="1" height="1"/><rect x="15" y="0" width="1" height="1"/><rect x="14" y="1" width="1" height="1"/><rect x="15" y="1" width="1" height="1"/><rect x="16" y="1" width="1" height="1"/><rect x="15" y="2" width="1" height="1"/><rect x="15" y="3" width="1" height="1"/><rect x="16" y="3" width="1" height="1"/><rect x="18" y="1" width="1" height="1"/><rect x="19" y="1" width="1" height="1"/><rect x="20" y="1" width="1" height="1"/><rect x="18" y="2" width="1" height="1"/><rect x="18" y="3" width="1" height="1"/><rect x="22" y="1" width="1" height="1"/><rect x="23" y="1" width="1" height="1"/><rect x="23" y="2" width="1" height="1"/><rect x="24" y="2" width="1" height="1"/><rect x="22" y="3" width="1" height="1"/><rect x="23" y="3" width="1" height="1"/><rect x="24" y="3" width="1" height="1"/><rect x="28" y="0" width="1" height="1"/><rect x="27" y="1" width="1" height="1"/><rect x="28" y="1" width="1" height="1"/><rect x="26" y="2" width="1" height="1"/><rect x="28" y="2" width="1" height="1"/><rect x="27" y="3" width="1" height="1"/><rect x="28" y="3" width="1" height="1"/><rect x="30" y="1" width="1" height="1"/><rect x="31" y="1" width="1" height="1"/><rect x="32" y="1" width="1" height="1"/><rect x="30" y="2" width="1" height="1"/><rect x="31" y="2" width="1" height="1"/><rect x="30" y="3" width="1" height="1"/><rect x="31" y="3" width="1" height="1"/><rect x="32" y="3" width="1" height="1"/><rect x="34" y="1" width="1" height="1"/><rect x="35" y="1" width="1" height="1"/><rect x="36" y="1" width="1" height="1"/><rect x="34" y="2" width="1" height="1"/><rect x="34" y="3" width="1" height="1"/></svg></a>
+    <a class="home" href="#market" title="tinytrader: home"><svg class="wordmark" viewBox="0 0 45 5" width="225" height="25" fill="currentColor" shape-rendering="crispEdges" role="img" aria-label="tinytrader"><rect x="1" y="0" width="1" height="1"/><rect x="0" y="1" width="1" height="1"/><rect x="1" y="1" width="1" height="1"/><rect x="2" y="1" width="1" height="1"/><rect x="1" y="2" width="1" height="1"/><rect x="1" y="3" width="1" height="1"/><rect x="2" y="3" width="1" height="1"/><rect x="4" y="0" width="1" height="1"/><rect x="4" y="2" width="1" height="1"/><rect x="4" y="3" width="1" height="1"/><rect x="6" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/><rect x="6" y="2" width="1" height="1"/><rect x="8" y="2" width="1" height="1"/><rect x="6" y="3" width="1" height="1"/><rect x="8" y="3" width="1" height="1"/><rect x="10" y="1" width="1" height="1"/><rect x="12" y="1" width="1" height="1"/><rect x="10" y="2" width="1" height="1"/><rect x="11" y="2" width="1" height="1"/><rect x="12" y="2" width="1" height="1"/><rect x="12" y="3" width="1" height="1"/><rect x="10" y="4" width="1" height="1"/><rect x="11" y="4" width="1" height="1"/><rect x="15" y="0" width="1" height="1"/><rect x="14" y="1" width="1" height="1"/><rect x="15" y="1" width="1" height="1"/><rect x="16" y="1" width="1" height="1"/><rect x="15" y="2" width="1" height="1"/><rect x="15" y="3" width="1" height="1"/><rect x="16" y="3" width="1" height="1"/><rect x="18" y="1" width="1" height="1"/><rect x="19" y="1" width="1" height="1"/><rect x="20" y="1" width="1" height="1"/><rect x="18" y="2" width="1" height="1"/><rect x="18" y="3" width="1" height="1"/><rect x="22" y="1" width="1" height="1"/><rect x="23" y="1" width="1" height="1"/><rect x="23" y="2" width="1" height="1"/><rect x="24" y="2" width="1" height="1"/><rect x="22" y="3" width="1" height="1"/><rect x="23" y="3" width="1" height="1"/><rect x="24" y="3" width="1" height="1"/><rect x="28" y="0" width="1" height="1"/><rect x="27" y="1" width="1" height="1"/><rect x="28" y="1" width="1" height="1"/><rect x="26" y="2" width="1" height="1"/><rect x="28" y="2" width="1" height="1"/><rect x="27" y="3" width="1" height="1"/><rect x="28" y="3" width="1" height="1"/><rect x="30" y="1" width="1" height="1"/><rect x="31" y="1" width="1" height="1"/><rect x="32" y="1" width="1" height="1"/><rect x="30" y="2" width="1" height="1"/><rect x="31" y="2" width="1" height="1"/><rect x="30" y="3" width="1" height="1"/><rect x="31" y="3" width="1" height="1"/><rect x="32" y="3" width="1" height="1"/><rect x="34" y="1" width="1" height="1"/><rect x="35" y="1" width="1" height="1"/><rect x="36" y="1" width="1" height="1"/><rect x="34" y="2" width="1" height="1"/><rect x="34" y="3" width="1" height="1"/><rect class="wm-dot" x="38" y="3" width="1" height="1"/><rect x="40" y="0" width="1" height="1"/><rect x="40" y="2" width="1" height="1"/><rect x="40" y="3" width="1" height="1"/><rect x="42" y="1" width="1" height="1"/><rect x="43" y="1" width="1" height="1"/><rect x="44" y="1" width="1" height="1"/><rect x="42" y="2" width="1" height="1"/><rect x="44" y="2" width="1" height="1"/><rect x="42" y="3" width="1" height="1"/><rect x="43" y="3" width="1" height="1"/><rect x="44" y="3" width="1" height="1"/></svg></a>
   </div>
   <div class="top-right">
     <select class="palette" id="palette" aria-label="Palette" title="Palette">
@@ -398,12 +412,13 @@ function statusOf(node) {
   if (h) {
     if (h.error) return c ? 'warn' : 'crit';
     if (h.body?.state === 'idle') return 'off';
+    if (h.body?.state === 'starting') return 'start';
     if (h.body?.state && h.body.state !== 'ready') return 'warn';
     return 'ok';
   }
   return c ? 'ok' : 'idle';
 }
-const statusText = { ok: ['Healthy', 'p-ok'], warn: ['Needs attention', 'p-warn'], crit: ['Down', 'p-crit'], idle: ['No data', 'p-idle'], off: ['Off schedule', 'p-idle'] };
+const statusText = { ok: ['Healthy', 'p-ok'], warn: ['Needs attention', 'p-warn'], crit: ['Down', 'p-crit'], idle: ['No data', 'p-idle'], off: ['Off schedule', 'p-idle'], start: ['Starting', 'p-idle'] };
 function writerOf(storeId) {
   const e = (state.topo?.edges || []).find(e => e.to === storeId && e.kind === 'flow');
   return e && nodesById()[e.from];
@@ -795,7 +810,7 @@ const catalogStamp = () => Object.values(state.snap?.services || {}).map(s => s.
 function updateStoreNav() {
   const has = catalogRoots().length > 0, el = $('nav-store');
   if (has === !!el.childElementCount) return;
-  el.innerHTML = has ? `<div class="nav-sec"><div class="nav-label">Store</div><div class="nav-items"><button type="button" data-tab="data"><span class="chev"></span><span class="lbl">Data</span></button><button type="button" data-tab="jobs"><span class="chev"></span><span class="lbl">Databento jobs</span></button><button type="button" data-tab="storage"><span class="chev"></span><span class="lbl">Storage</span></button></div></div>` : '';
+  el.innerHTML = has ? `<div class="nav-sec"><div class="nav-label">Store</div><div class="nav-items"><button type="button" data-tab="data"><span class="chev"></span><span class="lbl">Data</span></button><button type="button" data-tab="jobs"><span class="chev"></span><span class="lbl">Jobs</span></button><button type="button" data-tab="storage"><span class="chev"></span><span class="lbl">Storage</span></button></div></div>` : '';
 }
 function dsRange(d) {
   const days = Object.values(d.schemas).flatMap(s => Object.keys(s.days || {})).sort();
@@ -1041,7 +1056,7 @@ function drawCharts() {
 // a request form that prices before it submits, and every job through to
 // filed in the store. The form is drawn once; only the list refreshes.
 const jobs = {
-  list: null, err: null, rowErr: {}, datasets: null, schemas: {}, quote: null, quoteFor: '', msg: null, busy: false,
+  list: null, err: null, rowErr: {}, showHeld: false, datasets: null, schemas: {}, quote: null, quoteFor: '', msg: null, busy: false,
   form: { dataset: 'OPRA.PILLAR', schema: 'cmbp-1', symbols: '', stype_in: 'parent', start: '', end: '' },
 };
 async function jobsApi(path, body) {
@@ -1070,7 +1085,8 @@ const usd = n => '$' + (n ?? 0).toLocaleString(undefined, { minimumFractionDigit
 const day = t => new Date(t * 1000).toISOString().slice(0, 10);
 function jobsView() {
   const f = jobs.form, stypes = [['parent', 'parent (SPX.OPT)'], ['raw_symbol', 'raw symbol'], ['continuous', 'continuous'], ['instrument_id', 'instrument ID']];
-  return `<div><h1>Databento jobs</h1><p class="muted" style="margin:0">Request historical data from Databento and download it into the store. Every request is priced first; anything that costs money needs your confirmation of the exact amount.</p></div>
+  return `<div><h1>Jobs</h1><p class="muted" style="margin:0">Request historical data from a provider and download it into the store. Every request is priced first; anything that costs money needs your confirmation of the exact amount.</p></div>
+  <div class="field" style="max-width:260px"><label for="jf-provider">Provider</label><select id="jf-provider"><option value="databento" selected>Databento</option></select></div>
   <section class="panel" id="job-form-panel">
     <div class="sec-head" style="margin:0"><h2>New request</h2></div>
     <form class="job-form" id="job-form" autocomplete="off">
@@ -1083,7 +1099,7 @@ function jobsView() {
     </form>
     <div class="quote" id="job-quote">${quoteLine()}</div>
   </section>
-  <section><div class="sec-head"><h2>Jobs</h2><span class="muted" style="font-size:13px">Not yet expired at Databento; those needing attention first</span></div><div id="jobs-list">${jobsTable()}</div></section>`;
+  <section><div class="sec-head"><h2>At Databento</h2><span class="muted" style="font-size:13px">Not yet expired at the provider; those needing attention first</span></div><div id="jobs-list">${jobsTable()}</div></section>`;
 }
 function quoteLine() {
   const q = jobs.quote, current = q && jobs.quoteFor === JSON.stringify(jobs.form);
@@ -1104,8 +1120,8 @@ function jobState(j) {
   if (t && t.state === 'waiting') return ['<span class="pill p-idle">Waiting to download</span>', ''];
   if (t && t.state === 'filing') return ['<span class="pill p-idle">Filing</span>', 'Checking every file against the manifest and filing it in the store'];
   if (t && t.state === 'failed') return [`<span class="pill p-crit">Failed</span> <button type="button" class="btn small" data-job-download="${esc(j.id)}">Retry</button>`, esc(t.error || '')];
-  if (h && h.how === 'filed') return [`<span class="pill p-ok">In the store</span>`, ''];
-  if (h && h.how === 'folder') return [`<span class="pill p-ok" title="In a download folder on ${esc(h.volume)}, not yet filed in the store layout">On ${esc(h.volume)}</span>`, ''];
+  if (h && h.how === 'filed') return [`<span class="pill p-ok" title="Filed on ${esc(h.volume)}">In the store</span>`, ''];
+  if (h && h.how === 'folder') return [`<span class="pill p-ok" title="Downloaded to a folder on ${esc(h.volume)}, not yet filed in the store layout">Downloaded</span>`, ''];
   if (h && h.how === 'incoming') return [`<span class="pill p-warn">Partly downloaded</span> <button type="button" class="btn small" data-job-download="${esc(j.id)}">Resume</button>`, ''];
   if (j.state === 'done' && j.unfileable) return ['<span class="pill p-idle">Not fileable</span>', `Can't be filed in the store: ${esc(j.unfileable)}`];
   if (j.state === 'done') return [`<span class="pill p-warn">Ready</span> <button type="button" class="btn small" data-job-download="${esc(j.id)}">Download</button>`, j.expires ? `Available until ${day(j.expires)}` : ''];
@@ -1118,8 +1134,12 @@ function jobsTable() {
   if (!jobs.list || jobs.list.updated_at == null) return '<div class="box empty">Loading jobs…</div>';
   // Jobs that need something (or are moving) first, then the rest; newest first within each.
   const settled = j => !!j.held && !j.transfer || j.state === 'expired';
-  const list = (jobs.list.jobs || []).slice().sort((a, b) => settled(a) - settled(b) || b.received - a.received);
-  if (!list.length) return '<div class="box empty">No jobs at Databento.</div>';
+  const all = (jobs.list.jobs || []).slice().sort((a, b) => settled(a) - settled(b) || b.received - a.received);
+  // Jobs already on disk are history; they're shown only on request.
+  const onDisk = all.filter(j => j.held && !j.transfer).length;
+  const list = jobs.showHeld ? all : all.filter(j => !(j.held && !j.transfer));
+  const toggle = onDisk ? `<button type="button" class="btn small" data-jobs-held>${jobs.showHeld ? 'Hide' : 'Show'} ${onDisk} already on disk</button>` : '';
+  if (!list.length) return `<div class="box empty">Nothing waiting: every job at Databento is already on disk.</div>${toggle}`;
   const rows = list.map(j => {
     let [st, sub] = jobState(j);
     if (jobs.rowErr[j.id] && !j.transfer) sub = `<span class="msg-err">${esc(jobs.rowErr[j.id])}</span>`;
@@ -1132,6 +1152,7 @@ function jobsTable() {
       <td style="white-space:nowrap">${st}</td></tr>${sub ? `<tr class="sub"><td></td><td colspan="5">${sub}</td></tr>` : ''}`;
   }).join('');
   return `<div class="box scroll"><table class="jobs-tbl"><thead><tr><th>Job</th><th>Request</th><th>Range</th><th style="text-align:right">Size</th><th style="text-align:right">Cost</th><th>State</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${toggle}
     ${jobs.list.store_reachable === false ? '<p class="msg-err">The store is not reachable, so what it already holds is not shown.</p>' : ''}`;
 }
 async function jobsOpened() {
@@ -1171,6 +1192,7 @@ $('view').addEventListener('click', async e => {
     } catch (err) { jobs.msg = { text: err.message }; }
     jobs.quote = null; jobs.busy = false; redrawQuote(); loadJobs(); return;
   }
+  if (e.target.closest && e.target.closest('[data-jobs-held]')) { jobs.showHeld = !jobs.showHeld; $('jobs-list').innerHTML = jobsTable(); return; }
   const d = e.target.closest && e.target.closest('[data-job-download]');
   if (d) {
     d.disabled = true; delete jobs.rowErr[d.dataset.jobDownload];

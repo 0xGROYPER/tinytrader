@@ -267,6 +267,21 @@ async fn refresh(jobs: &Shared) -> Result<usize, String> {
             .await
             .map_err(|e| format!("list jobs: {e}"))?
     };
+    // What the store already holds, first: only jobs not on disk need
+    // their file lists (for the size a download would take).
+    let held: Value = match jobs
+        .http
+        .get(format!("{}/batches/databento", jobs.store))
+        .send()
+        .await
+    {
+        Ok(r) => r
+            .json::<Value>()
+            .await
+            .map(|v| v["batches"].clone())
+            .unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
     let mut out = Vec::new();
     for s in &short {
         let known = lock(&jobs.details).get(&s.id).cloned();
@@ -282,7 +297,7 @@ async fn refresh(jobs: &Shared) -> Result<usize, String> {
         };
         if job.state == JobState::Done {
             lock(&jobs.details).insert(job.id.clone(), job.clone());
-            if !lock(&jobs.delivered).contains_key(&job.id) {
+            if held[&job.id].is_null() && !lock(&jobs.delivered).contains_key(&job.id) {
                 let files = jobs.db.lock().await.batch().list_files(&job.id).await;
                 if let Ok(files) = files {
                     lock(&jobs.delivered)
@@ -292,19 +307,6 @@ async fn refresh(jobs: &Shared) -> Result<usize, String> {
         }
         out.push(job);
     }
-    let held: Value = match jobs
-        .http
-        .get(format!("{}/batches/databento", jobs.store))
-        .send()
-        .await
-    {
-        Ok(r) => r
-            .json::<Value>()
-            .await
-            .map(|v| v["batches"].clone())
-            .unwrap_or(Value::Null),
-        Err(_) => Value::Null,
-    };
     let delivered = lock(&jobs.delivered).clone();
     let rows: Vec<Value> = out
         .iter()
@@ -856,7 +858,11 @@ mod tests {
     fn refuses_requests_without_symbols_or_backwards() {
         assert!(req(" , ", "2025-10-01", "2025-10-01").check().is_err());
         assert!(req("SPX.OPT", "2025-10-02", "2025-10-01").check().is_err());
-        assert!(req("SPY.OPT,QQQ.OPT", "2025-10-01", "2025-10-01").check().is_err());
+        assert!(
+            req("SPY.OPT,QQQ.OPT", "2025-10-01", "2025-10-01")
+                .check()
+                .is_err()
+        );
         assert!(
             Request {
                 schema: "nope".into(),
