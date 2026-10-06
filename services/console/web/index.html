@@ -380,7 +380,7 @@ body:not(.docs-mode) .nav { display: none; }
 @media (max-width: 640px) { .brand { flex-wrap: wrap; row-gap: 6px; } .wtabs { flex: 1 0 100%; order: 3; } }
 /* Schedule: one line per service; a strip of today; symbols for the rest. */
 .sc { display: flex; flex-direction: column; gap: 2px; font: 13px var(--mono); container-type: inline-size; }
-.sc-row { display: grid; grid-template-columns: 10px minmax(80px, 170px) minmax(0, 1fr) 6em 5.5em; align-items: center; gap: 10px; min-height: 26px; }
+.sc-row { display: grid; grid-template-columns: 10px minmax(80px, 200px) minmax(0, 1fr) 13em 5.5em; align-items: center; gap: 10px; min-height: 26px; }
 .sc-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
 .sc-dot.ok { background: var(--ok); } .sc-dot.warn { background: var(--warn-mark); } .sc-dot.crit { background: var(--crit-mark); } .sc-dot.start { background: var(--accent-2); }
 .sc-name { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -392,7 +392,7 @@ body:not(.docs-mode) .nav { display: none; }
 .sc-bar.pause { background: repeating-linear-gradient(135deg, var(--muted) 0 2px, transparent 2px 5px); opacity: .7; }
 .sc-always { position: absolute; left: 0; right: 0; top: 6px; height: 2px; background: var(--accent-2); }
 .sc-now { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--warn-mark); }
-.sc-marks { display: flex; gap: 8px; color: var(--muted); white-space: nowrap; }
+.sc-marks { display: flex; gap: 4px 10px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
 .sc-marks span { cursor: default; }
 .sc-next { color: var(--muted); font-size: 12px; white-space: nowrap; text-align: right; }
 .sc-axis { min-height: 20px; } .sc-axis .sc-name, .sc-axis .sc-next { color: var(--muted); font-size: 12px; }

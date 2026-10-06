@@ -1,8 +1,8 @@
 // Schedule: one line per service (relays on the same feed and hours share
 // one), each with its state, a strip of today in New York time and symbols
-// for what else it runs. The words are in the tooltips.
-//   ▬ active hours (bright while running)   ▨ paused   ─ always running
-//   ↻ repeats every …   ⚡ on an event
+// for what else it runs (every 30s, on events). Details are in the tooltips.
+// The strip: a bar for active hours (bright while running), hatched for a
+// pause, a thin line for always running.
 import { defineWidget, redrawing } from '../lib/widgets.js';
 import { fleet, svcState, statusOf } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
@@ -48,11 +48,11 @@ function draw() {
         if (x.kind === 'window') next = inside && st === 'ok' ? `until ${x.hours.split('-')[1]}` : resume ? `next ${resume}` : '';
         if (x.kind === 'pause' && inside) next = 'paused';
       } else if (x.kind === 'always') bars.push(`<i class="sc-always" title="${esc(x.name)}: ${esc(x.when || 'always')}"></i>`);
-      else if (x.kind === 'interval') marks.push(`<span title="${esc(x.name)}: ${esc(x.when)}">↻${x.every_seconds ? every(x.every_seconds) : ''}</span>`);
-      else marks.push(`<span title="${esc(x.name)}: ${esc(x.when)}">⚡</span>`);
+      else if (x.kind === 'interval') marks.push(`<span title="${esc(x.name)}: ${esc(x.when)}">${x.every_seconds ? 'every ' + every(x.every_seconds) : 'repeats'}</span>`);
+      else marks.push(`<span title="${esc(x.name)}: ${esc(x.when)}">on events</span>`);
     }
     const title = [l.label, l.symbols.join(', '), l.members.length > 1 ? `${l.members.length} relays` : '', detail].filter(Boolean).join(' · ');
-    return `<div class="sc-row"><i class="sc-dot ${st || 'idle'}"></i><span class="sc-name" title="${esc(title)}">${esc(l.label)}${l.members.length > 1 ? `<em>×${l.members.length}</em>` : ''}</span>
+    return `<div class="sc-row"><i class="sc-dot ${st || 'idle'}"></i><span class="sc-name" title="${esc(title)}">${esc(l.label)}${l.members.length > 1 ? `<em>${l.members.length} relays</em>` : ''}</span>
       <span class="sc-track">${bars.join('')}<i class="sc-now" style="left:${pct(now)}"></i></span>
       <span class="sc-marks">${marks.join('')}</span><span class="sc-next">${esc(next)}</span></div>`;
   };
