@@ -353,6 +353,7 @@ body:not(.docs-mode) .nav { display: none; }
 .nav-home { all: unset; display: block; cursor: pointer; }
 .nav .nav-home { padding: 0 10px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 .nav .nav-home:hover { color: var(--fg); }
+.nav .nav-home[aria-current="page"] { color: var(--accent); }
 .doc-links { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
 .doc-links a { color: var(--fg); text-decoration: none; padding: 4px 6px; border-radius: 4px; font-size: 14px; }
 .doc-links a:hover { background: var(--nav-hover); color: var(--accent); }
@@ -1196,8 +1197,10 @@ function updateCollectionsNav() {
       return `<button type="button" data-tab="col:${esc(c.id)}" aria-expanded="${expanded}">${CHEV}<span class="lbl">${esc(c.name)}</span></button>` + (expanded ? rows(c, docTree(c), 1) : '');
     }).join('');
   }
-  const road = `<button type="button" class="doc-item" data-docs-roadmap${state.tab === 'roadmap' ? ' aria-current="page"' : ''}><span class="chev"></span><span class="lbl">Roadmap</span></button>`;
-  $('nav-collections').innerHTML = `<div class="nav-sec"><button type="button" class="nav-label nav-home" data-docs-home>Docs</button><div class="nav-items">${road}${items}</div></div>`;
+  // Roadmap and Docs are two sections of the docs pages, each headed by a link.
+  const here = (on) => on ? ' aria-current="page"' : '';
+  $('nav-collections').innerHTML = `<div class="nav-sec"><button type="button" class="nav-label nav-home" data-docs-roadmap${here(state.tab === 'roadmap')}>Roadmap</button></div>
+    <div class="nav-sec"><button type="button" class="nav-label nav-home" data-docs-home${here(state.tab.startsWith('col:') && state.doc === null)}>Docs</button><div class="nav-items">${items}</div></div>`;
 }
 function docsWidget() {
   if (!state.collections.length) return '<p class="muted">No documents are configured.</p>';
