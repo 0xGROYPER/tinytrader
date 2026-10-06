@@ -323,6 +323,21 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 .pal li { padding: 8px 10px; border-radius: 6px; font: 14px var(--ui); cursor: pointer; }
 .pal li[aria-selected="true"], .pal li:hover { background: var(--accent-soft); color: var(--accent); }
 .pal-hint { margin: 0; padding: 8px 16px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line-soft); }
+/* In a tile, a view is a widget: the tile bar names it, so the page title and description go. */
+.ws .tile-body > div:first-child:has(> h1) { display: none; }
+.tile-body { container: tile / size; }
+.ws .tile-body > .mcal { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 220px; }
+.ws .mcal-grid { flex: 1; grid-template-rows: auto repeat(var(--weeks), minmax(0, 1fr)); }
+.ws .cal-day { min-height: 0; }
+@container tile (max-height: 560px) { .cal-coming { display: none; } }
+.mcal-now { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin-right: auto; margin-left: 8px; white-space: nowrap; }
+@container (max-width: 380px) { .mcal-now .muted { display: none; } }
+/* Saved layouts under Workspace in the sidebar. */
+.nav-sub { display: flex; flex-direction: column; }
+.nav .nav-sub button { min-height: 30px; padding-left: 40px; font-size: 13px; font-weight: 500; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.nav .nav-sub button .lbl { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-sub kbd { font: 11px var(--mono); color: var(--muted); }
+.nav .nav-sub button[aria-current="page"] { color: var(--accent); background: transparent; }
 /* The tinytrader shell: read-only commands over this deployment. */
 .term { flex: 1; display: flex; flex-direction: column; min-height: 320px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: 13px/1.5 var(--mono); }
 .tile-body > .term { border: 0; border-radius: 0; margin: -14px -16px; }
@@ -333,7 +348,6 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 .term-in span { color: var(--accent); }
 .term-in input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--fg); font: inherit; }
 /* Calendar: a month grid that sizes itself to its container (page or tile). */
-.cal-now { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; }
 .mcal { container-type: inline-size; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg); }
 .mcal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .mcal-head h2 { margin: 0; font-size: 16px; }
@@ -790,8 +804,8 @@ function calendarView() {
   const until = iso => duration((Date.parse(iso) - Date.now()) / 1000);
   const c = cal.clock || {};
   const now = c.is_open
-    ? `<span class="pill p-ok">Open</span> Closes ${esc(ny(c.next_close))} (in ${until(c.next_close)})`
-    : `<span class="pill p-idle">Closed</span> Opens ${esc(ny(c.next_open))} (in ${until(c.next_open)})`;
+    ? `<span class="pill p-ok" title="Closes ${esc(ny(c.next_close))}">Open</span><span class="muted">closes in ${until(c.next_close)}</span>`
+    : `<span class="pill p-idle" title="Opens ${esc(ny(c.next_open))}">Closed</span><span class="muted">opens in ${until(c.next_open)}</span>`;
   const sessions = new Map(cal.days.map(d => [d.date, d]));
   const firstDay = cal.days[0].date, lastDay = cal.days[cal.days.length - 1].date;
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -823,10 +837,10 @@ function calendarView() {
     const k = kind(date, new Date(t).getUTCDay());
     if (k === 'holiday' || k === 'early') coming.push(`<li><span>${esc(new Date(t).toLocaleDateString(undefined, { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' }))}</span><span class="${k === 'holiday' ? 'warn' : ''}">${k === 'holiday' ? 'Closed' : 'Closes ' + esc(sessions.get(date).close)}</span></li>`);
   }
-  return head + `<div class="cal-now">${now}</div>
-    <div class="mcal">
-      <div class="mcal-head"><h2>${esc(label)}</h2><span class="mcal-nav">${nav(-1, 'Previous month', month <= months[0])}<button type="button" class="btn small" data-cal-nav="0"${month === today.slice(0, 7) ? ' disabled' : ''}>Today</button>${nav(1, 'Next month', month >= months[1])}</span></div>
-      <div class="mcal-grid">${cells.join('')}</div>
+  const weeks = cells.length / 7 - 1;
+  return head + `<div class="mcal">
+      <div class="mcal-head"><h2>${esc(label)}</h2><span class="mcal-now">${now}</span><span class="mcal-nav">${nav(-1, 'Previous month', month <= months[0])}<button type="button" class="btn small" data-cal-nav="0"${month === today.slice(0, 7) ? ' disabled' : ''}>Today</button>${nav(1, 'Next month', month >= months[1])}</span></div>
+      <div class="mcal-grid" style="--weeks:${weeks}">${cells.join('')}</div>
     </div>
     ${`${month}-01` <= lastDay && lastDay < `${month}-31` ? `<p class="muted" style="margin:0;font-size:13px">The calendar is known through ${esc(lastDay)}.</p>` : ''}
     <div class="cal-coming"><h3>Coming up</h3>${coming.length ? `<ul>${coming.join('')}</ul>` : `<p class="muted" style="margin:0;font-size:13px">No holidays or early closes through ${esc(lastDay)}.</p>`}</div>`;
@@ -1334,7 +1348,7 @@ let wsSeq = 1;
 const wsDefault = () => ({ dir: 'row', ratio: 0.6, a: { view: 'market' }, b: { dir: 'col', ratio: 0.5, a: { view: 'accounts' }, b: { view: 'shell' } } });
 state.ws = (() => { try { const v = JSON.parse(localStorage.getItem('tinytrader-workspace')); if (v && (v.view || v.dir)) return v; } catch (_) {} return wsDefault(); })();
 (function number(n) { n.id = 'w' + wsSeq++; if (!n.view) { number(n.a); number(n.b); } })(state.ws);
-const wsSave = () => { try { localStorage.setItem('tinytrader-workspace', JSON.stringify(state.ws)); } catch (_) {} };
+let wsSave = () => { try { localStorage.setItem('tinytrader-workspace', JSON.stringify(state.ws)); } catch (_) {} };
 const wsLeaves = (n = state.ws, out = []) => { if (n.view) out.push(n); else { wsLeaves(n.a, out); wsLeaves(n.b, out); } return out; };
 const wsFind = (id, n = state.ws, parent = null) => n.id === id ? { n, parent } : n.view ? null : wsFind(id, n.a, n) || wsFind(id, n.b, n);
 const tileIcon = {
@@ -1401,9 +1415,9 @@ $('view').addEventListener('pointerdown', e => {
 // or below, add a column at the far right or a row along the bottom, close
 // it, or switch to a saved layout.
 const LAYOUTS = {
-  'System graph and equity, news on the right': () => ({ dir: 'row', ratio: 0.7, a: { dir: 'col', ratio: 0.5, a: { view: 'overview' }, b: { view: 'accounts' } }, b: { view: 'news' } }),
-  'Market, accounts and shell': wsDefault,
-  'Jobs and storage, shell below': () => ({ dir: 'col', ratio: 0.65, a: { dir: 'row', ratio: 0.6, a: { view: 'jobs' }, b: { view: 'storage' } }, b: { view: 'shell' } }),
+  'Overview': () => ({ dir: 'row', ratio: 0.7, a: { dir: 'col', ratio: 0.5, a: { view: 'overview' }, b: { view: 'accounts' } }, b: { view: 'news' } }),
+  'Market': wsDefault,
+  'Data': () => ({ dir: 'col', ratio: 0.65, a: { dir: 'row', ratio: 0.6, a: { view: 'jobs' }, b: { view: 'storage' } }, b: { view: 'shell' } }),
   'One tile': () => ({ view: 'market' }),
 };
 let wsFocus = null;
@@ -1438,11 +1452,11 @@ function wsCommands() {
     out.push({ label: `New row along the bottom: ${label}`, run: () => wsSplit(v, 'col', true) });
   }
   if (wsLeaves().length > 1) out.push({ label: 'Close this tile', run: () => { const { parent } = wsFind(focusedLeaf().id); const keep = parent.a.id === focusedLeaf().id ? parent.b : parent.a; for (const k of ['view', 'dir', 'ratio', 'a', 'b']) delete parent[k]; Object.assign(parent, keep); wsFocus = null; } });
-  for (const [name, make] of Object.entries(LAYOUTS)) out.push({ label: `Layout: ${name}`, run: () => { const fresh = make(); for (const k of Object.keys(state.ws)) delete state.ws[k]; Object.assign(state.ws, fresh); (function number(n) { n.id = 'w' + wsSeq++; if (!n.view) { number(n.a); number(n.b); } })(state.ws); wsFocus = null; } });
+  for (const [name, make] of Object.entries(LAYOUTS)) out.push({ label: `Apply template: ${name}`, run: () => { const fresh = make(); for (const k of Object.keys(state.ws)) delete state.ws[k]; Object.assign(state.ws, fresh); (function number(n) { n.id = 'w' + wsSeq++; if (!n.view) { number(n.a); number(n.b); } })(state.ws); wsFocus = null; } });
   return out;
 }
 // Every typed word must appear in the command (so "news col" finds the column command).
-const matching = q => { const words = q.toLowerCase().split(/\s+/).filter(Boolean); return wsCommands().filter(c => words.every(w => c.label.toLowerCase().includes(w))); };
+const matching = q => { const words = q.toLowerCase().split(/\s+/).filter(Boolean); return [...layoutCommands(q), ...wsCommands()].filter(c => c.always || words.every(w => c.label.toLowerCase().includes(w))); };
 const pal = { open: false, sel: 0, list: [] };
 function palDraw() {
   const box = $('ws-pal'); if (!box) return;
@@ -1451,7 +1465,7 @@ function palDraw() {
 }
 function palOpen() {
   if (state.tab !== 'workspace') { state.tab = 'workspace'; state.navigated = true; render(); }
-  if (!$('ws-pal')) document.body.insertAdjacentHTML('beforeend', `<div class="pal-back" id="ws-pal"><div class="pal" role="dialog" aria-label="Workspace commands"><input id="ws-pal-in" placeholder="Type a command: news column, graph below, layout…" autocomplete="off" spellcheck="false"><ul id="ws-pal-list" role="listbox"></ul><p class="pal-hint">Acts on the focused tile: ${esc(VIEWS[focusedLeaf().view])}. ↑↓ to choose, Enter to run, Esc to close.</p></div></div>`);
+  if (!$('ws-pal')) document.body.insertAdjacentHTML('beforeend', `<div class="pal-back" id="ws-pal"><div class="pal" role="dialog" aria-label="Workspace commands"><input id="ws-pal-in" placeholder="Type a command: news column, graph below, save Trading…" autocomplete="off" spellcheck="false"><ul id="ws-pal-list" role="listbox"></ul><p class="pal-hint">Acts on the focused tile: ${esc(VIEWS[focusedLeaf().view])}. ↑↓ to choose, Enter to run, Esc to close.</p></div></div>`);
   pal.open = true; pal.sel = 0; $('ws-pal-in').value = ''; palDraw(); $('ws-pal-in').focus();
 }
 function palClose() { $('ws-pal')?.remove(); pal.open = false; }
@@ -1475,6 +1489,68 @@ $('view').addEventListener('pointerdown', e => {
   wsFocus = t.dataset.tile; document.querySelectorAll('.tile.focus').forEach(x => x.classList.remove('focus')); t.classList.add('focus');
 }, true);
 $('view').addEventListener('click', e => { if (e.target.closest && e.target.closest('[data-tile-cmd]')) { wsFocus = e.target.closest('[data-tile-cmd]').dataset.tileCmd; palOpen(); } });
+
+// Saved layouts: each has a name and its tile tree. The current layout keeps
+// its own edits; ⌥1–⌥9 switch to the first nine, and the palette saves,
+// switches, renames and deletes them. Kept per browser.
+const LS = { list: 'tinytrader-layouts', current: 'tinytrader-layout' };
+const plain = n => n.view ? { view: n.view } : { dir: n.dir, ratio: n.ratio, a: plain(n.a), b: plain(n.b) };
+const lay = { list: [], current: null };
+(() => {
+  try { lay.list = JSON.parse(localStorage.getItem(LS.list)) || []; lay.current = localStorage.getItem(LS.current); } catch (_) {}
+  if (!lay.list.length) {
+    // Start with the current workspace and the built-in layouts.
+    lay.list = [{ name: 'Main', tree: plain(state.ws) }, ...Object.entries(LAYOUTS).filter(([n]) => n !== 'One tile').map(([name, make]) => ({ name, tree: make() }))];
+    lay.current = 'Main';
+  }
+  if (!lay.list.some(l => l.name === lay.current)) lay.current = lay.list[0].name;
+})();
+function laySave() {
+  const cur = lay.list.find(l => l.name === lay.current); if (cur) cur.tree = plain(state.ws);
+  try { localStorage.setItem(LS.list, JSON.stringify(lay.list)); localStorage.setItem(LS.current, lay.current ?? ''); } catch (_) {}
+  updateLayoutNav();
+}
+function layLoad(tree) {
+  for (const k of Object.keys(state.ws)) delete state.ws[k];
+  Object.assign(state.ws, JSON.parse(JSON.stringify(tree)));
+  (function number(n) { n.id = 'w' + wsSeq++; if (!n.view) { number(n.a); number(n.b); } })(state.ws);
+  wsFocus = null;
+}
+function laySwitch(name) {
+  const to = lay.list.find(l => l.name === name); if (!to) return;
+  laySave(); lay.current = name; layLoad(to.tree); laySave();
+  if (state.tab !== 'workspace') state.tab = 'workspace';
+  state.navigated = true; render();
+}
+// Every change to the workspace is kept in the current layout.
+const wsSaveTree = wsSave;
+wsSave = () => { wsSaveTree(); laySave(); };
+// Under Workspace in the sidebar: the saved layouts, with their shortcuts.
+function updateLayoutNav() {
+  const host = document.querySelector('.nav button[data-tab="workspace"]'); if (!host) return;
+  let box = $('nav-layouts');
+  if (!box) { host.insertAdjacentHTML('afterend', '<div class="nav-sub" id="nav-layouts"></div>'); box = $('nav-layouts'); }
+  box.innerHTML = lay.list.map((l, i) => `<button type="button" data-layout="${esc(l.name)}"${state.tab === 'workspace' && l.name === lay.current ? ' aria-current="page"' : ''}><span class="lbl">${esc(l.name)}</span>${i < 9 ? `<kbd>⌥${i + 1}</kbd>` : ''}</button>`).join('');
+}
+document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('[data-layout]'); if (b) laySwitch(b.dataset.layout); });
+document.addEventListener('keydown', e => {
+  if (!e.altKey || e.metaKey || e.ctrlKey || !/^Digit[1-9]$/.test(e.code)) return;
+  const l = lay.list[+e.code.slice(5) - 1]; if (!l) return;
+  e.preventDefault(); laySwitch(l.name);
+});
+// Palette commands for layouts. "save Trading" saves the current tiles under
+// that name; "rename Trading" renames the current layout.
+function layoutCommands(q) {
+  const out = lay.list.map((l, i) => ({ label: `Switch to layout: ${l.name}${i < 9 ? `  (⌥${i + 1})` : ''}`, run: () => setTimeout(() => laySwitch(l.name)) }));
+  const m = q.match(/^\s*(save|rename)\s+(.+?)\s*$/i);
+  if (m) {
+    const name = m[2].slice(0, 40);
+    if (m[1].toLowerCase() === 'save') out.unshift({ label: `Save these tiles as a new layout “${name}”`, always: true, run: () => { laySave(); lay.list = lay.list.filter(l => l.name !== name); lay.list.push({ name, tree: plain(state.ws) }); lay.current = name; } });
+    else out.unshift({ label: `Rename “${lay.current}” to “${name}”`, always: true, run: () => { const c = lay.list.find(l => l.name === lay.current); if (c && !lay.list.some(l => l.name === name)) { c.name = name; lay.current = name; } } });
+  } else out.push({ label: 'Save these tiles as a new layout… (type: save <name>)', run: () => {} }, { label: 'Rename this layout… (type: rename <name>)', run: () => {} });
+  if (lay.list.length > 1) out.push({ label: `Delete this layout: ${lay.current}`, run: () => { lay.list = lay.list.filter(l => l.name !== lay.current); lay.current = lay.list[0].name; layLoad(lay.list[0].tree); } });
+  return out;
+}
 
 // The tinytrader shell: a terminal for read-only commands over this
 // deployment's state. It runs nothing on the machine itself.
@@ -1546,6 +1622,7 @@ function render() {
   updateCollectionsNav();
   const docOpen = state.tab.startsWith('col:') && state.doc !== null;
   document.querySelectorAll('.nav button[data-tab]').forEach(b => { if (b.dataset.tab === state.tab && !docOpen) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+  updateLayoutNav();
   if (state.tab.startsWith('col:')) wireDoc();
   drawCharts();
   status();
