@@ -1,6 +1,6 @@
 # 0007: Drives as one pool, copies by kind of data, and automations
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-06
 - **Amends:** [0002](0002-data-store.md) (where files go) and
   [0005](0005-store-service-and-supervision.md) (what the store runs)
@@ -90,8 +90,10 @@ model covers all of it:
 
 The services that already do scheduled work run their automations themselves
 and describe them (`/describe` gains an `automations` list). The console
-gathers them into one Automations page under Operate, with each automation's
-next run, last run and outcome, and run-now, pause and resume controls.
+gathers them into one Automations widget (workspaces replaced pages,
+[0010](0010-console-widgets.md)), grown from the Schedule widget, with each
+automation's next run, last run and outcome, and run-now, pause and resume
+controls.
 Creating an automation picks a task and a schedule. The store runs
 storage tasks (filing, copies, re-checking), and the jobs service runs
 provider tasks. There is no separate scheduler service until two hosts need
@@ -106,7 +108,7 @@ their active-hours automation and appear on the page with the rest.
   markers, a pool view in the catalog, a copier with verification, and a
   periodic re-check of hashes. Each is small, and each ships separately.
 - `dataset.json` gains a protection class.
-- The console gains an Automations page and a pool view on Storage. Its
+- The console gains an Automations widget and a pool view on Storage. Its
   controls for automations are the second place the console writes,
   after Jobs, so it needs a login before the console is reachable from
   other machines.

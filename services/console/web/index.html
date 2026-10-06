@@ -392,11 +392,12 @@ body:not(.docs-mode) .nav { display: none; }
 .tl-bar { position: absolute; top: 4px; bottom: 4px; border-radius: 3px; background: var(--accent-2); }
 .tl-bar.live { background: var(--accent-mark); }
 .tl-bar.off { background: transparent; border: 1px dashed var(--accent-2); }
+.tl-bar.pause { background: repeating-linear-gradient(135deg, var(--line) 0 4px, transparent 4px 8px); border: 1px solid var(--line); }
 .tl-now { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--warn-mark); }
 .tl-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--muted); padding-left: 2px; }
 .tl-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .tl-key { display: inline-block; width: 14px; height: 8px; border-radius: 2px; }
-.tl-key.bar { background: var(--accent-2); } .tl-key.session { background: var(--line-soft); } .tl-key.now { width: 2px; height: 12px; background: var(--warn-mark); }
+.tl-key.bar { background: var(--accent-2); } .tl-key.pause { background: repeating-linear-gradient(135deg, var(--line) 0 3px, transparent 3px 6px); border: 1px solid var(--line); } .tl-key.session { background: var(--line-soft); } .tl-key.now { width: 2px; height: 12px; background: var(--warn-mark); }
 @container (max-width: 420px) { .tl-row { grid-template-columns: 80px minmax(0, 1fr); } }
 .sched td { vertical-align: middle; }
 /* Data: a line per drive, then datasets, then everything else on disk. */

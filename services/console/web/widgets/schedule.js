@@ -30,7 +30,7 @@ function draw() {
   const trading = cal ? !!session : !['Sat', 'Sun'].includes(wd);
   // A window is set relative to the 09:30–16:00 session: an early close ends it early by as much.
   const shift = session && session.close < '16:00' ? mins(session.close) - 16 * 60 : 0;
-  const windows = rows.filter(r => r.x.kind === 'window' && r.x.hours);
+  const windows = rows.filter(r => (r.x.kind === 'window' || r.x.kind === 'pause') && r.x.hours);
   const ticks = [0, 3, 6, 9, 12, 15, 18, 21, 24].map(h => `<span style="left:${(h / 24 * 100).toFixed(2)}%">${String(h).padStart(2, '0')}</span>`).join('');
   const session0 = `<div class="tl-session" style="left:${(570 / 1440 * 100).toFixed(2)}%;width:${(((session ? mins(session.close) : 960) - 570) / 1440 * 100).toFixed(2)}%" title="Regular session"></div>`;
   const timeline = windows.length ? `<div class="tl">
@@ -40,12 +40,12 @@ function draw() {
         const [a, b] = x.hours.split('-').map(mins), end = b <= 16 * 60 + 60 ? b + shift : b;
         const st = statusOf({ ...s, kind: 'svc' });
         return `<div class="tl-row"><span class="tl-label" title="${esc(what(r))}">${esc(who(r))}</span><div class="tl-track">${session0}
-          <div class="tl-bar${trading ? '' : ' off'}${st === 'ok' ? ' live' : ''}" style="left:${(a / 1440 * 100).toFixed(2)}%;width:${((end - a) / 1440 * 100).toFixed(2)}%" title="${esc(x.when)}"></div>
+          <div class="tl-bar${x.kind === 'pause' ? ' pause' : ''}${trading ? '' : ' off'}${st === 'ok' && x.kind !== 'pause' ? ' live' : ''}" style="left:${(a / 1440 * 100).toFixed(2)}%;width:${((end - a) / 1440 * 100).toFixed(2)}%" title="${esc(x.when)}"></div>
           <div class="tl-now" style="left:${pctNow}%"></div></div></div>`;
       }).join('')}
-      <div class="tl-legend"><span><i class="tl-key bar"></i>active hours</span><span><i class="tl-key session"></i>regular session</span><span><i class="tl-key now"></i>now, ${esc(hm)} ET</span></div>
+      <div class="tl-legend"><span><i class="tl-key bar"></i>active hours</span>${windows.some(r => r.x.kind === 'pause') ? '<span><i class="tl-key pause"></i>paused</span>' : ''}<span><i class="tl-key session"></i>regular session</span><span><i class="tl-key now"></i>now, ${esc(hm)} ET</span></div>
     </div>` : '';
-  const order = { window: 0, always: 1, interval: 2, event: 3 };
+  const order = { window: 0, pause: 0, always: 1, interval: 2, event: 3 };
   const nowText = (s, x) => {
     const h = svcState(s.id).health?.body || {}, st = statusOf({ ...s, kind: 'svc' });
     if (st === 'crit') return '<span class="pill p-crit">Down</span>';
@@ -53,8 +53,13 @@ function draw() {
       const until = /until (.+)$/.exec(h.detail || '')?.[1];
       return h.state === 'idle' ? `<span class="muted">next ${esc(until || 'session')}</span>` : '<span class="pill p-ok">Running</span>';
     }
+    // A pause (the jobs service off the network for market hours) is in force inside its hours on a trading day.
+    if (x.kind === 'pause') {
+      const [a, b] = x.hours.split('-').map(mins);
+      return trading && nowMin >= a && nowMin < b ? '<span class="pill p-idle">Paused</span>' : `<span class="muted">not paused · next ${esc(x.hours.split('-')[0])} ET</span>`;
+    }
     if (x.kind === 'always') return st === 'warn' ? '<span class="pill p-warn">Needs attention</span>' : '<span class="pill p-ok">Running</span>';
-    if (x.kind === 'interval') return h.state === 'idle' ? '<span class="muted">paused off-hours</span>' : '<span class="muted">repeating</span>';
+    if (x.kind === 'interval') return h.state === 'idle' ? '<span class="muted">paused</span>' : '<span class="muted">repeating</span>';
     return '<span class="muted">on event</span>';
   };
   const table = rows.slice().sort((p, q) => order[p.x.kind] - order[q.x.kind] || who(p).localeCompare(who(q))).map(r =>

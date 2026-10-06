@@ -231,7 +231,7 @@ async fn main() {
         json!({ "name": "Download of jobs submitted here", "kind": "event", "when": "when Databento finishes them, outside market hours" }),
     ];
     if let Some(h) = args.pause_hours {
-        schedule.insert(0, json!({ "name": "Off the network for market hours", "kind": "window", "hours": h.to_string(), "when": format!("paused {h} ET on trading days") }));
+        schedule.insert(0, json!({ "name": "Off the network for market hours", "kind": "pause", "hours": h.to_string(), "when": format!("paused {h} ET on trading days") }));
     }
     observer.describe(json!({
         "role": "Databento batch jobs: prices and submits requests, and downloads finished jobs into the store.",
