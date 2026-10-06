@@ -938,7 +938,14 @@ function calendarView() {
   if (!cal) return head + `<p class="muted">${(state.topo?.services || []).some(s => s.id === 'accounts') ? 'Loading the market calendar…' : 'No service is serving a market calendar.'}</p>`;
   const ny = iso => new Date(iso).toLocaleString(undefined, { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   const until = iso => duration((Date.parse(iso) - Date.now()) / 1000);
-  const c = cal.clock || {};
+  // The clock is a reading from when the calendar was fetched; carry it
+  // forward past the close or open it named.
+  const c = { ...(cal.clock || {}) };
+  if (c.is_open && Date.parse(c.next_close) <= Date.now()) c.is_open = false;
+  else if (!c.is_open && c.next_open && Date.parse(c.next_open) <= Date.now()) {
+    const d = cal.days.find(x => x.date === c.next_open.slice(0, 10));
+    if (d) { c.is_open = true; c.next_close = `${d.date}T${d.close}:00${c.next_open.slice(19)}`; }
+  }
   const now = c.is_open
     ? `<span class="pill p-ok" title="Closes ${esc(ny(c.next_close))}">Open</span><span class="muted">closes in ${until(c.next_close)}</span>`
     : `<span class="pill p-idle" title="Opens ${esc(ny(c.next_open))}">Closed</span><span class="muted">opens in ${until(c.next_open)}</span>`;
