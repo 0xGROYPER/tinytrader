@@ -46,12 +46,19 @@ pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
 
     let mut datasets: BTreeMap<String, Dataset> = BTreeMap::new();
     let mut unrecognised = Vec::new();
+    let mut other = Vec::new();
     for entry in entries(path) {
         let found = visit(&entry, 0, &mut datasets);
         if !found {
-            unrecognised.push(file_name(&entry));
+            let name = file_name(&entry);
+            let u = usage(&entry);
+            other.push(
+                json!({ "name": name, "bytes": u.bytes, "files": u.files, "modified": u.modified }),
+            );
+            unrecognised.push(name);
         }
     }
+    let other_bytes: u64 = other.iter().filter_map(|o| o["bytes"].as_u64()).sum();
     let dataset_bytes: u64 = datasets
         .values()
         .flat_map(|d| d.schemas.values())
@@ -64,6 +71,8 @@ pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
         "volume": volume,
         "datasets": datasets.into_iter().map(|(id, d)| d.to_json(&id)).collect::<Vec<_>>(),
         "dataset_bytes": dataset_bytes,
+        "other": other,
+        "other_bytes": other_bytes,
         "unrecognised": unrecognised,
     })
 }
@@ -116,6 +125,12 @@ struct Dataset {
     schemas: BTreeMap<String, Schema>,
 }
 
+/// The key a dataset is listed under: its name, and its symbol when the
+/// layout has a symbol level.
+fn key(id: &str, symbol: Option<&str>) -> String {
+    symbol.map_or_else(|| id.to_owned(), |s| format!("{id} {s}"))
+}
+
 #[derive(Default)]
 struct Schema {
     files: u64,
@@ -126,13 +141,16 @@ struct Schema {
 }
 
 impl Dataset {
-    fn to_json(&self, id: &str) -> Value {
+    fn to_json(&self, key: &str) -> Value {
+        let (id, symbol) = key
+            .split_once(' ')
+            .map_or((key, None), |(a, b)| (a, Some(b)));
         let schemas: serde_json::Map<String, Value> = self
             .schemas
             .iter()
             .map(|(k, s)| (k.clone(), json!({ "files": s.files, "bytes": s.bytes, "symbols": s.symbols, "encodings": s.encodings, "days": s.days })))
             .collect();
-        json!({ "id": id, "sources": self.sources, "schemas": schemas })
+        json!({ "id": id, "symbol": symbol, "sources": self.sources, "schemas": schemas })
     }
 }
 
@@ -155,67 +173,111 @@ fn visit(dir: &Path, depth: usize, datasets: &mut BTreeMap<String, Dataset>) -> 
     found
 }
 
-/// `<DATASET>/<schema>/<date>.dbn.zst`, or with a symbol level in between.
+/// `<DATASET>/<schema>/<day>`, or with a symbol level in between, where a
+/// day is `<YYYY-MM-DD>.dbn.zst` or a `<YYYY-MM-DD>/` folder holding that
+/// day's files (an older layout).
 fn store_dataset(dir: &Path, id: &str, datasets: &mut BTreeMap<String, Dataset>) -> bool {
     let mut found = false;
-    for child in entries(dir).into_iter().filter(|c| c.is_dir()) {
-        if add_days(&child, None, id, &file_name(&child), datasets) {
-            found = true;
-        } else {
-            for grandchild in entries(&child).into_iter().filter(|c| c.is_dir()) {
-                found |= add_days(
-                    &grandchild,
-                    Some(file_name(&child)),
-                    id,
-                    &file_name(&grandchild),
-                    datasets,
-                );
-            }
-        }
-    }
-    if found {
-        let d = datasets.entry(id.to_owned()).or_default();
-        let source = format!("store: {}", dir.display());
+    let source = format!("store: {}", dir.display());
+    let note = |datasets: &mut BTreeMap<String, Dataset>, k: String| {
+        let d = datasets.entry(k).or_default();
         if !d.sources.contains(&source) {
-            d.sources.push(source);
+            d.sources.push(source.clone());
+        }
+    };
+    for child in entries(dir).into_iter().filter(|c| c.is_dir()) {
+        if add_days(&child, &key(id, None), &file_name(&child), datasets) {
+            note(datasets, key(id, None));
+            found = true;
+            continue;
+        }
+        let sym = file_name(&child);
+        for grandchild in entries(&child).into_iter().filter(|c| c.is_dir()) {
+            if add_days(
+                &grandchild,
+                &key(id, Some(&sym)),
+                &file_name(&grandchild),
+                datasets,
+            ) {
+                note(datasets, key(id, Some(&sym)));
+                found = true;
+            }
         }
     }
     found
 }
 
-/// Add every `<YYYY-MM-DD>.dbn.zst` in `dir` to a dataset's schema.
-fn add_days(
-    dir: &Path,
-    symbol: Option<String>,
-    id: &str,
-    schema: &str,
-    datasets: &mut BTreeMap<String, Dataset>,
-) -> bool {
+/// Add every day in `dir` (a `<YYYY-MM-DD>.dbn.zst` file or a `<YYYY-MM-DD>/`
+/// folder) to the schema of the dataset listed under `k`.
+fn add_days(dir: &Path, k: &str, schema: &str, datasets: &mut BTreeMap<String, Dataset>) -> bool {
     let mut any = false;
     for f in entries(dir) {
         let n = file_name(&f);
-        let Some(day) = n.strip_suffix(".dbn.zst").filter(|d| is_iso_date(d)) else {
-            continue;
-        };
-        let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+        let (day, size, encoding) =
+            if let Some(day) = n.strip_suffix(".dbn.zst").filter(|d| is_iso_date(d)) {
+                (
+                    day.to_owned(),
+                    f.metadata().map(|m| m.len()).unwrap_or(0),
+                    "dbn.zst",
+                )
+            } else if is_iso_date(&n) && f.is_dir() {
+                (n.clone(), usage(&f).bytes, "day folders")
+            } else {
+                continue;
+            };
         let s = datasets
-            .entry(id.to_owned())
+            .entry(k.to_owned())
             .or_default()
             .schemas
             .entry(schema.to_owned())
             .or_default();
-        note_encoding(s, "dbn.zst");
+        note_encoding(s, encoding);
         s.files += 1;
         s.bytes += size;
-        *s.days.entry(day.to_owned()).or_default() += size;
-        if let Some(sym) = &symbol
-            && !s.symbols.contains(sym)
-        {
-            s.symbols.push(sym.clone());
-        }
+        *s.days.entry(day).or_default() += size;
         any = true;
     }
     any
+}
+
+/// Space used under a path, its file count and its newest change.
+#[derive(Default, Clone, Copy)]
+pub struct Usage {
+    pub bytes: u64,
+    pub files: u64,
+    pub modified: f64,
+}
+
+/// Walk `path` (not following links), adding up its files.
+pub fn usage(path: &Path) -> Usage {
+    let mut u = Usage::default();
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if meta.is_dir() {
+            // Hidden folders count: older layouts keep data in `.archive`.
+            stack.extend(
+                std::fs::read_dir(&p)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path()),
+            );
+        } else if meta.is_file() {
+            u.bytes += meta.len();
+            u.files += 1;
+            if let Some(t) = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            {
+                u.modified = u.modified.max(t.as_secs_f64());
+            }
+        }
+    }
+    u
 }
 
 /// File encodings Databento delivers, longest first.
@@ -265,7 +327,11 @@ fn databento_batch(dir: &Path, datasets: &mut BTreeMap<String, Dataset>) -> bool
         };
         let day = format!("{}-{}-{}", &compact[..4], &compact[4..6], &compact[6..]);
         let size = f.metadata().map(|m| m.len()).unwrap_or(0);
-        let d = datasets.entry(id.to_owned()).or_default();
+        let k = match symbols.as_slice() {
+            [one] => key(id, Some(one)),
+            _ => key(id, None),
+        };
+        let d = datasets.entry(k).or_default();
         let s = d.schemas.entry(schema.to_owned()).or_default();
         note_encoding(s, encoding);
         s.files += 1;
@@ -282,8 +348,12 @@ fn databento_batch(dir: &Path, datasets: &mut BTreeMap<String, Dataset>) -> bool
         let job = meta["job_id"]
             .as_str()
             .map_or_else(|| file_name(dir), str::to_owned);
+        let k = match symbols.as_slice() {
+            [one] => key(id, Some(one)),
+            _ => key(id, None),
+        };
         datasets
-            .entry(id.to_owned())
+            .entry(k)
             .or_default()
             .sources
             .push(format!("databento batch {job}"));
@@ -357,7 +427,13 @@ mod tests {
         .unwrap();
         std::fs::write(csv.join("manifest.json"), "{}").unwrap();
         std::fs::write(csv.join("xnas-itch-20220610.trades.csv"), b"a,b").unwrap();
-        std::fs::create_dir_all(root.join("misc")).unwrap();
+        std::fs::create_dir_all(root.join("misc/.archive")).unwrap();
+        std::fs::write(root.join("misc/.archive/old.bin"), b"12345678").unwrap();
+        // An older layout: each day a folder of that day's files.
+        let older = root.join("ALPACA.SIP/QQQ/cmbp-1/2026-09-02");
+        std::fs::create_dir_all(&older).unwrap();
+        std::fs::write(older.join("cmbp-1.dbn.zst"), b"0123456789").unwrap();
+        std::fs::write(older.join("manifest.json"), b"{}").unwrap();
 
         let t = Thresholds {
             warning: 80.0,
@@ -366,19 +442,34 @@ mod tests {
         };
         let r = scan_root("test", &root, t);
         assert_eq!(r["present"], true);
-        let ds = &r["datasets"][0];
+        let find = |id: &str| {
+            r["datasets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|d| d["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        let ds = &find("OPRA.PILLAR");
         assert_eq!(ds["id"], "OPRA.PILLAR");
         assert_eq!(ds["schemas"]["definition"]["days"]["2026-09-01"], 3);
-        assert_eq!(ds["schemas"]["definition"]["symbols"][0], "SPY.OPT");
+        assert_eq!(ds["symbol"], "SPY.OPT");
         assert_eq!(ds["schemas"]["cmbp-1"]["days"]["2026-10-02"], 5);
         assert_eq!(ds["sources"].as_array().unwrap().len(), 2);
         assert_eq!(r["unrecognised"], json!(["misc"]));
-        assert_eq!(r["datasets"][1]["id"], "XNAS.ITCH");
-        assert_eq!(
-            r["datasets"][1]["schemas"]["trades"]["encodings"],
-            json!(["csv"])
-        );
-        assert_eq!(r["dataset_bytes"], 11);
+        assert_eq!(r["other"][0]["bytes"], 8, "hidden folders count");
+        let older = r["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "ALPACA.SIP")
+            .unwrap();
+        assert_eq!(older["symbol"], "QQQ");
+        assert_eq!(older["schemas"]["cmbp-1"]["days"]["2026-09-02"], 12);
+        let xnas = find("XNAS.ITCH");
+        assert_eq!(xnas["schemas"]["trades"]["encodings"], json!(["csv"]));
+        assert_eq!(r["dataset_bytes"], 23);
         std::fs::remove_dir_all(&root).unwrap();
 
         assert_eq!(scan_root("gone", &root, t)["present"], false);

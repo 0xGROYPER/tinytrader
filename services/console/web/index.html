@@ -377,6 +377,12 @@ body:not(.docs-mode) .nav { display: none; }
 .tl-key.bar { background: var(--accent-2); } .tl-key.session { background: var(--line-soft); } .tl-key.now { width: 2px; height: 12px; background: var(--warn-mark); }
 @container (max-width: 420px) { .tl-row { grid-template-columns: 80px minmax(0, 1fr); } }
 .sched td { vertical-align: middle; }
+/* Data: a line per drive, then datasets, then everything else on disk. */
+.drive-sum { display: flex; flex-wrap: wrap; gap: 8px 28px; font-size: 13px; }
+.drive-sum > div { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+.drive-sum b { font: 600 13px var(--mono); color: var(--fg); }
+.drive-sum span { color: var(--muted); font-family: var(--mono); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* The tinytrader shell: read-only commands over this deployment. */
 .term { flex: 1; display: flex; flex-direction: column; min-height: 320px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: 13px/1.5 var(--mono); }
 .tile-body > .term { border: 0; border-radius: 0; margin: -14px -16px; }
@@ -964,20 +970,27 @@ function dsRange(d) {
   return days.length ? [days[0], days[days.length - 1], new Set(days).size] : [null, null, 0];
 }
 function dataView() {
-  const rows = catalogRoots().flatMap(r => (r.datasets || []).map(d => ({ r, d, key: r.service + '|' + r.name + '|' + d.id })));
-  if (!rows.length) return '<div><h1>Data</h1><p class="muted">No datasets found in the configured roots yet.</p></div>';
-  if (!rows.some(x => x.key === state.ds)) state.ds = rows[0].key;
-  const table = rows.map(({ r, d, key }) => {
+  const roots = catalogRoots();
+  const rows = roots.flatMap(r => (r.datasets || []).map(d => ({ r, d, key: r.service + '|' + r.name + '|' + d.id + '|' + (d.symbol || '') })));
+  const head = `<div><h1>Data</h1><p class="muted" style="margin:0">Everything on the store's drives: datasets it recognises, then everything else.</p></div>`;
+  if (!roots.length) return head + '<p class="muted">The store is not reachable.</p>';
+  const sizeOf = d => Object.values(d.schemas).reduce((a, s) => a + s.bytes, 0);
+  // Per drive: datasets, other data, free.
+  const summary = `<div class="drive-sum">${roots.filter(r => r.present).map(r => `<div><b>${esc(r.name)}</b><span>${bytes(r.dataset_bytes || 0)} in datasets</span><span>${bytes(r.other_bytes || 0)} other</span><span>${r.volume?.available_bytes != null ? bytes(r.volume.available_bytes) + ' free' : ''}</span></div>`).join('')}</div>`;
+  if (!rows.some(x => x.key === state.ds)) state.ds = rows[0]?.key;
+  const table = rows.slice().sort((x, y) => x.d.id.localeCompare(y.d.id) || (x.d.symbol || '').localeCompare(y.d.symbol || '') || x.r.name.localeCompare(y.r.name)).map(({ r, d, key }) => {
     const [first, last, n] = dsRange(d);
-    const bytesTotal = Object.values(d.schemas).reduce((a, s) => a + s.bytes, 0);
-    return `<tr class="ds-row${key === state.ds ? ' sel' : ''}" data-ds="${esc(key)}"><td class="mono" style="color:var(--fg)">${esc(d.id)}</td><td class="mono">${esc(r.name)}</td>
+    return `<tr class="ds-row${key === state.ds ? ' sel' : ''}" data-ds="${esc(key)}"><td class="mono" style="color:var(--fg)">${esc(d.id)}</td><td class="mono">${esc(d.symbol || '—')}</td><td class="mono">${esc(r.name)}</td>
       <td class="mono">${Object.keys(d.schemas).map(esc).join(', ')}</td><td class="mono" style="white-space:nowrap">${first ?? '—'} → ${last ?? '—'}</td>
-      <td class="mono">${n}</td><td class="mono">${bytes(bytesTotal)}</td><td>${d.sources.length}</td></tr>`;
+      <td class="mono num">${n}</td><td class="mono num">${bytes(sizeOf(d))}</td></tr>`;
   }).join('');
   const sel = rows.find(x => x.key === state.ds);
-  return `<div><h1>Data</h1><p class="muted" style="margin:0">Datasets found in this deployment's data roots. Read-only.</p></div>
-    <div class="box scroll"><table><thead><tr><th>Dataset</th><th>Root</th><th>Schemas</th><th>Range</th><th>Days</th><th>Size</th><th>Sources</th></tr></thead><tbody>${table}</tbody></table></div>
-    ${sel ? datasetPanel(sel.r, sel.d) : ''}`;
+  const other = roots.flatMap(r => (r.other || []).map(o => ({ r, o }))).sort((x, y) => y.o.bytes - x.o.bytes);
+  const otherTable = other.length ? `<section><div class="sec-head"><h2>Other data on disk</h2><span class="muted" style="font-size:13px">Folders the store doesn't recognise as datasets, largest first</span></div>
+    <div class="box scroll"><table><thead><tr><th>Folder</th><th>Drive</th><th style="text-align:right">Size</th><th style="text-align:right">Files</th><th>Last changed</th></tr></thead><tbody>${other.map(({ r, o }) =>
+      `<tr><td class="mono" style="color:var(--fg)">${esc(o.name)}</td><td class="mono">${esc(r.name)}</td><td class="mono num">${bytes(o.bytes)}</td><td class="mono num">${(o.files || 0).toLocaleString()}</td><td class="muted">${o.modified ? esc(ago(new Date(o.modified * 1000).toISOString())) : '—'}</td></tr>`).join('')}</tbody></table></div></section>` : '';
+  return head + summary + (rows.length ? `<div class="box scroll"><table class="ds-tbl"><thead><tr><th>Dataset</th><th>Symbol</th><th>Drive</th><th>Schemas</th><th>Range</th><th style="text-align:right">Days</th><th style="text-align:right">Size</th></tr></thead><tbody>${table}</tbody></table></div>` : '<p class="muted">No recognised datasets yet.</p>')
+    + (sel ? datasetPanel(sel.r, sel.d) : '') + otherTable;
 }
 function datasetPanel(r, d) {
   const schemas = Object.keys(d.schemas);
@@ -995,7 +1008,7 @@ function datasetPanel(r, d) {
     }
   }
   return `<section class="panel">
-    <div class="sec-head" style="margin:0"><h2 class="mono" style="font-weight:500">${esc(d.id)} <span class="muted" style="font-size:13px;font-family:var(--ui)">in ${esc(r.name)}</span></h2></div>
+    <div class="sec-head" style="margin:0"><h2 class="mono" style="font-weight:500">${esc(d.id)}${d.symbol ? ' › ' + esc(d.symbol) : ''} <span class="muted" style="font-size:13px;font-family:var(--ui)">on ${esc(r.name)}</span></h2></div>
     <div class="chips">${schemas.map(x => `<button type="button" class="chip-btn" data-schema="${esc(x)}" aria-pressed="${x === state.dsSchema}">${esc(x)}</button>`).join('')}</div>
     <div class="facts">
       <div><div class="k">Files</div><div class="v">${s.files.toLocaleString()}</div></div>
