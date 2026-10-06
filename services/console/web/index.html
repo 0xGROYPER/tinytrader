@@ -313,7 +313,7 @@ body.ws-full .tile { border: 0; border-radius: 0; }
 body.ws-full .ws-gutter { flex-basis: 5px; background: var(--line); }
 body.ws-full .ws-gutter::after { background: var(--muted); opacity: .5; }
 body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--accent-mark); }
-@media (max-width: 800px) { body.ws-full .ws, body.ws-full .nav { height: auto; } #nav-layouts kbd { display: none; } }
+@media (max-width: 800px) { body.ws-full .nav { height: auto; } body.ws-full .ws { height: calc(100dvh - var(--top-h, 120px)); } }
 .tile.focus .tile-bar { box-shadow: inset 0 -2px 0 var(--accent-mark); }
 .tile-cmd { width: auto; padding: 0 6px; font: 500 11px var(--mono); letter-spacing: .02em; }
 .pal-back { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .28); display: flex; justify-content: center; align-items: flex-start; padding: 12vh 16px 0; }
@@ -426,6 +426,43 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 .rem-new span { font: 600 20px var(--sans); }
 .rem-new input { flex: 1; border: 0; outline: 0; background: transparent; color: var(--fg); font: 15px var(--sans); }
 @container (max-width: 560px) { .rem { grid-template-columns: minmax(0, 1fr); } .rem-side { display: none; } .rem-pick { display: block; } }
+/* Dockview, in the palette's colours (decision 0008). */
+.ws.dv-tt { display: block; }
+#ws-root, #ws-root.dockview-theme-light, #ws-root .dockview-theme-light { --dv-group-view-background-color: var(--bg); --dv-tabs-and-actions-container-background-color: var(--nav-bg);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--bg); --dv-activegroup-hiddenpanel-tab-background-color: var(--nav-bg);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--bg); --dv-inactivegroup-hiddenpanel-tab-background-color: var(--nav-bg);
+  --dv-activegroup-visiblepanel-tab-color: var(--fg); --dv-activegroup-hiddenpanel-tab-color: var(--muted);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--fg-2); --dv-inactivegroup-hiddenpanel-tab-color: var(--muted);
+  --dv-tab-divider-color: var(--line); --dv-separator-border: var(--line); --dv-paneview-header-border-color: var(--line);
+  --dv-sash-color: transparent; --dv-active-sash-color: var(--accent-mark); --dv-icon-hover-background-color: var(--nav-hover);
+  --dv-drag-over-background-color: color-mix(in srgb, var(--accent-mark) 16%, transparent); --dv-drag-over-border-color: var(--accent-mark);
+  --dv-tabs-and-actions-container-font-size: 13px; --dv-tabs-and-actions-container-height: 34px; --dv-tab-font-size: 13px;
+  --dv-floating-box-shadow: 0 10px 30px rgba(0, 0, 0, .25); --dv-scrollbar-background-color: var(--line);
+  --dv-context-menu-background-color: var(--bg); --dv-context-menu-color: var(--fg); font-family: var(--ui); }
+#ws-root .dv-tab { font-family: var(--ui); }
+#ws-root .dv-groupview { border: 0; }
+#ws-root .tile-body { height: 100%; box-sizing: border-box; }
+.dv-acts { display: flex; align-items: center; gap: 2px; height: 100%; padding: 0 4px; }
+/* The workspace switcher (⌥W): a tree of groups and a preview. */
+.pal.sw { width: min(760px, 100%); }
+.sw-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); min-height: 300px; max-height: 60vh; }
+.sw-list { list-style: none; margin: 0; padding: 6px; overflow: auto; border-right: 1px solid var(--line-soft); }
+.sw-list li { padding: 7px 12px; border-radius: 6px; font: 14px var(--ui); cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.sw-list li[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
+.sw-group { font-weight: 600; } .sw-group em { margin-left: auto; font-style: normal; color: var(--muted); font-weight: 400; }
+.sw-tw { width: 14px; color: var(--muted); }
+.sw-ws.current::after { content: "open"; margin-left: auto; font-size: 11px; color: var(--muted); }
+.sw-in { flex: 1; min-width: 0; border: 1px solid var(--accent-2); border-radius: 4px; background: var(--bg); color: var(--fg); font: 14px var(--ui); padding: 2px 6px; }
+.sw-pv { padding: 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.sw-cap { font-size: 12px; color: var(--muted); }
+.pv { flex: 1; display: flex; min-height: 180px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.pv > * { flex: 1 1 0; }
+.pv-split { display: flex; min-width: 0; min-height: 0; gap: 2px; background: var(--line); }
+.pv-split.col { flex-direction: column; }
+.pv-leaf { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 4px; background: var(--surface); }
+.pv-leaf span { font: 11px var(--mono); color: var(--fg-2); text-align: center; overflow: hidden; text-overflow: ellipsis; }
+.wtab-group { color: var(--muted); font-weight: 600; }
+.wtab-group span { font-size: 10px; }
 /* The tinytrader shell: read-only commands over this deployment. */
 .term { flex: 1; display: flex; flex-direction: column; min-height: 320px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: 13px/1.5 var(--mono); }
 .tile-body > .term { border: 0; border-radius: 0; margin: -14px -16px; }
@@ -550,6 +587,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
   <main><div class="col" id="view"></div></main>
 </div>
 
+<script src="/vendor/dockview-core-8.4.1.min.js"></script>
 <script>
 const state = { openGroups: new Set(), navKey: '', tab: 'workspace', wsMax: null, newsSymbol: null, topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
   ev: { service: null, after: 0, rows: [], paused: false, open: new Set(), times: [], fresh: new Set() } };
@@ -1624,141 +1662,149 @@ function viewHtml(tab) {
     : tab === 'workspace' ? workspaceView() : collectionView();
 }
 
-// Workspace: tiles, each showing one view. Split right or down, change a
-// tile's view, close it, drag the dividers; the layout is kept per browser.
+// Workspaces (decision 0008): Dockview manages the panels; each panel shows
+// one view. Workspaces are named layouts in groups, switched from the header
+// tabs (the current group's), the switcher (⌥W) and keys. Only the open
+// workspace runs: a panel renders while it is shown, and others are saved
+// layouts, which is all the switcher's previews read.
 const VIEWS = { roadmap: 'Roadmap', docs: 'Docs', overview: 'System graph', schedule: 'Schedule', market: 'Market', prices: 'Prices', accounts: 'Accounts and equity', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
 // Views that hold their own state (forms, input) and update themselves.
 const STEADY = new Set(['jobs', 'shell', 'data', 'storage', 'roadmap']);
-let wsSeq = 1;
-const wsDefault = () => ({ dir: 'row', ratio: 0.6, a: { view: 'market' }, b: { dir: 'col', ratio: 0.5, a: { view: 'accounts' }, b: { view: 'shell' } } });
-state.ws = (() => { try { const v = JSON.parse(localStorage.getItem('tinytrader-workspace')); if (v && (v.view || v.dir)) return v; } catch (_) {} return wsDefault(); })();
-(function number(n) { n.id = 'w' + wsSeq++; if (!n.view) { number(n.a); number(n.b); } })(state.ws);
-let wsSave = () => { try { localStorage.setItem('tinytrader-workspace', JSON.stringify(state.ws)); } catch (_) {} };
-const wsLeaves = (n = state.ws, out = []) => { if (n.view) out.push(n); else { wsLeaves(n.a, out); wsLeaves(n.b, out); } return out; };
-const wsFind = (id, n = state.ws, parent = null) => n.id === id ? { n, parent } : n.view ? null : wsFind(id, n.a, n) || wsFind(id, n.b, n);
 const tileIcon = {
-  row: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M8 2.5v11"/></svg>',
-  col: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M1.5 8h13"/></svg>',
   max: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9 7M2.5 13.5 7 9"/></svg>',
   restore: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M13.5 6.5h-4v-4M2.5 9.5h4v4M9.5 6.5 14 2M6.5 9.5 2 14"/></svg>',
   add: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>',
   close: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>',
 };
-function wsHtml(n) {
-  if (!n.view) return `<div class="ws-split ${n.dir}"><div class="ws-a" style="flex:${n.ratio} 1 0%">${wsHtml(n.a)}</div><div class="ws-gutter" data-gutter="${n.id}" role="separator" aria-orientation="${n.dir === 'row' ? 'vertical' : 'horizontal'}"></div><div class="ws-b" style="flex:${1 - n.ratio} 1 0%">${wsHtml(n.b)}</div></div>`;
-  const open = new Set(wsLeaves().map(l => l.view)), many = wsLeaves().length > 1;
-  const opts = Object.entries(VIEWS).map(([v, l]) => `<option value="${v}"${v === n.view ? ' selected' : ''}${v !== n.view && open.has(v) ? ' disabled' : ''}>${l}</option>`).join('');
-  return `<div class="tile${wsFocus === n.id ? ' focus' : ''}" data-tile="${n.id}"><div class="tile-bar"><select class="tile-view" data-tile-view="${n.id}" aria-label="Tile view">${opts}</select><span class="tile-acts">
-    <button type="button" class="tile-btn" data-tile-add="${n.id}" title="Add a widget" aria-label="Add a widget">${tileIcon.add}</button>
-    <button type="button" class="tile-btn" data-tile-max="${n.id}" title="${state.wsMax ? 'Restore tiles (Esc)' : 'Maximise (⌥Enter)'}" aria-label="${state.wsMax ? 'Restore tiles' : 'Maximise'}">${state.wsMax ? tileIcon.restore : tileIcon.max}</button>
-    <button type="button" class="tile-btn" data-tile-split="${n.id}|row" title="Split right" aria-label="Split right">${tileIcon.row}</button>
-    <button type="button" class="tile-btn" data-tile-split="${n.id}|col" title="Split down" aria-label="Split down">${tileIcon.col}</button>
-    ${many && !state.wsMax ? `<button type="button" class="tile-btn" data-tile-close="${n.id}" title="Close tile" aria-label="Close tile">${tileIcon.close}</button>` : ''}</span></div>
-    <div class="tile-body" id="tile-${n.id}">${viewHtml(n.view)}</div></div>`;
-}
-const workspaceView = () => { const max = state.wsMax && wsFind(state.wsMax)?.n; return `<div class="ws" id="ws-root">${wsHtml(max?.view ? max : state.ws)}</div>`; };
-// On each refresh, only tiles without state of their own are redrawn.
-function refreshTiles() {
-  for (const l of wsLeaves()) {
-    if (STEADY.has(l.view)) continue;
-    const el = $('tile-' + l.id); if (!el) continue;
-    const top = el.scrollTop; el.innerHTML = viewHtml(l.view); el.scrollTop = top;
-  }
-}
-function wsChanged() { wsSave(); state.navigated = true; render(); }
-$('view').addEventListener('change', e => {
-  const v = e.target.dataset?.tileView; if (!v) return;
-  wsFind(v).n.view = e.target.value; wsChanged();
-});
-$('view').addEventListener('click', e => {
-  const sp = e.target.closest && e.target.closest('[data-tile-split]');
-  if (sp) {
-    const [id, dir] = sp.dataset.tileSplit.split('|'), { n } = wsFind(id);
-    const open = new Set(wsLeaves().map(l => l.view)), next = Object.keys(VIEWS).find(v => !open.has(v));
-    if (!next) return;
-    const a = { view: n.view, id: 'w' + wsSeq++ }, b = { view: next, id: 'w' + wsSeq++ };
-    delete n.view; Object.assign(n, { dir, ratio: 0.5, a, b }); wsChanged(); return;
-  }
-  const cl = e.target.closest && e.target.closest('[data-tile-close]');
-  if (cl) {
-    const { parent } = wsFind(cl.dataset.tileClose); if (!parent) return;
-    const keep = parent.a.id === cl.dataset.tileClose ? parent.b : parent.a;
-    for (const k of ['view', 'dir', 'ratio', 'a', 'b']) delete parent[k];
-    Object.assign(parent, keep); wsChanged();
-  }
-});
-$('view').addEventListener('pointerdown', e => {
-  const g = e.target.closest && e.target.closest('[data-gutter]'); if (!g) return;
-  e.preventDefault(); g.setPointerCapture(e.pointerId); g.classList.add('drag');
-  const { n } = wsFind(g.dataset.gutter), box = g.parentElement.getBoundingClientRect(), [a, b] = [g.previousElementSibling, g.nextElementSibling];
-  const move = ev => {
-    const r = n.dir === 'row' ? (ev.clientX - box.left) / box.width : (ev.clientY - box.top) / box.height;
-    n.ratio = Math.min(0.95, Math.max(0.05, r)); a.style.flex = `${n.ratio} 1 0%`; b.style.flex = `${1 - n.ratio} 1 0%`;
-  };
-  const up = () => { g.classList.remove('drag'); g.removeEventListener('pointermove', move); g.removeEventListener('pointerup', up); wsSave(); drawCharts(); };
-  g.addEventListener('pointermove', move); g.addEventListener('pointerup', up);
-});
-
-// Workspace commands, typed: ⌘K (or Ctrl+K, or a tile's command button) opens
-// a palette that acts on the focused tile: show a view there, split it right
-// or below, add a column at the far right or a row along the bottom, close
-// it, or switch to a saved layout.
+// Templates and new workspaces start from a simple tree of splits.
 const LAYOUTS = {
   Market: () => ({ dir: 'row', ratio: 0.68, a: { dir: 'col', ratio: 0.5, a: { view: 'prices' }, b: { view: 'accounts' } }, b: { dir: 'col', ratio: 0.6, a: { view: 'news' }, b: { view: 'calendar' } } }),
   Operations: () => ({ dir: 'row', ratio: 0.62, a: { dir: 'col', ratio: 0.5, a: { view: 'overview' }, b: { view: 'schedule' } }, b: { dir: 'col', ratio: 0.55, a: { view: 'services' }, b: { view: 'shell' } } }),
   Data: () => ({ dir: 'row', ratio: 0.55, a: { view: 'jobs' }, b: { dir: 'col', ratio: 0.55, a: { view: 'data' }, b: { view: 'storage' } } }),
+};
+const DV = globalThis['dockview-core'];
+let dock = null, wsFocus = null, panelSeq = 0;
+const panelBody = new Map(); // panel id → its content element
+const panelId = () => 'p' + Date.now().toString(36) + (panelSeq++);
+const openViews = () => (dock?.panels || []).map(p => p.params?.view);
+const activePanel = () => dock?.activePanel || dock?.panels[0];
+function workspaceView() { return '<div class="ws dv-tt" id="ws-root"></div>'; }
+function renderPanel(body, view) {
+  body.dataset.view = view; body.innerHTML = viewHtml(view);
+  if (view === 'jobs') jobsOpened(); if (view === 'roadmap') remLoad();
+  const out = body.querySelector('#term-out'); if (out) out.scrollTop = out.scrollHeight;
 }
-let wsFocus = null;
-const focusedLeaf = () => (wsFocus && wsFind(wsFocus)?.n.view && wsFind(wsFocus).n) || wsLeaves()[0];
-function wsPut(view) {
-  // A view is open in one tile at a time: if it's elsewhere, the two swap.
-  const t = focusedLeaf(), other = wsLeaves().find(l => l.view === view && l !== t);
-  if (other) other.view = t.view;
-  t.view = view;
-}
-function wsSplit(view, dir, edge) {
-  if (wsLeaves().some(l => l.view === view)) { wsFocus = wsLeaves().find(l => l.view === view).id; return; }
-  const fresh = { view, id: 'w' + wsSeq++ };
-  if (edge) {
-    // Wrap the whole workspace: a new full-height column or full-width row.
-    const old = { ...state.ws };
-    for (const k of Object.keys(state.ws)) delete state.ws[k];
-    Object.assign(state.ws, { id: 'w' + wsSeq++, dir, ratio: 0.72, a: old, b: fresh });
-  } else {
-    const n = focusedLeaf(), keep = { view: n.view, id: 'w' + wsSeq++ };
-    delete n.view; Object.assign(n, { dir, ratio: 0.5, a: keep, b: fresh });
+// On each refresh, only visible panels without state of their own redraw.
+function refreshTiles() {
+  for (const body of panelBody.values()) {
+    if (!body.isConnected || STEADY.has(body.dataset.view)) continue;
+    const top = body.scrollTop; body.innerHTML = viewHtml(body.dataset.view); body.scrollTop = top;
   }
-  wsFocus = fresh.id;
 }
+// Build a template tree into the dock: each split's second half takes the
+// side of the whole area, then the first half subdivides what's left.
+function buildTree(tree) {
+  const first = n => n.view ? n : first(n.a);
+  const add = (view, ref, dir) => dock.addPanel({ id: panelId(), component: 'view', params: { view }, title: VIEWS[view] || view, ...(ref ? { position: { referencePanel: ref, direction: dir } } : {}) });
+  const fill = (n, p) => { if (n.view) return; const q = add(first(n.b).view, p, n.dir === 'row' ? 'right' : 'below'); fill(n.b, q); fill(n.a, p); };
+  const p = add(first(tree).view); fill(tree, p);
+}
+function mountWorkspace() {
+  dock?.dispose(); dock = null; panelBody.clear();
+  const el = $('ws-root'); if (!el) return;
+  if (!DV) { el.innerHTML = '<p class="msg-err" style="padding:16px">The window manager did not load (/vendor/dockview-core).</p>'; return; }
+  dock = new DV.DockviewComponent(el, {
+    className: 'dv-tt',
+    // Dockview's light theme for its sizes; its colours come from our palette (styles below).
+    theme: { name: 'light', className: 'dockview-theme-light', colorScheme: 'light' },
+    createComponent: () => {
+      const body = document.createElement('div'); body.className = 'tile-body';
+      return { element: body, init(p) { panelBody.set(p.api.id, body); renderPanel(body, p.params.view); } };
+    },
+    createRightHeaderActionComponent: group => {
+      const el = document.createElement('div'); el.className = 'dv-acts';
+      el.innerHTML = `<button type="button" class="tile-btn" data-dv-add title="Add a widget" aria-label="Add a widget">${tileIcon.add}</button><button type="button" class="tile-btn" data-dv-max title="Maximise (⌥Enter)" aria-label="Maximise">${tileIcon.max}</button>`;
+      el.querySelector('[data-dv-add]').onclick = () => { group.activePanel?.api.setActive(); palOpen('add '); };
+      el.querySelector('[data-dv-max]').onclick = () => { const p = group.activePanel; if (p) { p.api.isMaximized() ? p.api.exitMaximized() : p.api.maximize(); } };
+      return { element: el, init() {}, dispose() {} };
+    },
+    getTabContextMenuItems: () => ['maximize', 'float', 'separator', 'close'],
+  });
+  const cur = lay.list.find(l => l.name === lay.current);
+  // On a phone the workspace's widgets are tabs of one full-screen group,
+  // and that arrangement is never saved over the real layout.
+  dock.narrow = matchMedia('(max-width: 700px)').matches;
+  if (dock.narrow) {
+    const views = cur ? layViews(cur) : ['prices']; let first = null;
+    for (const view of views) {
+      const p = dock.addPanel({ id: panelId(), component: 'view', params: { view }, title: VIEWS[view] || view, ...(first ? { position: { referencePanel: first, direction: 'within' } } : {}) });
+      first = first || p;
+    }
+    first?.api.setActive();
+  } else {
+    try { if (cur?.dock) dock.fromJSON(cur.dock); else buildTree(cur?.tree || LAYOUTS.Market()); }
+    catch (e) { dock.clear(); buildTree(cur?.tree || LAYOUTS.Market()); }
+  }
+  if (state.focusView) { dock.panels.find(p => p.params?.view === state.focusView)?.api.setActive(); state.focusView = null; }
+  dock.onDidRemovePanel(p => panelBody.delete(p.id));
+  dock.onDidActivePanelChange(e => { wsFocus = (e?.panel || e)?.id ?? null; });
+  dock.onDidLayoutChange(() => { clearTimeout(mountWorkspace.t); mountWorkspace.t = setTimeout(laySave, 300); drawCharts(); });
+  laySave();
+  // Charts measure their panels, so draw them once the layout has settled.
+  requestAnimationFrame(() => requestAnimationFrame(drawCharts));
+}
+// Show a view: activate it if open; otherwise put it in the active panel,
+// beside it, as a tab with it, or along an edge of the whole workspace.
+function wsShow(view, where) {
+  if (!dock) return;
+  const open = dock.panels.find(p => p.params?.view === view);
+  if (open) { open.api.setActive(); return; }
+  const ref = activePanel();
+  if (where === 'here' && ref) {
+    ref.api.updateParameters({ view }); ref.params.view = view; ref.api.setTitle(VIEWS[view] || view);
+    const body = panelBody.get(ref.id); if (body) renderPanel(body, view);
+    laySave(); return;
+  }
+  const position = !ref ? undefined : where === 'tab' ? { referencePanel: ref, direction: 'within' } : where === 'right' || where === 'below' ? { referencePanel: ref, direction: where } : { direction: where === 'column' ? 'right' : 'below' };
+  dock.addPanel({ id: panelId(), component: 'view', params: { view }, title: VIEWS[view] || view, ...(position ? { position } : {}) });
+}
+function wsMaximise() { const p = activePanel(); if (p) p.api.isMaximized() ? p.api.exitMaximized() : p.api.maximize(); }
+document.addEventListener('keydown', e => {
+  if (state.tab !== 'workspace' || pal.open || sw.open) return;
+  if (e.altKey && e.key === 'Enter') { e.preventDefault(); wsMaximise(); }
+  else if (e.key === 'Escape' && activePanel()?.api.isMaximized()) { e.preventDefault(); activePanel().api.exitMaximized(); }
+});
+
+// The palette (⌘K): commands for the active panel and for workspaces.
 function wsCommands() {
   const out = [];
   for (const [v, label] of Object.entries(VIEWS)) {
-    out.push({ label: `Show ${label} here`, run: () => wsPut(v) });
-    out.push({ label: `Add ${label} to the right`, run: () => wsSplit(v, 'row') });
-    out.push({ label: `Add ${label} below`, run: () => wsSplit(v, 'col') });
-    out.push({ label: `Add ${label} as a column at the far right`, run: () => wsSplit(v, 'row', true) });
-    out.push({ label: `Add ${label} as a row along the bottom`, run: () => wsSplit(v, 'col', true) });
+    out.push({ label: `Show ${label} here`, run: () => wsShow(v, 'here') });
+    out.push({ label: `Add ${label} to the right`, run: () => wsShow(v, 'right') });
+    out.push({ label: `Add ${label} below`, run: () => wsShow(v, 'below') });
+    out.push({ label: `Add ${label} as a tab`, run: () => wsShow(v, 'tab') });
+    out.push({ label: `Add ${label} as a column at the far right`, run: () => wsShow(v, 'column') });
+    out.push({ label: `Add ${label} as a row along the bottom`, run: () => wsShow(v, 'row') });
   }
-  out.push({ label: state.wsMax ? 'Restore all tiles' : 'Maximise this tile', run: () => { state.wsMax = state.wsMax ? null : focusedLeaf().id; } });
-  if (wsLeaves().length > 1) out.push({ label: 'Close this tile', run: () => { const { parent } = wsFind(focusedLeaf().id); const keep = parent.a.id === focusedLeaf().id ? parent.b : parent.a; for (const k of ['view', 'dir', 'ratio', 'a', 'b']) delete parent[k]; Object.assign(parent, keep); wsFocus = null; } });
-  for (const [name, make] of Object.entries(LAYOUTS)) out.push({ label: `Apply template: ${name}`, run: () => { const fresh = make(); for (const k of Object.keys(state.ws)) delete state.ws[k]; Object.assign(state.ws, fresh); (function number(n) { n.id = 'w' + wsSeq++; if (!n.view) { number(n.a); number(n.b); } })(state.ws); wsFocus = null; } });
+  out.push({ label: activePanel()?.api.isMaximized() ? 'Restore all panels' : 'Maximise this panel', run: wsMaximise });
+  if ((dock?.panels.length || 0) > 1) out.push({ label: 'Close this panel', run: () => activePanel()?.api.close() });
+  for (const [name, make] of Object.entries(LAYOUTS)) out.push({ label: `Apply template: ${name}`, run: () => { dock.clear(); buildTree(make()); } });
   return out;
 }
-// Every typed word must appear in the command (so "news col" finds the column command).
 const matching = q => { const words = q.toLowerCase().split(/\s+/).filter(Boolean); return [...layoutCommands(q), ...wsCommands()].filter(c => c.always || words.every(w => c.label.toLowerCase().includes(w))); };
 const pal = { open: false, sel: 0, list: [] };
 function palDraw() {
-  const box = $('ws-pal'); if (!box) return;
+  if (!$('ws-pal')) return;
   pal.list = matching($('ws-pal-in').value).slice(0, 12); pal.sel = Math.min(pal.sel, Math.max(0, pal.list.length - 1));
   $('ws-pal-list').innerHTML = pal.list.map((c, i) => `<li role="option" data-pal="${i}" aria-selected="${i === pal.sel}">${esc(c.label)}</li>`).join('') || '<li class="muted">No matching command</li>';
 }
 function palOpen(prefill = '') {
   if (state.tab !== 'workspace') { state.tab = 'workspace'; state.navigated = true; render(); }
-  if (!$('ws-pal')) document.body.insertAdjacentHTML('beforeend', `<div class="pal-back" id="ws-pal"><div class="pal" role="dialog" aria-label="Workspace commands"><input id="ws-pal-in" placeholder="Type a command: news column, graph below, save Trading…" autocomplete="off" spellcheck="false"><ul id="ws-pal-list" role="listbox"></ul><p class="pal-hint">Acts on the focused tile: ${esc(VIEWS[focusedLeaf().view])}. ↑↓ to choose, Enter to run, Esc to close.</p></div></div>`);
+  if (!$('ws-pal')) document.body.insertAdjacentHTML('beforeend', `<div class="pal-back" id="ws-pal"><div class="pal" role="dialog" aria-label="Commands"><input id="ws-pal-in" placeholder="Type a command: news right, graph below, save Trading…" autocomplete="off" spellcheck="false"><ul id="ws-pal-list" role="listbox"></ul><p class="pal-hint">Acts on the active panel${activePanel() ? ': ' + esc(VIEWS[activePanel().params?.view] || '') : ''}. ↑↓ to choose, Enter to run, Esc to close.</p></div></div>`);
   pal.open = true; pal.sel = 0; $('ws-pal-in').value = prefill; palDraw(); $('ws-pal-in').focus();
 }
 function palClose() { $('ws-pal')?.remove(); pal.open = false; }
-function palRun(i) { const c = pal.list[i]; if (!c) return; c.run(); palClose(); wsChanged(); }
+function palRun(i) { const c = pal.list[i]; if (!c) return; palClose(); c.run(); }
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); pal.open ? palClose() : palOpen(); return; }
   if (!pal.open) return;
@@ -1772,126 +1818,205 @@ document.addEventListener('click', e => {
   const li = e.target.closest('[data-pal]'); if (li) { palRun(+li.dataset.pal); return; }
   if (e.target.id === 'ws-pal') palClose();
 });
-// The focused tile is the one last clicked or typed in.
-$('view').addEventListener('pointerdown', e => {
-  const t = e.target.closest && e.target.closest('[data-tile]'); if (!t) return;
-  wsFocus = t.dataset.tile; document.querySelectorAll('.tile.focus').forEach(x => x.classList.remove('focus')); t.classList.add('focus');
-}, true);
-$('view').addEventListener('click', e => {
-  const add = e.target.closest && e.target.closest('[data-tile-add]');
-  if (add) { wsFocus = add.dataset.tileAdd; palOpen('add '); return; }
-  const mx = e.target.closest && e.target.closest('[data-tile-max]');
-  if (mx) { wsMaximise(mx.dataset.tileMax); }
-});
-function wsMaximise(id) { state.wsMax = state.wsMax ? null : id; wsFocus = id; state.navigated = true; render(); drawCharts(); }
-document.addEventListener('keydown', e => {
-  if (state.tab !== 'workspace' || pal.open) return;
-  if (e.altKey && e.key === 'Enter') { e.preventDefault(); wsMaximise(focusedLeaf().id); }
-  else if (e.key === 'Escape' && state.wsMax) { e.preventDefault(); wsMaximise(state.wsMax); }
-});
 
-// Saved layouts: each has a name and its tile tree. The current layout keeps
-// its own edits; ⌥1–⌥9 switch to the first nine, and the palette saves,
-// switches, renames and deletes them. Kept per browser.
+// Saved workspaces: { name, group, dock (Dockview's layout) or tree }.
 const LS = { list: 'tinytrader-workspaces', current: 'tinytrader-workspace-current' };
-const plain = n => n.view ? { view: n.view } : { dir: n.dir, ratio: n.ratio, a: plain(n.a), b: plain(n.b) };
 const lay = { list: [], current: null };
 (() => {
   try { lay.list = JSON.parse(localStorage.getItem(LS.list)) || []; lay.current = localStorage.getItem(LS.current); } catch (_) {}
-  if (!lay.list.length) {
-    // Start with the default workspaces, keeping layouts saved earlier under their own names.
-    const builtin = new Set(['Main', 'Overview', 'Market', 'Data', 'System graph and equity, news on the right', 'Market, accounts and shell', 'Jobs and storage, shell below']);
-    let earlier = [];
-    try { earlier = (JSON.parse(localStorage.getItem('tinytrader-layouts')) || []).filter(l => !builtin.has(l.name)); } catch (_) {}
-    lay.list = [...Object.entries(LAYOUTS).map(([name, make]) => ({ name, tree: make() })), ...earlier];
-    lay.current = 'Market';
-  }
-  // New built-in workspaces join saved lists once.
-  let added = false;
-  // The Roadmap moved to the docs pages: drop the workspace that held only it.
-  if (lay.list.some(l => l.name === 'Roadmap' && l.tree?.view === 'roadmap')) {
-    lay.list = lay.list.filter(l => !(l.name === 'Roadmap' && l.tree?.view === 'roadmap')); added = true;
-  }
-  for (const name of []) {
-    let seen = []; try { seen = JSON.parse(localStorage.getItem('tinytrader-workspaces-added')) || []; } catch (_) {}
-    if (!seen.includes(name) && LAYOUTS[name] && !lay.list.some(l => l.name === name)) { lay.list.push({ name, tree: LAYOUTS[name]() }); added = true; }
-    try { localStorage.setItem('tinytrader-workspaces-added', JSON.stringify([...new Set([...seen, name])])); } catch (_) {}
-  }
-  // Kept at once, so a reload before any other change doesn't lose it.
-  if (added) try { localStorage.setItem(LS.list, JSON.stringify(lay.list)); } catch (_) {}
+  if (!lay.list.length) lay.list = Object.entries(LAYOUTS).map(([name, make]) => ({ name, tree: make() }));
+  // The Roadmap moved to the docs pages: drop a workspace that held only it.
+  lay.list = lay.list.filter(l => !(l.name === 'Roadmap' && l.tree?.view === 'roadmap'));
   if (!lay.list.some(l => l.name === lay.current)) lay.current = lay.list[0].name;
 })();
-layLoadOnStart();
+function layStore() { try { localStorage.setItem(LS.list, JSON.stringify(lay.list)); localStorage.setItem(LS.current, lay.current ?? ''); } catch (_) {} updateLayoutNav(); }
 function laySave() {
-  const cur = lay.list.find(l => l.name === lay.current); if (cur) cur.tree = plain(state.ws);
-  try { localStorage.setItem(LS.list, JSON.stringify(lay.list)); localStorage.setItem(LS.current, lay.current ?? ''); } catch (_) {}
-  updateLayoutNav();
-}
-function layLoad(tree) {
-  for (const k of Object.keys(state.ws)) delete state.ws[k];
-  Object.assign(state.ws, JSON.parse(JSON.stringify(tree)));
-  (function number(n) { n.id = 'w' + wsSeq++; if (!n.view) { number(n.a); number(n.b); } })(state.ws);
-  wsFocus = null;
+  const cur = lay.list.find(l => l.name === lay.current);
+  if (cur && dock && !dock.narrow && state.tab === 'workspace') { cur.dock = dock.toJSON(); delete cur.tree; }
+  layStore();
 }
 function laySwitch(name) {
-  const to = lay.list.find(l => l.name === name); if (!to) return;
-  laySave(); lay.current = name; layLoad(to.tree); laySave();
-  state.tab = 'workspace'; state.doc = null; state.wsMax = null;
+  if (!lay.list.some(l => l.name === name)) return;
+  if (dock && state.tab === 'workspace') laySave();
+  lay.current = name; layStore();
+  state.tab = 'workspace'; state.doc = null;
   try { history.replaceState(null, '', '/#w-' + encodeURIComponent(name)); } catch (_) {}
   state.navigated = true; render(); window.scrollTo(0, 0);
 }
-// Every change to the workspace is kept in the current layout.
-const wsSaveTree = wsSave;
-wsSave = () => { wsSaveTree(); laySave(); };
-// Under Workspace in the sidebar: the saved layouts, with their shortcuts.
+// Groups, in order of first appearance; ungrouped workspaces form their own.
+const groupOf = l => l?.group || '';
+const groups = () => [...new Set(lay.list.map(groupOf))];
+const inGroup = g => lay.list.filter(l => groupOf(l) === g);
+const layViews = l => l.dock ? Object.values(l.dock.panels || {}).map(p => p.params?.view) : (function leaves(n) { return n ? (n.view ? [n.view] : [...leaves(n.a), ...leaves(n.b)]) : []; })(l.tree);
+// Header: the current group's workspaces, with the group as a breadcrumb.
 function updateLayoutNav() {
   const box = $('wtabs'); if (!box) return;
   const docs = state.tab.startsWith('col:') || state.tab === 'roadmap';
-  const html = lay.list.map((l, i) => `<button type="button" class="wtab" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 9 ? ` (⌥${i + 1})` : ''}"${!docs && l.name === lay.current ? ' aria-current="page"' : ''}>${esc(l.name)}</button>`).join('')
-    + '<button type="button" class="wtab wtab-new" data-new-ws title="New workspace from these tiles (⌘K, then save …)" aria-label="New workspace">+</button>'
+  const cur = lay.list.find(l => l.name === lay.current), g = groupOf(cur), tabs = inGroup(g);
+  const crumb = `<button type="button" class="wtab wtab-group" data-switcher title="All workspaces (⌥W)">${g ? esc(g) : 'Workspaces'} <span aria-hidden="true">▾</span></button>`;
+  const html = crumb + tabs.map((l, i) => `<button type="button" class="wtab" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 9 ? ` (⌥${i + 1})` : ''}"${!docs && l.name === lay.current ? ' aria-current="page"' : ''}>${esc(l.name)}</button>`).join('')
+    + '<button type="button" class="wtab wtab-new" data-new-ws title="New workspace from these panels" aria-label="New workspace">+</button>'
     + `<a class="wtab wtab-docs" href="/docs/"${docs ? ' aria-current="page"' : ''}>Docs</a>`;
   if (box.innerHTML !== html) box.innerHTML = html;
 }
-function layLoadOnStart() { const cur = lay.list.find(l => l.name === lay.current); if (cur) layLoad(cur.tree); }
 document.addEventListener('click', e => {
   if (e.target.closest && e.target.closest('[data-docs-roadmap]')) {
     state.tab = 'roadmap'; state.doc = null; state.navigated = true;
     try { history.replaceState(null, '', '/docs/#roadmap'); } catch (_) {}
     render(); window.scrollTo(0, 0); return;
   }
+  if (e.target.closest && e.target.closest('[data-switcher]')) { swOpen(); return; }
   if (e.target.closest && e.target.closest('[data-new-ws]')) { palOpen('save '); return; }
   if (e.target.closest && e.target.closest('[data-docs-home]') && state.collections[0]) {
     state.tab = 'col:' + state.collections[0].id; state.doc = null; state.navigated = true;
     try { history.replaceState(null, '', '/docs/'); } catch (_) {}
-    render(); window.scrollTo(0, 0);
+    render(); window.scrollTo(0, 0); return;
+  }
+  const b = e.target.closest && e.target.closest('[data-layout]'); if (b) laySwitch(b.dataset.layout);
+});
+// Keys: ⌥↑/⌥↓ (or ⌃↑/⌃↓) within the group, ⌥←/⌥→ between groups, ⌥1–⌥9 the group's tabs, ⌥W the switcher.
+document.addEventListener('keydown', e => {
+  if (pal.open || sw.open || e.metaKey) return;
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+  const cur = lay.list.find(l => l.name === lay.current), g = groupOf(cur), tabs = inGroup(g), gs = groups();
+  if (e.altKey && e.code === 'KeyW') { e.preventDefault(); swOpen(); return; }
+  if (e.altKey && /^Digit[1-9]$/.test(e.code)) { const l = tabs[+e.code.slice(5) - 1]; if (l) { e.preventDefault(); laySwitch(l.name); } return; }
+  if ((e.ctrlKey || e.altKey) && ['ArrowUp', 'ArrowDown'].includes(e.key)) {
+    const i = tabs.indexOf(cur), n = tabs.length; e.preventDefault();
+    laySwitch(tabs[(i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n].name); return;
+  }
+  if (e.altKey && ['ArrowLeft', 'ArrowRight'].includes(e.key) && gs.length > 1) {
+    const i = gs.indexOf(g), next = gs[(i + (e.key === 'ArrowRight' ? 1 : -1) + gs.length) % gs.length];
+    e.preventDefault(); laySwitch(inGroup(next)[0].name);
   }
 });
-// ⌃↑/⌃↓ (or ⌥↑/⌥↓) move through the workspaces in the sidebar.
-document.addEventListener('keydown', e => {
-  if (!(e.ctrlKey || e.altKey) || e.metaKey || !['ArrowUp', 'ArrowDown'].includes(e.key) || pal.open) return;
-  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
-  const i = lay.list.findIndex(l => l.name === lay.current), n = lay.list.length;
-  e.preventDefault(); laySwitch(lay.list[(i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n].name);
-});
-document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('[data-layout]'); if (b) laySwitch(b.dataset.layout); });
-document.addEventListener('keydown', e => {
-  if (!e.altKey || e.metaKey || e.ctrlKey || !/^Digit[1-9]$/.test(e.code)) return;
-  const l = lay.list[+e.code.slice(5) - 1]; if (!l) return;
-  e.preventDefault(); laySwitch(l.name);
-});
-// Palette commands for layouts. "save Trading" saves the current tiles under
-// that name; "rename Trading" renames the current layout.
+// Palette commands for workspaces: save, rename, group, duplicate, delete, switch.
 function layoutCommands(q) {
-  const out = lay.list.map((l, i) => ({ label: `Switch to layout: ${l.name}${i < 9 ? `  (⌥${i + 1})` : ''}`, run: () => setTimeout(() => laySwitch(l.name)) }));
-  const m = q.match(/^\s*(save|rename)\s+(.+?)\s*$/i);
-  if (m) {
-    const name = m[2].slice(0, 40);
-    if (m[1].toLowerCase() === 'save') out.unshift({ label: `Save these tiles as a new layout “${name}”`, always: true, run: () => { laySave(); lay.list = lay.list.filter(l => l.name !== name); lay.list.push({ name, tree: plain(state.ws) }); lay.current = name; } });
-    else out.unshift({ label: `Rename “${lay.current}” to “${name}”`, always: true, run: () => { const c = lay.list.find(l => l.name === lay.current); if (c && !lay.list.some(l => l.name === name)) { c.name = name; lay.current = name; } } });
-  } else out.push({ label: 'Save these tiles as a new layout… (type: save <name>)', run: () => {} }, { label: 'Rename this layout… (type: rename <name>)', run: () => {} });
-  if (lay.list.length > 1) out.push({ label: `Delete this layout: ${lay.current}`, run: () => { lay.list = lay.list.filter(l => l.name !== lay.current); lay.current = lay.list[0].name; layLoad(lay.list[0].tree); } });
+  const out = lay.list.map(l => ({ label: `Switch to workspace: ${groupOf(l) ? groupOf(l) + ' › ' : ''}${l.name}`, run: () => laySwitch(l.name) }));
+  const m = q.match(/^\s*(save|rename|group)\s+(.*?)\s*$/i);
+  const cur = lay.list.find(l => l.name === lay.current);
+  if (m && m[2]) {
+    const arg = m[2].slice(0, 40), verb = m[1].toLowerCase();
+    if (verb === 'save') out.unshift({ label: `Save these panels as a new workspace “${arg}”`, always: true, run: () => { laySave(); lay.list = lay.list.filter(l => l.name !== arg); lay.list.push({ name: arg, group: groupOf(cur) || undefined, dock: dock?.toJSON() }); lay.current = arg; layStore(); } });
+    if (verb === 'rename') out.unshift({ label: `Rename “${lay.current}” to “${arg}”`, always: true, run: () => { if (cur && !lay.list.some(l => l.name === arg)) { cur.name = arg; lay.current = arg; layStore(); } } });
+    if (verb === 'group') out.unshift({ label: `Move “${lay.current}” to the group “${arg}”`, always: true, run: () => { if (cur) { cur.group = arg; layStore(); } } });
+  } else out.push({ label: 'Save these panels as a new workspace… (type: save <name>)', run: () => {} }, { label: 'Rename this workspace… (type: rename <name>)', run: () => {} }, { label: 'Move this workspace to a group… (type: group <name>)', run: () => {} });
+  out.push({ label: 'Open the workspace switcher (⌥W)', run: swOpen });
+  if (lay.list.length > 1) out.push({ label: `Delete this workspace: ${lay.current}`, run: () => layDelete(lay.current) });
   return out;
 }
+function layDelete(name) {
+  if (lay.list.length < 2) return;
+  const i = lay.list.findIndex(l => l.name === name); if (i < 0) return;
+  lay.list.splice(i, 1);
+  if (lay.current === name) { lay.current = lay.list[Math.max(0, i - 1)].name; layStore(); state.navigated = true; render(); } else layStore();
+}
+
+// The switcher (⌥W): every workspace as a tree of groups. ↑↓ move, →/Tab
+// open a group, ← close it, Enter opens; F2 renames, D duplicates, G moves to
+// a group, N saves the current panels as a new workspace, ⌫ deletes (asks
+// first); drag a workspace to reorder it or onto a group to move it there.
+const sw = { open: false, sel: 0, rows: [], expanded: new Set(), edit: null, confirm: null };
+function swRows() {
+  const rows = [];
+  for (const g of groups()) {
+    if (!g) { for (const l of inGroup('')) rows.push({ kind: 'ws', l, depth: 0 }); continue; }
+    const open = sw.expanded.has(g);
+    rows.push({ kind: 'group', g, depth: 0, open, n: inGroup(g).length });
+    if (open) for (const l of inGroup(g)) rows.push({ kind: 'ws', l, depth: 1 });
+  }
+  return rows;
+}
+function preview(l) {
+  const box = (v) => `<div class="pv-leaf"><span>${esc(VIEWS[v] || v || '')}</span></div>`;
+  if (l?.dock?.grid?.root) {
+    const panels = l.dock.panels || {};
+    const node = (n, orient) => n.type === 'leaf'
+      ? `<div class="pv-leaf" style="flex:${n.size || 1} 1 0"><span>${(n.data?.views || []).map(id => esc(VIEWS[panels[id]?.params?.view] || panels[id]?.title || '')).join(' · ')}</span></div>`
+      : `<div class="pv-split ${orient === 'HORIZONTAL' ? 'row' : 'col'}" style="flex:${n.size || 1} 1 0">${(n.data || []).map(c => node(c, orient === 'HORIZONTAL' ? 'VERTICAL' : 'HORIZONTAL')).join('')}</div>`;
+    return node(l.dock.grid.root, l.dock.grid.orientation);
+  }
+  const tree = n => n.view ? box(n.view) : `<div class="pv-split ${n.dir}">${tree(n.a)}${tree(n.b)}</div>`;
+  return l?.tree ? tree(l.tree) : '';
+}
+function swDraw() {
+  const box = $('sw'); if (!box) return;
+  sw.rows = swRows(); sw.sel = Math.min(sw.sel, sw.rows.length - 1);
+  const sel = sw.rows[sw.sel];
+  box.querySelector('.sw-list').innerHTML = sw.rows.map((r, i) => {
+    const on = i === sw.sel ? ' aria-selected="true"' : '';
+    if (r.kind === 'group') return `<li class="sw-group" data-sw="${i}" draggable="false"${on}><span class="sw-tw">${r.open ? '▾' : '▸'}</span>${esc(r.g)} <em>${r.n}</em></li>`;
+    const editing = sw.edit && sw.edit.row === i;
+    return `<li class="sw-ws${r.l.name === lay.current ? ' current' : ''}" data-sw="${i}" draggable="true" style="padding-left:${12 + r.depth * 18}px"${on}>${editing ? `<input class="sw-in" id="sw-in" value="${esc(sw.edit.value)}" placeholder="${sw.edit.kind === 'group' ? 'Group (empty for none)' : 'Name'}">` : esc(r.l.name)}</li>`;
+  }).join('');
+  const l = sel?.kind === 'ws' ? sel.l : sel?.kind === 'group' ? inGroup(sel.g)[0] : null;
+  box.querySelector('.sw-pv').innerHTML = l ? `<div class="pv">${preview(l)}</div><div class="sw-cap">${esc(l.name)} · ${layViews(l).length} widgets</div>` : '';
+  box.querySelector('.sw-foot').innerHTML = sw.confirm ? `<b>Delete “${esc(sw.confirm)}”?</b> Enter deletes, Esc keeps it.` : '↑↓ move · →/Tab open · ← close · Enter go · F2 rename · D duplicate · G group · N new · ⌫ delete';
+  $('sw-in')?.focus();
+}
+function swOpen() {
+  if (state.tab !== 'workspace') { state.tab = 'workspace'; state.navigated = true; render(); }
+  if (dock) laySave();
+  const cur = lay.list.find(l => l.name === lay.current);
+  if (groupOf(cur)) sw.expanded.add(groupOf(cur));
+  document.body.insertAdjacentHTML('beforeend', `<div class="pal-back" id="sw-back"><div class="pal sw" id="sw" role="dialog" aria-label="Workspaces"><div class="sw-body"><ul class="sw-list" role="tree"></ul><div class="sw-pv"></div></div><p class="pal-hint sw-foot"></p></div></div>`);
+  sw.open = true; sw.rows = swRows(); sw.sel = Math.max(0, sw.rows.findIndex(r => r.kind === 'ws' && r.l.name === lay.current)); swDraw();
+}
+function swClose() { $('sw-back')?.remove(); sw.open = false; sw.edit = null; sw.confirm = null; }
+function swCommit() {
+  const { kind, l, value } = sw.edit; const v = value.trim().slice(0, 40); sw.edit = null;
+  if (kind === 'rename' && v && !lay.list.some(x => x.name === v)) { if (lay.current === l.name) lay.current = v; l.name = v; }
+  if (kind === 'group') { l.group = v || undefined; if (v) sw.expanded.add(v); }
+  if (kind === 'new' && v && !lay.list.some(x => x.name === v)) { lay.list.push({ name: v, group: groupOf(lay.list.find(x => x.name === lay.current)) || undefined, dock: dock?.toJSON() }); }
+  layStore(); swDraw();
+}
+document.addEventListener('keydown', e => {
+  if (!sw.open) return;
+  const r = sw.rows[sw.sel];
+  if (sw.edit) {
+    if (e.key === 'Enter') { e.preventDefault(); sw.edit.value = $('sw-in').value; swCommit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); sw.edit = null; swDraw(); }
+    return;
+  }
+  if (sw.confirm) {
+    e.preventDefault();
+    if (e.key === 'Enter') { const n = sw.confirm; sw.confirm = null; layDelete(n); swDraw(); }
+    else if (e.key === 'Escape') { sw.confirm = null; swDraw(); }
+    return;
+  }
+  const k = e.key;
+  if (k === 'Escape' || (e.altKey && e.code === 'KeyW')) { e.preventDefault(); swClose(); }
+  else if (k === 'ArrowDown' || k === 'ArrowUp') { e.preventDefault(); sw.sel = (sw.sel + (k === 'ArrowDown' ? 1 : -1) + sw.rows.length) % sw.rows.length; swDraw(); }
+  else if ((k === 'ArrowRight' || k === 'Tab') && r?.kind === 'group') { e.preventDefault(); if (!r.open) sw.expanded.add(r.g); else sw.sel++; swDraw(); }
+  else if (k === 'ArrowLeft') { e.preventDefault(); if (r?.kind === 'group') sw.expanded.delete(r.g); else if (r?.depth) { sw.expanded.delete(groupOf(r.l)); sw.sel = sw.rows.findIndex(x => x.kind === 'group' && x.g === groupOf(r.l)); } swDraw(); }
+  else if (k === 'Enter') { e.preventDefault(); if (r?.kind === 'group') { r.open ? sw.expanded.delete(r.g) : sw.expanded.add(r.g); swDraw(); } else if (r) { swClose(); laySwitch(r.l.name); } }
+  else if (k === 'F2' && r?.kind === 'ws') { e.preventDefault(); sw.edit = { kind: 'rename', row: sw.sel, l: r.l, value: r.l.name }; swDraw(); }
+  else if ((k === 'g' || k === 'G') && r?.kind === 'ws') { e.preventDefault(); sw.edit = { kind: 'group', row: sw.sel, l: r.l, value: groupOf(r.l) }; swDraw(); }
+  else if ((k === 'd' || k === 'D') && r?.kind === 'ws') { e.preventDefault(); let n = r.l.name + ' copy'; while (lay.list.some(x => x.name === n)) n += '′'; lay.list.splice(lay.list.indexOf(r.l) + 1, 0, { ...JSON.parse(JSON.stringify(r.l)), name: n }); layStore(); swDraw(); }
+  else if (k === 'n' || k === 'N') { e.preventDefault(); sw.edit = { kind: 'new', row: sw.sel, l: null, value: '' }; swDraw(); }
+  else if ((k === 'Backspace' || k === 'Delete') && r?.kind === 'ws' && lay.list.length > 1) { e.preventDefault(); sw.confirm = r.l.name; swDraw(); }
+}, true);
+document.addEventListener('click', e => {
+  if (!sw.open) return;
+  if (e.target.id === 'sw-back') { swClose(); return; }
+  const li = e.target.closest && e.target.closest('[data-sw]'); if (!li || e.target.id === 'sw-in') return;
+  const i = +li.dataset.sw, r = sw.rows[i];
+  if (sw.sel === i && r.kind === 'ws') { swClose(); laySwitch(r.l.name); return; }
+  sw.sel = i; if (r.kind === 'group') { r.open ? sw.expanded.delete(r.g) : sw.expanded.add(r.g); } swDraw();
+});
+// Drag a workspace onto another to put it before that one (and in its group), or onto a group.
+document.addEventListener('dragstart', e => { const li = e.target.closest && e.target.closest('.sw-ws[data-sw]'); if (li) e.dataTransfer.setData('text/plain', li.dataset.sw); });
+document.addEventListener('dragover', e => { if (sw.open && e.target.closest && e.target.closest('[data-sw]')) e.preventDefault(); });
+document.addEventListener('drop', e => {
+  const li = sw.open && e.target.closest && e.target.closest('[data-sw]'); if (!li) return;
+  e.preventDefault();
+  const from = sw.rows[+e.dataTransfer.getData('text/plain')], to = sw.rows[+li.dataset.sw];
+  if (!from || from.kind !== 'ws' || !to || from === to) return;
+  lay.list.splice(lay.list.indexOf(from.l), 1);
+  if (to.kind === 'group') { from.l.group = to.g; lay.list.push(from.l); }
+  else { from.l.group = to.l.group; lay.list.splice(lay.list.indexOf(to.l), 0, from.l); }
+  layStore(); swDraw();
+});
 
 // The tinytrader shell: a terminal for read-only commands over this
 // deployment's state. It runs nothing on the machine itself.
@@ -1956,6 +2081,7 @@ function render() {
   document.body.classList.toggle('docs-mode', state.tab.startsWith('col:') || state.tab === 'roadmap');
   document.documentElement.style.setProperty('--top-h', document.querySelector('.top').offsetHeight + 'px');
   $('view').innerHTML = viewHtml(state.tab);
+  if (state.tab === 'workspace') mountWorkspace(); else if (dock) { dock.dispose(); dock = null; panelBody.clear(); }
   if ($('jobs-list')) jobsOpened();
   if ($('rem')) remLoad();
   if ($('ds-filter') && state.dsFilter) $('ds-filter').dispatchEvent(new Event('input', { bubbles: true }));
@@ -2114,8 +2240,8 @@ $('theme-btn').addEventListener('click', () => {
   else if (h) {
     // Old page links open the workspace holding that view, with it focused.
     const view = { charts: 'prices', workspace: null }[h] ?? h;
-    const home = view && lay.list.find(l => JSON.stringify(l.tree).includes(`"view":"${view}"`));
-    if (home) { laySwitch(home.name); wsFocus = wsLeaves().find(l => l.view === view)?.id ?? null; state.navigated = true; }
+    const home = view && lay.list.find(l => layViews(l).includes(view));
+    if (home) { state.focusView = view; laySwitch(home.name); }
   }
   await loadTopology(); await poll();
   setInterval(poll, 2000);
