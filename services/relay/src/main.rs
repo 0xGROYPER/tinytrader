@@ -295,6 +295,12 @@ fn register_metrics(observer: &Observer, hub: &Arc<Hub>) {
             &[],
             hub.reference_len() as f64,
         );
+        w.counter(
+            "tinytrader_relay_upstream_skips_total",
+            "Times the provider skipped records because the relay read too slowly.",
+            &[],
+            c(&hub.upstream_skips),
+        );
         w.gauge(
             "tinytrader_relay_upstream_up",
             "1 while the provider connection is up.",

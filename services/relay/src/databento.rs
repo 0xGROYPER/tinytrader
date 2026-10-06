@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use databento::LiveClient;
-use databento::dbn::{SType, Schema, VersionUpgradePolicy};
+use databento::dbn::{
+    ErrorCode, ErrorMsg, RecordRef, SType, Schema, SystemCode, SystemMsg, VersionUpgradePolicy,
+};
 use databento::live::Subscription;
 use time::OffsetDateTime;
 use tinytrader_observe::{Observer, State};
@@ -111,27 +113,116 @@ impl Databento {
             "relay: Databento session live for {}",
             self.symbols.join(",")
         );
+        let mut gaps = Gaps::default();
         loop {
             let mut chunk = Vec::with_capacity(CHUNK);
             let mut n = 0;
             match client.next_record().await {
-                Ok(Some(r)) => chunk.extend_from_slice(r.as_ref()),
+                Ok(Some(r)) => gaps.take(hub, r, &mut chunk, &mut n),
                 Ok(None) => return Ok(()),
                 Err(e) => return Err(format!("Databento session failed: {e}")),
             }
-            n += 1;
             // Take whatever else is already buffered, up to a chunk.
             while chunk.len() < CHUNK {
                 match client.try_next_record() {
-                    Ok(Some(r)) => {
-                        chunk.extend_from_slice(r.as_ref());
-                        n += 1;
-                    }
+                    Ok(Some(r)) => gaps.take(hub, r, &mut chunk, &mut n),
                     Ok(None) => break,
                     Err(e) => return Err(format!("Databento session failed: {e}")),
                 }
             }
-            hub.publish(chunk, n);
+            if !chunk.is_empty() {
+                hub.publish(chunk, n);
+            }
         }
+    }
+}
+
+/// Databento's own slow-reader messages are about the relay, and use the
+/// codes the relay sends its clients when it drops them; they are turned into
+/// the relay's markers instead of being passed on. A skip becomes
+/// `upstream-gap gap_from=<ns> gap_to=<ns>`, sent before the first record
+/// after it: from the last record before the skip to that record.
+#[derive(Default)]
+struct Gaps {
+    last_ts: u64,
+    skipped_since: Option<u64>,
+}
+
+impl Gaps {
+    fn take(&mut self, hub: &Hub, r: RecordRef, chunk: &mut Vec<u8>, n: &mut u64) {
+        if let Some(e) = r.get::<ErrorMsg>()
+            && e.code().ok() == Some(ErrorCode::SkippedRecordsAfterSlowReading)
+        {
+            self.skipped_since.get_or_insert(self.last_ts);
+            return;
+        }
+        if let Some(m) = r.get::<SystemMsg>()
+            && m.code().ok() == Some(SystemCode::SlowReaderWarning)
+        {
+            hub.upstream_slow();
+            return;
+        }
+        let ts = r.header().ts_event;
+        if let Some(from) = self.skipped_since.take() {
+            chunk.extend(hub.upstream_gap(from, ts));
+        }
+        if r.get::<ErrorMsg>().is_none() && r.get::<SystemMsg>().is_none() {
+            self.last_ts = ts;
+        }
+        chunk.extend_from_slice(r.as_ref());
+        *n += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use databento::dbn::{Cmbp1Msg, Metadata};
+
+    fn quote(ts: u64) -> Cmbp1Msg {
+        let mut q = Cmbp1Msg::default_for_schema(Schema::Cmbp1);
+        q.hd.instrument_id = 7;
+        q.hd.ts_event = ts;
+        q
+    }
+
+    #[test]
+    fn a_provider_skip_becomes_a_gap_marker() {
+        let hub = Hub::new(
+            Metadata::builder()
+                .dataset("OPRA.PILLAR".to_owned())
+                .schema(None)
+                .start(0)
+                .stype_in(None)
+                .stype_out(SType::InstrumentId)
+                .build(),
+            8,
+            Duration::from_secs(10),
+        );
+        let mut gaps = Gaps::default();
+        let (mut chunk, mut n) = (Vec::new(), 0);
+        let before = quote(100);
+        gaps.take(&hub, RecordRef::from(&before), &mut chunk, &mut n);
+        let skip = ErrorMsg::new(
+            150,
+            Some(ErrorCode::SkippedRecordsAfterSlowReading),
+            "Slow client detected for cmbp-1. Skipped records",
+            true,
+        );
+        gaps.take(&hub, RecordRef::from(&skip), &mut chunk, &mut n);
+        let after = quote(200);
+        gaps.take(&hub, RecordRef::from(&after), &mut chunk, &mut n);
+        assert_eq!(n, 2, "the provider's error isn't passed on");
+        let text = String::from_utf8_lossy(&chunk);
+        assert!(
+            text.contains("upstream-gap gap_from=100 gap_to=200"),
+            "{text}"
+        );
+        assert!(!text.contains("Slow client detected"));
+        assert_eq!(
+            hub.upstream_skips
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 }

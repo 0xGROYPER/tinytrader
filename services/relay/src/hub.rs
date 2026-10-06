@@ -174,6 +174,8 @@ pub struct Hub {
     pub records: AtomicU64,
     pub bytes: AtomicU64,
     pub reconnects: AtomicU64,
+    /// Times the provider skipped records because the relay read too slowly.
+    pub upstream_skips: AtomicU64,
     pub slow_disconnects: AtomicU64,
     pub refused: AtomicU64,
     /// Provider rows that couldn't be represented or weren't for this relay.
@@ -200,6 +202,7 @@ impl Hub {
             records: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             reconnects: AtomicU64::new(0),
+            upstream_skips: AtomicU64::new(0),
             slow_disconnects: AtomicU64::new(0),
             refused: AtomicU64::new(0),
             refused_rows: AtomicU64::new(0),
@@ -308,6 +311,26 @@ impl Hub {
     }
 
     /// The provider connection is up; tell clients how long it was down.
+    /// The provider skipped records it couldn't deliver in time (it sends
+    /// its own slow-reader error, whose code clients would mistake for the
+    /// relay dropping them). Returns the relay's own marker for clients:
+    /// `upstream-gap gap_from=<ns> gap_to=<ns>`, the span that is missing.
+    pub fn upstream_gap(&self, from: u64, to: u64) -> Vec<u8> {
+        self.upstream_skips.fetch_add(1, Ordering::Relaxed);
+        let text = format!("upstream-gap gap_from={from} gap_to={to}");
+        eprintln!("relay: the provider skipped records (the relay read too slowly): {text}");
+        self.events.push(text.clone(), text.clone());
+        protocol::system_text(&text)
+    }
+
+    /// The provider warned that the relay is reading too slowly. Not sent to
+    /// clients (it is about the relay, not them); logged.
+    pub fn upstream_slow(&self) {
+        let text = "the provider warned that the relay is reading too slowly".to_owned();
+        eprintln!("relay: {text}");
+        self.events.push(text.clone(), text);
+    }
+
     pub fn upstream_up(&self) {
         let mut u = lock(&self.upstream);
         if let Upstream::Off(_) = *u {

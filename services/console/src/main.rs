@@ -39,6 +39,9 @@
 //!   (optional). The one exception to read-only: `/api/jobs/...` is passed to
 //!   it, so the Data page can price, submit and download jobs. The jobs
 //!   service itself insists on an exact confirmation before any charge.
+//! - `CONSOLE_PAGE`: serve the page from this file, read on each request,
+//!   instead of the copy built in (optional; lets the page change without a
+//!   rebuild).
 //! - `CONSOLE_REMINDERS`: a JSON file for the roadmap's reminders, which the
 //!   console edits (`/api/reminders`); `CONSOLE_REMINDERS_SEED`: a Markdown
 //!   roadmap to start it from (optional).
@@ -181,8 +184,15 @@ async fn poll_forever(app: Arc<App>, observer: Observer) {
     }
 }
 
-async fn page() -> Html<&'static str> {
-    Html(PAGE)
+async fn page() -> Html<std::borrow::Cow<'static, str>> {
+    // A page file, when configured, is read fresh: the page can change
+    // without rebuilding the console.
+    if let Ok(path) = std::env::var("CONSOLE_PAGE")
+        && let Ok(text) = std::fs::read_to_string(&path)
+    {
+        return Html(std::borrow::Cow::Owned(text));
+    }
+    Html(std::borrow::Cow::Borrowed(PAGE))
 }
 
 async fn topology(AxumState(app): AxumState<Arc<App>>) -> Response {

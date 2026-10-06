@@ -125,6 +125,7 @@ The relay answers with a DBN v3 stream: a metadata header (dataset, schema,
 | Catch-up finished, now live | `SystemMsg`, code `ReplayCompleted` |
 | Provider connection lost | `SystemMsg`, text `upstream-down since=<ns>`; heartbeats continue |
 | Provider connection restored | `SystemMsg`, text `upstream-up gap_from=<ns> gap_to=<ns>` |
+| Provider skipped records (the relay read too slowly; the connection stayed up) | `SystemMsg`, text `upstream-gap gap_from=<ns> gap_to=<ns>`, before the first record after the skip. The provider's own slow-reader error and warning are not passed on: they use the codes the relay sends a client it drops. |
 | Outside active hours (provider disconnected on purpose) | `SystemMsg`, text `off-schedule until=<ns>`; heartbeats continue |
 | Active hours begin | `SystemMsg`, text `on-schedule` (not a gap) |
 | Client falling behind (queue half full) | `SystemMsg`, code `SlowReaderWarning` |
