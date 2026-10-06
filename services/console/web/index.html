@@ -338,6 +338,7 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 .nw-pop { position: fixed; z-index: 60; width: min(320px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 8px; background: var(--bg); box-shadow: 0 10px 30px rgba(0, 0, 0, .18); padding: 6px; }
 .nw-pop h3 { margin: 6px 10px 8px; font: 600 13px var(--ui); color: var(--muted); }
 .nw-item { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); font: 14px var(--ui); text-align: left; cursor: pointer; }
+.wm-confirm { display: flex; gap: 8px; justify-content: flex-end; padding: 4px 10px 8px; }
 .nw-item span { font-size: 12px; color: var(--muted); }
 .nw-item:hover, .nw-item[aria-selected="true"] { background: var(--accent-soft); }
 .bell-wrap { position: relative; }
@@ -1738,6 +1739,44 @@ function wsAdd(name, start = { tree: { view: 'overview' } }) {
   lay.list.push({ name: n, group: groupOf(lay.list.find(l => l.name === lay.current)) || undefined, ...JSON.parse(JSON.stringify(start)) });
   layStore(); laySwitch(n); return true;
 }
+// A workspace number's menu (right-click): rename, duplicate or delete it.
+// Delete asks in place first.
+function wmOpen(name, x, y) {
+  wmClose();
+  const l = lay.list.find(w => w.name === name); if (!l) return;
+  document.body.insertAdjacentHTML('beforeend', `<div class="nw-pop" id="wm" role="menu" aria-label="Workspace ${esc(name)}" style="top:${y}px;left:${Math.max(16, Math.min(x, innerWidth - 336))}px"></div>`);
+  wmDraw(l, false);
+}
+function wmDraw(l, confirm) {
+  const m = $('wm'); if (!m) return;
+  m.dataset.ws = l.name;
+  m.innerHTML = confirm
+    ? `<h3>Delete “${esc(l.name)}”?</h3><div class="wm-confirm"><button type="button" class="btn" data-wm="keep">Keep</button><button type="button" class="btn danger" data-wm="delete-yes">Delete</button></div>`
+    : `<h3>${esc(l.name)}</h3>
+      <button type="button" class="nw-item" role="menuitem" data-wm="rename"><b>Rename…</b></button>
+      ${lay.list.length < WS_MAX ? '<button type="button" class="nw-item" role="menuitem" data-wm="duplicate"><b>Duplicate</b></button>' : ''}
+      ${lay.list.length > 1 ? '<button type="button" class="nw-item" role="menuitem" data-wm="delete"><b>Delete</b></button>' : ''}`;
+}
+function wmClose() { $('wm')?.remove(); }
+document.addEventListener('contextmenu', e => {
+  const b = e.target.closest && e.target.closest('#wtabs [data-layout]'); if (!b) return;
+  e.preventDefault(); const r = b.getBoundingClientRect(); wmOpen(b.dataset.layout, r.left, r.bottom + 6);
+});
+document.addEventListener('click', e => {
+  const m = $('wm'); if (!m) return;
+  const a = e.target.closest && e.target.closest('[data-wm]');
+  if (!a) { if (!m.contains(e.target)) wmClose(); return; }
+  const l = lay.list.find(w => w.name === m.dataset.ws); if (!l) return wmClose();
+  const act = a.dataset.wm;
+  if (act === 'delete') return wmDraw(l, true);
+  if (act === 'keep') return wmDraw(l, false);
+  wmClose();
+  if (act === 'delete-yes') { layDelete(l.name); updateLayoutNav(); }
+  else if (act === 'duplicate') { if (dock && state.tab === 'workspace' && l.name === lay.current) laySave(); wsAdd(l.name + ' copy', l.dock ? { dock: l.dock } : { tree: l.tree }); }
+  else if (act === 'rename') { if (l.name !== lay.current) laySwitch(l.name); palOpen('rename '); }
+}, true);
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('wm')) wmClose(); });
+
 // The new-workspace menu (+, or ⌥ and the next number): start from a
 // template, a copy of the open workspace, or a single panel.
 const nw = { open: false, sel: 0 };
@@ -1781,7 +1820,7 @@ function updateLayoutNav() {
   const docs = state.tab.startsWith('col:') || state.tab === 'roadmap';
   const html = lay.list.map((l, i) => {
     const here = !docs && l.name === lay.current, n = wsNumber(i);
-    return `<button type="button" class="wtab wtab-num" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 10 ? ` (⌥${n})` : ''}${here ? ' · click for all workspaces (⌥W)' : ''}" aria-label="Workspace ${n}: ${esc(l.name)}"${here ? ' aria-current="page"' : ''}>${n}</button>`;
+    return `<button type="button" class="wtab wtab-num" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 10 ? ` (⌥${n})` : ''}${here ? ' · click for all workspaces (⌥W)' : ''} · right-click to rename, duplicate or delete" aria-label="Workspace ${n}: ${esc(l.name)}"${here ? ' aria-current="page"' : ''}>${n}</button>`;
   }).join('')
     + (lay.list.length < WS_MAX ? `<button type="button" class="wtab wtab-num" data-ws-add title="New workspace (⌥${wsNumber(lay.list.length)})" aria-label="New workspace" aria-haspopup="menu">+</button>` : '')
     + `<a class="wtab wtab-docs" href="/docs/"${docs ? ' aria-current="page"' : ''}>Docs</a>`;
