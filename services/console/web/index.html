@@ -102,7 +102,6 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
   --sans: 'Archivo', -apple-system, 'Segoe UI', system-ui, sans-serif; --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace; }
 @media (prefers-color-scheme: dark) { :root[data-palette="pbj2"]:not([data-theme="light"]) { --bg: #1C0B2A; --surface: #261236; --line: #4A2A63; --line-soft: #331A47; --nav-bg: #170923; --nav-hover: rgba(201, 139, 43, .12); --fg: #FFF3D2; --fg-2: #EAD9B0; --muted: #B9A3C2; --accent: #CDA2F2; --accent-mark: #B57EE8; --accent-2: #D9A04A; --accent-soft: #3A2052; --idle: #B9A3C2; --idle-soft: #2C163D; --grid: #2C163D; --link: var(--accent); } }
 :root[data-palette="pbj2"][data-theme="dark"] { --bg: #1C0B2A; --surface: #261236; --line: #4A2A63; --line-soft: #331A47; --nav-bg: #170923; --nav-hover: rgba(201, 139, 43, .12); --fg: #FFF3D2; --fg-2: #EAD9B0; --muted: #B9A3C2; --accent: #CDA2F2; --accent-mark: #B57EE8; --accent-2: #D9A04A; --accent-soft: #3A2052; --idle: #B9A3C2; --idle-soft: #2C163D; --grid: #2C163D; --link: var(--accent); }
-:root[data-palette="pbj2"] .top { border-top: 6px solid var(--accent); }
 :root[data-palette="pbj2"] h1 { font: 800 clamp(30px, 4vw, 44px)/1 var(--sans); letter-spacing: -0.04em; }
 :root[data-palette="pbj2"] h2 { font-family: var(--sans); font-weight: 800; letter-spacing: -0.02em; }
 :root[data-palette="pbj2"] .panel, :root[data-palette="pbj2"] .box { background: var(--surface); border-color: var(--accent-2); }
@@ -112,7 +111,6 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 @media (prefers-color-scheme: dark) { :root[data-palette="harbor"]:not([data-theme="light"]) { --bg: #0E2236; --surface: #142C44; --line: #2A4560; --line-soft: #1B3550; --nav-bg: #0B1C2E; --nav-hover: rgba(143, 176, 196, .08); --fg: #E9EEF0; --fg-2: #C9D8E0; --muted: #8FB0C4; --accent: #8FB0C4; --accent-mark: #8FB0C4; --accent-2: #4F7690; --accent-soft: #1C3852; --warn: #F2925E; --warn-mark: #E8743B; --warn-soft: #3A2014; --warn-line: #7A3E1F; --idle: #8FB0C4; --idle-soft: #1B3550; --grid: #1B3550; --link: var(--accent); } }
 :root[data-palette="harbor"][data-theme="dark"] { --bg: #0E2236; --surface: #142C44; --line: #2A4560; --line-soft: #1B3550; --nav-bg: #0B1C2E; --nav-hover: rgba(143, 176, 196, .08); --fg: #E9EEF0; --fg-2: #C9D8E0; --muted: #8FB0C4; --accent: #8FB0C4; --accent-mark: #8FB0C4; --accent-2: #4F7690; --accent-soft: #1C3852; --warn: #F2925E; --warn-mark: #E8743B; --warn-soft: #3A2014; --warn-line: #7A3E1F; --idle: #8FB0C4; --idle-soft: #1B3550; --grid: #1B3550; --link: var(--accent); }
 :root[data-palette="harbor"] { --dot: var(--warn-mark); }
-:root[data-palette="harbor"] .top { border-top: 6px solid var(--accent); }
 :root[data-palette="harbor"] h1 { font: 700 clamp(30px, 4vw, 44px)/1 var(--sans); letter-spacing: -0.04em; }
 :root[data-palette="harbor"] h2 { font-family: var(--sans); font-weight: 700; letter-spacing: -0.02em; }
 :root[data-palette="harbor"] .panel, :root[data-palette="harbor"] .box { background: var(--surface); }
@@ -130,7 +128,6 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 @media (prefers-color-scheme: dark) { :root[data-palette="dusk"]:not([data-theme="light"]) { --bg: #1B1633; --surface: #2A2250; --line: #433A7A; --line-soft: #352C63; --nav-bg: #17122C; --nav-hover: rgba(255, 180, 138, .07); --fg: #F3E9FF; --fg-2: #D9CCF2; --muted: #B3A6D6; --accent: #B9A2F2; --accent-mark: #7B5CD6; --accent-2: #FFB48A; --accent-soft: #2E2557; --warn: #FFB48A; --warn-mark: #FFB48A; --warn-soft: #3A2630; --warn-line: #7A4A3E; --idle: #B3A6D6; --idle-soft: #2A2250; --grid: #2A2250; --link: var(--accent); } }
 :root[data-palette="dusk"][data-theme="dark"] { --bg: #1B1633; --surface: #2A2250; --line: #433A7A; --line-soft: #352C63; --nav-bg: #17122C; --nav-hover: rgba(255, 180, 138, .07); --fg: #F3E9FF; --fg-2: #D9CCF2; --muted: #B3A6D6; --accent: #B9A2F2; --accent-mark: #7B5CD6; --accent-2: #FFB48A; --accent-soft: #2E2557; --warn: #FFB48A; --warn-mark: #FFB48A; --warn-soft: #3A2630; --warn-line: #7A4A3E; --idle: #B3A6D6; --idle-soft: #2A2250; --grid: #2A2250; --link: var(--accent); }
 :root[data-palette="dusk"] { --dot: var(--accent-2); }
-:root[data-palette="dusk"] .top { border-top: 6px solid var(--accent-2); }
 :root[data-palette="dusk"] h1 { font: 800 clamp(30px, 4vw, 44px)/1 var(--sans); letter-spacing: -0.05em; }
 :root[data-palette="dusk"] h1::after { content: "."; color: var(--accent-2); }
 :root[data-palette="dusk"] h2 { font-family: var(--sans); font-weight: 800; letter-spacing: -0.03em; }
