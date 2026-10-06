@@ -1,18 +1,28 @@
-// Storage: each data root and the volume it lives on, against the store's
-// thresholds.
+// Storage: the store's drives as one pool (decision 0007): the pool's free
+// space first, then each drive against the store's thresholds, then any new
+// drive that could be approved for the store.
 import { defineWidget } from '../lib/widgets.js';
-import { catalogRoots, catalogStamp } from '../lib/fleet.js';
+import { fleet, catalogRoots, catalogStamp } from '../lib/fleet.js';
 import { esc, bytes } from '../lib/format.js';
 
-function storageView() {
+const statusPill = { ok: ['OK', 'p-ok'], warning: ['Warning', 'p-warn'], critical: ['Critical', 'p-crit'], floor: ['Full', 'p-crit'], unknown: ['Space unknown', 'p-idle'] };
+
+// Drives the store found that it doesn't use yet.
+const candidates = () => Object.values(fleet.snap?.services || {}).flatMap(s => s.catalog?.candidates || []);
+
+function storageView(my) {
   const roots = catalogRoots();
-  const statusPill = { ok: ['OK', 'p-ok'], warning: ['Warning', 'p-warn'], critical: ['Critical', 'p-crit'], floor: ['Full', 'p-crit'], unknown: ['Space unknown', 'p-idle'] };
   const t = roots[0]?.thresholds || {};
+  // The pool: what new data can still use, below the critical threshold, on writable drives present.
+  const live = roots.filter(r => r.present && r.writable && r.volume?.total_bytes);
+  const room = live.reduce((a, r) => a + Math.max(0, r.volume.available_bytes - r.volume.total_bytes * (1 - (t.critical ?? 90) / 100)), 0);
+  const total = live.reduce((a, r) => a + r.volume.total_bytes, 0), free = live.reduce((a, r) => a + r.volume.available_bytes, 0);
+  const pool = live.length ? `<div class="pool"><b>${bytes(room)}</b><span>room for new data across ${live.length} drive${live.length === 1 ? '' : 's'}</span><span class="muted">${bytes(free)} free of ${bytes(total)}; each drive fills to ${t.critical ?? 90}%</span></div>` : '';
   const cards = roots.map(r => {
     const v = r.volume || {}, used = (v.used_fraction ?? 0) * 100, st = statusPill[v.status] || ['Missing', 'p-crit'];
     const marks = [t.warning, t.critical, t.floor].filter(Boolean).map(x => `<em style="left:${x}%" title="${x}%"></em>`).join('');
     return `<article class="panel">
-      <div class="d-head"><b>${esc(r.name)}</b><span class="pill ${r.present ? st[1] : 'p-crit'}">${r.present ? st[0] : 'Missing'}</span><span class="muted mono" style="margin-left:auto;font-size:12px">${esc(r.path)}</span></div>
+      <div class="d-head"><b>${esc(r.name)}</b><span class="pill ${r.present ? st[1] : 'p-crit'}">${r.present ? st[0] : 'Missing'}</span>${r.writable === false ? '<span class="muted" style="font-size:12px">read-only</span>' : ''}<span class="muted mono" style="margin-left:auto;font-size:12px">${esc(r.path)}</span></div>
       ${r.present ? `${v.status === 'unknown' ? `<p class="muted" style="margin:0;font-size:14px">${esc(v.reason || 'Disk space is not available for this root.')}</p>` : `<div class="usage"><b class="${esc(v.status)}" style="width:${used.toFixed(1)}%"></b>${marks}</div>`}
       <div class="facts">
         ${v.status === 'unknown' ? '' : `<div><div class="k">Used</div><div class="v">${used.toFixed(0)}% of ${bytes(v.total_bytes)}</div></div>
@@ -20,19 +30,62 @@ function storageView() {
         <div><div class="k">In datasets</div><div class="v">${bytes(r.dataset_bytes)} · ${(r.datasets || []).length} datasets</div></div>
       </div>
       ${(r.unrecognised || []).length ? `<div><div class="k" style="font-size:12px;color:var(--muted);margin-bottom:6px">Not in the store layout</div><div class="chips">${r.unrecognised.map(x => `<span class="tag">${esc(x)}</span>`).join('')}</div></div>` : ''}`
-      : '<p class="muted" style="margin:0">This root\'s path is not available: the drive may be unplugged.</p>'}
+      : '<p class="muted" style="margin:0">This drive is not available: it may be unplugged. Its files are listed as unavailable until it returns.</p>'}
     </article>`;
   }).join('');
-  return `<div><h1>Storage</h1><p class="muted" style="margin:0">Each data root and the volume it lives on. Marks show the thresholds: ${t.warning ?? 80}% warn, ${t.critical ?? 90}% pause non-capture writers, ${t.floor ?? 97}% stop capture. Nothing is ever deleted automatically.</p></div>
-    <div class="roots">${cards || '<p class="muted">No data roots configured.</p>'}</div>`;
+  const found = candidates();
+  const fresh = found.length ? `<section><div class="sec-head"><h2>New drives</h2><span class="muted" style="font-size:13px">Mounted, not used by the store</span></div>
+    <div class="roots">${found.map(c => {
+      const asking = my.asking === c.path;
+      return `<article class="panel" data-drive="${esc(c.path)}">
+        <div class="d-head"><b>${esc(c.label)}</b><span class="muted mono" style="margin-left:auto;font-size:12px">${esc(c.path)}</span></div>
+        <div class="facts"><div><div class="k">Size</div><div class="v">${bytes(c.total_bytes)}</div></div><div><div class="k">Free</div><div class="v">${bytes(c.available_bytes)}</div></div></div>
+        ${asking
+          ? `<p style="margin:0;font-size:14px">This writes one small file, <code>.tinytrader-volume</code>, at the top of ${esc(c.label)}, naming it <b>${esc(my.name)}</b>. The store then places new data there when it has the most room. Nothing on the drive is moved or changed.</p>
+             <div class="drive-acts"><button type="button" class="btn" data-drive-cancel>Cancel</button><button type="button" class="btn primary" data-drive-approve>Approve ${esc(c.label)}</button></div>`
+          : `<div class="drive-acts"><label class="field" style="flex:1"><span class="k">Name in the store</span><input data-drive-name value="${esc(my.names[c.path] ?? c.label.toLowerCase().replace(/[^a-z0-9._-]+/g, '-'))}" spellcheck="false" autocomplete="off"></label><button type="button" class="btn" data-drive-use>Use for the store…</button></div>`}
+        ${my.err[c.path] ? `<p class="msg-err" style="margin:0">${esc(my.err[c.path])}</p>` : ''}
+      </article>`;
+    }).join('')}</div></section>` : '';
+  return `<div><h1>Storage</h1><p class="muted" style="margin:0">The store's drives as one pool. Marks show the thresholds: ${t.warning ?? 80}% warn, ${t.critical ?? 90}% no new data on that drive, ${t.floor ?? 97}% stop capture. Nothing is ever deleted automatically.</p></div>
+    ${pool}<div class="roots">${cards || '<p class="muted">No data roots configured.</p>'}</div>${fresh}`;
 }
 
 defineWidget('storage', {
   title: 'Storage',
   mount(el) {
-    let stamp = null;
-    const draw = () => { stamp = catalogStamp(); const top = el.scrollTop; el.innerHTML = storageView(); el.scrollTop = top; };
+    const my = { asking: null, name: '', names: {}, err: {}, stamp: null, found: '' };
+    const draw = () => { my.stamp = catalogStamp(); my.found = JSON.stringify(candidates()); const top = el.scrollTop; el.innerHTML = storageView(my); el.scrollTop = top; };
+    const input = e => { const d = e.target.closest('[data-drive]'); if (d && e.target.matches('[data-drive-name]')) my.names[d.dataset.drive] = e.target.value; };
+    const click = async e => {
+      const d = e.target.closest('[data-drive]'); if (!d) return;
+      const path = d.dataset.drive;
+      if (e.target.closest('[data-drive-use]')) {
+        my.name = (d.querySelector('[data-drive-name]').value || '').trim(); my.names[path] = my.name; delete my.err[path];
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(my.name)) { my.err[path] = 'A name uses letters, digits, ".", "_" and "-".'; draw(); return; }
+        my.asking = path; draw(); return;
+      }
+      if (e.target.closest('[data-drive-cancel]')) { my.asking = null; draw(); return; }
+      if (e.target.closest('[data-drive-approve]')) {
+        e.target.disabled = true;
+        try {
+          const r = await fetch('/api/store/volumes/approve', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path, name: my.name }) });
+          const v = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(v.error || `${r.status} ${r.statusText}`);
+          my.asking = null;
+        } catch (err) { my.err[path] = err.message; my.asking = null; }
+        draw();
+      }
+    };
+    el.addEventListener('input', input); el.addEventListener('click', click);
     draw();
-    return { update() { if (catalogStamp() !== stamp) draw(); } };
+    return {
+      // Redrawn when the catalog or the drives found change, never mid-question or under typing.
+      update() {
+        if (my.asking || el.contains(document.activeElement)) return;
+        if (catalogStamp() !== my.stamp || JSON.stringify(candidates()) !== my.found) draw();
+      },
+      dispose() { el.removeEventListener('input', input); el.removeEventListener('click', click); },
+    };
   },
 });

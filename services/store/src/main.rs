@@ -20,6 +20,7 @@
 
 mod catalog;
 mod ingest;
+mod volumes;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,13 +46,14 @@ use tinytrader_observe::{Events, Observer, State, listen_address, unix_seconds};
 struct Args {
     /// A volume as NAME=PATH, or NAME=PATH:ro for read-only. Repeat, or
     /// separate with `;`.
-    #[arg(
-        long = "volume",
-        env = "STORE_VOLUMES",
-        value_delimiter = ';',
-        required = true
-    )]
+    #[arg(long = "volume", env = "STORE_VOLUMES", value_delimiter = ';')]
     volumes: Vec<String>,
+
+    /// Where drives are mounted (such as /Volumes). Drives there carrying an
+    /// approval marker are used as they appear; the others are offered for
+    /// approval in the console (decision 0007).
+    #[arg(long, env = "STORE_DISCOVER")]
+    discover: Option<PathBuf>,
 
     /// How often to rescan the volumes, in seconds.
     #[arg(long, env = "STORE_RESCAN_SECONDS", default_value_t = 300)]
@@ -71,7 +73,9 @@ struct Args {
 }
 
 struct Store {
-    volumes: Vec<Volume>,
+    /// The configured volumes, then approved drives as they are found.
+    volumes: std::sync::RwLock<Vec<Volume>>,
+    discover: Option<PathBuf>,
     limits: Thresholds,
     catalog: Mutex<Value>,
     events: Events,
@@ -112,8 +116,8 @@ async fn main() {
             })
         })
         .collect();
-    if volumes.is_empty() {
-        eprintln!("store: give at least one --volume NAME=PATH");
+    if volumes.is_empty() && args.discover.is_none() {
+        eprintln!("store: give at least one --volume NAME=PATH, or --discover DIR");
         std::process::exit(2);
     }
     let limits = Thresholds {
@@ -122,7 +126,8 @@ async fn main() {
         floor: args.floor,
     };
     let store = Arc::new(Store {
-        volumes,
+        volumes: std::sync::RwLock::new(volumes),
+        discover: args.discover.clone(),
         limits,
         catalog: Mutex::new(json!({ "generated_at": null, "roots": [] })),
         events: Events::default(),
@@ -134,7 +139,7 @@ async fn main() {
     let listen = listen_address("STORE_LISTEN", "127.0.0.1:9120");
     let observer = Observer::new("store", env!("CARGO_PKG_VERSION"));
     let names = store
-        .volumes
+        .volumes()
         .iter()
         .map(|v| format!("{}{}", v.name, if v.writable { "" } else { " (read-only)" }))
         .collect::<Vec<_>>()
@@ -195,6 +200,7 @@ async fn main() {
         .route("/incorporate/{provider}/{batch}", post(incorporate))
         .route("/batches/{provider}", get(batches))
         .route("/adopt/{provider}", post(adopt))
+        .route("/volumes/approve", post(approve))
         .with_state(store.clone())
         .merge(observer.router())
         .merge(store.events.router());
@@ -224,7 +230,35 @@ async fn main() {
 
 /// Rescan every volume into the catalog.
 async fn scan(store: &Shared, observer: &Observer) {
-    let (volumes, limits) = (store.volumes.clone(), store.limits);
+    // Approved drives join as they are found; one that goes missing stays
+    // listed (and reported) until it returns.
+    let mut candidates = Vec::new();
+    if let Some(dir) = store.discover.clone() {
+        let found = tokio::task::spawn_blocking(move || volumes::discover(&dir)).await;
+        if let Ok(found) = found {
+            let mut list = store
+                .volumes
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for v in found.marked {
+                if !list.iter().any(|x| x.path == v.path || x.name == v.name) {
+                    eprintln!(
+                        "store: using approved drive {} at {}",
+                        v.name,
+                        v.path.display()
+                    );
+                    list.push(v);
+                }
+            }
+            // A drive the configuration already names isn't offered again.
+            candidates = found
+                .candidates
+                .into_iter()
+                .filter(|c| !list.iter().any(|v| c["path"].as_str() == v.path.to_str()))
+                .collect();
+        }
+    }
+    let (volumes, limits) = (store.volumes(), store.limits);
     let scanned = tokio::task::spawn_blocking(move || {
         volumes
             .iter()
@@ -258,6 +292,8 @@ async fn scan(store: &Shared, observer: &Observer) {
         "generated_at": unix_seconds(),
         "thresholds": { "warning": store.limits.warning, "critical": store.limits.critical, "floor": store.limits.floor },
         "roots": scanned,
+        "candidates": candidates,
+        "discover": store.discover,
     });
     observer.set_state(
         if degraded {
@@ -270,30 +306,64 @@ async fn scan(store: &Shared, observer: &Observer) {
 }
 
 impl Store {
-    /// The provider directory where `batch` is already incoming, if any.
-    fn batch_root(&self, provider: &str, batch: &str) -> Option<PathBuf> {
+    fn volumes(&self) -> Vec<Volume> {
         self.volumes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Every writable volume's share of an incoming batch.
+    fn parts(&self, provider: &str, batch: &str) -> Vec<ingest::Part> {
+        self.volumes()
             .iter()
             .filter(|v| v.writable)
             .map(|v| v.path.join(provider))
-            .find(|root| root.join(ingest::INCOMING).join(batch).is_dir())
+            .map(|root| ingest::Part {
+                inc: root.join(ingest::INCOMING).join(batch),
+                root,
+            })
+            .filter(|p| p.inc.is_dir())
+            .collect()
     }
 
-    /// The writable volume with the most free space below the critical
-    /// threshold, as its provider directory.
-    fn place(&self, provider: &str) -> Result<PathBuf, String> {
-        self.volumes
+    /// Where an incoming file goes (decision 0007: each file whole on the
+    /// volume with the most room): the volume already holding it, or a part
+    /// of it, if any; otherwise the writable volume with the most free space
+    /// that stays below the critical threshold with `size` more bytes.
+    fn place(
+        &self,
+        provider: &str,
+        batch: &str,
+        file: &str,
+        size: Option<u64>,
+    ) -> Result<PathBuf, String> {
+        if let Some(p) = self
+            .parts(provider, batch)
+            .into_iter()
+            .find(|p| p.inc.join(file).exists() || p.inc.join(format!("{file}.partial")).exists())
+        {
+            return Ok(p.root);
+        }
+        let need = size.unwrap_or(0);
+        self.volumes()
             .iter()
             .filter(|v| v.writable && v.path.is_dir())
             .filter_map(|v| {
                 let total = fs4::total_space(&v.path).ok()?;
-                let free = fs4::available_space(&v.path).ok()?;
+                let free = fs4::available_space(&v.path).ok()?.checked_sub(need)?;
                 let used = 100.0 * (1.0 - free as f64 / total.max(1) as f64);
                 (used < self.limits.critical).then(|| (free, v.path.join(provider)))
             })
             .max_by_key(|(free, _)| *free)
             .map(|(_, root)| root)
-            .ok_or_else(|| "no writable volume has room".to_owned())
+            .ok_or_else(|| {
+                format!(
+                    "no writable volume has room for {file}{} below {}% used",
+                    size.map_or(String::new(), |s| format!(" ({s} bytes)")),
+                    self.limits.critical
+                )
+            })
     }
 }
 
@@ -318,12 +388,9 @@ async fn upload(
     if !ingest::safe(&batch) || !ingest::safe(&file) {
         return refused(StatusCode::BAD_REQUEST, "unsafe batch or file name");
     }
-    let root = match store.batch_root(pdir, &batch) {
-        Some(r) => r,
-        None => match store.place(pdir) {
-            Ok(r) => r,
-            Err(e) => return refused(StatusCode::INSUFFICIENT_STORAGE, e),
-        },
+    let root = match store.place(pdir, &batch, &file, expect.size) {
+        Ok(r) => r,
+        Err(e) => return refused(StatusCode::INSUFFICIENT_STORAGE, e),
     };
     let dir = root.join(ingest::INCOMING).join(&batch);
     let mut up = match tokio::task::block_in_place(|| ingest::Upload::start(&dir, &file)) {
@@ -362,7 +429,7 @@ async fn upload(
 /// Batches waiting to be incorporated, with their files.
 async fn list_incoming(AxState(store): AxState<Shared>) -> Json<Value> {
     let mut out = Vec::new();
-    for v in store.volumes.iter().filter(|v| v.writable) {
+    for v in store.volumes().iter().filter(|v| v.writable) {
         let Ok(providers) = std::fs::read_dir(&v.path) else {
             continue;
         };
@@ -399,22 +466,23 @@ async fn incorporate(
     if !ingest::safe(&batch) {
         return refused(StatusCode::BAD_REQUEST, "unsafe batch name");
     }
-    let Some(root) = store.batch_root(pdir, &batch) else {
+    let parts = store.parts(pdir, &batch);
+    if parts.is_empty() {
         return refused(StatusCode::NOT_FOUND, format!("no incoming batch {batch}"));
-    };
+    }
     // The same provider on every other volume, read-only ones included, is
     // checked for the same days.
     let elsewhere: Vec<PathBuf> = store
-        .volumes
+        .volumes()
         .iter()
         .map(|v| v.path.join(pdir))
-        .filter(|p| *p != root)
+        .filter(|p| !parts.iter().any(|x| x.root == *p))
         .collect();
     let _one_at_a_time = store.filing.lock().await;
     let today = today();
-    let (b, r) = (batch.clone(), root.clone());
+    let b = batch.clone();
     let result = tokio::task::spawn_blocking(move || {
-        ingest::incorporate_databento(&r, &elsewhere, &b, &today)
+        ingest::incorporate_databento(&parts, &elsewhere, &b, &today)
     })
     .await;
     match result {
@@ -448,7 +516,7 @@ async fn batches(AxState(store): AxState<Shared>, UrlPath(provider): UrlPath<Str
             format!("unknown provider {provider}"),
         );
     };
-    let volumes = store.volumes.clone();
+    let volumes = store.volumes();
     let found = tokio::task::spawn_blocking(move || {
         let mut out = serde_json::Map::new();
         let dirs = |p: &std::path::Path| -> Vec<std::fs::DirEntry> {
@@ -529,7 +597,8 @@ async fn adopt(
             format!("no folder {}", req.path.display()),
         );
     };
-    let Some(volume) = store.volumes.iter().find(|v| {
+    let all = store.volumes();
+    let Some(volume) = all.iter().find(|v| {
         v.path.canonicalize().is_ok_and(|vp| {
             dir.parent() == Some(vp.as_path())
                 || dir.parent().and_then(Path::parent) == Some(vp.as_path())
@@ -554,7 +623,7 @@ async fn adopt(
     }
     let root = volume.path.join(pdir);
     let elsewhere: Vec<PathBuf> = store
-        .volumes
+        .volumes()
         .iter()
         .map(|v| v.path.join(pdir))
         .filter(|p| *p != root)
@@ -588,6 +657,44 @@ async fn adopt(
 }
 
 /// Today's UTC date, `YYYY-MM-DD`.
+#[derive(Deserialize)]
+struct ApproveRequest {
+    path: PathBuf,
+    name: String,
+}
+
+/// Approve a drive found in the mount directory: write its marker and start
+/// using it. The console asks the operator first.
+async fn approve(AxState(store): AxState<Shared>, Json(req): Json<ApproveRequest>) -> Reply {
+    let Some(dir) = store.discover.clone() else {
+        return refused(
+            StatusCode::NOT_FOUND,
+            "this store doesn't look for new drives (no --discover)",
+        );
+    };
+    let taken: Vec<String> = store.volumes().into_iter().map(|v| v.name).collect();
+    let (path, name) = (req.path.clone(), req.name.trim().to_owned());
+    let result =
+        tokio::task::spawn_blocking(move || volumes::approve(&dir, &path, &name, &taken)).await;
+    match result {
+        Ok(Ok(v)) => {
+            store.events.push(
+                format!("approved drive {} at {}", v.name, v.path.display()),
+                json!({ "name": v.name, "path": v.path }).to_string(),
+            );
+            store
+                .volumes
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(v.clone());
+            store.rescan.notify_one();
+            reply(StatusCode::OK, json!({ "name": v.name, "path": v.path }))
+        }
+        Ok(Err(e)) => refused(StatusCode::BAD_REQUEST, e),
+        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 fn today() -> String {
     let days = (unix_seconds() / 86_400.0) as i64;
     let z = days + 719_468;

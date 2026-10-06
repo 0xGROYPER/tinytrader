@@ -141,27 +141,35 @@ impl Upload {
     }
 }
 
-/// Appends step records to a migration ledger.
+/// Appends step records to a migration ledger, one copy on each volume
+/// involved, so every volume records what happened to its files.
 struct Ledger {
-    file: fs::File,
+    files: Vec<fs::File>,
 }
 
 impl Ledger {
-    fn open(path: &Path) -> Result<Self, String> {
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    fn open(paths: &[PathBuf]) -> Result<Self, String> {
+        let mut files = Vec::new();
+        for path in paths {
+            if let Some(dir) = path.parent() {
+                fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            files.push(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .map_err(|e| e.to_string())?,
+            );
         }
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|e| e.to_string())?;
-        Ok(Self { file })
+        Ok(Self { files })
     }
     fn record(&mut self, mut event: Value) {
         event["at"] = json!(tinytrader_observe::unix_seconds());
-        let _ = writeln!(self.file, "{event}");
-        let _ = self.file.sync_all();
+        for file in &mut self.files {
+            let _ = writeln!(file, "{event}");
+            let _ = file.sync_all();
+        }
     }
 }
 
@@ -277,32 +285,38 @@ enum Plan {
     },
 }
 
-/// Incorporate a Databento batch waiting in `<root>/.incoming/<batch>`, where
-/// `root` is the provider directory. `elsewhere` are the same provider's
-/// directories on the store's other volumes (read-only ones included), which
-/// are checked for the same days. Returns a summary of what happened.
+/// One volume's share of a batch: the folder holding its files, and that
+/// volume's provider directory, where they are filed. A batch may be spread
+/// over several volumes (decision 0007: each file is placed whole on the
+/// volume with the most room); each file is filed on the volume it is on, so
+/// every move is a hard link.
+#[derive(Clone, Debug)]
+pub struct Part {
+    pub inc: PathBuf,
+    pub root: PathBuf,
+}
+
+/// Incorporate a Databento batch waiting in `.incoming/<batch>` on one or more
+/// volumes (`parts`). `elsewhere` are the same provider's directories on the
+/// store's other volumes (read-only ones included), which are checked for the
+/// same days. Returns a summary of what happened.
 ///
 /// Existing data is never replaced. A day already held anywhere is either the
 /// same bytes (the incoming copy is dropped as a duplicate) or the whole batch
 /// is refused. Every check runs before anything moves, and each move cannot
-/// replace a file even if one appeared since the check.
+/// replace a file even if one appeared since the check. Receipts and the
+/// migration record go to every volume holding part of the batch.
 ///
 /// # Errors
 /// If the batch is incomplete, a file doesn't match the manifest, the
 /// request shape isn't supported, or a destination holds a different file.
 pub fn incorporate_databento(
-    root: &Path,
+    parts: &[Part],
     elsewhere: &[PathBuf],
     batch: &str,
     today: &str,
 ) -> Result<Value, String> {
-    file_databento(
-        &root.join(INCOMING).join(batch),
-        root,
-        elsewhere,
-        batch,
-        today,
-    )
+    file_databento(parts, elsewhere, batch, today)
 }
 
 /// File a Databento download folder where it already is (`dir`, on the same
@@ -323,19 +337,61 @@ pub fn adopt_databento(
         .and_then(|n| n.to_str())
         .filter(|n| safe(n))
         .ok_or("not a batch folder")?;
-    file_databento(dir, root, elsewhere, batch, today)
+    let part = Part {
+        inc: dir.to_path_buf(),
+        root: root.to_path_buf(),
+    };
+    file_databento(&[part], elsewhere, batch, today)
 }
 
+/// Keep a receipt in `provenance/<batch>/` on every root: linked on its own
+/// volume, copied (and checked) to the others, never over a different one.
+/// The incoming copy is gone afterwards.
+fn keep_receipt(
+    from: &Path,
+    own: &Path,
+    roots: &[&Path],
+    batch: &str,
+    name: &str,
+) -> Result<Vec<PathBuf>, String> {
+    let bytes = fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
+    let mut kept = Vec::new();
+    for root in roots.iter().filter(|r| **r != own) {
+        let to = root.join("provenance").join(batch).join(name);
+        if !to.exists() {
+            write_new(&to, &bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+        }
+        kept.push(to);
+    }
+    let to = own.join("provenance").join(batch).join(name);
+    if to.exists() {
+        fs::remove_file(from).map_err(|e| e.to_string())?;
+    } else {
+        place_new(from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
+    }
+    kept.push(to);
+    Ok(kept)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass of checks, then one of moves, kept together so nothing moves before every check"
+)]
 fn file_databento(
-    inc: &Path,
-    root: &Path,
+    parts: &[Part],
     elsewhere: &[PathBuf],
     batch: &str,
     today: &str,
 ) -> Result<Value, String> {
-    let inc = inc.to_path_buf();
+    let roots: Vec<&Path> = parts.iter().map(|p| p.root.as_path()).collect();
+    let first = parts.first().ok_or("no part of the batch was found")?;
+    // The part holding a file, if any does.
+    let holder = |name: &str| parts.iter().find(|p| p.inc.join(name).exists());
     let read_json = |name: &str| -> Result<Value, String> {
-        let p = inc.join(name);
+        let p = holder(name)
+            .ok_or_else(|| format!("{name}: missing"))?
+            .inc
+            .join(name);
         let text = fs::read_to_string(&p).map_err(|e| format!("{name}: {e}"))?;
         serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))
     };
@@ -380,13 +436,17 @@ fn file_databento(
             ));
         }
     };
-    let prov = root.join("provenance").join(batch);
+    let prov = |root: &Path| root.join("provenance").join(batch);
     let mut ledger = Ledger::open(
-        &root
-            .join("migrations")
-            .join(format!("{today}-incorporate-{batch}.events.jsonl")),
+        &roots
+            .iter()
+            .map(|r| {
+                r.join("migrations")
+                    .join(format!("{today}-incorporate-{batch}.events.jsonl"))
+            })
+            .collect::<Vec<_>>(),
     )?;
-    ledger.record(json!({ "step": "begin", "batch": batch, "dataset": dataset, "schema": schema, "symbols": symbols }));
+    ledger.record(json!({ "step": "begin", "batch": batch, "dataset": dataset, "schema": schema, "symbols": symbols, "parts": parts.iter().map(|p| &p.inc).collect::<Vec<_>>() }));
 
     // The manifest as kept: without its download URLs.
     let mut kept_manifest = manifest.clone();
@@ -397,12 +457,21 @@ fn file_databento(
     }
     let kept_manifest = serde_json::to_string_pretty(&kept_manifest).map_err(|e| e.to_string())?;
 
+    // Every provider directory a day could already be in, on any volume.
+    let mut everywhere: Vec<PathBuf> = roots.iter().map(|r| r.to_path_buf()).collect();
+    everywhere.extend(
+        elsewhere
+            .iter()
+            .filter(|e| !roots.contains(&e.as_path()))
+            .cloned(),
+    );
+
     // Check everything, and plan every move, before moving anything.
     let files = manifest["files"]
         .as_array()
         .ok_or("manifest.json lists no files")?;
     let mut plans = Vec::new();
-    let mut receipts = Vec::new();
+    let mut receipts: Vec<(String, PathBuf, PathBuf)> = Vec::new();
     let mut problems = Vec::new();
     let mut check = |f: &Value| -> Result<(), String> {
         let name = f["filename"].as_str().unwrap_or_default();
@@ -414,22 +483,28 @@ fn file_databento(
             .unwrap_or_default()
             .trim_start_matches("sha256:")
             .to_ascii_lowercase();
-        let path = inc.join(name);
+        let part = holder(name).unwrap_or(first);
+        let path = part.inc.join(name);
         if name.ends_with(".json") {
-            let kept = prov.join(name);
             if !path.exists() {
                 // Kept by an earlier, interrupted run?
-                return if kept.exists() && hash_file(&kept)? == want {
-                    Ok(())
-                } else {
-                    Err(format!("{name}: missing"))
-                };
+                for root in &roots {
+                    let kept = prov(root).join(name);
+                    if kept.exists() && hash_file(&kept)? == want {
+                        return Ok(());
+                    }
+                }
+                return Err(format!("{name}: missing"));
             }
-            if kept.exists() && hash_file(&kept)? != hash_file(&path)? {
-                return Err(format!(
-                    "{}: provenance already holds a different {name}",
-                    prov.display()
-                ));
+            let got = hash_file(&path)?;
+            for root in &roots {
+                let kept = prov(root).join(name);
+                if kept.exists() && hash_file(&kept)? != got {
+                    return Err(format!(
+                        "{}: provenance already holds a different {name}",
+                        prov(root).display()
+                    ));
+                }
             }
         }
         let day = if name.ends_with(".json") {
@@ -441,10 +516,9 @@ fn file_databento(
             )
         };
         let rel = day.as_ref().map(|d| level.join(format!("{d}.dbn.zst")));
-        // Every place this day could already be, on any volume.
         let existing: Vec<(PathBuf, String)> = match &rel {
-            Some(rel) => std::iter::once(root)
-                .chain(elsewhere.iter().map(PathBuf::as_path))
+            Some(rel) => everywhere
+                .iter()
                 .map(|r| r.join(rel))
                 .filter(|p| p.exists())
                 .map(|p| hash_file(&p).map(|h| (p, h)))
@@ -480,10 +554,10 @@ fn file_databento(
             check_header(&path, dataset, schema, d).map_err(|e| format!("{name}: {e}"))?;
         }
         ledger.record(
-            json!({ "step": "verified", "file": name, "bytes": meta.len(), "sha256": got }),
+            json!({ "step": "verified", "file": path, "bytes": meta.len(), "sha256": got }),
         );
         match (rel, existing.into_iter().next()) {
-            (None, _) => receipts.push(name.to_owned()),
+            (None, _) => receipts.push((name.to_owned(), path, part.root.clone())),
             (Some(_), Some((p, _))) => plans.push(Plan::Duplicate {
                 from: path,
                 existing: p,
@@ -491,7 +565,7 @@ fn file_databento(
             }),
             (Some(rel), None) => plans.push(Plan::Place {
                 from: path,
-                to: root.join(rel),
+                to: part.root.join(rel),
                 sha256: got,
             }),
         }
@@ -502,12 +576,14 @@ fn file_databento(
             problems.push(e);
         }
     }
-    let kept = prov.join("manifest.json");
-    if kept.exists() && fs::read_to_string(&kept).map_err(|e| e.to_string())? != kept_manifest {
-        problems.push(format!(
-            "{}: provenance already holds a different manifest.json",
-            prov.display()
-        ));
+    for root in &roots {
+        let kept = prov(root).join("manifest.json");
+        if kept.exists() && fs::read_to_string(&kept).map_err(|e| e.to_string())? != kept_manifest {
+            problems.push(format!(
+                "{}: provenance already holds a different manifest.json",
+                prov(root).display()
+            ));
+        }
     }
     if !problems.is_empty() {
         ledger.record(json!({ "step": "refused", "problems": problems }));
@@ -546,66 +622,78 @@ fn file_databento(
         }
     }
 
-    // Receipts go to provenance, never over a different one (checked above).
-    for name in receipts.iter().filter(|n| *n != "manifest.json") {
-        let (from, to) = (inc.join(name), prov.join(name));
-        if to.exists() {
-            fs::remove_file(&from).map_err(|e| e.to_string())?;
-        } else {
-            place_new(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
+    // Receipts go to provenance on every volume holding part of the batch,
+    // never over a different one (checked above).
+    let receipt_names: Vec<String> = receipts.iter().map(|(n, _, _)| n.clone()).collect();
+    for (name, from, own) in receipts.iter().filter(|(n, _, _)| n != "manifest.json") {
+        for to in keep_receipt(from, own, &roots, batch, name)? {
+            ledger.record(json!({ "step": "receipt", "file": to }));
         }
-        ledger.record(json!({ "step": "receipt", "file": to }));
     }
-    // Other receipts left in the folder (such as a downloader's own listing)
+    // Other receipts left in a folder (such as a downloader's own listing)
     // are kept beside the provider's; anything else stays where it is.
-    for e in fs::read_dir(&inc).map_err(|e| e.to_string())?.flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if name == "manifest.json" || !name.ends_with(".json") || !safe(&name) {
-            continue;
-        }
-        let to = prov.join(&name);
-        if to.exists() {
-            if hash_file(&to)? == hash_file(&e.path())? {
-                fs::remove_file(e.path()).map_err(|e| e.to_string())?;
+    for part in parts {
+        for e in fs::read_dir(&part.inc).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name == "manifest.json" || !name.ends_with(".json") || !safe(&name) {
+                continue;
             }
-            continue;
+            let own = prov(&part.root).join(&name);
+            if own.exists() {
+                if hash_file(&own)? == hash_file(&e.path())? {
+                    fs::remove_file(e.path()).map_err(|e| e.to_string())?;
+                }
+                continue;
+            }
+            for to in keep_receipt(&e.path(), &part.root, &roots, batch, &name)? {
+                ledger.record(json!({ "step": "receipt", "file": to }));
+            }
         }
-        place_new(&e.path(), &to).map_err(|e| format!("{}: {e}", to.display()))?;
-        ledger.record(json!({ "step": "receipt", "file": to }));
     }
-    // The manifest doesn't list itself; it is always kept.
-    if !kept.exists() {
-        write_new(&kept, kept_manifest.as_bytes())
-            .map_err(|e| format!("{}: {e}", kept.display()))?;
+    // The manifest doesn't list itself; it is always kept, on every volume.
+    for root in &roots {
+        let kept = prov(root).join("manifest.json");
+        if !kept.exists() {
+            write_new(&kept, kept_manifest.as_bytes())
+                .map_err(|e| format!("{}: {e}", kept.display()))?;
+        }
+        ledger.record(json!({ "step": "receipt", "file": kept }));
     }
-    let from = inc.join("manifest.json");
-    let _ = fs::remove_file(&from);
-    ledger.record(json!({ "step": "receipt", "file": kept }));
-    // The folder is empty now; remove it (never recursively). Anything the
-    // store didn't recognise keeps it there, and is reported.
-    let left: Vec<String> = fs::read_dir(&inc)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    let _ = fs::remove_dir(&inc);
-    let _ = fs::remove_dir(root.join(INCOMING));
+    // The folders are empty now; remove them (never recursively). Anything
+    // the store didn't recognise keeps its folder there, and is reported.
+    let mut left = Vec::new();
+    for part in parts {
+        let _ = fs::remove_file(part.inc.join("manifest.json"));
+        left.extend(
+            fs::read_dir(&part.inc)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| part.inc.join(e.file_name()).display().to_string()),
+        );
+        let _ = fs::remove_dir(&part.inc);
+        let _ = fs::remove_dir(part.root.join(INCOMING));
+    }
     let summary = json!({
         "batch": batch, "dataset": dataset, "schema": schema, "symbols": symbols,
-        "files": placed, "receipts": receipts, "provenance": prov, "from": inc, "left_behind": left, "completed_at": tinytrader_observe::unix_seconds(),
+        "files": placed, "receipts": receipt_names,
+        "provenance": roots.iter().map(|r| prov(r)).collect::<Vec<_>>(),
+        "from": parts.iter().map(|p| &p.inc).collect::<Vec<_>>(),
+        "left_behind": left, "completed_at": tinytrader_observe::unix_seconds(),
     });
     let text = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
-    let mut out = root
-        .join("migrations")
-        .join(format!("{today}-incorporate-{batch}.json"));
-    if out.exists() {
-        out = root.join("migrations").join(format!(
-            "{today}-incorporate-{batch}-{}.json",
-            tinytrader_observe::unix_seconds() as u64
-        ));
+    for root in &roots {
+        let mut out = root
+            .join("migrations")
+            .join(format!("{today}-incorporate-{batch}.json"));
+        if out.exists() {
+            out = root.join("migrations").join(format!(
+                "{today}-incorporate-{batch}-{}.json",
+                tinytrader_observe::unix_seconds() as u64
+            ));
+        }
+        write_new(&out, text.as_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
     }
-    write_new(&out, text.as_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
     ledger.record(json!({ "step": "complete" }));
     Ok(summary)
 }
@@ -679,6 +767,101 @@ mod tests {
 
     const DAY: &str = "OPRA.PILLAR/SPX.OPT/cmbp-1/2025-10-01.dbn.zst";
 
+    /// A batch incoming on one volume.
+    fn one(root: &Path, batch: &str) -> Vec<Part> {
+        vec![Part {
+            inc: root.join(INCOMING).join(batch),
+            root: root.to_path_buf(),
+        }]
+    }
+
+    #[test]
+    fn files_a_batch_spread_over_two_volumes() {
+        // Day one and the receipts arrived on volume a, day two on volume b
+        // (each placed where there was most room); each day is filed on its
+        // own volume, and both volumes get the receipts and the record.
+        let d = scratch("spread");
+        let (a, b) = (d.join("a/Databento"), d.join("b/Databento"));
+        let (ia, ib) = (
+            a.join(INCOMING).join("OPRA-S"),
+            b.join(INCOMING).join("OPRA-S"),
+        );
+        let one_day = dbn_day(b"one");
+        let two_day = dbn_file("OPRA.PILLAR", dbn::Schema::Cmbp1, "2025-10-02", b"two");
+        let sha1 = upload(&ia, "opra-pillar-20251001.cmbp-1.dbn.zst", &one_day);
+        let sha2 = upload(&ib, "opra-pillar-20251002.cmbp-1.dbn.zst", &two_day);
+        let metadata = json!({
+            "query": { "dataset": "OPRA.PILLAR", "schema": "cmbp-1", "symbols": ["SPX.OPT"], "encoding": "dbn", "compression": "zstd" },
+            "customizations": { "split_symbols": false, "split_duration": "day" },
+        })
+        .to_string();
+        let msha = upload(&ia, "metadata.json", metadata.as_bytes());
+        let manifest = json!({ "files": [
+            { "filename": "opra-pillar-20251001.cmbp-1.dbn.zst", "size": one_day.len(), "hash": format!("sha256:{sha1}") },
+            { "filename": "opra-pillar-20251002.cmbp-1.dbn.zst", "size": two_day.len(), "hash": format!("sha256:{sha2}") },
+            { "filename": "metadata.json", "size": metadata.len(), "hash": format!("sha256:{msha}") },
+        ] })
+        .to_string();
+        upload(&ia, "manifest.json", manifest.as_bytes());
+        let parts = vec![
+            Part {
+                inc: ia.clone(),
+                root: a.clone(),
+            },
+            Part {
+                inc: ib.clone(),
+                root: b.clone(),
+            },
+        ];
+        let s = incorporate_databento(&parts, &[], "OPRA-S", "2026-10-06").unwrap();
+        assert_eq!(s["files"].as_array().unwrap().len(), 2);
+        assert_eq!(fs::read(a.join(DAY)).unwrap(), one_day);
+        assert_eq!(
+            fs::read(b.join("OPRA.PILLAR/SPX.OPT/cmbp-1/2025-10-02.dbn.zst")).unwrap(),
+            two_day
+        );
+        assert!(
+            !b.join(DAY).exists()
+                && !a
+                    .join("OPRA.PILLAR/SPX.OPT/cmbp-1/2025-10-02.dbn.zst")
+                    .exists()
+        );
+        for root in [&a, &b] {
+            assert!(
+                root.join("provenance/OPRA-S/manifest.json").exists(),
+                "{}",
+                root.display()
+            );
+            assert!(
+                root.join("provenance/OPRA-S/metadata.json").exists(),
+                "{}",
+                root.display()
+            );
+            assert!(
+                root.join("migrations/2026-10-06-incorporate-OPRA-S.json")
+                    .exists()
+            );
+            assert!(!root.join(INCOMING).exists());
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_day_on_another_volume_is_still_checked() {
+        // A day already filed on b, different bytes, refuses the part on a.
+        let d = scratch("spread-conflict");
+        let (a, b) = (d.join("a/Databento"), d.join("b/Databento"));
+        fs::create_dir_all(b.join(DAY).parent().unwrap()).unwrap();
+        fs::write(b.join(DAY), b"what b had").unwrap();
+        stage(&a, "OPRA-T", &["SPX.OPT"], b"other");
+        let parts = one(&a, "OPRA-T");
+        let err = incorporate_databento(&parts, std::slice::from_ref(&b), "OPRA-T", "2026-10-06")
+            .unwrap_err();
+        assert!(err.contains("already holds a different file"), "{err}");
+        assert_eq!(fs::read(b.join(DAY)).unwrap(), b"what b had");
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn refuses_a_file_that_does_not_match() {
         let d = scratch("mismatch");
@@ -693,7 +876,7 @@ mod tests {
     fn files_a_batch_in_the_standard_layout() {
         let root = scratch("batch").join("Databento");
         stage(&root, "OPRA-1", &["SPX.OPT"], b"day one");
-        let s = incorporate_databento(&root, &[], "OPRA-1", "2026-10-06").unwrap();
+        let s = incorporate_databento(&one(&root, "OPRA-1"), &[], "OPRA-1", "2026-10-06").unwrap();
         assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         assert_eq!(s["files"].as_array().unwrap().len(), 1);
         let kept = fs::read_to_string(root.join("provenance/OPRA-1/manifest.json")).unwrap();
@@ -713,7 +896,8 @@ mod tests {
         fs::create_dir_all(root.join(DAY).parent().unwrap()).unwrap();
         fs::write(root.join(DAY), b"what we had").unwrap();
         stage(&root, "OPRA-2", &["SPX.OPT"], b"something else");
-        let err = incorporate_databento(&root, &[], "OPRA-2", "2026-10-06").unwrap_err();
+        let err =
+            incorporate_databento(&one(&root, "OPRA-2"), &[], "OPRA-2", "2026-10-06").unwrap_err();
         assert!(err.contains("already holds a different file"), "{err}");
         assert_eq!(fs::read(root.join(DAY)).unwrap(), b"what we had");
         assert!(
@@ -738,17 +922,26 @@ mod tests {
 
         // A different day elsewhere: refused.
         stage(&here, "OPRA-3", &["SPX.OPT"], b"not the same");
-        let err =
-            incorporate_databento(&here, std::slice::from_ref(&there), "OPRA-3", "2026-10-06")
-                .unwrap_err();
+        let err = incorporate_databento(
+            &one(&here, "OPRA-3"),
+            std::slice::from_ref(&there),
+            "OPRA-3",
+            "2026-10-06",
+        )
+        .unwrap_err();
         assert!(err.contains("already holds a different file"), "{err}");
         assert!(!here.join(DAY).exists());
 
         // The same bytes elsewhere: a proven duplicate, not a second copy.
         let other = base.join("other/Databento");
         stage(&other, "OPRA-4", &["SPX.OPT"], b"held elsewhere");
-        let s = incorporate_databento(&other, std::slice::from_ref(&there), "OPRA-4", "2026-10-06")
-            .unwrap();
+        let s = incorporate_databento(
+            &one(&other, "OPRA-4"),
+            std::slice::from_ref(&there),
+            "OPRA-4",
+            "2026-10-06",
+        )
+        .unwrap();
         assert!(!other.join(DAY).exists(), "no second copy");
         assert_eq!(s["files"][0]["already_present"], true);
         assert_eq!(
@@ -762,7 +955,8 @@ mod tests {
     fn refuses_batches_of_several_symbols() {
         let root = scratch("symbols").join("Databento");
         stage(&root, "OPRA-5", &["SPY.OPT", "QQQ.OPT"], b"two parents");
-        let err = incorporate_databento(&root, &[], "OPRA-5", "2026-10-06").unwrap_err();
+        let err =
+            incorporate_databento(&one(&root, "OPRA-5"), &[], "OPRA-5", "2026-10-06").unwrap_err();
         assert!(err.contains("one symbol"), "{err}");
         assert!(!root.join("OPRA.PILLAR").exists());
         let _ = fs::remove_dir_all(root.parent().unwrap());
@@ -772,10 +966,10 @@ mod tests {
     fn filing_the_same_batch_again_changes_nothing() {
         let root = scratch("again").join("Databento");
         stage(&root, "OPRA-6", &["SPX.OPT"], b"day one");
-        incorporate_databento(&root, &[], "OPRA-6", "2026-10-06").unwrap();
+        incorporate_databento(&one(&root, "OPRA-6"), &[], "OPRA-6", "2026-10-06").unwrap();
         let receipt = fs::read(root.join("provenance/OPRA-6/manifest.json")).unwrap();
         stage(&root, "OPRA-6", &["SPX.OPT"], b"day one");
-        let s = incorporate_databento(&root, &[], "OPRA-6", "2026-10-06").unwrap();
+        let s = incorporate_databento(&one(&root, "OPRA-6"), &[], "OPRA-6", "2026-10-06").unwrap();
         assert_eq!(s["files"][0]["already_present"], true);
         assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         assert_eq!(
@@ -802,7 +996,8 @@ mod tests {
         fs::create_dir_all(root.join("provenance/OPRA-7")).unwrap();
         fs::write(root.join("provenance/OPRA-7/manifest.json"), "{}").unwrap();
         stage(&root, "OPRA-7", &["SPX.OPT"], b"day one");
-        let err = incorporate_databento(&root, &[], "OPRA-7", "2026-10-06").unwrap_err();
+        let err =
+            incorporate_databento(&one(&root, "OPRA-7"), &[], "OPRA-7", "2026-10-06").unwrap_err();
         assert!(err.contains("different manifest.json"), "{err}");
         assert!(!root.join(DAY).exists());
         assert_eq!(
@@ -824,7 +1019,7 @@ mod tests {
             root.join(DAY),
         )
         .unwrap();
-        incorporate_databento(&root, &[], "OPRA-8", "2026-10-06").unwrap();
+        incorporate_databento(&one(&root, "OPRA-8"), &[], "OPRA-8", "2026-10-06").unwrap();
         assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         assert!(root.join("provenance/OPRA-8/manifest.json").exists());
         assert!(!root.join(INCOMING).exists());
@@ -866,7 +1061,8 @@ mod tests {
             &["SPX.OPT"],
             &dbn_file("OPRA.PILLAR", dbn::Schema::Trades, "2025-10-01", b""),
         );
-        let err = incorporate_databento(&root, &[], "OPRA-11", "2026-10-06").unwrap_err();
+        let err = incorporate_databento(&one(&root, "OPRA-11"), &[], "OPRA-11", "2026-10-06")
+            .unwrap_err();
         assert!(err.contains("schema"), "{err}");
         stage_bytes(
             &root,
@@ -874,11 +1070,12 @@ mod tests {
             &["SPX.OPT"],
             &dbn_file("OPRA.PILLAR", dbn::Schema::Cmbp1, "2025-10-02", b""),
         );
-        let err = incorporate_databento(&root, &[], "OPRA-12", "2026-10-06").unwrap_err();
+        let err = incorporate_databento(&one(&root, "OPRA-12"), &[], "OPRA-12", "2026-10-06")
+            .unwrap_err();
         assert!(err.contains("not 2025-10-01"), "{err}");
         stage_bytes(&root, "OPRA-13", &["SPX.OPT"], b"not dbn at all");
         assert!(
-            incorporate_databento(&root, &[], "OPRA-13", "2026-10-06")
+            incorporate_databento(&one(&root, "OPRA-13"), &[], "OPRA-13", "2026-10-06")
                 .unwrap_err()
                 .contains("not a readable DBN file")
         );

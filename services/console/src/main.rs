@@ -35,6 +35,9 @@
 //! - `CONSOLE_COMPOSE_PROJECT`: only show containers from this Compose project (optional)
 //! - `CONSOLE_COLLECTIONS`: document collections shown in the sidebar, e.g.
 //!   `Docs=/srv/docs;Research=/srv/research` (optional; see `collections.rs`)
+//! - `CONSOLE_STORE`: the store, e.g. `http://host.docker.internal:9120`, so
+//!   the Storage widget can approve a new drive (decision 0007). Only that
+//!   one call is passed through.
 //! - `CONSOLE_JOBS`: the Databento jobs service, e.g. `http://databento-jobs:9121`
 //!   (optional). The one exception to read-only: `/api/jobs/...` is passed to
 //!   it, so the Data page can price, submit and download jobs. The jobs
@@ -72,6 +75,8 @@ struct App {
     poller: Poller,
     /// The jobs service's base URL, and a client to reach it.
     jobs: Option<(String, reqwest::Client)>,
+    /// The store's base URL, for approving drives.
+    store: Option<String>,
     /// The roadmap's reminders, if configured.
     reminders: Option<reminders::Reminders>,
     polls: AtomicU64,
@@ -102,6 +107,10 @@ async fn main() {
         poller: Poller::new(config),
         polls: AtomicU64::new(0),
         collections: collections::parse(&env("CONSOLE_COLLECTIONS", "")),
+        store: std::env::var("CONSOLE_STORE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.trim_end_matches('/').to_owned()),
         jobs: std::env::var("CONSOLE_JOBS")
             .ok()
             .filter(|s| !s.is_empty())
@@ -153,6 +162,10 @@ async fn main() {
         .route("/api/collections", get(list_collections))
         .route("/api/collections/{id}/{index}", get(collection_doc))
         .route("/api/jobs/{*rest}", get(jobs_proxy).post(jobs_proxy))
+        .route(
+            "/api/store/volumes/approve",
+            axum::routing::post(store_approve),
+        )
         .route("/api/reminders", get(reminders_get).post(reminders_post))
         .with_state(app)
         .merge(observer.router());
@@ -362,6 +375,36 @@ async fn jobs_proxy(
             no_store((code, [(header::CONTENT_TYPE, "application/json")], bytes))
         }
         Err(e) => (StatusCode::BAD_GATEWAY, format!("jobs service: {e}")).into_response(),
+    }
+}
+
+/// Approve a drive for the store: the one store call the console passes on.
+async fn store_approve(AxumState(app): AxumState<Arc<App>>, body: axum::body::Bytes) -> Response {
+    let Some(base) = &app.store else {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({ "error": "no store configured (CONSOLE_STORE)" })),
+        )
+            .into_response();
+    };
+    let sent = reqwest::Client::new()
+        .post(format!("{base}/volumes/approve"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await;
+    match sent {
+        Ok(r) => {
+            let code = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let bytes = r.bytes().await.unwrap_or_default();
+            no_store((code, [(header::CONTENT_TYPE, "application/json")], bytes))
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            axum::Json(json!({ "error": format!("store: {e}") })),
+        )
+            .into_response(),
     }
 }
 
