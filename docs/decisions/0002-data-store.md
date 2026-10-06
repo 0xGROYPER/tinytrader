@@ -191,7 +191,12 @@ left where it was downloaded:
    provider root.
 2. Verify every file's size and SHA-256 against the provider's manifest.
 3. Move each data file to `<DATASET>/[<symbol>/]<schema>/<YYYY-MM-DD>.dbn.zst`
-   (a rename on the same volume), refusing to overwrite a different file.
+   (on the same volume, by a link that cannot replace an existing file). A
+   day already held on any of the store's volumes must be byte-identical
+   (SHA-256 recomputed on both sides), in which case the incoming copy is
+   dropped as a duplicate; otherwise the whole batch is refused and nothing
+   moves. A batch for several symbols is refused, since only a file for all
+   symbols may sit at `<DATASET>/<schema>/`.
 4. Move the provider's manifest, metadata and condition files to
    `provenance/<batch-id>/`.
 5. Record the batch in a `migrations/` ledger, then remove the incoming

@@ -76,6 +76,8 @@ struct Store {
     rescan: tokio::sync::Notify,
     bytes_in: AtomicU64,
     batches_in: AtomicU64,
+    /// One batch is filed at a time.
+    filing: tokio::sync::Mutex<()>,
 }
 
 type Shared = Arc<Store>;
@@ -125,6 +127,7 @@ async fn main() {
         rescan: tokio::sync::Notify::new(),
         bytes_in: AtomicU64::new(0),
         batches_in: AtomicU64::new(0),
+        filing: tokio::sync::Mutex::new(()),
     });
     let listen = listen_address("STORE_LISTEN", "127.0.0.1:9120");
     let observer = Observer::new("store", env!("CARGO_PKG_VERSION"));
@@ -392,10 +395,21 @@ async fn incorporate(
     let Some(root) = store.batch_root(pdir, &batch) else {
         return refused(StatusCode::NOT_FOUND, format!("no incoming batch {batch}"));
     };
+    // The same provider on every other volume, read-only ones included, is
+    // checked for the same days.
+    let elsewhere: Vec<PathBuf> = store
+        .volumes
+        .iter()
+        .map(|v| v.path.join(pdir))
+        .filter(|p| *p != root)
+        .collect();
+    let _one_at_a_time = store.filing.lock().await;
     let today = today();
     let (b, r) = (batch.clone(), root.clone());
-    let result =
-        tokio::task::spawn_blocking(move || ingest::incorporate_databento(&r, &b, &today)).await;
+    let result = tokio::task::spawn_blocking(move || {
+        ingest::incorporate_databento(&r, &elsewhere, &b, &today)
+    })
+    .await;
     match result {
         Ok(Ok(summary)) => {
             store.batches_in.fetch_add(1, Ordering::Relaxed);

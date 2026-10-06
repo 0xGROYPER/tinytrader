@@ -1033,7 +1033,7 @@ function jobsView() {
     <form class="job-form" id="job-form" autocomplete="off">
       <div class="field"><label for="jf-dataset">Dataset</label><input id="jf-dataset" name="dataset" list="jf-datasets" value="${esc(f.dataset)}" spellcheck="false"><datalist id="jf-datasets">${(jobs.datasets || []).map(d => `<option value="${esc(d)}">`).join('')}</datalist></div>
       <div class="field"><label for="jf-schema">Schema</label><select id="jf-schema" name="schema"><option>${esc(f.schema)}</option></select></div>
-      <div class="field" style="grid-column: span 2"><label for="jf-symbols">Symbols</label><input id="jf-symbols" name="symbols" value="${esc(f.symbols)}" placeholder="SPX.OPT, SPXW.OPT" spellcheck="false"></div>
+      <div class="field" style="grid-column: span 2"><label for="jf-symbols">Symbol</label><input id="jf-symbols" name="symbols" value="${esc(f.symbols)}" placeholder="SPX.OPT" spellcheck="false"></div>
       <div class="field"><label for="jf-stype">Symbol type</label><select id="jf-stype" name="stype_in">${stypes.map(([v, l]) => `<option value="${v}"${v === f.stype_in ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
       <div class="field"><label for="jf-start">First day</label><input id="jf-start" name="start" type="date" value="${esc(f.start)}"></div>
       <div class="field"><label for="jf-end">Last day</label><input id="jf-end" name="end" type="date" value="${esc(f.end)}"></div>
@@ -1064,6 +1064,7 @@ function jobState(j) {
   if (h && h.how === 'filed') return [`<span class="pill p-ok">In the store</span>`, ''];
   if (h && h.how === 'folder') return [`<span class="pill p-ok" title="In a download folder on ${esc(h.volume)}, not yet filed in the store layout">On ${esc(h.volume)}</span>`, ''];
   if (h && h.how === 'incoming') return [`<span class="pill p-warn">Partly downloaded</span> <button type="button" class="btn small" data-job-download="${esc(j.id)}">Resume</button>`, ''];
+  if (j.state === 'done' && j.unfileable) return ['<span class="pill p-idle">Not fileable</span>', `Can't be filed in the store: ${esc(j.unfileable)}`];
   if (j.state === 'done') return [`<span class="pill p-warn">Ready</span> <button type="button" class="btn small" data-job-download="${esc(j.id)}">Download</button>`, j.expires ? `Available until ${day(j.expires)}` : ''];
   if (j.state === 'expired') return ['<span class="pill p-idle">Expired</span>', ''];
   const what = j.state === 'queued' ? 'Queued' : `Processing${j.progress != null ? ' ' + j.progress + '%' : ''}`;

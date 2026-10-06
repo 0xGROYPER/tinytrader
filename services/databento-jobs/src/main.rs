@@ -101,7 +101,11 @@ impl Request {
             .collect();
         if symbols.is_empty() {
             // Never a whole dataset by accident.
-            return Err("name at least one symbol".into());
+            return Err("name a symbol".into());
+        }
+        if symbols.len() > 1 {
+            // The store files one symbol per batch (decision 0002).
+            return Err("one symbol per request: the store files each symbol on its own, so request each separately".into());
         }
         Ok(Checked {
             dataset: self.dataset.trim().to_owned(),
@@ -311,7 +315,10 @@ async fn refresh(jobs: &Shared) -> Result<usize, String> {
     let ready: Vec<String> = out
         .iter()
         .filter(|j| {
-            j.state == JobState::Done && lock(&jobs.follow).contains(&j.id) && held[&j.id].is_null()
+            j.state == JobState::Done
+                && lock(&jobs.follow).contains(&j.id)
+                && held[&j.id].is_null()
+                && unfileable(j).is_none()
         })
         .map(|j| j.id.clone())
         .collect();
@@ -324,6 +331,22 @@ async fn refresh(jobs: &Shared) -> Result<usize, String> {
 
 /// `bytes` is what downloading delivers (compressed); Databento's own job
 /// size is the uncompressed size.
+/// Why the store would refuse to file this job, if it would. Checked before
+/// downloading, so nothing is fetched that can't be filed.
+fn unfileable(j: &BatchJob) -> Option<String> {
+    use databento::dbn::{Compression, Encoding};
+    if j.encoding != Encoding::Dbn || j.compression != Compression::Zstd {
+        return Some("not DBN with zstd; the store files only .dbn.zst".into());
+    }
+    if j.split_symbols || j.split_duration.as_str() != "day" {
+        return Some(
+            "not split by day (or split by symbol); the store files one file per day".into(),
+        );
+    }
+    let n = j.symbols.to_api_string().split(',').count();
+    (n > 1).then(|| format!("requests {n} symbols; the store files one symbol per batch"))
+}
+
 fn row(j: &BatchJob, held: &Value, delivered: Option<u64>) -> Value {
     let state = match j.state {
         JobState::Queued => "queued",
@@ -348,6 +371,7 @@ fn row(j: &BatchJob, held: &Value, delivered: Option<u64>) -> Value {
         "expires": j.ts_expiration.map(time::OffsetDateTime::unix_timestamp),
         "split": j.split_duration.as_str(),
         "split_symbols": j.split_symbols,
+        "unfileable": unfileable(j),
         "held": held.get(&j.id).map(|h| json!({ "volume": h["volume"], "how": h["how"] })),
     })
 }
@@ -530,6 +554,24 @@ async fn submit(AxState(jobs): AxState<Shared>, Json(s): Json<Submit>) -> Reply 
 }
 
 async fn download(AxState(jobs): AxState<Shared>, UrlPath(job): UrlPath<String>) -> Reply {
+    let details = {
+        let mut db = jobs.db.lock().await;
+        db.batch().get_job_details(&job).await
+    };
+    match details {
+        Ok(j) if j.state != JobState::Done => {
+            return refused(StatusCode::CONFLICT, "the job isn't done yet");
+        }
+        Ok(j) => {
+            if let Some(why) = unfileable(&j) {
+                return refused(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("not downloaded: {why}"),
+                );
+            }
+        }
+        Err(e) => return refused(StatusCode::BAD_GATEWAY, format!("job {job}: {e}")),
+    }
     let busy = lock(&jobs.transfers)
         .get(&job)
         .is_some_and(|t| t.error.is_none() && t.state != "filed");
@@ -814,6 +856,7 @@ mod tests {
     fn refuses_requests_without_symbols_or_backwards() {
         assert!(req(" , ", "2025-10-01", "2025-10-01").check().is_err());
         assert!(req("SPX.OPT", "2025-10-02", "2025-10-01").check().is_err());
+        assert!(req("SPY.OPT,QQQ.OPT", "2025-10-01", "2025-10-01").check().is_err());
         assert!(
             Request {
                 schema: "nope".into(),
