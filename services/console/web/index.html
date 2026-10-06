@@ -335,6 +335,11 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 .mcal-now { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin-right: auto; margin-left: 8px; white-space: nowrap; }
 @container (max-width: 380px) { .mcal-now .muted { display: none; } }
 /* Header status: the worst state of any service; opens Operations. */
+.nw-pop { position: fixed; z-index: 60; width: min(320px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 8px; background: var(--bg); box-shadow: 0 10px 30px rgba(0, 0, 0, .18); padding: 6px; }
+.nw-pop h3 { margin: 6px 10px 8px; font: 600 13px var(--ui); color: var(--muted); }
+.nw-item { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); font: 14px var(--ui); text-align: left; cursor: pointer; }
+.nw-item span { font-size: 12px; color: var(--muted); }
+.nw-item:hover, .nw-item[aria-selected="true"] { background: var(--accent-soft); }
 .bell-wrap { position: relative; }
 .bell { position: relative; }
 .bell-n { position: absolute; top: 6px; right: 6px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--warn-mark); color: var(--bg); font: 700 10px/16px var(--ui); text-align: center; }
@@ -452,7 +457,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 #ws-root .dv-groupview { border: 0; }
 #ws-root .tile-body { height: 100%; box-sizing: border-box; }
 .dv-acts { display: flex; align-items: center; gap: 2px; height: 100%; padding: 0 4px; }
-/* The workspace switcher (⌥S): a tree of groups and a preview. */
+/* The workspace switcher (⌥W): a tree of groups and a preview. */
 .pal.sw { width: min(760px, 100%); }
 .sw-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); min-height: 300px; max-height: 60vh; }
 .sw-list { list-style: none; margin: 0; padding: 6px; overflow: auto; border-right: 1px solid var(--line-soft); }
@@ -1684,7 +1689,7 @@ function viewHtml(tab) {
 
 // Workspaces (decision 0008): Dockview manages the panels; each panel shows
 // one view. Workspaces are named layouts in groups, switched from the header
-// tabs (the current group's), the switcher (⌥S) and keys. Only the open
+// tabs (the current group's), the switcher (⌥W) and keys. Only the open
 // workspace runs: a panel renders while it is shown, and others are saved
 // layouts, which is all the switcher's previews read.
 const VIEWS = { roadmap: 'Roadmap', docs: 'Docs', overview: 'System graph', schedule: 'Schedule', market: 'Market', prices: 'Prices', accounts: 'Accounts and equity', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
@@ -1697,6 +1702,7 @@ const tileIcon = {
   close: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>',
 };
 // Templates and new workspaces start from a simple tree of splits.
+const LAYOUT_NOTES = { Market: 'Prices, accounts, news, calendar', Operations: 'System graph, schedule, services, shell', Data: 'Jobs, coverage, storage' };
 const LAYOUTS = {
   Market: () => ({ dir: 'row', ratio: 0.68, a: { dir: 'col', ratio: 0.5, a: { view: 'prices' }, b: { view: 'accounts' } }, b: { dir: 'col', ratio: 0.6, a: { view: 'news' }, b: { view: 'calendar' } } }),
   Operations: () => ({ dir: 'row', ratio: 0.62, a: { dir: 'col', ratio: 0.5, a: { view: 'overview' }, b: { view: 'schedule' } }, b: { dir: 'col', ratio: 0.55, a: { view: 'services' }, b: { view: 'shell' } } }),
@@ -1873,21 +1879,59 @@ const layViews = l => l.dock ? Object.values(l.dock.panels || {}).map(p => p.par
 const WS_MAX = 10;
 const wsNumber = i => i < 9 ? String(i + 1) : '0';
 // A new workspace, numbered next, with one panel to build on; it opens.
-function wsAdd(name) {
+function wsAdd(name, start = { tree: { view: 'overview' } }) {
   if (lay.list.length >= WS_MAX) return false;
-  let n = name || `Workspace ${wsNumber(lay.list.length)}`;
-  while (lay.list.some(l => l.name === n)) n += '′';
-  lay.list.push({ name: n, group: groupOf(lay.list.find(l => l.name === lay.current)) || undefined, tree: { view: 'overview' } });
+  const base = name || `Workspace ${wsNumber(lay.list.length)}`;
+  let n = base; for (let k = 2; lay.list.some(l => l.name === n); k++) n = `${base} ${k}`;
+  lay.list.push({ name: n, group: groupOf(lay.list.find(l => l.name === lay.current)) || undefined, ...JSON.parse(JSON.stringify(start)) });
   layStore(); laySwitch(n); return true;
 }
+// The new-workspace menu (+, or ⌥ and the next number): start from a
+// template, a copy of the open workspace, or a single panel.
+const nw = { open: false, sel: 0 };
+function nwItems() {
+  const cur = lay.list.find(l => l.name === lay.current);
+  if (dock && state.tab === 'workspace') laySave();
+  return [
+    ...Object.keys(LAYOUTS).map(k => ({ label: k, sub: LAYOUT_NOTES[k], name: k, start: { tree: LAYOUTS[k]() } })),
+    ...(cur ? [{ label: 'Copy of this workspace', sub: cur.name, name: cur.name + ' copy', start: cur.dock ? { dock: cur.dock } : { tree: cur.tree } }] : []),
+    { label: 'Single panel', sub: 'System graph, to build on', name: null, start: { tree: { view: 'overview' } } },
+  ];
+}
+function nwOpen() {
+  if (lay.list.length >= WS_MAX) return;
+  nw.open = true; nw.sel = 0; nw.items = nwItems();
+  const btn = document.querySelector('[data-ws-add]'), r = btn?.getBoundingClientRect();
+  document.body.insertAdjacentHTML('beforeend', `<div class="nw-pop" id="nw" role="menu" aria-label="New workspace" style="top:${(r ? r.bottom : 60) + 6}px;left:${Math.max(16, Math.min(r ? r.left : 16, innerWidth - 336))}px"></div>`);
+  nwDraw();
+}
+function nwDraw() {
+  $('nw').innerHTML = `<h3>New workspace ${wsNumber(lay.list.length)}</h3>` + nw.items.map((it, i) => `<button type="button" class="nw-item" role="menuitem" data-nw="${i}"${i === nw.sel ? ' aria-selected="true"' : ''}><b>${esc(it.label)}</b><span>${esc(it.sub)}</span></button>`).join('');
+}
+function nwClose() { $('nw')?.remove(); nw.open = false; }
+function nwPick(i) { const it = nw.items[i]; nwClose(); if (it) wsAdd(it.name, it.start); }
+document.addEventListener('keydown', e => {
+  if (!nw.open) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  if (e.key === 'Escape') nwClose();
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { nw.sel = (nw.sel + (e.key === 'ArrowDown' ? 1 : -1) + nw.items.length) % nw.items.length; nwDraw(); }
+  else if (e.key === 'Enter') nwPick(nw.sel);
+  else if (/^[1-9]$/.test(e.key) && !e.altKey) nwPick(+e.key - 1);
+}, true);
+document.addEventListener('click', e => {
+  if (!nw.open) return;
+  const b = e.target.closest && e.target.closest('[data-nw]');
+  if (b) { nwPick(+b.dataset.nw); return; }
+  if (!(e.target.closest && e.target.closest('#nw, [data-ws-add]'))) nwClose();
+}, true);
 function updateLayoutNav() {
   const box = $('wtabs'); if (!box) return;
   const docs = state.tab.startsWith('col:') || state.tab === 'roadmap';
   const html = lay.list.map((l, i) => {
     const here = !docs && l.name === lay.current, n = wsNumber(i);
-    return `<button type="button" class="wtab wtab-num" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 10 ? ` (⌥${n})` : ''}${here ? ' · click for all workspaces (⌥S)' : ''}" aria-label="Workspace ${n}: ${esc(l.name)}"${here ? ' aria-current="page"' : ''}>${n}</button>`;
+    return `<button type="button" class="wtab wtab-num" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 10 ? ` (⌥${n})` : ''}${here ? ' · click for all workspaces (⌥W)' : ''}" aria-label="Workspace ${n}: ${esc(l.name)}"${here ? ' aria-current="page"' : ''}>${n}</button>`;
   }).join('')
-    + (lay.list.length < WS_MAX ? `<button type="button" class="wtab wtab-num" data-ws-add title="New workspace (⌥${wsNumber(lay.list.length)})" aria-label="New workspace">+</button>` : '')
+    + (lay.list.length < WS_MAX ? `<button type="button" class="wtab wtab-num" data-ws-add title="New workspace (⌥${wsNumber(lay.list.length)})" aria-label="New workspace" aria-haspopup="menu">+</button>` : '')
     + `<a class="wtab wtab-docs" href="/docs/"${docs ? ' aria-current="page"' : ''}>Docs</a>`;
   if (box.innerHTML !== html) box.innerHTML = html;
 }
@@ -1903,20 +1947,20 @@ document.addEventListener('click', e => {
     try { history.replaceState(null, '', '/docs/'); } catch (_) {}
     render(); window.scrollTo(0, 0); return;
   }
-  if (e.target.closest && e.target.closest('[data-ws-add]')) { wsAdd(); return; }
+  if (e.target.closest && e.target.closest('[data-ws-add]')) { nw.open ? nwClose() : nwOpen(); return; }
   const b = e.target.closest && e.target.closest('[data-layout]');
   if (b) { if (b.getAttribute('aria-current') === 'page') swOpen(); else laySwitch(b.dataset.layout); }
 });
-// Keys: ⌥↑/⌥↓ (or ⌃↑/⌃↓) within the group, ⌥←/⌥→ between groups, ⌥1–⌥9 and ⌥0 the numbered workspaces, ⌥S the switcher.
+// Keys: ⌥↑/⌥↓ (or ⌃↑/⌃↓) within the group, ⌥←/⌥→ between groups, ⌥1–⌥9 and ⌥0 the numbered workspaces, ⌥W the switcher.
 document.addEventListener('keydown', e => {
   if (pal.open || sw.open || e.metaKey) return;
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
   const cur = lay.list.find(l => l.name === lay.current), g = groupOf(cur), tabs = inGroup(g), gs = groups();
-  if (e.altKey && e.code === 'KeyS') { e.preventDefault(); swOpen(); return; }
+  if (e.altKey && e.code === 'KeyW') { e.preventDefault(); swOpen(); return; }
   if (e.altKey && /^Digit[0-9]$/.test(e.code)) {
     const d = +e.code.slice(5), i = d === 0 ? 9 : d - 1, l = lay.list[i];
     e.preventDefault();
-    if (l) laySwitch(l.name); else if (i === lay.list.length) wsAdd();
+    if (l) laySwitch(l.name); else if (i === lay.list.length) nwOpen();
     return;
   }
   if ((e.ctrlKey || e.altKey) && ['ArrowUp', 'ArrowDown'].includes(e.key)) {
@@ -1939,7 +1983,7 @@ function layoutCommands(q) {
     if (verb === 'rename') out.unshift({ label: `Rename “${lay.current}” to “${arg}”`, always: true, run: () => { if (cur && !lay.list.some(l => l.name === arg)) { cur.name = arg; lay.current = arg; layStore(); } } });
     if (verb === 'group') out.unshift({ label: `Move “${lay.current}” to the group “${arg}”`, always: true, run: () => { if (cur) { cur.group = arg; layStore(); } } });
   } else out.push({ label: 'Save these panels as a new workspace… (type: save <name>)', run: () => {} }, { label: 'Rename this workspace… (type: rename <name>)', run: () => {} }, { label: 'Move this workspace to a group… (type: group <name>)', run: () => {} });
-  out.push({ label: 'Open the workspace switcher (⌥S)', run: swOpen });
+  out.push({ label: 'Open the workspace switcher (⌥W)', run: swOpen });
   if (lay.list.length > 1) out.push({ label: `Delete this workspace: ${lay.current}`, run: () => layDelete(lay.current) });
   return out;
 }
@@ -1950,7 +1994,7 @@ function layDelete(name) {
   if (lay.current === name) { lay.current = lay.list[Math.max(0, i - 1)].name; layStore(); state.navigated = true; render(); } else layStore();
 }
 
-// The switcher (⌥S): every workspace as a tree of groups. ↑↓ move, →/Tab
+// The switcher (⌥W): every workspace as a tree of groups. ↑↓ move, →/Tab
 // open a group, ← close it, Enter opens; F2 renames, D duplicates, G moves to
 // a group, N saves the current panels as a new workspace, ⌫ deletes (asks
 // first); drag a workspace to reorder it or onto a group to move it there.
@@ -2026,7 +2070,7 @@ document.addEventListener('keydown', e => {
     return;
   }
   const k = e.key;
-  if (k === 'Escape' || (e.altKey && e.code === 'KeyS')) { e.preventDefault(); swClose(); }
+  if (k === 'Escape' || (e.altKey && e.code === 'KeyW')) { e.preventDefault(); swClose(); }
   else if (k === 'ArrowDown' || k === 'ArrowUp') { e.preventDefault(); sw.sel = (sw.sel + (k === 'ArrowDown' ? 1 : -1) + sw.rows.length) % sw.rows.length; swDraw(); }
   else if ((k === 'ArrowRight' || k === 'Tab') && r?.kind === 'group') { e.preventDefault(); if (!r.open) sw.expanded.add(r.g); else sw.sel++; swDraw(); }
   else if (k === 'ArrowLeft') { e.preventDefault(); if (r?.kind === 'group') sw.expanded.delete(r.g); else if (r?.depth) { sw.expanded.delete(groupOf(r.l)); sw.sel = sw.rows.findIndex(x => x.kind === 'group' && x.g === groupOf(r.l)); } swDraw(); }
