@@ -7,6 +7,7 @@ members = [
     "services/alpaca-news",
     "services/alpaca-account",
     "services/relay",
+    "libs/dbn",
     "services/catalog",
     "services/console",
     "services/databento-live",
@@ -32,5 +33,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+glacier-dbn = { path = "libs/dbn" }
 glacier-fleet = { path = "libs/fleet" }
 glacier-observe = { path = "libs/observe" }

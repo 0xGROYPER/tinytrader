@@ -1145,6 +1145,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "glacier-dbn"
+version = "0.1.0"
+dependencies = [
+ "dbn",
+]
+
+[[package]]
 name = "glacier-fleet"
 version = "0.1.0"
 dependencies = [
