@@ -1,70 +1,68 @@
-// Schedule: what every service runs and when, from each service's
-// `/describe`. The deployment graph shows the present; this shows intent:
-// active hours on a day timeline (New York time), then every schedule.
+// Schedule: one line per service (relays on the same feed and hours share
+// one), each with its state, a strip of today in New York time and symbols
+// for what else it runs. The words are in the tooltips.
+//   ▬ active hours (bright while running)   ▨ paused   ─ always running
+//   ↻ repeats every …   ⚡ on an event
 import { defineWidget, redrawing } from '../lib/widgets.js';
 import { fleet, svcState, statusOf } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 
+const mins = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+const pct = m => (m / 1440 * 100).toFixed(2) + '%';
+const every = s => s >= 3600 ? `${s / 3600}h` : s >= 60 ? `${s / 60}m` : `${s}s`;
+// A line's state is its worst member's.
+const rank = { crit: 0, warn: 1, start: 2, ok: 3, off: 4, idle: 5 };
+
 function draw() {
   const svcs = (fleet.topo?.services || []).filter(s => Array.isArray(s.schedule));
-  const head = '<div><h1>Schedule</h1><p class="muted" style="margin:0">What each service runs and when, in New York time.</p></div>';
-  if (!svcs.length) return head + '<p class="muted">No service describes a schedule yet.</p>';
-  // Services carrying the same feed on the same hours (the relays) are one row.
-  const rows = [];
-  for (const s of svcs) for (const x of s.schedule) {
-    const same = x.feed && rows.find(r => r.x.feed === x.feed && r.x.hours === x.hours && r.x.kind === x.kind);
-    if (same) { same.group.push(s); same.symbols.push(...(x.symbols || [])); }
-    else rows.push({ s, x, group: [s], symbols: [...(x.symbols || [])] });
+  if (!svcs.length) return '<p class="muted">No service describes a schedule yet.</p>';
+  const lines = [];
+  for (const s of svcs) {
+    const feed = s.schedule.find(x => x.feed);
+    const key = feed ? `${feed.feed}|${feed.hours}` : s.id;
+    let l = lines.find(x => x.key === key);
+    if (!l) lines.push(l = { key, label: feed ? feed.feed : (s.label || s.id), members: [], symbols: [], items: s.schedule });
+    l.members.push(s); if (feed) l.symbols.push(...(feed.symbols || []));
   }
-  const who = r => r.x.feed ? r.x.feed : (r.s.label || r.s.id);
-  const what = r => r.x.feed ? `${r.x.name}: ${r.symbols.join(', ')}${r.group.length > 1 ? ` (${r.group.length} relays)` : ''}` : r.x.name;
-  // A group's state is its worst member's.
-  const rank = { crit: 0, warn: 1, start: 2, ok: 3, off: 4, idle: 5 };
-  const worst = r => r.group.slice().sort((a, b) => (rank[statusOf({ ...a, kind: 'svc' })] ?? 9) - (rank[statusOf({ ...b, kind: 'svc' })] ?? 9))[0];
-  const mins = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
-  const nyNow = new Date().toLocaleString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short' });
-  const [wd, hm] = nyNow.split(' '), nowMin = mins(hm), pctNow = (nowMin / 1440 * 100).toFixed(2);
+  const ny = new Date().toLocaleString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short' });
+  const [wd, hm] = ny.split(' '), now = mins(hm);
   const cal = svcs.map(s => svcState(s.id).calendar).find(c => c?.days?.length);
-  const todayNy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const session = cal?.days.find(d => d.date === todayNy);
+  const session = cal?.days.find(d => d.date === new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }));
   const trading = cal ? !!session : !['Sat', 'Sun'].includes(wd);
-  // A window is set relative to the 09:30–16:00 session: an early close ends it early by as much.
-  const shift = session && session.close < '16:00' ? mins(session.close) - 16 * 60 : 0;
-  const windows = rows.filter(r => (r.x.kind === 'window' || r.x.kind === 'pause') && r.x.hours);
-  const ticks = [0, 3, 6, 9, 12, 15, 18, 21, 24].map(h => `<span style="left:${(h / 24 * 100).toFixed(2)}%">${String(h).padStart(2, '0')}</span>`).join('');
-  const session0 = `<div class="tl-session" style="left:${(570 / 1440 * 100).toFixed(2)}%;width:${(((session ? mins(session.close) : 960) - 570) / 1440 * 100).toFixed(2)}%" title="Regular session"></div>`;
-  const timeline = windows.length ? `<div class="tl">
-      <div class="tl-row tl-axis"><span class="tl-label">${trading ? 'Today, a trading day' : 'Today, markets closed'}</span><div class="tl-track">${ticks}</div></div>
-      ${windows.map(r => {
-        const { x } = r, s = worst(r);
-        const [a, b] = x.hours.split('-').map(mins), end = b <= 16 * 60 + 60 ? b + shift : b;
-        const st = statusOf({ ...s, kind: 'svc' });
-        return `<div class="tl-row"><span class="tl-label" title="${esc(what(r))}">${esc(who(r))}</span><div class="tl-track">${session0}
-          <div class="tl-bar${x.kind === 'pause' ? ' pause' : ''}${trading ? '' : ' off'}${st === 'ok' && x.kind !== 'pause' ? ' live' : ''}" style="left:${(a / 1440 * 100).toFixed(2)}%;width:${((end - a) / 1440 * 100).toFixed(2)}%" title="${esc(x.when)}"></div>
-          <div class="tl-now" style="left:${pctNow}%"></div></div></div>`;
-      }).join('')}
-      <div class="tl-legend"><span><i class="tl-key bar"></i>active hours</span>${windows.some(r => r.x.kind === 'pause') ? '<span><i class="tl-key pause"></i>paused</span>' : ''}<span><i class="tl-key session"></i>regular session</span><span><i class="tl-key now"></i>now, ${esc(hm)} ET</span></div>
-    </div>` : '';
-  const order = { window: 0, pause: 0, always: 1, interval: 2, event: 3 };
-  const nowText = (s, x) => {
-    const h = svcState(s.id).health?.body || {}, st = statusOf({ ...s, kind: 'svc' });
-    if (st === 'crit') return '<span class="pill p-crit">Down</span>';
-    if (x.kind === 'window') {
-      const until = /until (.+)$/.exec(h.detail || '')?.[1];
-      return h.state === 'idle' ? `<span class="muted">next ${esc(until || 'session')}</span>` : '<span class="pill p-ok">Running</span>';
+  // Hours are set against the 09:30–16:00 session; an early close ends them early by as much.
+  const shift = session && session.close < '16:00' ? mins(session.close) - 960 : 0;
+  const close = session ? mins(session.close) : 960;
+
+  const row = l => {
+    const st = l.members.map(s => statusOf({ ...s, kind: 'svc' })).sort((a, b) => (rank[a] ?? 9) - (rank[b] ?? 9))[0];
+    const detail = svcState(l.members[0].id).health?.body?.detail || '';
+    const bars = [], marks = [];
+    let next = '';
+    for (const x of l.items) {
+      if ((x.kind === 'window' || x.kind === 'pause') && x.hours) {
+        const [a, b0] = x.hours.split('-').map(mins), b = b0 <= 17 * 60 ? b0 + shift : b0;
+        const inside = trading && now >= a && now < b;
+        const cls = x.kind === 'pause' ? 'pause' : st === 'ok' ? 'live' : '';
+        bars.push(`<i class="sc-bar ${cls}${trading ? '' : ' off'}" style="left:${pct(a)};width:${pct(b - a)}" title="${esc(x.name)}: ${esc(x.when)}"></i>`);
+        const resume = /until \w+ (\d\d:\d\d)/.exec(detail)?.[1];
+        if (x.kind === 'window') next = inside && st === 'ok' ? `until ${x.hours.split('-')[1]}` : resume ? `next ${resume}` : '';
+        if (x.kind === 'pause' && inside) next = 'paused';
+      } else if (x.kind === 'always') bars.push(`<i class="sc-always" title="${esc(x.name)}: ${esc(x.when || 'always')}"></i>`);
+      else if (x.kind === 'interval') marks.push(`<span title="${esc(x.name)}: ${esc(x.when)}">↻${x.every_seconds ? every(x.every_seconds) : ''}</span>`);
+      else marks.push(`<span title="${esc(x.name)}: ${esc(x.when)}">⚡</span>`);
     }
-    // A pause (the jobs service off the network for market hours) is in force inside its hours on a trading day.
-    if (x.kind === 'pause') {
-      const [a, b] = x.hours.split('-').map(mins);
-      return trading && nowMin >= a && nowMin < b ? '<span class="pill p-idle">Paused</span>' : `<span class="muted">not paused · next ${esc(x.hours.split('-')[0])} ET</span>`;
-    }
-    if (x.kind === 'always') return st === 'warn' ? '<span class="pill p-warn">Needs attention</span>' : '<span class="pill p-ok">Running</span>';
-    if (x.kind === 'interval') return h.state === 'idle' ? '<span class="muted">paused</span>' : '<span class="muted">repeating</span>';
-    return '<span class="muted">on event</span>';
+    const title = [l.label, l.symbols.join(', '), l.members.length > 1 ? `${l.members.length} relays` : '', detail].filter(Boolean).join(' · ');
+    return `<div class="sc-row"><i class="sc-dot ${st || 'idle'}"></i><span class="sc-name" title="${esc(title)}">${esc(l.label)}${l.members.length > 1 ? `<em>×${l.members.length}</em>` : ''}</span>
+      <span class="sc-track">${bars.join('')}<i class="sc-now" style="left:${pct(now)}"></i></span>
+      <span class="sc-marks">${marks.join('')}</span><span class="sc-next">${esc(next)}</span></div>`;
   };
-  const table = rows.slice().sort((p, q) => order[p.x.kind] - order[q.x.kind] || who(p).localeCompare(who(q))).map(r =>
-    `<tr><td class="mono" style="color:var(--fg)">${esc(who(r))}</td><td>${esc(what(r))}</td><td class="mono">${esc(r.x.when)}</td><td>${nowText(worst(r), r.x)}</td></tr>`).join('');
-  return head + timeline + `<div class="box scroll"><table class="sched"><thead><tr><th>Service or feed</th><th>What</th><th>When</th><th>Now</th></tr></thead><tbody>${table}</tbody></table></div>`;
+  const order = l => l.items.some(x => x.kind === 'window') ? 0 : l.items.some(x => x.kind === 'pause') ? 1 : 2;
+  const axis = [0, 6, 12, 18, 24].map(h => `<span style="left:${pct(h * 60)}">${String(h).padStart(2, '0')}</span>`).join('');
+  return `<div class="sc">
+    <div class="sc-row sc-axis"><i></i><span class="sc-name">${trading ? `trading day${shift ? ', early close' : ''}` : 'market closed'}</span>
+      <span class="sc-track"><i class="sc-session" style="left:${pct(570)};width:${pct(close - 570)}" title="Regular session"></i>${axis}<i class="sc-now" style="left:${pct(now)}" title="Now, ${esc(hm)} ET"></i></span><span class="sc-marks"></span><span class="sc-next">${esc(hm)} ET</span></div>
+    ${lines.sort((a, b) => order(a) - order(b) || a.label.localeCompare(b.label)).map(row).join('')}
+  </div>`;
 }
 
 defineWidget('schedule', { title: 'Schedule', mount: redrawing(draw) });

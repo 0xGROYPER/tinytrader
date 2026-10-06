@@ -370,7 +370,6 @@ body:not(.docs-mode) .nav { display: none; }
 .wtab:hover { background: var(--nav-hover); color: var(--fg); }
 .wtab[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
 .wtab-num { width: 36px; padding: 0; justify-content: center; font-variant-numeric: tabular-nums; }
-.wtab-docs { margin-left: 8px; border-left: 1px solid var(--line); border-radius: 0 6px 6px 0; }
 .nav-home { all: unset; display: block; cursor: pointer; }
 .nav .nav-home { padding: 0 10px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 .nav .nav-home:hover { color: var(--fg); }
@@ -379,27 +378,29 @@ body:not(.docs-mode) .nav { display: none; }
 .doc-links a { color: var(--fg); text-decoration: none; padding: 4px 6px; border-radius: 4px; font-size: 14px; }
 .doc-links a:hover { background: var(--nav-hover); color: var(--accent); }
 @media (max-width: 640px) { .brand { flex-wrap: wrap; row-gap: 6px; } .wtabs { flex: 1 0 100%; order: 3; } }
-/* Schedule: a day timeline of active hours (New York time), then every schedule. */
-.tl { display: flex; flex-direction: column; gap: 6px; container-type: inline-size; }
-.tl-row { display: grid; grid-template-columns: minmax(90px, 180px) minmax(0, 1fr); align-items: center; gap: 10px; }
-.tl-label { font: 13px var(--mono); color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tl-track { position: relative; height: 20px; border-radius: 4px; background: var(--surface); }
-.tl-axis .tl-label { color: var(--muted); font-size: 12px; }
-.tl-axis .tl-track { background: transparent; height: 16px; }
-.tl-axis .tl-track span { position: absolute; transform: translateX(-50%); font: 11px var(--mono); color: var(--muted); }
-.tl-axis .tl-track span:first-child { transform: none; } .tl-axis .tl-track span:last-child { transform: translateX(-100%); }
-.tl-session { position: absolute; top: 0; bottom: 0; background: var(--line-soft); }
-.tl-bar { position: absolute; top: 4px; bottom: 4px; border-radius: 3px; background: var(--accent-2); }
-.tl-bar.live { background: var(--accent-mark); }
-.tl-bar.off { background: transparent; border: 1px dashed var(--accent-2); }
-.tl-bar.pause { background: repeating-linear-gradient(135deg, var(--line) 0 4px, transparent 4px 8px); border: 1px solid var(--line); }
-.tl-now { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--warn-mark); }
-.tl-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--muted); padding-left: 2px; }
-.tl-legend span { display: inline-flex; align-items: center; gap: 6px; }
-.tl-key { display: inline-block; width: 14px; height: 8px; border-radius: 2px; }
-.tl-key.bar { background: var(--accent-2); } .tl-key.pause { background: repeating-linear-gradient(135deg, var(--line) 0 3px, transparent 3px 6px); border: 1px solid var(--line); } .tl-key.session { background: var(--line-soft); } .tl-key.now { width: 2px; height: 12px; background: var(--warn-mark); }
-@container (max-width: 420px) { .tl-row { grid-template-columns: 80px minmax(0, 1fr); } }
-.sched td { vertical-align: middle; }
+/* Schedule: one line per service; a strip of today; symbols for the rest. */
+.sc { display: flex; flex-direction: column; gap: 2px; font: 13px var(--mono); container-type: inline-size; }
+.sc-row { display: grid; grid-template-columns: 10px minmax(80px, 170px) minmax(0, 1fr) 6em 5.5em; align-items: center; gap: 10px; min-height: 26px; }
+.sc-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+.sc-dot.ok { background: var(--ok); } .sc-dot.warn { background: var(--warn-mark); } .sc-dot.crit { background: var(--crit-mark); } .sc-dot.start { background: var(--accent-2); }
+.sc-name { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sc-name em { font-style: normal; color: var(--muted); margin-left: 6px; font-size: 11px; }
+.sc-track { position: relative; height: 14px; border-radius: 3px; background: var(--surface); }
+.sc-bar { position: absolute; top: 3px; bottom: 3px; border-radius: 2px; background: var(--accent-2); }
+.sc-bar.live { background: var(--accent-mark); }
+.sc-bar.off { background: transparent; border: 1px dashed var(--accent-2); }
+.sc-bar.pause { background: repeating-linear-gradient(135deg, var(--muted) 0 2px, transparent 2px 5px); opacity: .7; }
+.sc-always { position: absolute; left: 0; right: 0; top: 6px; height: 2px; background: var(--accent-2); }
+.sc-now { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--warn-mark); }
+.sc-marks { display: flex; gap: 8px; color: var(--muted); white-space: nowrap; }
+.sc-marks span { cursor: default; }
+.sc-next { color: var(--muted); font-size: 12px; white-space: nowrap; text-align: right; }
+.sc-axis { min-height: 20px; } .sc-axis .sc-name, .sc-axis .sc-next { color: var(--muted); font-size: 12px; }
+.sc-axis .sc-track { background: transparent; }
+.sc-axis .sc-track span { position: absolute; top: 0; transform: translateX(-50%); font-size: 11px; color: var(--muted); }
+.sc-axis .sc-track span:first-of-type { transform: none; } .sc-axis .sc-track span:last-of-type { transform: translateX(-100%); }
+.sc-session { position: absolute; top: 0; bottom: 0; background: var(--line-soft); border-radius: 2px; }
+@container (max-width: 420px) { .sc-row { grid-template-columns: 10px minmax(0, 1fr) auto 5.5em; } .sc-track { display: none; } }
 /* Data: a line per drive, then datasets, then everything else on disk. */
 .drive-sum { display: flex; flex-wrap: wrap; gap: 8px 28px; font-size: 13px; }
 .drive-sum > div { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
@@ -596,7 +597,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 <body>
 <header class="top">
   <div class="brand">
-    <a class="home" href="/" title="tinytrader: home"><svg class="wordmark" viewBox="0 0 45 5" width="225" height="25" fill="currentColor" shape-rendering="crispEdges" role="img" aria-label="tinytrader"><rect x="1" y="0" width="1" height="1"/><rect x="0" y="1" width="1" height="1"/><rect x="1" y="1" width="1" height="1"/><rect x="2" y="1" width="1" height="1"/><rect x="1" y="2" width="1" height="1"/><rect x="1" y="3" width="1" height="1"/><rect x="2" y="3" width="1" height="1"/><rect x="4" y="0" width="1" height="1"/><rect x="4" y="2" width="1" height="1"/><rect x="4" y="3" width="1" height="1"/><rect x="6" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/><rect x="6" y="2" width="1" height="1"/><rect x="8" y="2" width="1" height="1"/><rect x="6" y="3" width="1" height="1"/><rect x="8" y="3" width="1" height="1"/><rect x="10" y="1" width="1" height="1"/><rect x="12" y="1" width="1" height="1"/><rect x="10" y="2" width="1" height="1"/><rect x="11" y="2" width="1" height="1"/><rect x="12" y="2" width="1" height="1"/><rect x="12" y="3" width="1" height="1"/><rect x="10" y="4" width="1" height="1"/><rect x="11" y="4" width="1" height="1"/><rect x="15" y="0" width="1" height="1"/><rect x="14" y="1" width="1" height="1"/><rect x="15" y="1" width="1" height="1"/><rect x="16" y="1" width="1" height="1"/><rect x="15" y="2" width="1" height="1"/><rect x="15" y="3" width="1" height="1"/><rect x="16" y="3" width="1" height="1"/><rect x="18" y="1" width="1" height="1"/><rect x="19" y="1" width="1" height="1"/><rect x="20" y="1" width="1" height="1"/><rect x="18" y="2" width="1" height="1"/><rect x="18" y="3" width="1" height="1"/><rect x="22" y="1" width="1" height="1"/><rect x="23" y="1" width="1" height="1"/><rect x="23" y="2" width="1" height="1"/><rect x="24" y="2" width="1" height="1"/><rect x="22" y="3" width="1" height="1"/><rect x="23" y="3" width="1" height="1"/><rect x="24" y="3" width="1" height="1"/><rect x="28" y="0" width="1" height="1"/><rect x="27" y="1" width="1" height="1"/><rect x="28" y="1" width="1" height="1"/><rect x="26" y="2" width="1" height="1"/><rect x="28" y="2" width="1" height="1"/><rect x="27" y="3" width="1" height="1"/><rect x="28" y="3" width="1" height="1"/><rect x="30" y="1" width="1" height="1"/><rect x="31" y="1" width="1" height="1"/><rect x="32" y="1" width="1" height="1"/><rect x="30" y="2" width="1" height="1"/><rect x="31" y="2" width="1" height="1"/><rect x="30" y="3" width="1" height="1"/><rect x="31" y="3" width="1" height="1"/><rect x="32" y="3" width="1" height="1"/><rect x="34" y="1" width="1" height="1"/><rect x="35" y="1" width="1" height="1"/><rect x="36" y="1" width="1" height="1"/><rect x="34" y="2" width="1" height="1"/><rect x="34" y="3" width="1" height="1"/><rect class="wm-dot" x="38" y="3" width="1" height="1"/><rect x="40" y="0" width="1" height="1"/><rect x="40" y="2" width="1" height="1"/><rect x="40" y="3" width="1" height="1"/><rect x="42" y="1" width="1" height="1"/><rect x="43" y="1" width="1" height="1"/><rect x="44" y="1" width="1" height="1"/><rect x="42" y="2" width="1" height="1"/><rect x="44" y="2" width="1" height="1"/><rect x="42" y="3" width="1" height="1"/><rect x="43" y="3" width="1" height="1"/><rect x="44" y="3" width="1" height="1"/></svg></a>
+    <a class="home" href="/docs/" title="Docs"><svg class="wordmark" viewBox="0 0 45 5" width="225" height="25" fill="currentColor" shape-rendering="crispEdges" role="img" aria-label="tinytrader"><rect x="1" y="0" width="1" height="1"/><rect x="0" y="1" width="1" height="1"/><rect x="1" y="1" width="1" height="1"/><rect x="2" y="1" width="1" height="1"/><rect x="1" y="2" width="1" height="1"/><rect x="1" y="3" width="1" height="1"/><rect x="2" y="3" width="1" height="1"/><rect x="4" y="0" width="1" height="1"/><rect x="4" y="2" width="1" height="1"/><rect x="4" y="3" width="1" height="1"/><rect x="6" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/><rect x="6" y="2" width="1" height="1"/><rect x="8" y="2" width="1" height="1"/><rect x="6" y="3" width="1" height="1"/><rect x="8" y="3" width="1" height="1"/><rect x="10" y="1" width="1" height="1"/><rect x="12" y="1" width="1" height="1"/><rect x="10" y="2" width="1" height="1"/><rect x="11" y="2" width="1" height="1"/><rect x="12" y="2" width="1" height="1"/><rect x="12" y="3" width="1" height="1"/><rect x="10" y="4" width="1" height="1"/><rect x="11" y="4" width="1" height="1"/><rect x="15" y="0" width="1" height="1"/><rect x="14" y="1" width="1" height="1"/><rect x="15" y="1" width="1" height="1"/><rect x="16" y="1" width="1" height="1"/><rect x="15" y="2" width="1" height="1"/><rect x="15" y="3" width="1" height="1"/><rect x="16" y="3" width="1" height="1"/><rect x="18" y="1" width="1" height="1"/><rect x="19" y="1" width="1" height="1"/><rect x="20" y="1" width="1" height="1"/><rect x="18" y="2" width="1" height="1"/><rect x="18" y="3" width="1" height="1"/><rect x="22" y="1" width="1" height="1"/><rect x="23" y="1" width="1" height="1"/><rect x="23" y="2" width="1" height="1"/><rect x="24" y="2" width="1" height="1"/><rect x="22" y="3" width="1" height="1"/><rect x="23" y="3" width="1" height="1"/><rect x="24" y="3" width="1" height="1"/><rect x="28" y="0" width="1" height="1"/><rect x="27" y="1" width="1" height="1"/><rect x="28" y="1" width="1" height="1"/><rect x="26" y="2" width="1" height="1"/><rect x="28" y="2" width="1" height="1"/><rect x="27" y="3" width="1" height="1"/><rect x="28" y="3" width="1" height="1"/><rect x="30" y="1" width="1" height="1"/><rect x="31" y="1" width="1" height="1"/><rect x="32" y="1" width="1" height="1"/><rect x="30" y="2" width="1" height="1"/><rect x="31" y="2" width="1" height="1"/><rect x="30" y="3" width="1" height="1"/><rect x="31" y="3" width="1" height="1"/><rect x="32" y="3" width="1" height="1"/><rect x="34" y="1" width="1" height="1"/><rect x="35" y="1" width="1" height="1"/><rect x="36" y="1" width="1" height="1"/><rect x="34" y="2" width="1" height="1"/><rect x="34" y="3" width="1" height="1"/><rect class="wm-dot" x="38" y="3" width="1" height="1"/><rect x="40" y="0" width="1" height="1"/><rect x="40" y="2" width="1" height="1"/><rect x="40" y="3" width="1" height="1"/><rect x="42" y="1" width="1" height="1"/><rect x="43" y="1" width="1" height="1"/><rect x="44" y="1" width="1" height="1"/><rect x="42" y="2" width="1" height="1"/><rect x="44" y="2" width="1" height="1"/><rect x="42" y="3" width="1" height="1"/><rect x="43" y="3" width="1" height="1"/><rect x="44" y="3" width="1" height="1"/></svg></a>
     <nav class="wtabs" id="wtabs" aria-label="Workspaces"></nav>
   </div>
   <div class="top-right">
@@ -880,7 +881,11 @@ function mountWorkspace() {
   }
   if (state.focusView) { dock.panels.find(p => p.params?.view === state.focusView)?.api.setActive(); state.focusView = null; }
   dock.onDidRemovePanel(p => { const body = panelBody.get(p.id); if (body) unmount(body); panelBody.delete(p.id); });
-  dock.onDidActivePanelChange(e => { wsFocus = (e?.panel || e)?.id ?? null; });
+  dock.onDidActivePanelChange(e => {
+    const p = e?.panel || e; wsFocus = p?.id ?? null;
+    // A panel brought to the front (a tab) shows the latest at once, not at the next poll.
+    const body = p && panelBody.get(p.id); if (body) mounted.get(body)?.update?.();
+  });
   dock.onDidLayoutChange(() => { clearTimeout(mountWorkspace.t); mountWorkspace.t = setTimeout(laySave, 300); drawCharts(); });
   laySave();
   // Charts measure their panels, so draw them once the layout has settled.
@@ -1076,8 +1081,7 @@ function updateLayoutNav() {
     const here = !docs && l.name === lay.current, n = wsNumber(i);
     return `<button type="button" class="wtab wtab-num" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 10 ? ` (⌥${n})` : ''}${here ? ' · click for all workspaces (⌥W)' : ''} · right-click to rename, duplicate or delete" aria-label="Workspace ${n}: ${esc(l.name)}"${here ? ' aria-current="page"' : ''}>${n}</button>`;
   }).join('')
-    + (lay.list.length < WS_MAX ? `<button type="button" class="wtab wtab-num" data-ws-add title="New workspace (⌥${wsNumber(lay.list.length)})" aria-label="New workspace" aria-haspopup="menu">+</button>` : '')
-    + `<a class="wtab wtab-docs" href="/docs/"${docs ? ' aria-current="page"' : ''}>Docs</a>`;
+    + (lay.list.length < WS_MAX ? `<button type="button" class="wtab wtab-num" data-ws-add title="New workspace (⌥${wsNumber(lay.list.length)})" aria-label="New workspace" aria-haspopup="menu">+</button>` : '');
   if (box.innerHTML !== html) box.innerHTML = html;
 }
 document.addEventListener('click', e => {
@@ -1343,10 +1347,6 @@ async function poll() {
   if (!document.querySelector('.tip:not([hidden])')) render(); else status();
 }
 
-document.querySelector('.home').addEventListener('click', e => {
-  e.preventDefault();
-  if (lay.list[0]) laySwitch(lay.list[0].name);
-});
 document.querySelector('.nav').addEventListener('click', e => {
   const f = e.target.closest('[data-folder]');
   if (f) {
