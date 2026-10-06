@@ -60,7 +60,7 @@ function draw() {
   const axis = [0, 6, 12, 18, 24].map(h => `<span style="left:${pct(h * 60)}">${String(h).padStart(2, '0')}</span>`).join('');
   return `<div class="sc">
     <div class="sc-row sc-axis"><i></i><span class="sc-name">${trading ? `trading day${shift ? ', early close' : ''}` : 'market closed'}</span>
-      <span class="sc-track"><i class="sc-session" style="left:${pct(570)};width:${pct(close - 570)}" title="Regular session"></i>${axis}<i class="sc-now" style="left:${pct(now)}" title="Now, ${esc(hm)} ET"></i></span><span class="sc-marks"></span><span class="sc-next">${esc(hm)} ET</span></div>
+      <span class="sc-track"><i class="sc-session" style="left:${pct(570)};width:${pct(close - 570)}" title="Regular session"></i>${axis}<i class="sc-now" style="left:${pct(now)}" title="Now, ${esc(hm)} ET"></i></span><span class="sc-marks"></span><span class="sc-next">now ${esc(hm)} ET</span></div>
     ${lines.sort((a, b) => order(a) - order(b) || a.label.localeCompare(b.label)).map(row).join('')}
   </div>`;
 }

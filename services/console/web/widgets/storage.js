@@ -5,6 +5,33 @@ import { defineWidget } from '../lib/widgets.js';
 import { fleet, catalogRoots, catalogStamp } from '../lib/fleet.js';
 import { esc, bytes } from '../lib/format.js';
 
+// What fills a drive: each dataset (by its path on the drive) and every
+// other folder, largest first.
+function contents(r) {
+  const items = (r.datasets || []).map(d => {
+    const src = (d.sources || [])[0]?.replace(/^[^:]*:\s*/, '') || '';
+    let path = src.startsWith(r.path) ? src.slice(r.path.length).replace(/^\//, '') : (src || d.id);
+    if (d.symbol && !path.endsWith(d.symbol)) path += '/' + d.symbol;
+    return { path, bytes: Object.values(d.schemas).reduce((a, x) => a + x.bytes, 0), kind: 'data', note: Object.keys(d.schemas).join(', ') };
+  });
+  for (const o of r.other || []) items.push({ path: o.name, bytes: o.bytes, kind: 'other', note: `${(o.files || 0).toLocaleString()} files` });
+  return items.sort((a, b) => b.bytes - a.bytes);
+}
+
+function fill(r) {
+  const v = r.volume || {}, total = v.total_bytes;
+  if (!total) return '';
+  const items = contents(r).filter(x => x.bytes > 0);
+  const known = items.reduce((a, x) => a + x.bytes, 0), used = total - (v.available_bytes ?? 0);
+  const seg = (w, cls, title) => w > 0 ? `<i class="${cls}" style="width:${(w / total * 100).toFixed(2)}%" title="${esc(title)}"></i>` : '';
+  const bar = items.map(x => seg(x.bytes, x.kind, `${x.path}: ${bytes(x.bytes)}`)).join('')
+    + seg(Math.max(0, used - known), 'rest', `everything else on the drive: ${bytes(Math.max(0, used - known))}`)
+    + seg(v.available_bytes ?? 0, 'free', `free: ${bytes(v.available_bytes)}`);
+  const rows = items.map(x => `<tr><td class="mono" style="color:var(--fg)"><i class="sw ${x.kind}"></i>${esc(x.path)}</td><td class="muted">${esc(x.note)}</td><td class="mono num">${bytes(x.bytes)}</td></tr>`).join('');
+  return `<div class="fillbar">${bar}</div>
+    <div class="scroll"><table class="fill-tbl"><tbody>${rows}</tbody></table></div>`;
+}
+
 const statusPill = { ok: ['OK', 'p-ok'], warning: ['Warning', 'p-warn'], critical: ['Critical', 'p-crit'], floor: ['Full', 'p-crit'], unknown: ['Space unknown', 'p-idle'] };
 
 // Drives the store found that it doesn't use yet.
@@ -29,7 +56,7 @@ function storageView(my) {
         <div><div class="k">Free</div><div class="v">${bytes(v.available_bytes)}</div></div>`}
         <div><div class="k">In datasets</div><div class="v">${bytes(r.dataset_bytes)} · ${(r.datasets || []).length} datasets</div></div>
       </div>
-      ${(r.unrecognised || []).length ? `<div><div class="k" style="font-size:12px;color:var(--muted);margin-bottom:6px">Not in the store layout</div><div class="chips">${r.unrecognised.map(x => `<span class="tag">${esc(x)}</span>`).join('')}</div></div>` : ''}`
+      ${fill(r)}`
       : '<p class="muted" style="margin:0">This drive is not available: it may be unplugged. Its files are listed as unavailable until it returns.</p>'}
     </article>`;
   }).join('');
