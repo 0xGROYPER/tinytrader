@@ -335,11 +335,18 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 .mcal-now { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin-right: auto; margin-left: 8px; white-space: nowrap; }
 @container (max-width: 380px) { .mcal-now .muted { display: none; } }
 /* Header status: the worst state of any service; opens Operations. */
-.hstat { display: inline-flex; align-items: center; gap: 8px; height: 46px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 500 13px var(--ui); cursor: pointer; }
-.hstat:hover { background: var(--surface); }
-.hstat .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
-.hstat .dot.warn { background: var(--warn-mark); } .hstat .dot.crit { background: var(--crit-mark); }
-@media (max-width: 640px) { .hstat span { display: none; } }
+.bell-wrap { position: relative; }
+.bell { position: relative; }
+.bell-n { position: absolute; top: 6px; right: 6px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--warn-mark); color: var(--bg); font: 700 10px/16px var(--ui); text-align: center; }
+.bell-n.crit { background: var(--crit-mark); }
+.bell-pop { position: fixed; right: 16px; z-index: 50; width: min(380px, calc(100vw - 32px)); max-height: 60vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); box-shadow: 0 10px 30px rgba(0, 0, 0, .18); padding: 6px; }
+.bell-pop h3 { margin: 6px 10px 8px; font: 600 13px var(--ui); color: var(--muted); }
+.bell-item { display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 4px 10px; align-items: baseline; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); font: 14px var(--ui); text-align: left; cursor: pointer; }
+.bell-item:hover { background: var(--nav-hover); }
+.bell-item i { width: 8px; height: 8px; border-radius: 50%; background: var(--warn-mark); } .bell-item i.crit { background: var(--crit-mark); }
+.bell-item span { grid-column: 2; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.bell-none { margin: 8px 10px 10px; color: var(--muted); font-size: 14px; }
+
 #nav-layouts kbd { margin-left: auto; font: 11px var(--mono); color: var(--muted); font-weight: 400; }
 #nav-layouts .nav-new { color: var(--muted); font-weight: 500; }
 /* Workspaces are tabs in the header; the sidebar only appears on the docs pages. */
@@ -350,7 +357,7 @@ body:not(.docs-mode) .nav { display: none; }
 .wtab { flex: none; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--fg-2); font: 500 14px var(--ui); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; white-space: nowrap; }
 .wtab:hover { background: var(--nav-hover); color: var(--fg); }
 .wtab[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
-.wtab-new { width: 36px; padding: 0; justify-content: center; font-size: 18px; color: var(--muted); }
+.wtab-num { width: 36px; padding: 0; justify-content: center; font-variant-numeric: tabular-nums; }
 .wtab-docs { margin-left: 8px; border-left: 1px solid var(--line); border-radius: 0 6px 6px 0; }
 .nav-home { all: unset; display: block; cursor: pointer; }
 .nav .nav-home { padding: 0 10px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
@@ -472,8 +479,6 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 .pv-split.col { flex-direction: column; }
 .pv-leaf { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 4px; background: var(--surface); }
 .pv-leaf span { font: 11px var(--mono); color: var(--fg-2); text-align: center; overflow: hidden; text-overflow: ellipsis; }
-.wtab-group { color: var(--muted); font-weight: 600; }
-.wtab-group span { font-size: 10px; }
 /* The tinytrader shell: read-only commands over this deployment. */
 .term { flex: 1; display: flex; flex-direction: column; min-height: 320px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: 13px/1.5 var(--mono); }
 .tile-body > .term { border: 0; border-radius: 0; margin: -14px -16px; }
@@ -582,11 +587,14 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
     <nav class="wtabs" id="wtabs" aria-label="Workspaces"></nav>
   </div>
   <div class="top-right">
-    <button type="button" class="hstat" id="hstat" hidden></button>
     <select class="palette" id="palette" aria-label="Palette" title="Palette">
       <option value="frost">Frost</option><option value="spruce">Spruce</option><option value="pbj">PB&amp;J</option><option value="amber">Amber</option><option value="swiss">Swiss Signal</option><option value="pbj2">PB&amp;J v2</option><option value="harbor">Harbor Fog</option><option value="dusk">Dusk</option>
     </select>
     <button type="button" class="icon-btn" id="theme-btn"></button>
+    <div class="bell-wrap">
+      <button type="button" class="icon-btn bell" id="bell" aria-haspopup="true" aria-expanded="false" aria-label="Alerts"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg><b class="bell-n" id="bell-n" hidden></b></button>
+      <div class="bell-pop" id="bell-pop" hidden></div>
+    </div>
   </div>
 </header>
 <div class="banner" id="banner" hidden></div>
@@ -1860,15 +1868,15 @@ const groupOf = l => l?.group || '';
 const groups = () => [...new Set(lay.list.map(groupOf))];
 const inGroup = g => lay.list.filter(l => groupOf(l) === g);
 const layViews = l => l.dock ? Object.values(l.dock.panels || {}).map(p => p.params?.view) : (function leaves(n) { return n ? (n.view ? [n.view] : [...leaves(n.a), ...leaves(n.b)]) : []; })(l.tree);
-// Header: the current group's workspaces, with the group as a breadcrumb.
+// Header: every workspace as a number, 1–9 then 0 (⌥1–⌥0), then 11 on.
+const wsNumber = i => i < 9 ? String(i + 1) : i === 9 ? '0' : String(i + 1);
 function updateLayoutNav() {
   const box = $('wtabs'); if (!box) return;
   const docs = state.tab.startsWith('col:') || state.tab === 'roadmap';
-  const cur = lay.list.find(l => l.name === lay.current), g = groupOf(cur), tabs = inGroup(g);
-  const crumb = `<button type="button" class="wtab wtab-group" data-switcher title="All workspaces (⌥W)">${g ? esc(g) : 'Workspaces'} <span aria-hidden="true">▾</span></button>`;
-  const html = crumb + tabs.map((l, i) => `<button type="button" class="wtab" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 9 ? ` (⌥${i + 1})` : ''}"${!docs && l.name === lay.current ? ' aria-current="page"' : ''}>${esc(l.name)}</button>`).join('')
-    + '<button type="button" class="wtab wtab-new" data-new-ws title="New workspace from these panels" aria-label="New workspace">+</button>'
-    + `<a class="wtab wtab-docs" href="/docs/"${docs ? ' aria-current="page"' : ''}>Docs</a>`;
+  const html = lay.list.map((l, i) => {
+    const here = !docs && l.name === lay.current, n = wsNumber(i);
+    return `<button type="button" class="wtab wtab-num" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 10 ? ` (⌥${n})` : ''}${here ? ' · click for all workspaces (⌥W)' : ''}" aria-label="Workspace ${n}: ${esc(l.name)}"${here ? ' aria-current="page"' : ''}>${n}</button>`;
+  }).join('') + `<a class="wtab wtab-docs" href="/docs/"${docs ? ' aria-current="page"' : ''}>Docs</a>`;
   if (box.innerHTML !== html) box.innerHTML = html;
 }
 document.addEventListener('click', e => {
@@ -1878,21 +1886,21 @@ document.addEventListener('click', e => {
     render(); window.scrollTo(0, 0); return;
   }
   if (e.target.closest && e.target.closest('[data-switcher]')) { swOpen(); return; }
-  if (e.target.closest && e.target.closest('[data-new-ws]')) { palOpen('save '); return; }
   if (e.target.closest && e.target.closest('[data-docs-home]') && state.collections[0]) {
     state.tab = 'col:' + state.collections[0].id; state.doc = null; state.navigated = true;
     try { history.replaceState(null, '', '/docs/'); } catch (_) {}
     render(); window.scrollTo(0, 0); return;
   }
-  const b = e.target.closest && e.target.closest('[data-layout]'); if (b) laySwitch(b.dataset.layout);
+  const b = e.target.closest && e.target.closest('[data-layout]');
+  if (b) { if (b.getAttribute('aria-current') === 'page') swOpen(); else laySwitch(b.dataset.layout); }
 });
-// Keys: ⌥↑/⌥↓ (or ⌃↑/⌃↓) within the group, ⌥←/⌥→ between groups, ⌥1–⌥9 the group's tabs, ⌥W the switcher.
+// Keys: ⌥↑/⌥↓ (or ⌃↑/⌃↓) within the group, ⌥←/⌥→ between groups, ⌥1–⌥9 and ⌥0 the numbered workspaces, ⌥W the switcher.
 document.addEventListener('keydown', e => {
   if (pal.open || sw.open || e.metaKey) return;
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
   const cur = lay.list.find(l => l.name === lay.current), g = groupOf(cur), tabs = inGroup(g), gs = groups();
   if (e.altKey && e.code === 'KeyW') { e.preventDefault(); swOpen(); return; }
-  if (e.altKey && /^Digit[1-9]$/.test(e.code)) { const l = tabs[+e.code.slice(5) - 1]; if (l) { e.preventDefault(); laySwitch(l.name); } return; }
+  if (e.altKey && /^Digit[0-9]$/.test(e.code)) { const d = +e.code.slice(5), l = lay.list[d === 0 ? 9 : d - 1]; if (l) { e.preventDefault(); laySwitch(l.name); } return; }
   if ((e.ctrlKey || e.altKey) && ['ArrowUp', 'ArrowDown'].includes(e.key)) {
     const i = tabs.indexOf(cur), n = tabs.length; e.preventDefault();
     laySwitch(tabs[(i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n].name); return;
@@ -2126,18 +2134,37 @@ function render() {
   status();
   if (window.scrollY !== scrollY) window.scrollTo(0, scrollY);
 }
-function updateHeaderStatus() {
-  const el = $('hstat'); if (!el || !state.topo) return;
-  const svcs = (state.topo.services || []).map(s => ({ s, st: statusOf({ ...s, kind: 'svc' }) }));
-  const down = svcs.filter(x => x.st === 'crit'), warn = svcs.filter(x => x.st === 'warn');
-  const tone = down.length ? 'crit' : warn.length ? 'warn' : 'ok';
-  const text = down.length ? `${down.length} down` : warn.length ? `${warn.length} need${warn.length === 1 ? 's' : ''} attention` : 'All healthy';
-  const html = `<i class="dot ${tone}"></i><span>${text}</span>`;
-  if (el.innerHTML !== html) el.innerHTML = html;
-  el.title = [...down, ...warn].map(x => x.s.id).join(', ') || 'Every service is running or off schedule';
-  el.hidden = false;
+// Alerts: the bell beside the theme button. Its count is the services down
+// or needing attention; the list says which and why, and opens each one.
+function alerts() {
+  return (state.topo?.services || []).map(s => ({ s, st: statusOf({ ...s, kind: 'svc' }) })).filter(x => x.st === 'crit' || x.st === 'warn')
+    .sort((a, b) => (a.st === 'crit' ? 0 : 1) - (b.st === 'crit' ? 0 : 1));
 }
-$('hstat').addEventListener('click', () => { if (lay.list.some(l => l.name === 'Operations')) laySwitch('Operations'); });
+function updateHeaderStatus() {
+  if (!state.topo) return;
+  const list = alerts(), n = $('bell-n'), crit = list.some(x => x.st === 'crit');
+  n.hidden = !list.length; n.textContent = list.length; n.classList.toggle('crit', crit);
+  $('bell').title = list.length ? `${list.length} alert${list.length === 1 ? '' : 's'}` : 'No alerts';
+  if (!$('bell-pop').hidden) bellDraw();
+}
+function bellDraw() {
+  const list = alerts();
+  const html = '<h3>Alerts</h3>' + (list.length
+    ? list.map(x => `<button type="button" class="bell-item" data-alert="${esc(x.s.id)}"><i class="${x.st}"></i><b>${esc(x.s.id)} ${x.st === 'crit' ? 'is down' : 'needs attention'}</b><span>${esc(subOf({ ...x.s, kind: 'svc' }))}</span></button>`).join('')
+    : '<p class="bell-none">Every service is running or off schedule.</p>');
+  if ($('bell-pop').innerHTML !== html) $('bell-pop').innerHTML = html;
+}
+function bellToggle(open) {
+  $('bell-pop').hidden = !open; $('bell').setAttribute('aria-expanded', open);
+  if (open) { const r = $('bell').getBoundingClientRect(); $('bell-pop').style.top = r.bottom + 6 + 'px'; bellDraw(); }
+}
+$('bell').addEventListener('click', e => { e.stopPropagation(); bellToggle($('bell-pop').hidden); });
+document.addEventListener('click', e => {
+  const a = e.target.closest && e.target.closest('[data-alert]');
+  if (a) { bellToggle(false); state.node = a.dataset.alert; if (lay.list.some(l => l.name === 'Operations')) laySwitch('Operations'); else render(); return; }
+  if (!$('bell-pop').hidden && !e.target.closest('.bell-wrap')) bellToggle(false);
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('bell-pop').hidden) bellToggle(false); });
 function status() {
   updateHeaderStatus();
   const age = state.lastOk ? (Date.now() - state.lastOk) / 1000 : null;
