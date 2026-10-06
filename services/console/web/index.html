@@ -1408,7 +1408,18 @@ function scheduleView() {
   const svcs = (state.topo?.services || []).filter(s => Array.isArray(s.schedule));
   const head = '<div><h1>Schedule</h1><p class="muted" style="margin:0">What each service runs and when, in New York time.</p></div>';
   if (!svcs.length) return head + '<p class="muted">No service describes a schedule yet.</p>';
-  const rows = svcs.flatMap(s => s.schedule.map(x => ({ s, x })));
+  // Services carrying the same feed on the same hours (the relays) are one row.
+  const rows = [];
+  for (const s of svcs) for (const x of s.schedule) {
+    const same = x.feed && rows.find(r => r.x.feed === x.feed && r.x.hours === x.hours && r.x.kind === x.kind);
+    if (same) { same.group.push(s); same.symbols.push(...(x.symbols || [])); }
+    else rows.push({ s, x, group: [s], symbols: [...(x.symbols || [])] });
+  }
+  const who = r => r.x.feed ? r.x.feed : (r.s.label || r.s.id);
+  const what = r => r.x.feed ? `${r.x.name}: ${r.symbols.join(', ')}${r.group.length > 1 ? ` (${r.group.length} relays)` : ''}` : r.x.name;
+  // A group's state is its worst member's.
+  const rank = { crit: 0, warn: 1, start: 2, ok: 3, off: 4, idle: 5 };
+  const worst = r => r.group.slice().sort((a, b) => (rank[statusOf({ ...a, kind: 'svc' })] ?? 9) - (rank[statusOf({ ...b, kind: 'svc' })] ?? 9))[0];
   const mins = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
   const nyNow = new Date().toLocaleString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short' });
   const [wd, hm] = nyNow.split(' '), nowMin = mins(hm), pctNow = (nowMin / 1440 * 100).toFixed(2);
@@ -1423,10 +1434,11 @@ function scheduleView() {
   const session0 = `<div class="tl-session" style="left:${(570 / 1440 * 100).toFixed(2)}%;width:${(((session ? mins(session.close) : 960) - 570) / 1440 * 100).toFixed(2)}%" title="Regular session"></div>`;
   const timeline = windows.length ? `<div class="tl">
       <div class="tl-row tl-axis"><span class="tl-label">${trading ? 'Today, a trading day' : 'Today, markets closed'}</span><div class="tl-track">${ticks}</div></div>
-      ${windows.map(({ s, x }) => {
+      ${windows.map(r => {
+        const { x } = r, s = worst(r);
         const [a, b] = x.hours.split('-').map(mins), end = b <= 16 * 60 + 60 ? b + shift : b;
         const st = statusOf({ ...s, kind: 'svc' });
-        return `<div class="tl-row"><span class="tl-label" title="${esc(x.name)}">${esc(s.label || s.id)}</span><div class="tl-track">${session0}
+        return `<div class="tl-row"><span class="tl-label" title="${esc(what(r))}">${esc(who(r))}</span><div class="tl-track">${session0}
           <div class="tl-bar${trading ? '' : ' off'}${st === 'ok' ? ' live' : ''}" style="left:${(a / 1440 * 100).toFixed(2)}%;width:${((end - a) / 1440 * 100).toFixed(2)}%" title="${esc(x.when)}"></div>
           <div class="tl-now" style="left:${pctNow}%"></div></div></div>`;
       }).join('')}
@@ -1444,9 +1456,9 @@ function scheduleView() {
     if (x.kind === 'interval') return h.state === 'idle' ? '<span class="muted">paused off-hours</span>' : '<span class="muted">repeating</span>';
     return '<span class="muted">on event</span>';
   };
-  const table = rows.slice().sort((p, q) => order[p.x.kind] - order[q.x.kind] || (p.s.label || p.s.id).localeCompare(q.s.label || q.s.id)).map(({ s, x }) =>
-    `<tr><td class="mono" style="color:var(--fg)">${esc(s.label || s.id)}</td><td>${esc(x.name)}</td><td class="mono">${esc(x.when)}</td><td>${nowText(s, x)}</td></tr>`).join('');
-  return head + timeline + `<div class="box scroll"><table class="sched"><thead><tr><th>Service</th><th>What</th><th>When</th><th>Now</th></tr></thead><tbody>${table}</tbody></table></div>`;
+  const table = rows.slice().sort((p, q) => order[p.x.kind] - order[q.x.kind] || who(p).localeCompare(who(q))).map(r =>
+    `<tr><td class="mono" style="color:var(--fg)">${esc(who(r))}</td><td>${esc(what(r))}</td><td class="mono">${esc(r.x.when)}</td><td>${nowText(worst(r), r.x)}</td></tr>`).join('');
+  return head + timeline + `<div class="box scroll"><table class="sched"><thead><tr><th>Service or feed</th><th>What</th><th>When</th><th>Now</th></tr></thead><tbody>${table}</tbody></table></div>`;
 }
 
 // One view's HTML, for the page or for a workspace tile.

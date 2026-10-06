@@ -181,6 +181,13 @@ async fn run(args: Args) -> Result<(), String> {
         Duration::from_secs(args.heartbeat.max(1)),
     ));
 
+    let feed = format!(
+        "{} {dataset}",
+        match provider_id {
+            "databento" => "Databento",
+            _ => "Alpaca",
+        }
+    );
     let observer = Observer::new("relay", env!("CARGO_PKG_VERSION"));
     observer.set_state(State::Starting, &format!("connecting to {provider_id}"));
     observer.describe(json!({
@@ -189,9 +196,10 @@ async fn run(args: Args) -> Result<(), String> {
         "streams": { "events": "/events", "series": "/recent" },
         "panels": [{ "heading": format!("{dataset} {}", args.symbols.join(", ")), "note": "Trade prices of the most active instruments, sampled once per second", "decimals": 2 }],
         "relay": { "protocol": protocol::PROTOCOL, "listen": args.listen, "symbols": args.symbols },
+        // Relays carrying the same feed on the same hours are one line on a schedule.
         "schedule": [match args.hours {
-            Some(h) => json!({ "name": "Market data session", "kind": "window", "hours": h.to_string(), "when": format!("{h} ET on trading days") }),
-            None => json!({ "name": "Market data session", "kind": "always", "when": "always" }),
+            Some(h) => json!({ "name": "Market data session", "kind": "window", "hours": h.to_string(), "when": format!("{h} ET on trading days"), "feed": feed, "symbols": args.symbols }),
+            None => json!({ "name": "Market data session", "kind": "always", "when": "always", "feed": feed, "symbols": args.symbols }),
         }],
     }));
     register_metrics(&observer, &hub);
