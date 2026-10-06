@@ -10,7 +10,7 @@
 /* Layout: scientific-docs shell; light or dark, following the system unless the viewer picks one. NixOS-flavoured blue and light blue with an orange for attention. */
 :root {
   color-scheme: light;
-  --bg: #FFFFFF; --surface: #F5F8FC; --line: #D5DFEB; --line-soft: #E8EEF5;
+  --bg: #FFFFFF; --surface: #F5F8FC; --line: #D5DFEB; --line-soft: #E8EEF5; --nav-bg: #F8FAFD; --nav-hover: rgba(65, 103, 179, .07);
   --fg: #1C283A; --fg-2: #3A4A60; --muted: #5C6B80;
   --accent: #4167B3; --accent-mark: #5277C3; --accent-2: #7EBAE4; --accent-soft: #EAF3FB;
   --ok: #17704F; --ok-soft: #E5F4ED;
@@ -22,7 +22,7 @@
   --mono: 'Inconsolata', ui-monospace, 'SF Mono', Menlo, monospace;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
-  --bg: #0D141F; --surface: #131C2A; --line: #26344A; --line-soft: #1B2636;
+  --bg: #0D141F; --surface: #131C2A; --line: #26344A; --line-soft: #1B2636; --nav-bg: #101827; --nav-hover: rgba(142, 195, 234, .07);
   --fg: #E3EAF3; --fg-2: #B8C5D6; --muted: #8B9AB0;
   --accent: #8EC3EA; --accent-mark: #7EBAE4; --accent-2: #5277C3; --accent-soft: #16273E;
   --ok: #72CFA5; --ok-soft: #13291F;
@@ -33,7 +33,7 @@
   color-scheme: dark;
 } }
 :root[data-theme="dark"] {
-  --bg: #0D141F; --surface: #131C2A; --line: #26344A; --line-soft: #1B2636;
+  --bg: #0D141F; --surface: #131C2A; --line: #26344A; --line-soft: #1B2636; --nav-bg: #101827; --nav-hover: rgba(142, 195, 234, .07);
   --fg: #E3EAF3; --fg-2: #B8C5D6; --muted: #8B9AB0;
   --accent: #8EC3EA; --accent-mark: #7EBAE4; --accent-2: #5277C3; --accent-soft: #16273E;
   --ok: #72CFA5; --ok-soft: #13291F;
@@ -64,18 +64,25 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 .banner { padding: 10px 16px; background: var(--warn-soft); color: var(--warn); border-bottom: 1px solid var(--warn-line); font-size: 14px; }
 
 .shell { display: flex; flex-wrap: wrap; align-items: flex-start; }
-.nav { flex: 1 1 210px; max-width: 250px; padding: 12px 12px 24px; border-right: 1px solid var(--line-soft); display: flex; flex-direction: column; }
-.nav-sec { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+/* Sidebar, after Databento's docs: tinted panel, uppercase section rules,
+   36px rows, a fixed chevron slot so all labels align, 16px per level. */
+.nav { flex: 0 0 264px; max-width: 264px; padding: 12px 10px 24px; background: var(--nav-bg); border-right: 1px solid var(--line-soft); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+.nav-sec { display: flex; flex-direction: column; margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
 .nav > .nav-sec:first-child, #nav-store:first-child > .nav-sec { margin-top: 0; padding-top: 4px; border-top: 0; }
-.nav-label { font-size: 12px; font-weight: 600; line-height: 20px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); padding: 0 8px 6px; }
-.nav-items { display: flex; flex-direction: column; gap: 2px; margin-left: 8px; padding-left: 4px; border-left: 1px solid var(--line-soft); }
-.nav button { display: flex; align-items: center; width: 100%; text-align: left; min-height: 36px; padding: 0 8px; border: 0; border-radius: 4px; background: transparent; color: var(--fg-2); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; }
-.nav button:hover { background: var(--surface); color: var(--accent); }
-.nav button[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.nav-label { font-size: 12px; font-weight: 600; line-height: 20px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); padding: 0 10px 6px; }
+.nav-items { display: flex; flex-direction: column; }
+.nav button { --lvl: 0; display: flex; align-items: center; gap: 4px; width: 100%; text-align: left; min-height: 36px; padding: 0 10px 0 calc(6px + var(--lvl) * 16px); border: 0; border-radius: 4px; background: transparent; color: var(--fg-2); font: inherit; font-size: 14px; font-weight: 600; line-height: 1.35; cursor: pointer; }
+.nav button.sub { font-weight: 400; }
+.nav button .chev { flex: none; width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); transition: transform .15s; }
+.nav button[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.nav button:hover { background: var(--nav-hover); }
+.nav button.trail { color: var(--accent); }
+.nav button[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
+.nav button .lbl { padding: 8px 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 main { flex: 999 1 560px; min-width: 0; padding: 24px 32px 64px; }
 .col { max-width: 1100px; display: flex; flex-direction: column; gap: 28px; }
 @media (max-width: 780px) {
-  .nav { flex-direction: row; flex-wrap: wrap; max-width: none; border-right: 0; border-bottom: 1px solid var(--line-soft); padding: 8px 12px; }
+  .nav { flex: 1 1 100%; flex-direction: row; flex-wrap: wrap; max-width: none; position: static; height: auto; overflow: visible; border-right: 0; border-bottom: 1px solid var(--line-soft); padding: 8px 12px; }
   .nav-sec, .nav-items { display: contents; }
   .nav-label { display: none; }
   .nav button { width: auto; min-height: 44px; }
@@ -204,16 +211,9 @@ tr:last-child td { border-bottom: 0; }
 .doc-card b { color: var(--accent); font-weight: 600; }
 .doc-card span { font: 12px var(--mono); color: var(--muted); }
 .group-h { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 18px 0 8px; }
-.nav-tree { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 6px 12px; padding-left: 4px; border-left: 1px solid var(--line-soft); }
-.nav-tree.flat { margin: 0; padding: 0; border-left: 0; }
-.nav .nav-tree button { min-height: 30px; font-size: 13.5px; }
-.nav .nav-tree .nav-group { font-weight: 600; color: var(--fg-2); gap: 6px; }
-.nav-group::before { content: ""; width: 0; height: 0; border-left: 5px solid var(--muted); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform .15s; }
-.nav-group[aria-expanded="true"]::before { transform: rotate(90deg); }
-.nav-leaves { display: flex; flex-direction: column; gap: 1px; margin-left: 11px; }
 .mobile-only, .nav .mobile-only { display: none; }
 @media (max-width: 780px) {
-  .nav .nav-tree { display: none; }
+  .nav .doc-item, .nav button .chev { display: none; }
   .mobile-only { display: inline-block; margin-bottom: 10px; }
   .nav .mobile-only { display: flex; margin: 0; }
 }
@@ -266,16 +266,16 @@ tr:last-child td { border-bottom: 0; }
     <div class="nav-sec">
       <div class="nav-label">Markets</div>
       <div class="nav-items">
-        <button type="button" data-tab="news">News</button>
-        <button type="button" data-tab="calendar">Calendar</button>
-        <button type="button" data-tab="accounts">Accounts</button>
+        <button type="button" data-tab="news"><span class="chev"></span><span class="lbl">News</span></button>
+        <button type="button" data-tab="calendar"><span class="chev"></span><span class="lbl">Calendar</span></button>
+        <button type="button" data-tab="accounts"><span class="chev"></span><span class="lbl">Accounts</span></button>
       </div>
     </div>
     <div class="nav-sec">
       <div class="nav-label">Operate</div>
       <div class="nav-items">
-        <button type="button" data-tab="overview">Overview</button>
-        <button type="button" data-tab="services">Services</button>
+        <button type="button" data-tab="overview"><span class="chev"></span><span class="lbl">Overview</span></button>
+        <button type="button" data-tab="services"><span class="chev"></span><span class="lbl">Services</span></button>
       </div>
     </div>
     <div id="nav-store"></div>
@@ -692,7 +692,7 @@ const catalogStamp = () => Object.values(state.snap?.services || {}).map(s => s.
 function updateStoreNav() {
   const has = catalogRoots().length > 0, el = $('nav-store');
   if (has === !!el.childElementCount) return;
-  el.innerHTML = has ? `<div class="nav-sec"><div class="nav-label">Store</div><div class="nav-items"><button type="button" data-tab="data">Data</button><button type="button" data-tab="storage">Storage</button></div></div>` : '';
+  el.innerHTML = has ? `<div class="nav-sec"><div class="nav-label">Store</div><div class="nav-items"><button type="button" data-tab="data"><span class="chev"></span><span class="lbl">Data</span></button><button type="button" data-tab="storage"><span class="chev"></span><span class="lbl">Storage</span></button></div></div>` : '';
 }
 function dsRange(d) {
   const days = Object.values(d.schemas).flatMap(s => Object.keys(s.days || {})).sort();
@@ -779,30 +779,71 @@ async function loadCollections() {
   } catch (_) {}
 }
 const groupLabel = g => g.split('/').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' › ');
-// The Docs section. With one collection, its folders (collapsible) and
-// documents sit directly under the heading; with several, each collection is
-// an item and the open one expands. Documents never need a second sidebar.
+// The Docs section, after Databento's sidebar: folders form a tree (a
+// group `glacier/decisions` sits inside `glacier`), opening a folder closes
+// its siblings and opens its first document, and the open document's folders
+// are marked. With one collection its folders are the top level; with
+// several, each collection is a top-level folder.
+const CHEV = '<span class="chev"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M8.3 13.3 11.7 10 8.3 6.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"/></svg></span>';
+function docTree(c) {
+  const root = { path: '', docs: [], kids: new Map() };
+  for (const d of c.docs) {
+    let node = root, path = '';
+    for (const seg of d.group.split('/')) {
+      path = path ? path + '/' + seg : seg;
+      if (!node.kids.has(seg)) node.kids.set(seg, { path, name: seg, docs: [], kids: new Map() });
+      node = node.kids.get(seg);
+    }
+    node.docs.push(d);
+  }
+  return root;
+}
+const folderKey = (c, path) => c.id + ':' + path;
+const parentOf = k => k.includes('/') ? k.slice(0, k.lastIndexOf('/')) : k.slice(0, k.indexOf(':') + 1);
+// Open a folder and close its siblings (and everything inside them).
+function openFolder(key) {
+  const parent = parentOf(key);
+  for (const k of [...state.openGroups]) {
+    const top = k.split('/').slice(0, key.split('/').length).join('/');
+    if (top !== key && parentOf(top) === parent) state.openGroups.delete(k);
+  }
+  state.openGroups.add(key);
+}
+function closeFolder(key) {
+  for (const k of [...state.openGroups]) if (k === key || k.startsWith(key + '/')) state.openGroups.delete(k);
+}
+function revealDoc(c, d) {
+  let path = '';
+  for (const seg of d.group.split('/')) { path = path ? path + '/' + seg : seg; openFolder(folderKey(c, path)); }
+}
 function updateCollectionsNav() {
   const key = [state.tab, state.doc, [...state.openGroups].join(','), state.collections.length].join('|');
   if (key === state.navKey) return;
   state.navKey = key;
   if (!state.collections.length) { $('nav-collections').innerHTML = ''; return; }
   const open = currentCollection();
-  const tree = (c, flat = false) => {
-    const cls = flat ? 'nav-tree flat' : 'nav-tree';
-    const groups = [...new Set(c.docs.map(d => d.group))];
-    const leaf = d => `<button type="button" data-col="${esc(c.id)}" data-doc="${d.index}"${c === open && d.index === state.doc ? ' aria-current="page"' : ''}>${esc(d.title)}</button>`;
-    if (groups.length < 2) return `<div class="${cls}">${c.docs.map(leaf).join('')}</div>`;
-    return `<div class="${cls}">${groups.map(g => {
-      const expanded = state.openGroups.has(g);
-      return `<button type="button" class="nav-group" data-group="${esc(g)}" aria-expanded="${expanded}">${esc(groupLabel(g))}</button>` +
-        (expanded ? `<div class="nav-leaves">${c.docs.filter(d => d.group === g).map(leaf).join('')}</div>` : '');
-    }).join('')}</div>`;
+  const current = open && state.doc !== null ? open.docs.find(d => d.index === state.doc) : null;
+  const rows = (c, node, lvl) => {
+    let out = node.docs.map(d => `<button type="button" class="doc-item${lvl ? ' sub' : ''}" style="--lvl:${lvl}" data-col="${esc(c.id)}" data-doc="${d.index}" title="${esc(d.title)}"${d === current ? ' aria-current="page"' : ''}><span class="chev"></span><span class="lbl">${esc(d.title)}</span></button>`).join('');
+    for (const kid of node.kids.values()) {
+      const k = folderKey(c, kid.path), expanded = state.openGroups.has(k);
+      const trail = current && c === open && (current.group === kid.path || current.group.startsWith(kid.path + '/'));
+      out += `<button type="button" class="doc-item${lvl ? ' sub' : ''}${trail ? ' trail' : ''}" style="--lvl:${lvl}" data-col="${esc(c.id)}" data-folder="${esc(kid.path)}" aria-expanded="${expanded}">${CHEV}<span class="lbl">${esc(kid.name.charAt(0).toUpperCase() + kid.name.slice(1))}</span></button>`;
+      if (expanded) out += rows(c, kid, lvl + 1);
+    }
+    return out;
   };
-  const items = state.collections.length === 1
+  let items;
+  if (state.collections.length === 1) {
+    const c = state.collections[0];
     // On a phone the tree is hidden, so the collection's own page stands in.
-    ? `<button type="button" class="mobile-only" data-tab="col:${esc(state.collections[0].id)}">${esc(state.collections[0].name)}</button>` + tree(state.collections[0], true)
-    : state.collections.map(c => `<button type="button" data-tab="col:${esc(c.id)}">${esc(c.name)}</button>` + (c === open && c.docs.length ? tree(c) : '')).join('');
+    items = `<button type="button" class="mobile-only" data-tab="col:${esc(c.id)}"><span class="lbl">${esc(c.name)}</span></button>` + rows(c, docTree(c), 0);
+  } else {
+    items = state.collections.map(c => {
+      const expanded = c === open;
+      return `<button type="button" data-tab="col:${esc(c.id)}" aria-expanded="${expanded}">${CHEV}<span class="lbl">${esc(c.name)}</span></button>` + (expanded ? rows(c, docTree(c), 1) : '');
+    }).join('');
+  }
   $('nav-collections').innerHTML = `<div class="nav-sec"><div class="nav-label">Docs</div><div class="nav-items">${items}</div></div>`;
 }
 const currentCollection = () => state.collections.find(c => 'col:' + c.id === state.tab);
@@ -833,7 +874,7 @@ function openDoc(index) {
   state.doc = index; state.navigated = true;
   const c = currentCollection();
   const d = c?.docs.find(x => x.index === index);
-  if (d) state.openGroups.add(d.group);
+  if (d) revealDoc(c, d);
   try { history.replaceState(null, '', '#' + (c ? c.id + (index === null ? '' : '-' + index) : '')); } catch (_) {}
   render(); window.scrollTo(0, 0);
 }
@@ -952,8 +993,16 @@ document.querySelector('.home').addEventListener('click', e => {
   render(); window.scrollTo(0, 0);
 });
 document.querySelector('.nav').addEventListener('click', e => {
-  const g = e.target.closest('[data-group]');
-  if (g) { const k = g.dataset.group; if (state.openGroups.has(k)) state.openGroups.delete(k); else state.openGroups.add(k); updateCollectionsNav(); return; }
+  const f = e.target.closest('[data-folder]');
+  if (f) {
+    const c = state.collections.find(x => x.id === f.dataset.col), k = folderKey(c, f.dataset.folder);
+    if (state.openGroups.has(k)) { closeFolder(k); updateCollectionsNav(); return; }
+    openFolder(k);
+    // Like a docs site: opening a folder shows its first document.
+    const first = c.docs.find(d => d.group === f.dataset.folder);
+    if (first) { state.tab = 'col:' + c.id; openDoc(first.index); } else updateCollectionsNav();
+    return;
+  }
   const dc = e.target.closest('[data-doc]');
   if (dc) { state.tab = 'col:' + dc.dataset.col; openDoc(+dc.dataset.doc); return; }
   const b = e.target.closest('button[data-tab]'); if (!b) return;
@@ -1030,7 +1079,7 @@ $('theme-btn').addEventListener('click', () => {
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
   if (hc) {
     state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true;
-    const d = hc.docs.find(x => x.index === state.doc); if (d) state.openGroups.add(d.group);
+    const d = hc.docs.find(x => x.index === state.doc); if (d) revealDoc(hc, d);
   }
   else if (['overview', 'services', 'market', 'data', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
   else if (['accounts', 'news', 'calendar'].includes(h)) { state.tab = h; state.navigated = true; }
