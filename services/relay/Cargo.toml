@@ -12,8 +12,11 @@ workspace = true
 axum.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 databento = { version = "0.63", default-features = false, features = ["live"] }
+glacier-dbn.workspace = true
 glacier-observe.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+tar = { version = "0.4", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 time = { version = "0.3", features = ["parsing", "serde"] }
 tokio = { workspace = true, features = ["io-util"] }
