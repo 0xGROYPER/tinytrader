@@ -55,7 +55,7 @@ pub struct ServiceInfo {
     pub recent: Option<String>,
     pub catalog: Option<String>,
     pub news: Option<String>,
-    pub account: Option<String>,
+    pub accounts: Option<String>,
     pub calendar: Option<String>,
 }
 
@@ -129,7 +129,7 @@ pub struct ServiceState {
     /// The service's news stories, if it serves them.
     pub news: Option<Value>,
     /// The brokerage account it reads, if it serves one.
-    pub account: Option<Value>,
+    pub accounts: Option<Value>,
     /// The market calendar it serves, if any.
     pub calendar: Option<Value>,
 }

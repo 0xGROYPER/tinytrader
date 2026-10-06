@@ -17,10 +17,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use databento::dbn::{
-    ErrorCode, InstrumentDefMsg, Metadata, RecordHeader, StatMsg, SystemCode, UNDEF_TIMESTAMP,
-    rtype,
+    Cmbp1Msg, ErrorCode, InstrumentDefMsg, Mbp1Msg, Metadata, RecordHeader, StatMsg, SystemCode,
+    UNDEF_PRICE, UNDEF_TIMESTAMP, rtype,
 };
-use tinytrader_observe::Events;
+use tinytrader_observe::{Events, Series};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::OwnedWriteHalf;
@@ -119,6 +119,18 @@ impl Reference {
     fn len(&self) -> usize {
         self.definitions.len() + self.statistics.len()
     }
+
+    /// The instrument's symbol, from its definition.
+    fn symbol(&self, id: u32) -> Option<String> {
+        let (_, def) = self.definitions.get(&id)?;
+        let at = offset_of!(InstrumentDefMsg, raw_symbol);
+        let raw = def.get(at..at + 71)?;
+        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+        std::str::from_utf8(&raw[..end])
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +158,8 @@ pub struct Hub {
     /// queue meet with nothing missed or repeated.
     reference: Mutex<Reference>,
     pub events: Events,
+    /// Trade prices of the most active instruments, by symbol, for charts.
+    pub series: Series,
     pub clients: AtomicU64,
     pub records: AtomicU64,
     pub bytes: AtomicU64,
@@ -170,6 +184,7 @@ impl Hub {
             metadata,
             upstream: Mutex::new(Upstream::Starting),
             reference: Mutex::new(Reference::default()),
+            series: Series::new(900, 1000, 6),
             events: Events::default(),
             clients: AtomicU64::new(0),
             records: AtomicU64::new(0),
@@ -231,9 +246,40 @@ impl Hub {
         self.bytes.fetch_add(plain.len() as u64, Ordering::Relaxed);
         let mut reference = lock(&self.reference);
         reference.absorb(&plain);
+        self.chart(&reference, &plain);
         // No receivers is fine: nobody is listening right now.
         let _ = self.tx.send(plain);
         let _ = self.tx_cond.send(with_conditions);
+    }
+
+    /// Record the price of every trade in a chunk under its symbol.
+    fn chart(&self, reference: &Reference, chunk: &[u8]) {
+        let mut at = 0;
+        while at < chunk.len() {
+            let len = usize::from(chunk[at]) * 4;
+            let Some(rec) = chunk.get(at..at + len).filter(|r| r.len() >= 16) else {
+                return;
+            };
+            at += len;
+            let (action, price) = match rec[1] {
+                rtype::MBP_1 => (offset_of!(Mbp1Msg, action), offset_of!(Mbp1Msg, price)),
+                rtype::CMBP_1 => (offset_of!(Cmbp1Msg, action), offset_of!(Cmbp1Msg, price)),
+                _ => continue,
+            };
+            if rec.get(action) != Some(&b'T') {
+                continue;
+            }
+            let Some(px) = u64_at(rec, price)
+                .map(|p| p as i64)
+                .filter(|p| *p != UNDEF_PRICE)
+            else {
+                continue;
+            };
+            let id = u32_at(rec, offset_of!(RecordHeader, instrument_id)).unwrap_or(0);
+            if let Some(symbol) = reference.symbol(id) {
+                self.series.push(&symbol, px as f64 / 1e9);
+            }
+        }
     }
 
     fn broadcast(&self, bytes: Vec<u8>) {
@@ -605,6 +651,34 @@ mod tests {
         }
         assert_eq!(seen, ["def 7 150", "stat 7 1000"]);
         assert_eq!(hub.reference_len(), 2);
+    }
+
+    #[test]
+    fn charts_trades_by_symbol() {
+        let hub = Hub::new(metadata(), 8, Duration::from_secs(10));
+        let mut def = InstrumentDefMsg {
+            hd: RecordHeader::new::<InstrumentDefMsg>(rtype::INSTRUMENT_DEF, 1, 7, 0),
+            expiration: u64::MAX,
+            ..Default::default()
+        };
+        def.raw_symbol = databento::dbn::record::str_to_c_chars("SPY 261016C00775000").unwrap();
+        let trade = |action: u8, price: i64| {
+            let m = Mbp1Msg {
+                hd: RecordHeader::new::<Mbp1Msg>(rtype::MBP_1, 1, 7, 0),
+                action: action as std::ffi::c_char,
+                price,
+                ..Default::default()
+            };
+            databento::dbn::RecordRef::from(&m).as_ref().to_vec()
+        };
+        let mut chunk = databento::dbn::RecordRef::from(&def).as_ref().to_vec();
+        chunk.extend(trade(b'T', 1_250_000_000));
+        chunk.extend(trade(b'A', 9_000_000_000)); // a quote, not charted
+        hub.publish(chunk, 3);
+        let recent = hub.series.snapshot();
+        let points = recent["SPY 261016C00775000"].as_array().unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0][1].as_f64(), Some(1.25));
     }
 
     #[tokio::test]

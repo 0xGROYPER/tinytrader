@@ -282,8 +282,8 @@ async fn observe_into(
     if let Some(path) = d["streams"]["news"].as_str() {
         svc["news"] = json!(format!("{base}{path}"));
     }
-    if let Some(path) = d["streams"]["account"].as_str() {
-        svc["account"] = json!(format!("{base}{path}"));
+    if let Some(path) = d["streams"]["accounts"].as_str() {
+        svc["accounts"] = json!(format!("{base}{path}"));
     }
     if let Some(path) = d["streams"]["calendar"].as_str() {
         svc["calendar"] = json!(format!("{base}{path}"));
@@ -650,8 +650,8 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
         if let Some(url) = svc["catalog"].as_str() {
             entry.insert("catalog".into(), slow(app, url, 30).await);
         }
-        if let Some(url) = svc["account"].as_str() {
-            entry.insert("account".into(), slow(app, url, 5).await);
+        if let Some(url) = svc["accounts"].as_str() {
+            entry.insert("accounts".into(), slow(app, url, 5).await);
         }
         if let Some(url) = svc["calendar"].as_str() {
             entry.insert("calendar".into(), slow(app, url, 60).await);

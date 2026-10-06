@@ -584,8 +584,9 @@ function marketView() {
 }
 // Every service that serves an `account` stream gets a card: live accounts first.
 function accountsView(withHeading = true) {
-  const accts = (state.topo?.services || []).filter(s => s.account)
-    .map(s => ({ svc: s, a: svcState(s.id).account }))
+  // Every account of every service that serves an `accounts` stream.
+  const accts = (state.topo?.services || []).filter(s => s.accounts)
+    .flatMap(s => (svcState(s.id).accounts?.accounts || []).map(a => ({ svc: s, a })))
     .sort((x, y) => (x.a?.environment === 'live' ? 0 : 1) - (y.a?.environment === 'live' ? 0 : 1) || (x.a?.label || x.svc.id).localeCompare(y.a?.label || y.svc.id));
   if (!accts.length) return '';
   const grid = `<div class="cards acct-cards">${accts.map(({ svc, a }) => accountCard(svc, a)).join('')}</div>`;
@@ -646,7 +647,7 @@ function accountCard(svc, a) {
   return `<article class="card acct">${head}
     <div class="val"><span class="big">${money(acc.equity, cur)}</span>${day != null ? `<span class="chg ${tone(day)}">${signed(day, cur)} (${pct(acc.last_equity ? day / acc.last_equity : null)}) today</span>` : ''}</div>
     <div class="acct-stats">${stats.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('')}</div>
-    <div class="chart" data-chart="${esc(svc.id)}|recent|equity" data-decimals="2"></div>
+    <div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2"></div>
     ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Symbol</th><th>Qty</th><th>Value</th><th>Unrealized</th><th>Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted" style="margin:0;font-size:13px">No open positions.</p>'}
     <div class="foot">${pos.length > 8 ? `${pos.length} positions, largest 8 shown · ` : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
   </article>`;

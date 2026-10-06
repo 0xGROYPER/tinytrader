@@ -1,14 +1,16 @@
-//! Example service: reads one Alpaca brokerage account (paper or live) over
-//! REST and serves its balances and open positions. It only reads; it never
-//! places, changes or cancels orders. Run one instance per account.
+//! Example service: reads Alpaca brokerage accounts (paper or live) over REST
+//! and serves their balances and open positions. It only reads; it never
+//! places, changes or cancels orders. One process reads any number of
+//! accounts.
 //!
-//! Serves `/account`:
+//! Serves `/accounts`, one entry per account:
 //!
 //! ```json
-//! { "environment": "paper", "label": "...", "updated_at": 1759700000.0,
-//!   "account": { "status": "ACTIVE", "currency": "USD", "equity": 100000.0,
-//!                "last_equity": 99500.0, "cash": 50000.0, "buying_power": 200000.0, ... },
-//!   "positions": [{ "symbol": "SPY", "qty": 10.0, "market_value": 6690.0, ... }] }
+//! { "accounts": [
+//!   { "name": "paper-1", "label": "Paper 1", "environment": "paper", "updated_at": 1759700000.0,
+//!     "account": { "status": "ACTIVE", "currency": "USD", "equity": 100000.0,
+//!                  "last_equity": 99500.0, "cash": 50000.0, "buying_power": 200000.0, ... },
+//!     "positions": [{ "symbol": "SPY", "qty": 10.0, "market_value": 6690.0, ... }] } ] }
 //! ```
 //!
 //! Also serves `/calendar`, the US market clock and trading sessions from
@@ -17,11 +19,14 @@
 //! times in New York), refreshed every ten minutes.
 //!
 //! Numeric fields are numbers, not Alpaca's strings. Account numbers and
-//! ids are never served. Equity is also kept as a series at `/recent`
-//! (key `equity`), and position changes are a live tail at `/events`.
+//! ids are never served. Each account's equity is kept as a series at
+//! `/recent` (keyed by its label), and position changes are a live tail at
+//! `/events`.
 //!
-//! Credentials: `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`, or the same
-//! names with a `_FILE` suffix pointing at files containing them.
+//! Credentials: with `--accounts`, each account `NAME` reads its key from
+//! `<secrets>/NAME_key_id` and `<secrets>/NAME_secret_key`. Without it, one
+//! account reads `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY` (or the same
+//! names with a `_FILE` suffix pointing at files containing them).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -90,104 +95,180 @@ impl Environment {
     }
 }
 
-/// Reads an Alpaca account's balances and positions and serves them.
+/// Reads Alpaca accounts' balances and positions and serves them.
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
-    /// Which Alpaca environment the keys belong to. By default, paper when
-    /// the key id starts with `PK` (as Alpaca's paper keys do), else live.
-    #[arg(long, env = "ALPACA_ACCOUNT_ENVIRONMENT", value_enum)]
-    environment: Option<Environment>,
+    /// Accounts to read, as `NAME=LABEL` separated by `;`, e.g.
+    /// `live=Live;paper-1=Paper 1`. Without it, one account is read from
+    /// `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`.
+    #[arg(long, env = "ALPACA_ACCOUNTS")]
+    accounts: Option<String>,
 
-    /// Name shown for this account; consoles otherwise use the service's name.
+    /// Where each account's key files are (`NAME_key_id`, `NAME_secret_key`).
+    #[arg(long, env = "ALPACA_ACCOUNT_SECRETS", default_value = "/run/secrets")]
+    secrets: String,
+
+    /// Name shown for the single account read from the environment.
     #[arg(long, env = "ALPACA_ACCOUNT_LABEL")]
     label: Option<String>,
 
-    /// Seconds between polls.
+    /// Seconds between polls of each account.
     #[arg(long, env = "ALPACA_ACCOUNT_INTERVAL", default_value_t = 15)]
     interval: u64,
 }
 
-#[derive(Default)]
-struct Shared {
+/// One account and its latest reading.
+struct Account {
+    name: String,
+    label: String,
+    env: Environment,
+    key: String,
+    secret: String,
     doc: Mutex<Value>,
-    calendar: Mutex<Value>,
     polls: AtomicU64,
     errors: AtomicU64,
+}
+
+impl Account {
+    /// Paper or live, told apart by the key: Alpaca's paper keys start with `PK`.
+    fn new(name: &str, label: &str, key: String, secret: String) -> Self {
+        let env = if key.starts_with("PK") {
+            Environment::Paper
+        } else {
+            Environment::Live
+        };
+        Self {
+            name: name.to_owned(),
+            label: label.to_owned(),
+            env,
+            doc: Mutex::new(json!({ "name": name, "label": label, "environment": env.name() })),
+            key,
+            secret,
+            polls: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+        }
+    }
+}
+
+#[derive(Default)]
+struct Shared {
+    accounts: Vec<Account>,
+    calendar: Mutex<Value>,
     events: Events,
     series: Series,
+}
+
+/// The accounts to read, from `--accounts` and the secrets directory, or the
+/// single account in the environment.
+fn load_accounts(args: &Args) -> Result<Vec<Account>, String> {
+    let Some(list) = args.accounts.as_deref().filter(|l| !l.trim().is_empty()) else {
+        let label = args.label.clone().unwrap_or_else(|| "Alpaca".to_owned());
+        return Ok(vec![Account::new(
+            "account",
+            &label,
+            secret("APCA_API_KEY_ID")?,
+            secret("APCA_API_SECRET_KEY")?,
+        )]);
+    };
+    let read = |file: String| {
+        std::fs::read_to_string(&file)
+            .map(|s| s.trim().to_owned())
+            .map_err(|e| format!("cannot read {file}: {e}"))
+    };
+    list.split(';')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(|entry| {
+            let (name, label) = entry.split_once('=').unwrap_or((entry, entry));
+            let (name, label) = (name.trim(), label.trim());
+            Ok(Account::new(
+                name,
+                label,
+                read(format!("{}/{name}_key_id", args.secrets))?,
+                read(format!("{}/{name}_secret_key", args.secrets))?,
+            ))
+        })
+        .collect()
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let (key, secret) = match (secret("APCA_API_KEY_ID"), secret("APCA_API_SECRET_KEY")) {
-        (Ok(k), Ok(s)) => (k, s),
-        (Err(e), _) | (_, Err(e)) => {
+    let accounts = match load_accounts(&args) {
+        Ok(a) if !a.is_empty() => a,
+        Ok(_) => {
+            eprintln!("alpaca-account: no accounts given");
+            std::process::exit(2);
+        }
+        Err(e) => {
             eprintln!("alpaca-account: {e}");
             std::process::exit(2);
         }
     };
-    let env = args.environment.unwrap_or(if key.starts_with("PK") {
-        Environment::Paper
-    } else {
-        Environment::Live
-    });
-    let label = args.label.clone();
-    let named = label
-        .as_deref()
-        .map_or_else(String::new, |l| format!(" ({l})"));
     let listen = listen_address("ALPACA_ACCOUNT_LISTEN", "127.0.0.1:9107");
     let observer = Observer::new("alpaca-account", env!("CARGO_PKG_VERSION"));
-    let shared = Arc::new(Shared::default());
-    *lock(&shared.doc) = json!({ "environment": env.name(), "label": label });
+    let names: Vec<String> = accounts
+        .iter()
+        .map(|a| format!("{} ({})", a.label, a.env.name()))
+        .collect();
+    let shared = Arc::new(Shared {
+        accounts,
+        ..Shared::default()
+    });
     observer.describe(json!({
-        "role": format!("Balances and positions of an Alpaca {} account{named}. Read only.", env.name()),
+        "role": format!("Balances and positions of Alpaca accounts: {}. Read only.", names.join(", ")),
         "upstream": [{ "id": "alpaca-trading", "label": "alpaca", "sub": "trading API", "kind": "flow", "via": "REST, read only" }],
-        "streams": { "events": "/events", "series": "/recent", "account": "/account", "calendar": "/calendar" },
+        "streams": { "events": "/events", "series": "/recent", "accounts": "/accounts", "calendar": "/calendar" },
     }));
     {
         let s = shared.clone();
         observer.set_metrics(move |w| {
-            let l = [("environment", env.name())];
-            w.counter(
-                "tinytrader_account_polls_total",
-                "Polls of the account.",
-                &l,
-                s.polls.load(Ordering::Relaxed) as f64,
-            );
-            w.counter(
-                "tinytrader_account_errors_total",
-                "Failed polls.",
-                &l,
-                s.errors.load(Ordering::Relaxed) as f64,
-            );
-            let doc = lock(&s.doc);
-            if let Some(at) = doc["updated_at"].as_f64() {
-                w.gauge(
-                    "tinytrader_account_last_poll_age_seconds",
-                    "Seconds since the last successful poll.",
+            for a in &s.accounts {
+                let l = [("account", a.name.as_str()), ("environment", a.env.name())];
+                w.counter(
+                    "tinytrader_account_polls_total",
+                    "Polls of the account.",
                     &l,
-                    unix_seconds() - at,
+                    a.polls.load(Ordering::Relaxed) as f64,
                 );
-            }
-            if let Some(n) = doc["positions"].as_array().map(Vec::len) {
-                w.gauge(
-                    "tinytrader_account_positions",
-                    "Open positions.",
+                w.counter(
+                    "tinytrader_account_errors_total",
+                    "Failed polls.",
                     &l,
-                    n as f64,
+                    a.errors.load(Ordering::Relaxed) as f64,
                 );
+                let doc = lock(&a.doc);
+                if let Some(at) = doc["updated_at"].as_f64() {
+                    w.gauge(
+                        "tinytrader_account_last_poll_age_seconds",
+                        "Seconds since the last successful poll.",
+                        &l,
+                        unix_seconds() - at,
+                    );
+                }
+                if let Some(n) = doc["positions"].as_array().map(Vec::len) {
+                    w.gauge(
+                        "tinytrader_account_positions",
+                        "Open positions.",
+                        &l,
+                        n as f64,
+                    );
+                }
             }
         });
     }
 
     let app = Router::new()
         .route(
-            "/account",
+            "/accounts",
             get({
                 let s = shared.clone();
-                move || async move { axum::Json(lock(&s.doc).clone()) }
+                move || async move {
+                    let docs: Vec<Value> =
+                        s.accounts.iter().map(|a| lock(&a.doc).clone()).collect();
+                    axum::Json(json!({ "accounts": docs }))
+                }
             }),
         )
         .route(
@@ -207,7 +288,7 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    eprintln!("alpaca-account: {}{named} on http://{listen}", env.name());
+    eprintln!("alpaca-account: {} on http://{listen}", names.join(", "));
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             eprintln!("alpaca-account: http server stopped: {e}");
@@ -221,8 +302,10 @@ async fn main() {
     let every = Duration::from_secs(args.interval.max(5));
     let mut calendar_due: Option<std::time::Instant> = None;
     loop {
+        // The calendar is the same for every account; the first one reads it.
         if calendar_due.is_none_or(|t| t.elapsed() > Duration::from_secs(600)) {
-            match read_calendar(&http, env, &key, &secret).await {
+            let a = &shared.accounts[0];
+            match read_calendar(&http, a.env, &a.key, &a.secret).await {
                 Ok(c) => {
                     *lock(&shared.calendar) = c;
                     calendar_due = Some(std::time::Instant::now());
@@ -230,33 +313,37 @@ async fn main() {
                 Err(e) => eprintln!("alpaca-account: calendar: {e}"),
             }
         }
-        let read = async {
-            let account = get_json(&http, env, &key, &secret, "/v2/account").await?;
-            let positions = get_json(&http, env, &key, &secret, "/v2/positions").await?;
-            Ok::<_, String>((account, positions))
-        };
-        match read.await {
-            Ok((account, positions)) => {
-                shared.polls.fetch_add(1, Ordering::Relaxed);
-                update(&shared, &account, &positions);
-                let doc = lock(&shared.doc);
-                let equity = doc["account"]["equity"].as_f64();
-                let n = doc["positions"].as_array().map_or(0, Vec::len);
-                drop(doc);
-                observer.set_state(
-                    State::Ready,
-                    &match equity {
-                        Some(e) => format!("equity {e:.2}, {n} positions"),
-                        None => format!("{n} positions"),
-                    },
-                );
+        let mut failing = Vec::new();
+        for a in &shared.accounts {
+            let read = async {
+                let account = get_json(&http, a.env, &a.key, &a.secret, "/v2/account").await?;
+                let positions = get_json(&http, a.env, &a.key, &a.secret, "/v2/positions").await?;
+                Ok::<_, String>((account, positions))
+            };
+            match read.await {
+                Ok((account, positions)) => {
+                    a.polls.fetch_add(1, Ordering::Relaxed);
+                    update(&shared, a, &account, &positions);
+                }
+                Err(e) => {
+                    a.errors.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("alpaca-account: {}: {e}", a.label);
+                    observer.record_error(&format!("{}: {e}", a.label));
+                    failing.push(a.label.clone());
+                }
             }
-            Err(e) => {
-                shared.errors.fetch_add(1, Ordering::Relaxed);
-                eprintln!("alpaca-account: {e}");
-                observer.record_error(&e);
-                observer.set_state(State::Degraded, "account unreachable; retrying");
-            }
+        }
+        let n = shared.accounts.len();
+        if failing.is_empty() {
+            observer.set_state(
+                State::Ready,
+                &format!("{n} account{}", if n == 1 { "" } else { "s" }),
+            );
+        } else {
+            observer.set_state(
+                State::Degraded,
+                &format!("unreachable: {}; retrying", failing.join(", ")),
+            );
         }
         tokio::time::sleep(every).await;
     }
@@ -350,7 +437,7 @@ fn pick(v: &Value, fields: &[&str]) -> Value {
 }
 
 /// Store a fresh reading, record equity, and announce position changes.
-fn update(shared: &Shared, account: &Value, positions: &Value) {
+fn update(shared: &Shared, acct: &Account, account: &Value, positions: &Value) {
     let account = pick(account, ACCOUNT_FIELDS);
     let mut positions: Vec<Value> = positions
         .as_array()
@@ -359,14 +446,15 @@ fn update(shared: &Shared, account: &Value, positions: &Value) {
         .map(|p| pick(p, POSITION_FIELDS))
         .collect();
     positions.sort_by(|a, b| a["symbol"].as_str().cmp(&b["symbol"].as_str()));
-    let mut doc = lock(&shared.doc);
+    let mut doc = lock(&acct.doc);
     if let Some(before) = doc["positions"].as_array() {
         for line in changes(before, &positions) {
+            let line = format!("{}: {line}", acct.label);
             shared.events.push(line.clone(), line);
         }
     }
     if let Some(e) = account["equity"].as_f64() {
-        shared.series.push("equity", e);
+        shared.series.push(&acct.label, e);
     }
     doc["account"] = account;
     doc["positions"] = json!(positions);
