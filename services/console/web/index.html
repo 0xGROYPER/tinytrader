@@ -279,6 +279,7 @@ tr:last-child td { border-bottom: 0; }
 .quote label { display: inline-flex; align-items: center; gap: 8px; color: var(--fg); }
 .msg-err { color: var(--crit); font-size: 14px; overflow-wrap: anywhere; }
 .msg-ok { color: var(--ok); font-size: 14px; }
+.msg-warn { color: var(--warn); font-size: 14px; flex-basis: 100%; overflow-wrap: anywhere; }
 .jobs-tbl td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .jobs-tbl tr.sub td { padding-top: 0; color: var(--muted); font-size: 13px; }
 .jobs-tbl tr.has-sub td { border-bottom: 0; }
@@ -1386,9 +1387,10 @@ function quoteLine() {
   const price = `<button type="button" class="btn${current ? '' : ' primary'}" id="jf-price"${jobs.busy ? ' disabled' : ''}>${jobs.busy === 'price' ? 'Pricing…' : 'Price'}</button>`;
   if (!current) return price + msg;
   const paid = q.cost_usd > 0;
+  const warn = (q.warnings || []).length ? `<span class="msg-warn">⚠ ${q.warnings.map(esc).join(' · ')}</span>` : '';
   return `${price}<span class="cost">${usd(q.cost_usd)}</span><span class="muted">${paid ? 'charged to the Databento account' : 'included, no charge'} · ${bytes(q.billable_bytes)} billable (uncompressed)</span>
     ${paid ? `<label><input type="checkbox" id="jf-confirm"> Charge ${usd(q.cost_usd)}</label>` : ''}
-    <button type="button" class="btn primary" id="jf-submit"${paid || jobs.busy ? ' disabled' : ''}>${jobs.busy === 'submit' ? 'Submitting…' : paid ? 'Submit for ' + usd(q.cost_usd) : 'Submit'}</button>${msg}`;
+    <button type="button" class="btn primary" id="jf-submit"${paid || jobs.busy ? ' disabled' : ''}>${jobs.busy === 'submit' ? 'Submitting…' : paid ? 'Submit for ' + usd(q.cost_usd) : 'Submit'}</button>${warn}${msg}`;
 }
 function jobState(j) {
   const t = j.transfer, h = j.held;

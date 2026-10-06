@@ -493,9 +493,76 @@ async fn cost(jobs: &Jobs, c: &Checked) -> Result<(f64, u64), String> {
     Ok((usd, bytes))
 }
 
+/// Before pricing: refuse a request outside what Databento has for the
+/// schema, and warn about requested days it marks degraded, pending or
+/// missing.
+async fn availability(jobs: &Jobs, c: &Checked) -> Result<Vec<String>, String> {
+    use databento::historical::metadata::{DatasetCondition, GetDatasetConditionParams};
+    let mut db = jobs.db.lock().await;
+    let mut warnings = Vec::new();
+    match db.metadata().get_dataset_range(&c.dataset).await {
+        Ok(r) => {
+            let (from, to) = r
+                .range_by_schema
+                .get(&c.schema)
+                .map_or((r.start, r.end), |x| (x.start, x.end));
+            let (want_from, want_to) = (
+                c.start.midnight().assume_utc(),
+                c.end.midnight().assume_utc(),
+            );
+            if want_from < from.replace_time(time::Time::MIDNIGHT) || want_to > to {
+                let last = (to - time::Duration::nanoseconds(1)).date();
+                return Err(format!(
+                    "Databento has {} {} from {} to {last}",
+                    c.dataset,
+                    c.schema.as_str(),
+                    from.date()
+                ));
+            }
+        }
+        Err(e) => warnings.push(format!("couldn't check the available range: {e}")),
+    }
+    let params = GetDatasetConditionParams::builder()
+        .dataset(&c.dataset)
+        .date_range(c.start..c.end)
+        .build();
+    match db.metadata().get_dataset_condition(&params).await {
+        Ok(days) => {
+            for (cond, label) in [
+                (DatasetCondition::Degraded, "degraded"),
+                (DatasetCondition::Pending, "pending"),
+                (DatasetCondition::Missing, "missing"),
+            ] {
+                let list: Vec<String> = days
+                    .iter()
+                    .filter(|d| d.condition == cond)
+                    .map(|d| d.date.to_string())
+                    .collect();
+                if !list.is_empty() {
+                    warnings.push(format!(
+                        "Databento marks {} {label}: {}",
+                        if list.len() == 1 {
+                            "1 day"
+                        } else {
+                            "these days"
+                        },
+                        list.join(", ")
+                    ));
+                }
+            }
+        }
+        Err(e) => warnings.push(format!("couldn't check the days' condition: {e}")),
+    }
+    Ok(warnings)
+}
+
 async fn price(AxState(jobs): AxState<Shared>, Json(request): Json<Request>) -> Reply {
     let checked = match request.check() {
         Ok(c) => c,
+        Err(e) => return refused(StatusCode::BAD_REQUEST, e),
+    };
+    let warnings = match availability(&jobs, &checked).await {
+        Ok(w) => w,
         Err(e) => return refused(StatusCode::BAD_REQUEST, e),
     };
     let (usd, bytes) = match cost(&jobs, &checked).await {
@@ -516,7 +583,7 @@ async fn price(AxState(jobs): AxState<Shared>, Json(request): Json<Request>) -> 
     (
         StatusCode::OK,
         Json(
-            json!({ "quote": id, "cost_usd": usd, "billable_bytes": bytes, "valid_seconds": QUOTE_TTL.as_secs() }),
+            json!({ "quote": id, "warnings": warnings, "cost_usd": usd, "billable_bytes": bytes, "valid_seconds": QUOTE_TTL.as_secs() }),
         ),
     )
 }

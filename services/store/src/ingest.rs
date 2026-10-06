@@ -177,6 +177,55 @@ fn databento_day(name: &str, schema: &str) -> Option<String> {
         .then(|| format!("{}-{}-{}", &day[..4], &day[4..6], &day[6..]))
 }
 
+/// Check a day file's own DBN header against where it's being filed: its
+/// dataset, its schema, and a time range that includes the day. The manifest
+/// already vouched for its bytes; this catches a file that is intact but
+/// isn't what its name says.
+fn check_header(path: &Path, dataset: &str, schema: &str, day: &str) -> Result<(), String> {
+    let decoder = dbn::decode::dbn::Decoder::from_zstd_file(path)
+        .map_err(|e| format!("not a readable DBN file: {e}"))?;
+    let m = dbn::decode::DbnMetadata::metadata(&decoder);
+    if m.dataset != dataset {
+        return Err(format!(
+            "its header says dataset {}, not {dataset}",
+            m.dataset
+        ));
+    }
+    let want: dbn::Schema = schema
+        .parse()
+        .map_err(|_| format!("unknown schema {schema}"))?;
+    if m.schema != Some(want) {
+        return Err(format!(
+            "its header says schema {:?}, not {schema}",
+            m.schema.map(|s| s.as_str())
+        ));
+    }
+    let start = day_ns(day).ok_or("bad day")?;
+    let end = start + 86_400 * 1_000_000_000;
+    if m.start >= end || m.end.is_some_and(|e| e.get() <= start) {
+        return Err(format!(
+            "its header covers {}..{}, not {day}",
+            m.start,
+            m.end.map_or(0, |e| e.get())
+        ));
+    }
+    Ok(())
+}
+
+/// Nanoseconds since the epoch at 00:00 UTC of a `YYYY-MM-DD` day.
+fn day_ns(day: &str) -> Option<u64> {
+    let mut it = day.split('-').map(str::parse::<i64>);
+    let (y, m, d) = (it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?);
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    u64::try_from((era * 146_097 + doe - 719_468) * 86_400)
+        .ok()
+        .map(|s| s * 1_000_000_000)
+}
+
 /// Move `from` to `to` without ever replacing an existing `to`: a hard link
 /// (which fails if `to` exists, atomically) then removing `from`. Both are on
 /// the same volume.
@@ -383,13 +432,15 @@ fn file_databento(
                 ));
             }
         }
-        let rel = if name.ends_with(".json") {
+        let day = if name.ends_with(".json") {
             None
         } else {
-            let day = databento_day(name, schema)
-                .ok_or_else(|| format!("{name}: not a daily {schema} .dbn.zst file"))?;
-            Some(level.join(format!("{day}.dbn.zst")))
+            Some(
+                databento_day(name, schema)
+                    .ok_or_else(|| format!("{name}: not a daily {schema} .dbn.zst file"))?,
+            )
         };
+        let rel = day.as_ref().map(|d| level.join(format!("{d}.dbn.zst")));
         // Every place this day could already be, on any volume.
         let existing: Vec<(PathBuf, String)> = match &rel {
             Some(rel) => std::iter::once(root)
@@ -424,6 +475,9 @@ fn file_databento(
         let got = hash_file(&path)?;
         if got != want {
             return Err(format!("{name}: SHA-256 {got}, manifest says {want}"));
+        }
+        if let Some(d) = &day {
+            check_header(&path, dataset, schema, d).map_err(|e| format!("{name}: {e}"))?;
         }
         ledger.record(
             json!({ "step": "verified", "file": name, "bytes": meta.len(), "sha256": got }),
@@ -577,7 +631,35 @@ mod tests {
     }
 
     /// Stage a Databento batch of one day for `symbols` in `root`.
-    fn stage(root: &Path, batch: &str, symbols: &[&str], data: &[u8]) {
+    /// A real zstd DBN file for OPRA.PILLAR cmbp-1 on 2025-10-01; `label`
+    /// makes different labels give different bytes.
+    fn dbn_day(label: &[u8]) -> Vec<u8> {
+        dbn_file("OPRA.PILLAR", dbn::Schema::Cmbp1, "2025-10-01", label)
+    }
+
+    fn dbn_file(dataset: &str, schema: dbn::Schema, day: &str, label: &[u8]) -> Vec<u8> {
+        let start = day_ns(day).unwrap() + label.iter().map(|b| u64::from(*b)).sum::<u64>();
+        let metadata = dbn::Metadata::builder()
+            .dataset(dataset.to_owned())
+            .schema(Some(schema))
+            .start(start)
+            .end(std::num::NonZeroU64::new(
+                day_ns(day).unwrap() + 86_400 * 1_000_000_000,
+            ))
+            .stype_in(Some(dbn::SType::Parent))
+            .stype_out(dbn::SType::InstrumentId)
+            .build();
+        let mut out = Vec::new();
+        // The zstd stream is finished when the encoder is dropped.
+        drop(dbn::encode::dbn::Encoder::with_zstd(&mut out, &metadata).unwrap());
+        out
+    }
+
+    fn stage(root: &Path, batch: &str, symbols: &[&str], label: &[u8]) {
+        stage_bytes(root, batch, symbols, &dbn_day(label));
+    }
+
+    fn stage_bytes(root: &Path, batch: &str, symbols: &[&str], data: &[u8]) {
         let inc = root.join(INCOMING).join(batch);
         let data_sha = upload(&inc, "opra-pillar-20251001.cmbp-1.dbn.zst", data);
         let metadata = json!({
@@ -612,7 +694,7 @@ mod tests {
         let root = scratch("batch").join("Databento");
         stage(&root, "OPRA-1", &["SPX.OPT"], b"day one");
         let s = incorporate_databento(&root, &[], "OPRA-1", "2026-10-06").unwrap();
-        assert_eq!(fs::read(root.join(DAY)).unwrap(), b"day one");
+        assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         assert_eq!(s["files"].as_array().unwrap().len(), 1);
         let kept = fs::read_to_string(root.join("provenance/OPRA-1/manifest.json")).unwrap();
         assert!(!kept.contains("secret"), "download URLs removed");
@@ -652,7 +734,7 @@ mod tests {
         let base = scratch("volumes");
         let (here, there) = (base.join("new/Databento"), base.join("old/Databento"));
         fs::create_dir_all(there.join(DAY).parent().unwrap()).unwrap();
-        fs::write(there.join(DAY), b"held elsewhere").unwrap();
+        fs::write(there.join(DAY), dbn_day(b"held elsewhere")).unwrap();
 
         // A different day elsewhere: refused.
         stage(&here, "OPRA-3", &["SPX.OPT"], b"not the same");
@@ -669,7 +751,10 @@ mod tests {
             .unwrap();
         assert!(!other.join(DAY).exists(), "no second copy");
         assert_eq!(s["files"][0]["already_present"], true);
-        assert_eq!(fs::read(there.join(DAY)).unwrap(), b"held elsewhere");
+        assert_eq!(
+            fs::read(there.join(DAY)).unwrap(),
+            dbn_day(b"held elsewhere")
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -692,7 +777,7 @@ mod tests {
         stage(&root, "OPRA-6", &["SPX.OPT"], b"day one");
         let s = incorporate_databento(&root, &[], "OPRA-6", "2026-10-06").unwrap();
         assert_eq!(s["files"][0]["already_present"], true);
-        assert_eq!(fs::read(root.join(DAY)).unwrap(), b"day one");
+        assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         assert_eq!(
             fs::read(root.join("provenance/OPRA-6/manifest.json")).unwrap(),
             receipt
@@ -740,7 +825,7 @@ mod tests {
         )
         .unwrap();
         incorporate_databento(&root, &[], "OPRA-8", "2026-10-06").unwrap();
-        assert_eq!(fs::read(root.join(DAY)).unwrap(), b"day one");
+        assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         assert!(root.join("provenance/OPRA-8/manifest.json").exists());
         assert!(!root.join(INCOMING).exists());
         let _ = fs::remove_dir_all(root.parent().unwrap());
@@ -756,7 +841,7 @@ mod tests {
         fs::rename(base.join(INCOMING).join("OPRA-9"), &dir).unwrap();
         fs::write(dir.join("_batch_listing.json"), "[]").unwrap();
         let s = adopt_databento(&dir, &root, &[], "2026-10-06").unwrap();
-        assert_eq!(fs::read(root.join(DAY)).unwrap(), b"day one");
+        assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         assert!(root.join("provenance/OPRA-9/_batch_listing.json").exists());
         assert!(!dir.exists(), "the folder is gone once filed");
         assert_eq!(s["left_behind"], json!([]));
@@ -767,8 +852,53 @@ mod tests {
         fs::rename(base.join(INCOMING).join("OPRA-10"), &bad).unwrap();
         assert!(adopt_databento(&bad, &root, &[], "2026-10-06").is_err());
         assert_eq!(fs::read_dir(&bad).unwrap().count(), 3);
-        assert_eq!(fs::read(root.join(DAY)).unwrap(), b"day one");
+        assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn refuses_a_file_whose_header_disagrees() {
+        let root = scratch("header").join("Databento");
+        // Intact (the manifest vouches for it) but really a trades file for another day.
+        stage_bytes(
+            &root,
+            "OPRA-11",
+            &["SPX.OPT"],
+            &dbn_file("OPRA.PILLAR", dbn::Schema::Trades, "2025-10-01", b""),
+        );
+        let err = incorporate_databento(&root, &[], "OPRA-11", "2026-10-06").unwrap_err();
+        assert!(err.contains("schema"), "{err}");
+        stage_bytes(
+            &root,
+            "OPRA-12",
+            &["SPX.OPT"],
+            &dbn_file("OPRA.PILLAR", dbn::Schema::Cmbp1, "2025-10-02", b""),
+        );
+        let err = incorporate_databento(&root, &[], "OPRA-12", "2026-10-06").unwrap_err();
+        assert!(err.contains("not 2025-10-01"), "{err}");
+        stage_bytes(&root, "OPRA-13", &["SPX.OPT"], b"not dbn at all");
+        assert!(
+            incorporate_databento(&root, &[], "OPRA-13", "2026-10-06")
+                .unwrap_err()
+                .contains("not a readable DBN file")
+        );
+        assert!(!root.join(DAY).exists(), "nothing filed");
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// Against a real filed day (DBN as Databento delivers it, which may be an
+    /// older DBN version): `TT_REAL_DBN=<path> TT_REAL_DAY=<YYYY-MM-DD> TT_REAL_SCHEMA=<schema>
+    /// cargo test -p store real_file -- --ignored`.
+    #[test]
+    #[ignore = "needs a real Databento file"]
+    fn real_file_passes_the_header_check() {
+        let (path, day, schema) = (
+            std::env::var("TT_REAL_DBN").unwrap(),
+            std::env::var("TT_REAL_DAY").unwrap(),
+            std::env::var("TT_REAL_SCHEMA").unwrap(),
+        );
+        check_header(Path::new(&path), "OPRA.PILLAR", &schema, &day).unwrap();
+        assert!(check_header(Path::new(&path), "OPRA.PILLAR", &schema, "2020-01-02").is_err());
     }
 
     #[test]
