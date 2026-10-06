@@ -269,6 +269,7 @@ tr:last-child td { border-bottom: 0; }
 .field input, .field select { width: 100%; box-sizing: border-box; min-height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: 14px var(--mono); }
 .field input:focus-visible, .field select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .btn { min-height: 38px; padding: 0 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: 500 14px var(--ui); cursor: pointer; white-space: nowrap; }
+.btn.danger { border-color: var(--crit); color: var(--crit); }
 .btn:hover:not(:disabled) { background: var(--surface); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
 .btn.primary:hover:not(:disabled) { background: var(--accent-mark); }
@@ -452,7 +453,16 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 .sw-list li[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); }
 .sw-group { font-weight: 600; } .sw-group em { margin-left: auto; font-style: normal; color: var(--muted); font-weight: 400; }
 .sw-tw { width: 14px; color: var(--muted); }
-.sw-ws.current::after { content: "open"; margin-left: auto; font-size: 11px; color: var(--muted); }
+.sw-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-acts { display: flex; gap: 2px; visibility: hidden; }
+.sw-list li:hover .sw-acts, .sw-list li[aria-selected="true"] .sw-acts { visibility: visible; }
+.sw-acts button { border: 0; background: transparent; color: var(--muted); font: 14px var(--ui); width: 24px; height: 24px; border-radius: 4px; cursor: pointer; }
+.sw-acts button:hover { background: var(--nav-hover); color: var(--fg); }
+.sw-acts button:disabled { opacity: .3; cursor: default; }
+.sw-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sw-btns { display: flex; gap: 8px; margin-left: auto; }
+.sw-ws.current .sw-name::after { content: " · open"; color: var(--muted); font-size: 11px; }
+.sw-ws.current.x::after { content: "open"; margin-left: auto; font-size: 11px; color: var(--muted); }
 .sw-in { flex: 1; min-width: 0; border: 1px solid var(--accent-2); border-radius: 4px; background: var(--bg); color: var(--fg); font: 14px var(--ui); padding: 2px 6px; }
 .sw-pv { padding: 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .sw-cap { font-size: 12px; color: var(--muted); }
@@ -1949,11 +1959,14 @@ function swDraw() {
     const on = i === sw.sel ? ' aria-selected="true"' : '';
     if (r.kind === 'group') return `<li class="sw-group" data-sw="${i}" draggable="false"${on}><span class="sw-tw">${r.open ? '▾' : '▸'}</span>${esc(r.g)} <em>${r.n}</em></li>`;
     const editing = sw.edit && sw.edit.row === i;
-    return `<li class="sw-ws${r.l.name === lay.current ? ' current' : ''}" data-sw="${i}" draggable="true" style="padding-left:${12 + r.depth * 18}px"${on}>${editing ? `<input class="sw-in" id="sw-in" value="${esc(sw.edit.value)}" placeholder="${sw.edit.kind === 'group' ? 'Group (empty for none)' : 'Name'}">` : esc(r.l.name)}</li>`;
+    return `<li class="sw-ws${r.l.name === lay.current ? ' current' : ''}" data-sw="${i}" draggable="true" style="padding-left:${12 + r.depth * 18}px"${on}>${editing ? `<input class="sw-in" id="sw-in" value="${esc(sw.edit.value)}" placeholder="${sw.edit.kind === 'group' ? 'Group (empty for none)' : 'Name'}">` : `<span class="sw-name">${esc(r.l.name)}</span><span class="sw-acts"><button type="button" data-sw-act="rename" title="Rename (F2)" aria-label="Rename ${esc(r.l.name)}">✎</button><button type="button" data-sw-act="delete" title="Delete (⌫)" aria-label="Delete ${esc(r.l.name)}"${lay.list.length > 1 ? '' : ' disabled'}>×</button></span>`}</li>`;
   }).join('');
   const l = sel?.kind === 'ws' ? sel.l : sel?.kind === 'group' ? inGroup(sel.g)[0] : null;
   box.querySelector('.sw-pv').innerHTML = l ? `<div class="pv">${preview(l)}</div><div class="sw-cap">${esc(l.name)} · ${layViews(l).length} widgets</div>` : '';
-  box.querySelector('.sw-foot').innerHTML = sw.confirm ? `<b>Delete “${esc(sw.confirm)}”?</b> Enter deletes, Esc keeps it.` : '↑↓ move · →/Tab open · ← close · Enter go · F2 rename · D duplicate · G group · N new · ⌫ delete';
+  box.querySelector('.sw-foot').innerHTML = sw.confirm
+    ? `<b>Delete “${esc(sw.confirm)}”?</b><span class="sw-btns"><button type="button" class="btn" data-sw-act="keep">Keep</button><button type="button" class="btn danger" data-sw-act="really-delete">Delete</button></span>`
+    : sw.edit?.kind === 'new' ? '<input class="sw-in" id="sw-in" placeholder="New workspace name, then Enter" autocomplete="off">'
+    : `<button type="button" class="btn" data-sw-act="new">+ New workspace</button><span>↑↓ move · Enter go · F2 rename · D duplicate · G group · ⌫ delete</span>`;
   $('sw-in')?.focus();
 }
 function swOpen() {
@@ -1961,7 +1974,7 @@ function swOpen() {
   if (dock) laySave();
   const cur = lay.list.find(l => l.name === lay.current);
   if (groupOf(cur)) sw.expanded.add(groupOf(cur));
-  document.body.insertAdjacentHTML('beforeend', `<div class="pal-back" id="sw-back"><div class="pal sw" id="sw" role="dialog" aria-label="Workspaces"><div class="sw-body"><ul class="sw-list" role="tree"></ul><div class="sw-pv"></div></div><p class="pal-hint sw-foot"></p></div></div>`);
+  document.body.insertAdjacentHTML('beforeend', `<div class="pal-back" id="sw-back"><div class="pal sw" id="sw" role="dialog" aria-label="Workspaces"><div class="sw-body"><ul class="sw-list" role="tree"></ul><div class="sw-pv"></div></div><div class="pal-hint sw-foot"></div></div></div>`);
   sw.open = true; sw.rows = swRows(); sw.sel = Math.max(0, sw.rows.findIndex(r => r.kind === 'ws' && r.l.name === lay.current)); swDraw();
 }
 function swClose() { $('sw-back')?.remove(); sw.open = false; sw.edit = null; sw.confirm = null; }
@@ -1969,7 +1982,10 @@ function swCommit() {
   const { kind, l, value } = sw.edit; const v = value.trim().slice(0, 40); sw.edit = null;
   if (kind === 'rename' && v && !lay.list.some(x => x.name === v)) { if (lay.current === l.name) lay.current = v; l.name = v; }
   if (kind === 'group') { l.group = v || undefined; if (v) sw.expanded.add(v); }
-  if (kind === 'new' && v && !lay.list.some(x => x.name === v)) { lay.list.push({ name: v, group: groupOf(lay.list.find(x => x.name === lay.current)) || undefined, dock: dock?.toJSON() }); }
+  if (kind === 'new' && v && !lay.list.some(x => x.name === v)) {
+    lay.list.push({ name: v, group: groupOf(lay.list.find(x => x.name === lay.current)) || undefined, tree: { view: 'overview' } });
+    layStore(); swClose(); laySwitch(v); return;
+  }
   layStore(); swDraw();
 }
 document.addEventListener('keydown', e => {
@@ -2001,6 +2017,16 @@ document.addEventListener('keydown', e => {
 document.addEventListener('click', e => {
   if (!sw.open) return;
   if (e.target.id === 'sw-back') { swClose(); return; }
+  const act = e.target.closest && e.target.closest('[data-sw-act]');
+  if (act) {
+    const a = act.dataset.swAct, i = +(act.closest('[data-sw]')?.dataset.sw ?? -1), r = sw.rows[i];
+    if (a === 'rename' && r) { sw.sel = i; sw.edit = { kind: 'rename', row: i, l: r.l, value: r.l.name }; }
+    else if (a === 'delete' && r && lay.list.length > 1) { sw.sel = i; sw.confirm = r.l.name; }
+    else if (a === 'new') { sw.edit = { kind: 'new', row: -1, l: null, value: '' }; }
+    else if (a === 'keep') sw.confirm = null;
+    else if (a === 'really-delete') { const n = sw.confirm; sw.confirm = null; layDelete(n); }
+    swDraw(); return;
+  }
   const li = e.target.closest && e.target.closest('[data-sw]'); if (!li || e.target.id === 'sw-in') return;
   const i = +li.dataset.sw, r = sw.rows[i];
   if (sw.sel === i && r.kind === 'ws') { swClose(); laySwitch(r.l.name); return; }
