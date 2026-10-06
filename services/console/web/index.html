@@ -7,42 +7,42 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inconsolata:wght@400;500;600&family=Inter:wght@400;500;600&display=swap">
 <style>
-/* Layout: scientific-docs shell; light or dark, following the system unless the viewer picks one. NixOS-flavoured blue and light blue with an orange for attention. */
+/* Layout: docs-style shell; light or dark, following the system unless the viewer picks one. Monochrome, after tinygrad: ink on paper, with colour only where it means something (green and red for prices, status colours for health). */
 :root {
   color-scheme: light;
-  --bg: #FFFFFF; --surface: #F5F8FC; --line: #D5DFEB; --line-soft: #E8EEF5; --nav-bg: #F8FAFD; --nav-hover: rgba(65, 103, 179, .07);
-  --fg: #1C283A; --fg-2: #3A4A60; --muted: #5C6B80;
-  --accent: #4167B3; --accent-mark: #5277C3; --accent-2: #7EBAE4; --accent-soft: #EAF3FB;
+  --bg: #FFFFFF; --surface: #F6F6F6; --line: #D9D9D9; --line-soft: #EBEBEB; --nav-bg: #FAFAFA; --nav-hover: rgba(0, 0, 0, .05);
+  --fg: #111111; --fg-2: #333333; --muted: #6B6B6B;
+  --accent: #111111; --accent-mark: #111111; --accent-2: #8A8A8A; --accent-soft: #EBEBEB;
   --ok: #17704F; --ok-soft: #E5F4ED;
   --warn: #A3500C; --warn-mark: #E8862A; --warn-soft: #FDF1E4; --warn-line: #F2C9A0;
   --crit: #A5232F; --crit-mark: #C8363F; --crit-soft: #FBECEE; --crit-line: #E9B9BF;
-  --idle: #4F5D72; --idle-soft: #ECF0F5;
-  --grid: #E3EAF2; --up: #1E8A5A; --down: #C8363F;
+  --idle: #555555; --idle-soft: #EFEFEF;
+  --grid: #EBEBEB; --up: #1E8A5A; --down: #C8363F;
   --sans: 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif;
   --mono: 'Inconsolata', ui-monospace, 'SF Mono', Menlo, monospace;
   /* The interface is monospace, after tinygrad; long reading stays proportional. */
   --ui: var(--mono);
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
-  --bg: #0D141F; --surface: #131C2A; --line: #26344A; --line-soft: #1B2636; --nav-bg: #101827; --nav-hover: rgba(142, 195, 234, .07);
-  --fg: #E3EAF3; --fg-2: #B8C5D6; --muted: #8B9AB0;
-  --accent: #8EC3EA; --accent-mark: #7EBAE4; --accent-2: #5277C3; --accent-soft: #16273E;
+  --bg: #0E0E0E; --surface: #171717; --line: #2E2E2E; --line-soft: #1F1F1F; --nav-bg: #121212; --nav-hover: rgba(255, 255, 255, .06);
+  --fg: #EDEDED; --fg-2: #C4C4C4; --muted: #8F8F8F;
+  --accent: #F2F2F2; --accent-mark: #DADADA; --accent-2: #8F8F8F; --accent-soft: #262626;
   --ok: #72CFA5; --ok-soft: #13291F;
   --warn: #F2A660; --warn-mark: #E8862A; --warn-soft: #2C1E10; --warn-line: #5C3E1F;
   --crit: #F29AA3; --crit-mark: #E0606A; --crit-soft: #2F171B; --crit-line: #5E2B32;
-  --idle: #A9B6C8; --idle-soft: #1E2838;
-  --grid: #1F2B3D; --up: #4CC38A; --down: #EF6B73;
+  --idle: #ABABAB; --idle-soft: #222222;
+  --grid: #222222; --up: #4CC38A; --down: #EF6B73;
   color-scheme: dark;
 } }
 :root[data-theme="dark"] {
-  --bg: #0D141F; --surface: #131C2A; --line: #26344A; --line-soft: #1B2636; --nav-bg: #101827; --nav-hover: rgba(142, 195, 234, .07);
-  --fg: #E3EAF3; --fg-2: #B8C5D6; --muted: #8B9AB0;
-  --accent: #8EC3EA; --accent-mark: #7EBAE4; --accent-2: #5277C3; --accent-soft: #16273E;
+  --bg: #0E0E0E; --surface: #171717; --line: #2E2E2E; --line-soft: #1F1F1F; --nav-bg: #121212; --nav-hover: rgba(255, 255, 255, .06);
+  --fg: #EDEDED; --fg-2: #C4C4C4; --muted: #8F8F8F;
+  --accent: #F2F2F2; --accent-mark: #DADADA; --accent-2: #8F8F8F; --accent-soft: #262626;
   --ok: #72CFA5; --ok-soft: #13291F;
   --warn: #F2A660; --warn-mark: #E8862A; --warn-soft: #2C1E10; --warn-line: #5C3E1F;
   --crit: #F29AA3; --crit-mark: #E0606A; --crit-soft: #2F171B; --crit-line: #5E2B32;
-  --idle: #A9B6C8; --idle-soft: #1E2838;
-  --grid: #1F2B3D; --up: #4CC38A; --down: #EF6B73;
+  --idle: #ABABAB; --idle-soft: #222222;
+  --grid: #222222; --up: #4CC38A; --down: #EF6B73;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -227,7 +227,8 @@ tr:last-child td { border-bottom: 0; }
 .prose h1 { color: var(--fg); font-size: 26px; margin: 4px 0 12px; }
 .prose h2 { color: var(--fg); font-size: 20px; margin: 30px 0 10px; }
 .prose h3 { color: var(--fg); font-size: 16px; margin: 22px 0 8px; }
-.prose a { color: var(--accent); }
+.prose a { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--muted); }
+.prose a:hover { text-decoration-color: var(--fg); }
 .prose code { font-family: var(--mono); font-size: .95em; background: var(--surface); border: 1px solid var(--line-soft); border-radius: 4px; padding: 0 4px; }
 .prose pre { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
 .prose pre code { background: none; border: 0; padding: 0; color: var(--fg); }
