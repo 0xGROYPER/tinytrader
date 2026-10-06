@@ -452,6 +452,12 @@ impl Series {
         }
     }
 
+    /// Forget everything recorded for `key`, such as yesterday's curve when a
+    /// new session starts.
+    pub fn clear(&self, key: &str) {
+        lock(&self.inner).keys.remove(key);
+    }
+
     /// Load past points for `key` (milliseconds since the epoch, value), such
     /// as history read back from a provider after a restart. Points newer than
     /// what the series already holds are ignored; the newest are kept.

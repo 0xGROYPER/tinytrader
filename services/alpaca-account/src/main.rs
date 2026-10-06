@@ -183,6 +183,8 @@ struct Shared {
     /// Each account's equity, one point a minute: the latest session, loaded
     /// from Alpaca's portfolio history on start, then kept live.
     series: Series,
+    /// When the current session's window opened (ns), once one has.
+    session: Mutex<Option<u64>>,
 }
 
 impl Default for Shared {
@@ -192,6 +194,7 @@ impl Default for Shared {
             calendar: Mutex::default(),
             events: Events::default(),
             series: Series::new(1500, 60_000, 16),
+            session: Mutex::new(None),
         }
     }
 }
@@ -356,12 +359,16 @@ async fn main() {
         // the calendar already read. The first pass always reads, so the
         // accounts are known even when the service starts after hours.
         let mut end = u64::MAX;
+        let mut opened = None;
         if let Some(hours) = args.hours {
             let now = (unix_seconds() * 1e9) as u64;
             let calendar: tinytrader_schedule::Calendar =
                 serde_json::from_value(lock(&shared.calendar).clone()).unwrap_or_default();
             match hours.next(now, &calendar) {
-                Some((start, e)) if start <= now => end = e,
+                Some((start, e)) if start <= now => {
+                    end = e;
+                    opened = Some(start);
+                }
                 next if !first => {
                     let detail = match next {
                         Some((start, _)) => format!(
@@ -387,6 +394,14 @@ async fn main() {
         match read_calendar(&http, a.env, &a.key, &a.secret).await {
             Ok(c) => *lock(&shared.calendar) = c,
             Err(e) => eprintln!("alpaca-account: calendar: {e}"),
+        }
+        // A new session starts each account's curve afresh, from that day.
+        if opened.is_some() && opened != *lock(&shared.session) {
+            *lock(&shared.session) = opened;
+            for a in &shared.accounts {
+                shared.series.clear(&a.label);
+                a.history.store(false, Ordering::Relaxed);
+            }
         }
         read_all(&shared, &http, &observer).await;
         if end == 0 {
@@ -492,9 +507,17 @@ async fn read_one(
 /// point a minute) from Alpaca's portfolio history, so a restart doesn't lose
 /// the curve. Alpaca's history uses its own marks; live points use ours.
 async fn load_history(shared: &Shared, a: &Account, http: &reqwest::Client) {
-    let path =
-        "/v2/account/portfolio/history?period=1D&timeframe=1Min&intraday_reporting=extended_hours";
-    match get_json(http, a.env, &a.key, &a.secret, path).await {
+    // In a session, from four hours before its window opened (04:00 New York
+    // time for a 07:55 window, never the day before); otherwise the latest
+    // session Alpaca has.
+    let path = match *lock(&shared.session) {
+        Some(start) => format!(
+            "/v2/account/portfolio/history?start={}&timeframe=1Min&intraday_reporting=extended_hours",
+            rfc3339((start / 1_000_000_000).saturating_sub(4 * 3600))
+        ),
+        None => "/v2/account/portfolio/history?period=1D&timeframe=1Min&intraday_reporting=extended_hours".to_owned(),
+    };
+    match get_json(http, a.env, &a.key, &a.secret, &path).await {
         Ok(h) => {
             let times = h["timestamp"].as_array().cloned().unwrap_or_default();
             let equity = h["equity"].as_array().cloned().unwrap_or_default();
@@ -509,6 +532,19 @@ async fn load_history(shared: &Shared, a: &Account, http: &reqwest::Client) {
         }
         Err(e) => eprintln!("alpaca-account: {}: no equity history: {e}", a.label),
     }
+}
+
+/// Seconds since the epoch as `YYYY-MM-DDTHH:MM:SSZ`.
+fn rfc3339(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    format!(
+        "{}T{:02}:{:02}:{:02}Z",
+        civil_date(days),
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 /// Read every account, and report how that went.
