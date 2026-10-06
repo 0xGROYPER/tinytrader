@@ -65,7 +65,7 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 
 .icon-btn { width: 46px; height: 46px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); cursor: pointer; }
 .icon-btn:hover { background: var(--surface); }
-/* Palettes, chosen in the header: Frost (the default), Spruce and PB&J. */
+/* Palettes, chosen in the header: Frost (the default), Spruce, PB&J and Amber. */
 :root[data-palette="spruce"] { --accent: #2E5E4E; --accent-mark: #3B7562; --accent-2: #8DBFA0; --accent-soft: #E6F0EB; --nav-hover: rgba(46, 94, 78, .07); --link: var(--accent); }
 @media (prefers-color-scheme: dark) { :root[data-palette="spruce"]:not([data-theme="light"]) { --accent: #8DC9AC; --accent-mark: #6FB394; --accent-2: #2E5E4E; --accent-soft: #16261F; --nav-hover: rgba(141, 201, 172, .08); --link: var(--accent); } }
 :root[data-palette="spruce"][data-theme="dark"] { --accent: #8DC9AC; --accent-mark: #6FB394; --accent-2: #2E5E4E; --accent-soft: #16261F; --nav-hover: rgba(141, 201, 172, .08); --link: var(--accent); }
@@ -75,6 +75,9 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 :root[data-palette="pbj"] { --bg: #FFFFFF; --surface: #F8F4EE; --line: #E2D8CB; --line-soft: #EFE8DE; --nav-bg: #FBF8F3; --nav-hover: rgba(107, 63, 160, .07); --fg: #241B2E; --fg-2: #43384F; --muted: #6E6378; --accent: #6B3FA0; --accent-mark: #7C4DB3; --accent-2: #A8763E; --accent-soft: #F1EAF8; --idle: #6E6378; --idle-soft: #F1ECE5; --grid: #EFE8DE; --link: var(--accent); }
 @media (prefers-color-scheme: dark) { :root[data-palette="pbj"]:not([data-theme="light"]) { --bg: #120F16; --surface: #1A1620; --line: #332B3D; --line-soft: #221C29; --nav-bg: #15121A; --nav-hover: rgba(183, 148, 230, .08); --fg: #EDE6F3; --fg-2: #CFC3DA; --muted: #9A8DA6; --accent: #B794E6; --accent-mark: #A57FDB; --accent-2: #C9975B; --accent-soft: #261D33; --idle: #A99BB5; --idle-soft: #221C29; --grid: #221C29; --link: var(--accent); } }
 :root[data-palette="pbj"][data-theme="dark"] { --bg: #120F16; --surface: #1A1620; --line: #332B3D; --line-soft: #221C29; --nav-bg: #15121A; --nav-hover: rgba(183, 148, 230, .08); --fg: #EDE6F3; --fg-2: #CFC3DA; --muted: #9A8DA6; --accent: #B794E6; --accent-mark: #A57FDB; --accent-2: #C9975B; --accent-soft: #261D33; --idle: #A99BB5; --idle-soft: #221C29; --grid: #221C29; --link: var(--accent); }
+:root[data-palette="amber"] { --accent: #A84A12; --accent-mark: #C25A1E; --accent-2: #E7A174; --accent-soft: #F8EBE1; --nav-hover: rgba(168, 74, 18, .07); --link: var(--accent); }
+@media (prefers-color-scheme: dark) { :root[data-palette="amber"]:not([data-theme="light"]) { --accent: #F0995E; --accent-mark: #E98A4C; --accent-2: #A84A12; --accent-soft: #2C1B10; --nav-hover: rgba(240, 153, 94, .08); --link: var(--accent); } }
+:root[data-palette="amber"][data-theme="dark"] { --accent: #F0995E; --accent-mark: #E98A4C; --accent-2: #A84A12; --accent-soft: #2C1B10; --nav-hover: rgba(240, 153, 94, .08); --link: var(--accent); }
 .palette { height: 46px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 13px var(--ui); cursor: pointer; }
 
 .top-right { display: flex; align-items: center; gap: 14px; }
@@ -275,7 +278,7 @@ tr:last-child td { border-bottom: 0; }
   </div>
   <div class="top-right">
     <select class="palette" id="palette" aria-label="Palette" title="Palette">
-      <option value="frost">Frost</option><option value="spruce">Spruce</option><option value="pbj">PB&amp;J</option>
+      <option value="frost">Frost</option><option value="spruce">Spruce</option><option value="pbj">PB&amp;J</option><option value="amber">Amber</option>
     </select>
     <button type="button" class="icon-btn" id="theme-btn"></button>
   </div>
@@ -1106,7 +1109,7 @@ darkQuery.addEventListener('change', applyTheme);
 // Palette: Frost by default; the choice is remembered per browser.
 (() => {
   const set = v => { if (v) document.documentElement.setAttribute('data-palette', v); else document.documentElement.removeAttribute('data-palette'); };
-  const palettes = ['frost', 'spruce', 'pbj'];
+  const palettes = ['frost', 'spruce', 'pbj', 'amber'];
   let saved = 'frost'; try { const v = localStorage.getItem('tinytrader-palette'); if (palettes.includes(v)) saved = v; } catch (_) {}
   set(saved); $('palette').value = saved;
   $('palette').addEventListener('change', e => { set(e.target.value); try { localStorage.setItem('tinytrader-palette', e.target.value); } catch (_) {} drawCharts(); });
