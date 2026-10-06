@@ -132,6 +132,9 @@ pub enum Upstream {
 
 pub struct Hub {
     tx: broadcast::Sender<Chunk>,
+    /// The same stream with trade conditions interleaved, for sources that
+    /// have them; otherwise identical to `tx`.
+    tx_cond: broadcast::Sender<Chunk>,
     capacity: usize,
     heartbeat: Duration,
     /// A write taking longer than this means the client has stopped reading.
@@ -149,14 +152,18 @@ pub struct Hub {
     pub reconnects: AtomicU64,
     pub slow_disconnects: AtomicU64,
     pub refused: AtomicU64,
+    /// Provider rows that couldn't be represented or weren't for this relay.
+    pub refused_rows: AtomicU64,
 }
 
 impl Hub {
     /// `capacity` chunks of up to 64 KiB each are queued per client.
     pub fn new(metadata: Metadata, capacity: usize, heartbeat: Duration) -> Self {
         let (tx, _) = broadcast::channel(capacity.max(2));
+        let (tx_cond, _) = broadcast::channel(capacity.max(2));
         Self {
             tx,
+            tx_cond,
             capacity: capacity.max(2),
             heartbeat,
             write_timeout: Duration::from_secs(10),
@@ -170,6 +177,7 @@ impl Hub {
             reconnects: AtomicU64::new(0),
             slow_disconnects: AtomicU64::new(0),
             refused: AtomicU64::new(0),
+            refused_rows: AtomicU64::new(0),
         }
     }
 
@@ -212,12 +220,26 @@ impl Hub {
 
     /// Send records to every live client, keeping any reference records.
     pub fn publish(&self, chunk: Vec<u8>, records: u64) {
+        let chunk: Chunk = chunk.into();
+        self.publish_pair(chunk.clone(), chunk, records);
+    }
+
+    /// Send records to live clients: `plain` to most, `with_conditions` to
+    /// those that asked for trade conditions.
+    pub fn publish_pair(&self, plain: Chunk, with_conditions: Chunk, records: u64) {
         self.records.fetch_add(records, Ordering::Relaxed);
-        self.bytes.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        self.bytes.fetch_add(plain.len() as u64, Ordering::Relaxed);
         let mut reference = lock(&self.reference);
-        reference.absorb(&chunk);
+        reference.absorb(&plain);
         // No receivers is fine: nobody is listening right now.
-        let _ = self.tx.send(chunk.into());
+        let _ = self.tx.send(plain);
+        let _ = self.tx_cond.send(with_conditions);
+    }
+
+    fn broadcast(&self, bytes: Vec<u8>) {
+        let chunk: Chunk = bytes.into();
+        let _ = self.tx.send(chunk.clone());
+        let _ = self.tx_cond.send(chunk);
     }
 
     /// Reference records held for joining clients.
@@ -236,7 +258,7 @@ impl Hub {
             self.reconnects.fetch_add(1, Ordering::Relaxed);
             let text = format!("upstream-up gap_from={since} gap_to={}", protocol::now_ns());
             self.events.push(text.clone(), text.clone());
-            let _ = self.tx.send(protocol::system_text(&text).into());
+            self.broadcast(protocol::system_text(&text));
         }
         *u = Upstream::Up;
     }
@@ -251,7 +273,7 @@ impl Hub {
         *u = Upstream::Down(since);
         let text = format!("upstream-down since={since}");
         self.events.push(text.clone(), text.clone());
-        let _ = self.tx.send(protocol::system_text(&text).into());
+        self.broadcast(protocol::system_text(&text));
     }
 
     /// Refuse a client with an `ErrorMsg` and close.
@@ -263,24 +285,67 @@ impl Hub {
         let _ = out.shutdown().await;
     }
 
-    /// Send a client the reference records, then live records until it
-    /// disconnects or falls behind. `start` goes in its stream header.
-    pub async fn serve(&self, mut out: OwnedWriteHalf, start: u64) {
+    /// Send a client the reference records, then (when catching up) the
+    /// history it asked for, then `ReplayCompleted`, then live records until
+    /// it disconnects or falls behind. `start` goes in its stream header.
+    ///
+    /// Live records are buffered while history is sent, and market records
+    /// from before `cut` (which history covers) are dropped from them.
+    pub async fn serve(&self, mut out: OwnedWriteHalf, join: Serve) {
         let (mut rx, snapshot) = {
             let mut reference = lock(&self.reference);
-            (self.tx.subscribe(), reference.snapshot(protocol::now_ns()))
+            let rx = if join.conditions {
+                self.tx_cond.subscribe()
+            } else {
+                self.tx.subscribe()
+            };
+            (rx, reference.snapshot(protocol::now_ns()))
         };
-        let Ok(mut first) = protocol::header(&self.metadata(start)).await else {
+        let Ok(mut first) = protocol::header(&self.metadata(join.start)).await else {
             return;
         };
         first.extend(snapshot);
-        first.extend(protocol::system_code(SystemCode::ReplayCompleted));
+        if !matches!(self.send(&mut out, &first).await, Sent::Ok) {
+            return;
+        }
+        let mut buffered: Vec<Chunk> = Vec::new();
+        if let Some(mut history) = join.history {
+            loop {
+                tokio::select! {
+                    page = history.recv() => match page {
+                        Some(Ok(bytes)) => {
+                            if !matches!(self.send(&mut out, &bytes).await, Sent::Ok) {
+                                return;
+                            }
+                        }
+                        Some(Err(e)) => {
+                            let _ = out.write_all(&protocol::error(ErrorCode::InternalError, &e)).await;
+                            return;
+                        }
+                        None => break,
+                    },
+                    got = rx.recv() => match got {
+                        Ok(chunk) => buffered.push(chunk),
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            self.drop_slow(&mut out, "client fell behind while catching up").await;
+                            return;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    },
+                }
+            }
+        }
+        let mut cut = join.cut;
+        let mut tail = protocol::system_code(SystemCode::ReplayCompleted);
         if let Upstream::Down(since) = self.upstream() {
-            first.extend(protocol::system_text(&format!(
+            tail.extend(protocol::system_text(&format!(
                 "upstream-down since={since}"
             )));
         }
-        if !matches!(self.send(&mut out, &first).await, Sent::Ok) {
+        for chunk in &buffered {
+            tail.extend(after_cut(chunk, &mut cut));
+        }
+        if !matches!(self.send(&mut out, &tail).await, Sent::Ok) {
             return;
         }
         let mut last_write = Instant::now();
@@ -290,7 +355,7 @@ impl Hub {
             let bytes: Vec<u8> = tokio::select! {
                 got = rx.recv() => match got {
                     Ok(chunk) => {
-                        let mut bytes = chunk.to_vec();
+                        let mut bytes = after_cut(&chunk, &mut cut);
                         let queued = rx.len();
                         if !warned && queued > self.capacity / 2 {
                             warned = true;
@@ -313,6 +378,9 @@ impl Hub {
                     protocol::system_code(SystemCode::Heartbeat)
                 }
             };
+            if bytes.is_empty() {
+                continue;
+            }
             match self.send(&mut out, &bytes).await {
                 Sent::Ok => last_write = Instant::now(),
                 Sent::Closed => return,
@@ -323,6 +391,47 @@ impl Hub {
             }
         }
     }
+}
+
+/// How a client is served.
+pub struct Serve {
+    /// For the stream header.
+    pub start: u64,
+    /// Interleave trade conditions.
+    pub conditions: bool,
+    /// History to send before live data, as chunks of records.
+    pub history: Option<tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>>,
+    /// Live market records before this time are dropped (history covers
+    /// them). Zero keeps everything.
+    pub cut: u64,
+}
+
+/// The records of a live chunk that history doesn't already cover: market
+/// records (MBP-1 and trade conditions) timed before `cut` are dropped until
+/// one at or after it is seen, after which `cut` is cleared.
+fn after_cut(chunk: &[u8], cut: &mut u64) -> Vec<u8> {
+    if *cut == 0 {
+        return chunk.to_vec();
+    }
+    let mut out = Vec::with_capacity(chunk.len());
+    let mut at = 0;
+    while at < chunk.len() {
+        let len = usize::from(chunk[at]) * 4;
+        let Some(rec) = chunk.get(at..at + len).filter(|r| r.len() >= 16) else {
+            break;
+        };
+        at += len;
+        let market = rec[1] == rtype::MBP_1 || rec[1] == glacier_dbn::trade_conditions::RTYPE;
+        let ts = u64_at(rec, 8).unwrap_or(0);
+        if market && *cut != 0 {
+            if ts < *cut {
+                continue;
+            }
+            *cut = 0;
+        }
+        out.extend_from_slice(rec);
+    }
+    out
 }
 
 /// Read a client's join line. On failure the client has been refused.
@@ -392,7 +501,16 @@ mod tests {
                 let hub = hub.clone();
                 tokio::spawn(async move {
                     if let Some((_, out)) = read_join(s, &hub).await {
-                        hub.serve(out, protocol::now_ns()).await;
+                        hub.serve(
+                            out,
+                            Serve {
+                                start: protocol::now_ns(),
+                                conditions: false,
+                                history: None,
+                                cut: 0,
+                            },
+                        )
+                        .await;
                     }
                 });
             }

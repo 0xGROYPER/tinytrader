@@ -3,17 +3,23 @@
 //! keeps no recording. See decision 0006 for the protocol.
 //!
 //! A client connects over TCP and sends one line of JSON,
-//! `{"protocol":"glacier.relay/1"}`. The relay answers with a DBN v3 stream:
-//! the day's reference records (definitions and statistics), a
-//! `ReplayCompleted` system record, then live data. An optional
-//! `"start":"<RFC 3339 time>"` is recorded in the stream header; market data
-//! before joining is not replayed.
+//! `{"protocol":"glacier.relay/1"}`, optionally with
+//! `"start":"<RFC 3339 time>"` and `"conditions":true`. The relay answers with
+//! a DBN v3 stream: reference records (definitions, and statistics where the
+//! source has them), any catch-up the source supports, a `ReplayCompleted`
+//! system record, then live data.
 //!
-//! Sources: `databento` (any live dataset; OPRA by default).
+//! Sources:
+//! - `databento`: any live dataset (OPRA by default). Catch-up is the day's
+//!   reference data only; Databento can't replay `cmbp-1`.
+//! - `alpaca-iex`: Alpaca's IEX quotes and trades as `ALPACA.IEX` MBP-1.
+//!   Catch-up replays history from `start`; `conditions` interleaves a
+//!   `glacier.trade-conditions/1` record after each trade.
 //!
-//! Credentials: `DATABENTO_API_KEY`, or `DATABENTO_API_KEY_FILE` naming a file
-//! containing it.
+//! Credentials: `DATABENTO_API_KEY`, or `APCA_API_KEY_ID` and
+//! `APCA_API_SECRET_KEY`; each also as `<NAME>_FILE` naming a file.
 
+mod alpaca;
 mod databento;
 mod hub;
 mod protocol;
@@ -34,6 +40,7 @@ use ::databento::dbn::{Metadata, SType, Schema};
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Source {
     Databento,
+    AlpacaIex,
 }
 
 /// Holds one provider connection and serves its records to local clients.
@@ -81,10 +88,23 @@ struct Args {
     /// Seconds without data before a heartbeat is sent.
     #[arg(long, env = "RELAY_HEARTBEAT", default_value_t = 10)]
     heartbeat: u64,
+
+    /// Alpaca only: use Alpaca's test stream (symbol `FAKEPACA`), which runs
+    /// at any time of day.
+    #[arg(long, env = "RELAY_ALPACA_TEST")]
+    alpaca_test: bool,
+}
+
+/// The provider a relay holds.
+enum Provider {
+    Databento(Arc<Databento>),
+    Alpaca(Arc<alpaca::Alpaca>),
 }
 
 #[tokio::main]
 async fn main() {
+    // One TLS crypto provider for the websocket and HTTP clients.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let args = Args::parse();
     if let Err(e) = run(args).await {
         eprintln!("relay: {e}");
@@ -102,11 +122,39 @@ async fn run(args: Args) -> Result<(), String> {
         .iter()
         .map(|s| Schema::from_str(s).map_err(|e| format!("--reference {s}: {e}")))
         .collect::<Result<Vec<_>, _>>()?;
-    let Source::Databento = args.source;
-    let key = secret("DATABENTO_API_KEY")?;
+    let (dataset, provider) = match args.source {
+        Source::Databento => (
+            args.dataset.clone(),
+            Provider::Databento(Arc::new(Databento {
+                key: secret("DATABENTO_API_KEY")?,
+                dataset: args.dataset.clone(),
+                symbols: args.symbols.clone(),
+                schema,
+                reference,
+                stype_in,
+            })),
+        ),
+        Source::AlpacaIex => (
+            relay::iex::DATASET.to_owned(),
+            Provider::Alpaca(Arc::new(alpaca::Alpaca {
+                key: secret("APCA_API_KEY_ID")?,
+                secret: secret("APCA_API_SECRET_KEY")?,
+                symbols: args.symbols.clone(),
+                test: args.alpaca_test,
+                http: reqwest::Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .build()
+                    .map_err(|e| e.to_string())?,
+            })),
+        ),
+    };
+    let (stype_in, schema_name, provider_id, via) = match provider {
+        Provider::Databento(_) => (stype_in, args.schema.clone(), "databento", "live API"),
+        Provider::Alpaca(_) => (SType::RawSymbol, "mbp-1".to_owned(), "alpaca", "websocket"),
+    };
 
     let metadata = Metadata::builder()
-        .dataset(args.dataset.clone())
+        .dataset(dataset.clone())
         .schema(None)
         .start(0)
         .stype_in(Some(stype_in))
@@ -118,20 +166,12 @@ async fn run(args: Args) -> Result<(), String> {
         args.client_queue,
         Duration::from_secs(args.heartbeat.max(1)),
     ));
-    let source = Arc::new(Databento {
-        key,
-        dataset: args.dataset.clone(),
-        symbols: args.symbols.clone(),
-        schema,
-        reference,
-        stype_in,
-    });
 
     let observer = Observer::new("relay", env!("CARGO_PKG_VERSION"));
-    observer.set_state(State::Starting, "connecting to Databento");
+    observer.set_state(State::Starting, &format!("connecting to {provider_id}"));
     observer.describe(json!({
-        "role": format!("Relays {} {} for {} to local clients ({}).", args.dataset, args.schema, args.symbols.join(", "), protocol::PROTOCOL),
-        "upstream": [{ "id": "databento", "label": "databento", "sub": args.dataset, "kind": "flow", "via": "live API" }],
+        "role": format!("Relays {dataset} {schema_name} for {} to local clients ({}).", args.symbols.join(", "), protocol::PROTOCOL),
+        "upstream": [{ "id": provider_id, "label": provider_id, "sub": dataset, "kind": "flow", "via": via }],
         "streams": { "events": "/events" },
         "relay": { "protocol": protocol::PROTOCOL, "listen": args.listen, "symbols": args.symbols },
     }));
@@ -152,34 +192,45 @@ async fn run(args: Args) -> Result<(), String> {
         .await
         .map_err(|e| format!("cannot listen on {}: {e}", args.listen))?;
     eprintln!(
-        "relay: {} {} for {} on {} (endpoints on http://{observe_at})",
-        args.dataset,
-        args.schema,
+        "relay: {dataset} {schema_name} for {} on {} (endpoints on http://{observe_at})",
         args.symbols.join(","),
         args.listen
     );
-    tokio::spawn(source.clone().run(hub.clone(), observer.clone()));
+    let alpaca = match &provider {
+        Provider::Databento(d) => {
+            tokio::spawn(d.clone().run(hub.clone(), observer.clone()));
+            None
+        }
+        Provider::Alpaca(a) => {
+            tokio::spawn(a.clone().run(hub.clone(), observer.clone()));
+            Some(a.clone())
+        }
+    };
 
     loop {
         tokio::select! {
             accepted = clients.accept() => {
                 let Ok((stream, peer)) = accepted else { continue };
                 let _ = stream.set_nodelay(true);
-                let hub = hub.clone();
+                let (hub, alpaca) = (hub.clone(), alpaca.clone());
                 tokio::spawn(async move {
                     let Some((join, out)) = hub::read_join(stream, &hub).await else { return };
-                    if join.conditions {
+                    if join.conditions && alpaca.is_none() {
                         hub.refuse(out, ::databento::dbn::ErrorCode::InvalidSubscription,
                             "this source has no trade conditions").await;
                         return;
                     }
-                    let start = join
-                        .start
-                        .and_then(|t| u64::try_from(t.unix_timestamp_nanos()).ok())
-                        .unwrap_or_else(protocol::now_ns);
+                    let now = protocol::now_ns();
+                    let requested = join.start.and_then(|t| u64::try_from(t.unix_timestamp_nanos()).ok());
+                    // Alpaca serves history; catch up from the requested start
+                    // to now, then continue live from the same point.
+                    let (history, cut) = match (&alpaca, requested) {
+                        (Some(a), Some(start)) if start < now => (Some(a.catch_up(start, now, join.conditions)), now),
+                        _ => (None, 0),
+                    };
                     hub.events.push(format!("client {peer} joined"), format!("client {peer} joined"));
                     let _guard = ClientGuard::new(&hub.clients);
-                    hub.serve(out, start).await;
+                    hub.serve(out, hub::Serve { start: requested.unwrap_or(now), conditions: join.conditions, history, cut }).await;
                 });
             }
             _ = shutdown() => {

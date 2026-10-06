@@ -14,6 +14,10 @@ clap = { version = "4", features = ["derive", "env"] }
 databento = { version = "0.63", default-features = false, features = ["live"] }
 glacier-dbn.workspace = true
 glacier-observe.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+tokio-tungstenite.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 tar = { version = "0.4", default-features = false }

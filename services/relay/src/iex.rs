@@ -18,7 +18,10 @@
 //!   from history; `ts_in_delta`, `depth`, `sequence` and order counts are 0.
 //! - In history, a trade comes before a quote with the same timestamp.
 
-use dbn::{BidAskPair, FlagSet, Mbp1Msg, RecordHeader, UNDEF_PRICE, UNDEF_TIMESTAMP, rtype};
+use dbn::{
+    BidAskPair, FlagSet, InstrumentDefMsg, Mbp1Msg, RecordHeader, UNDEF_PRICE, UNDEF_TIMESTAMP,
+    rtype,
+};
 use glacier_dbn::dbn;
 use glacier_dbn::{TradeConditions, TradeUpdate};
 use serde::Deserialize;
@@ -258,10 +261,18 @@ impl RawTrade<'_> {
 }
 
 /// Turns one symbol's quotes and trades into records, keeping its book.
+///
+/// A trade carries the book as it stood before any quote with the trade's
+/// own time, whatever order the stream delivers them in. In history, where
+/// trades come before quotes at equal times, that is simply the last quote.
 pub struct Encoder {
     pub publisher: u16,
     pub instrument: u32,
     book: (Side, Side),
+    /// Time of the latest quote, and the book before the first quote at
+    /// that time.
+    book_ts: u64,
+    before: (Side, Side),
     trades: u32,
 }
 
@@ -272,12 +283,22 @@ impl Encoder {
             publisher: PUBLISHER,
             instrument: instrument_id(symbol),
             book: (ABSENT, ABSENT),
+            book_ts: 0,
+            before: (ABSENT, ABSENT),
             trades: 0,
         }
     }
 
-    fn record(&self, ts: u64, ts_recv: u64, action: u8, price: i64, size: u32) -> Mbp1Msg {
-        let (bid, ask) = self.book;
+    fn record(
+        &self,
+        ts: u64,
+        ts_recv: u64,
+        action: u8,
+        price: i64,
+        size: u32,
+        book: (Side, Side),
+    ) -> Mbp1Msg {
+        let (bid, ask) = book;
         Mbp1Msg {
             hd: RecordHeader::new::<Mbp1Msg>(rtype::MBP_1, self.publisher, self.instrument, ts),
             price,
@@ -302,11 +323,15 @@ impl Encoder {
 
     /// A quote's record; the book then holds the quote.
     pub fn quote(&mut self, q: &Quote, ts_recv: u64) -> Mbp1Msg {
+        if q.ts != self.book_ts {
+            self.before = self.book;
+            self.book_ts = q.ts;
+        }
         self.book = (q.bid, q.ask);
-        self.record(q.ts, ts_recv, b'M', UNDEF_PRICE, 0)
+        self.record(q.ts, ts_recv, b'M', UNDEF_PRICE, 0, self.book)
     }
 
-    /// A trade's record, carrying the current book, and its conditions.
+    /// A trade's record, carrying the book before it, and its conditions.
     ///
     /// # Errors
     /// The conditions are refused if the layout can't hold them (more than
@@ -319,7 +344,12 @@ impl Encoder {
         Mbp1Msg,
         Result<TradeConditions, glacier_dbn::trade_conditions::Invalid>,
     ) {
-        let rec = self.record(t.ts, ts_recv, b'T', t.px, t.sz);
+        let book = if t.ts > self.book_ts {
+            self.book
+        } else {
+            self.before
+        };
+        let rec = self.record(t.ts, ts_recv, b'T', t.px, t.sz, book);
         let seq = self.trades;
         self.trades = self.trades.wrapping_add(1);
         let cond = TradeConditions::codes_from(&t.codes).and_then(|(codes, count)| {
@@ -339,6 +369,33 @@ impl Encoder {
             c.encode().map(|_| c)
         });
         (rec, cond)
+    }
+
+    /// The instrument definition for this encoder's symbol: a US equity in
+    /// USD with a one-cent tick.
+    #[must_use]
+    pub fn definition(&self, symbol: &str) -> InstrumentDefMsg {
+        let text = |s: &str| dbn::record::str_to_c_chars(s).unwrap_or([0; 71]);
+        let mut d = InstrumentDefMsg {
+            hd: RecordHeader::new::<InstrumentDefMsg>(
+                rtype::INSTRUMENT_DEF,
+                self.publisher,
+                self.instrument,
+                UNDEF_TIMESTAMP,
+            ),
+            min_price_increment: 10_000_000,
+            raw_instrument_id: 0,
+            raw_symbol: text(symbol),
+            security_update_action: b'A' as std::ffi::c_char,
+            user_defined_instrument: b'N' as std::ffi::c_char,
+            leg_count: 0,
+            leg_index: 0,
+            ..Default::default()
+        };
+        d.asset = dbn::record::str_to_c_chars(symbol).unwrap_or_default();
+        d.currency = dbn::record::str_to_c_chars("USD").unwrap_or_default();
+        d.security_type = dbn::record::str_to_c_chars("EQUITY").unwrap_or_default();
+        d
     }
 }
 

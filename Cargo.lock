@@ -2532,13 +2532,17 @@ dependencies = [
  "clap",
  "databento",
  "flate2",
+ "futures-util",
  "glacier-dbn",
  "glacier-observe",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tar",
  "time",
  "tokio",
+ "tokio-tungstenite 0.27.0",
 ]
 
 [[package]]
