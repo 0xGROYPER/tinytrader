@@ -1,0 +1,23 @@
+[package]
+name = "databento-jobs"
+description = "Databento batch jobs: price, submit, follow, and download finished jobs into the store"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+databento = { version = "0.63", default-features = false, features = ["historical"] }
+futures-util.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time = { version = "0.3", features = ["macros", "parsing"] }
+tinytrader-observe.workspace = true
+tokio.workspace = true

@@ -35,6 +35,10 @@
 //! - `CONSOLE_COMPOSE_PROJECT`: only show containers from this Compose project (optional)
 //! - `CONSOLE_COLLECTIONS`: document collections shown in the sidebar, e.g.
 //!   `Docs=/srv/docs;Research=/srv/research` (optional; see `collections.rs`)
+//! - `CONSOLE_JOBS`: the Databento jobs service, e.g. `http://databento-jobs:9121`
+//!   (optional). The one exception to read-only: `/api/jobs/...` is passed to
+//!   it, so the Data page can price, submit and download jobs. The jobs
+//!   service itself insists on an exact confirmation before any charge.
 
 mod collections;
 
@@ -56,6 +60,8 @@ const PAGE: &str = include_str!("../web/index.html");
 
 struct App {
     poller: Poller,
+    /// The jobs service's base URL, and a client to reach it.
+    jobs: Option<(String, reqwest::Client)>,
     polls: AtomicU64,
     collections: Vec<collections::Collection>,
 }
@@ -84,6 +90,10 @@ async fn main() {
         poller: Poller::new(config),
         polls: AtomicU64::new(0),
         collections: collections::parse(&env("CONSOLE_COLLECTIONS", "")),
+        jobs: std::env::var("CONSOLE_JOBS")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|u| (u.trim_end_matches('/').to_owned(), reqwest::Client::new())),
     });
 
     let observer = Observer::new("console", env!("CARGO_PKG_VERSION"));
@@ -112,6 +122,7 @@ async fn main() {
         .route("/api/events/{service}", get(events))
         .route("/api/collections", get(list_collections))
         .route("/api/collections/{id}/{index}", get(collection_doc))
+        .route("/api/jobs/{*rest}", get(jobs_proxy).post(jobs_proxy))
         .with_state(app)
         .merge(observer.router());
     let listener = match tokio::net::TcpListener::bind(&listen).await {
@@ -200,6 +211,38 @@ async fn collection_doc(
             || (StatusCode::NOT_FOUND, "no such document").into_response(),
             |d| no_store(axum::Json(d)),
         )
+}
+
+/// Pass a request to the jobs service and its answer back.
+async fn jobs_proxy(
+    AxumState(app): AxumState<Arc<App>>,
+    method: axum::http::Method,
+    axum::extract::Path(rest): axum::extract::Path<String>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+    body: axum::body::Bytes,
+) -> Response {
+    let Some((base, http)) = &app.jobs else {
+        return (StatusCode::NOT_FOUND, "no jobs service configured").into_response();
+    };
+    let url = match query {
+        Some(q) => format!("{base}/{rest}?{q}"),
+        None => format!("{base}/{rest}"),
+    };
+    let req = if method == axum::http::Method::POST {
+        http.post(url)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body)
+    } else {
+        http.get(url)
+    };
+    match req.timeout(Duration::from_secs(120)).send().await {
+        Ok(r) => {
+            let code = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let bytes = r.bytes().await.unwrap_or_default();
+            no_store((code, [(header::CONTENT_TYPE, "application/json")], bytes))
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("jobs service: {e}")).into_response(),
+    }
 }
 
 fn no_store(body: impl IntoResponse) -> Response {

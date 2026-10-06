@@ -12,6 +12,7 @@ members = [
     "libs/schedule",
     "services/store",
     "services/console",
+    "services/databento-jobs",
     "services/databento-live",
     "services/dbn-tcp",
     "services/ticker",

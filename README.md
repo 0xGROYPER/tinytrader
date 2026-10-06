@@ -40,6 +40,7 @@ console the same way.
 | `services/alpaca-live` | Example service streaming Alpaca's free real-time IEX data |
 | `services/dbn-tcp` | Example service reading any live DBN stream served over TCP |
 | `services/store` | The data store: the one process that touches the disks; ingests provider downloads into the standard layout, and catalogs datasets, coverage and disk space |
+| `services/databento-jobs` | Databento batch jobs: prices and submits requests (charges need an exact confirmation), and downloads finished jobs into the store |
 | `services/alpaca-news` | Example service serving market news from Alpaca (supplied by Benzinga) |
 | `services/alpaca-account` | Example service serving an Alpaca account's balances and positions, read only |
 | `services/relay` | Market data relay: holds one provider connection and serves it to local clients ([decision 0006](docs/decisions/0006-market-data-relay.md)) |

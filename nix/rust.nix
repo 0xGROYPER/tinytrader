@@ -22,6 +22,7 @@
           ../libs/fleet
           ../apps/tui
           ../services/ticker
+          ../services/databento-jobs
           ../services/databento-live
           ../services/alpaca-live
           ../services/dbn-tcp
@@ -62,6 +63,7 @@
 
       ticker = service "ticker" "Toy service streaming Coinbase public tickers to disk";
       console = service "console" "tinytrader console";
+      databento-jobs = service "databento-jobs" "Databento batch jobs: price, submit, and download into the store";
       databento-live = service "databento-live" "Example service streaming a Databento live subscription";
       alpaca-live = service "alpaca-live" "Example service streaming Alpaca real-time IEX data";
       dbn-tcp = service "dbn-tcp" "Example service reading a live DBN stream over TCP";
@@ -77,6 +79,7 @@
         inherit
           ticker
           console
+          databento-jobs
           databento-live
           alpaca-live
           dbn-tcp

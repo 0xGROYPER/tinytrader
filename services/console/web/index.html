@@ -208,6 +208,28 @@ tr:last-child td { border-bottom: 0; }
 .ds-row.sel td { background: var(--accent-soft); }
 .panel { border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+/* Databento jobs: the request form and the jobs list. */
+.job-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 12px 16px; }
+.field { min-width: 0; }
+.field label { display: block; font-size: 12px; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; margin-bottom: 4px; }
+.field input, .field select { width: 100%; box-sizing: border-box; min-height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: 14px var(--mono); }
+.field input:focus-visible, .field select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.btn { min-height: 38px; padding: 0 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: 500 14px var(--ui); cursor: pointer; white-space: nowrap; }
+.btn:hover:not(:disabled) { background: var(--surface); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.btn.primary:hover:not(:disabled) { background: var(--accent-mark); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.small { min-height: 30px; padding: 0 10px; font-size: 13px; }
+.quote { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; font-size: 14px; }
+.quote .cost { font: 500 16px var(--mono); color: var(--fg); font-variant-numeric: tabular-nums; }
+.quote label { display: inline-flex; align-items: center; gap: 8px; color: var(--fg); }
+.msg-err { color: var(--crit); font-size: 14px; overflow-wrap: anywhere; }
+.msg-ok { color: var(--ok); font-size: 14px; }
+.jobs-tbl td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.jobs-tbl tr.sub td { padding-top: 0; color: var(--muted); font-size: 13px; }
+.jobs-tbl tr.has-sub td { border-bottom: 0; }
+.bar { height: 4px; border-radius: 2px; background: var(--line-soft); margin-top: 6px; max-width: 320px; overflow: hidden; }
+.bar b { display: block; height: 100%; background: var(--accent-mark); }
 .chip-btn { min-height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 500 13px var(--mono); cursor: pointer; }
 .chip-btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-2); color: var(--accent); }
 .cal-wrap { overflow-x: auto; padding-bottom: 4px; }
@@ -730,7 +752,7 @@ const catalogStamp = () => Object.values(state.snap?.services || {}).map(s => s.
 function updateStoreNav() {
   const has = catalogRoots().length > 0, el = $('nav-store');
   if (has === !!el.childElementCount) return;
-  el.innerHTML = has ? `<div class="nav-sec"><div class="nav-label">Store</div><div class="nav-items"><button type="button" data-tab="data"><span class="chev"></span><span class="lbl">Data</span></button><button type="button" data-tab="storage"><span class="chev"></span><span class="lbl">Storage</span></button></div></div>` : '';
+  el.innerHTML = has ? `<div class="nav-sec"><div class="nav-label">Store</div><div class="nav-items"><button type="button" data-tab="data"><span class="chev"></span><span class="lbl">Data</span></button><button type="button" data-tab="jobs"><span class="chev"></span><span class="lbl">Databento jobs</span></button><button type="button" data-tab="storage"><span class="chev"></span><span class="lbl">Storage</span></button></div></div>` : '';
 }
 function dsRange(d) {
   const days = Object.values(d.schemas).flatMap(s => Object.keys(s.days || {})).sort();
@@ -972,6 +994,149 @@ function drawCharts() {
 }
 
 // ---------- render & polling ----------
+// Databento jobs, through the console's /api/jobs proxy to the jobs service:
+// a request form that prices before it submits, and every job through to
+// filed in the store. The form is drawn once; only the list refreshes.
+const jobs = {
+  list: null, err: null, rowErr: {}, datasets: null, schemas: {}, quote: null, quoteFor: '', msg: null, busy: false,
+  form: { dataset: 'OPRA.PILLAR', schema: 'cmbp-1', symbols: '', stype_in: 'parent', start: '', end: '' },
+};
+async function jobsApi(path, body) {
+  const r = await fetch('/api/jobs/' + path, body === undefined ? { cache: 'no-store' }
+    : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  let v = null; try { v = await r.json(); } catch (_) {}
+  if (!r.ok) throw new Error(v?.error || (r.status === 404 ? 'No jobs service is configured.' : `${r.status} ${r.statusText}`));
+  return v;
+}
+async function loadJobs() {
+  try { jobs.list = await jobsApi('jobs'); jobs.err = null; } catch (e) { jobs.err = e.message; }
+  if (state.tab === 'jobs' && $('jobs-list')) $('jobs-list').innerHTML = jobsTable();
+}
+async function loadSchemas(ds) {
+  if (!ds || jobs.schemas[ds]) return fillSchemas();
+  try { jobs.schemas[ds] = (await jobsApi('schemas?dataset=' + encodeURIComponent(ds))).schemas; } catch (_) { jobs.schemas[ds] = null; }
+  fillSchemas();
+}
+function fillSchemas() {
+  const el = $('jf-schema'); if (!el) return;
+  const list = jobs.schemas[jobs.form.dataset] || [jobs.form.schema];
+  if (!list.includes(jobs.form.schema)) jobs.form.schema = list.includes('cmbp-1') ? 'cmbp-1' : list[0];
+  el.innerHTML = list.map(x => `<option${x === jobs.form.schema ? ' selected' : ''}>${esc(x)}</option>`).join('');
+}
+const usd = n => '$' + (n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const day = t => new Date(t * 1000).toISOString().slice(0, 10);
+function jobsView() {
+  const f = jobs.form, stypes = [['parent', 'parent (SPX.OPT)'], ['raw_symbol', 'raw symbol'], ['continuous', 'continuous'], ['instrument_id', 'instrument ID']];
+  return `<div><h1>Databento jobs</h1><p class="muted" style="margin:0">Request historical data from Databento and download it into the store. Every request is priced first; anything that costs money needs your confirmation of the exact amount.</p></div>
+  <section class="panel" id="job-form-panel">
+    <div class="sec-head" style="margin:0"><h2>New request</h2></div>
+    <form class="job-form" id="job-form" autocomplete="off">
+      <div class="field"><label for="jf-dataset">Dataset</label><input id="jf-dataset" name="dataset" list="jf-datasets" value="${esc(f.dataset)}" spellcheck="false"><datalist id="jf-datasets">${(jobs.datasets || []).map(d => `<option value="${esc(d)}">`).join('')}</datalist></div>
+      <div class="field"><label for="jf-schema">Schema</label><select id="jf-schema" name="schema"><option>${esc(f.schema)}</option></select></div>
+      <div class="field" style="grid-column: span 2"><label for="jf-symbols">Symbols</label><input id="jf-symbols" name="symbols" value="${esc(f.symbols)}" placeholder="SPX.OPT, SPXW.OPT" spellcheck="false"></div>
+      <div class="field"><label for="jf-stype">Symbol type</label><select id="jf-stype" name="stype_in">${stypes.map(([v, l]) => `<option value="${v}"${v === f.stype_in ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
+      <div class="field"><label for="jf-start">First day</label><input id="jf-start" name="start" type="date" value="${esc(f.start)}"></div>
+      <div class="field"><label for="jf-end">Last day</label><input id="jf-end" name="end" type="date" value="${esc(f.end)}"></div>
+    </form>
+    <div class="quote" id="job-quote">${quoteLine()}</div>
+  </section>
+  <section><div class="sec-head"><h2>Jobs</h2><span class="muted" style="font-size:13px">Not yet expired at Databento; those needing attention first</span></div><div id="jobs-list">${jobsTable()}</div></section>`;
+}
+function quoteLine() {
+  const q = jobs.quote, current = q && jobs.quoteFor === JSON.stringify(jobs.form);
+  const msg = jobs.msg ? `<span class="${jobs.msg.ok ? 'msg-ok' : 'msg-err'}">${esc(jobs.msg.text)}</span>` : '';
+  const price = `<button type="button" class="btn${current ? '' : ' primary'}" id="jf-price"${jobs.busy ? ' disabled' : ''}>${jobs.busy === 'price' ? 'Pricing…' : 'Price'}</button>`;
+  if (!current) return price + msg;
+  const paid = q.cost_usd > 0;
+  return `${price}<span class="cost">${usd(q.cost_usd)}</span><span class="muted">${paid ? 'charged to the Databento account' : 'included, no charge'} · ${bytes(q.billable_bytes)} billable (uncompressed)</span>
+    ${paid ? `<label><input type="checkbox" id="jf-confirm"> Charge ${usd(q.cost_usd)}</label>` : ''}
+    <button type="button" class="btn primary" id="jf-submit"${paid || jobs.busy ? ' disabled' : ''}>${jobs.busy === 'submit' ? 'Submitting…' : paid ? 'Submit for ' + usd(q.cost_usd) : 'Submit'}</button>${msg}`;
+}
+function jobState(j) {
+  const t = j.transfer, h = j.held;
+  if (t && t.state === 'downloading') {
+    const pct = t.total_bytes ? 100 * t.done_bytes / t.total_bytes : 0;
+    return [`<span class="pill p-idle">Downloading ${pct.toFixed(0)}%</span>`, `${esc(t.file)} · ${bytes(t.done_bytes)} of ${bytes(t.total_bytes)}<div class="bar"><b style="width:${pct.toFixed(1)}%"></b></div>`];
+  }
+  if (t && t.state === 'waiting') return ['<span class="pill p-idle">Waiting to download</span>', ''];
+  if (t && t.state === 'filing') return ['<span class="pill p-idle">Filing</span>', 'Checking every file against the manifest and filing it in the store'];
+  if (t && t.state === 'failed') return [`<span class="pill p-crit">Failed</span> <button type="button" class="btn small" data-job-download="${esc(j.id)}">Retry</button>`, esc(t.error || '')];
+  if (h && h.how === 'filed') return [`<span class="pill p-ok">In the store</span>`, ''];
+  if (h && h.how === 'folder') return [`<span class="pill p-ok" title="In a download folder on ${esc(h.volume)}, not yet filed in the store layout">On ${esc(h.volume)}</span>`, ''];
+  if (h && h.how === 'incoming') return [`<span class="pill p-warn">Partly downloaded</span> <button type="button" class="btn small" data-job-download="${esc(j.id)}">Resume</button>`, ''];
+  if (j.state === 'done') return [`<span class="pill p-warn">Ready</span> <button type="button" class="btn small" data-job-download="${esc(j.id)}">Download</button>`, j.expires ? `Available until ${day(j.expires)}` : ''];
+  if (j.state === 'expired') return ['<span class="pill p-idle">Expired</span>', ''];
+  const what = j.state === 'queued' ? 'Queued' : `Processing${j.progress != null ? ' ' + j.progress + '%' : ''}`;
+  return [`<span class="pill p-idle">${what}</span>`, j.follow ? 'Downloads into the store when done' : ''];
+}
+function jobsTable() {
+  if (jobs.err) return `<div class="box empty msg-err">${esc(jobs.err)}</div>`;
+  if (!jobs.list) return '<div class="box empty">Loading jobs…</div>';
+  // Jobs that need something (or are moving) first, then the rest; newest first within each.
+  const settled = j => !!j.held && !j.transfer || j.state === 'expired';
+  const list = (jobs.list.jobs || []).slice().sort((a, b) => settled(a) - settled(b) || b.received - a.received);
+  if (!list.length) return '<div class="box empty">No jobs at Databento.</div>';
+  const rows = list.map(j => {
+    let [st, sub] = jobState(j);
+    if (jobs.rowErr[j.id] && !j.transfer) sub = `<span class="msg-err">${esc(jobs.rowErr[j.id])}</span>`;
+    const last = day(j.end - 1), range = day(j.start) === last ? day(j.start) : `${day(j.start)} → ${last}`;
+    return `<tr${sub ? ' class="has-sub"' : ''}><td class="mono" style="color:var(--fg)">${esc(j.id)}</td>
+      <td class="mono">${esc(j.symbols)} <span class="muted">${esc(j.schema)}</span><div class="muted" style="font-size:12px">${esc(j.dataset)}</div></td>
+      <td class="mono" style="white-space:nowrap">${range}</td>
+      <td class="num mono">${j.bytes != null ? bytes(j.bytes) : '—'}</td>
+      <td class="num mono">${j.cost_usd != null ? usd(j.cost_usd) : '—'}</td>
+      <td style="white-space:nowrap">${st}</td></tr>${sub ? `<tr class="sub"><td></td><td colspan="5">${sub}</td></tr>` : ''}`;
+  }).join('');
+  return `<div class="box scroll"><table class="jobs-tbl"><thead><tr><th>Job</th><th>Request</th><th>Range</th><th style="text-align:right">Size</th><th style="text-align:right">Cost</th><th>State</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${jobs.list.store_reachable === false ? '<p class="msg-err">The store is not reachable, so what it already holds is not shown.</p>' : ''}`;
+}
+async function jobsOpened() {
+  loadJobs();
+  if (!jobs.datasets) { try { jobs.datasets = (await jobsApi('datasets')).datasets; } catch (_) { jobs.datasets = []; }
+    const dl = $('jf-datasets'); if (dl) dl.innerHTML = jobs.datasets.map(d => `<option value="${esc(d)}">`).join(''); }
+  loadSchemas(jobs.form.dataset);
+}
+const redrawQuote = () => { const q = $('job-quote'); if (q) q.innerHTML = quoteLine(); };
+$('view').addEventListener('input', e => {
+  const el = e.target; if (!el.closest || !el.closest('#job-form')) return;
+  jobs.form[el.name] = el.value; jobs.msg = null;
+  if (el.name === 'symbols' && /\.(OPT|FUT)\b/i.test(el.value)) { jobs.form.stype_in = 'parent'; $('jf-stype').value = 'parent'; }
+  if (el.name === 'start' && (!jobs.form.end || jobs.form.end < el.value)) { jobs.form.end = el.value; $('jf-end').value = el.value; }
+  if (el.name === 'dataset') loadSchemas(el.value.trim());
+  redrawQuote();
+});
+$('view').addEventListener('change', e => {
+  if (e.target.id === 'jf-confirm') { const b = $('jf-submit'); if (b) b.disabled = !e.target.checked || !!jobs.busy; return; }
+  if (e.target.closest && e.target.closest('#job-form')) { jobs.form[e.target.name] = e.target.value; redrawQuote(); }
+});
+$('view').addEventListener('click', async e => {
+  if (e.target.id === 'jf-price') {
+    jobs.busy = 'price'; jobs.msg = null; redrawQuote();
+    const snapshot = JSON.stringify(jobs.form);
+    try { jobs.quote = await jobsApi('price', jobs.form); jobs.quoteFor = snapshot; }
+    catch (err) { jobs.quote = null; jobs.msg = { text: err.message }; }
+    jobs.busy = false; redrawQuote(); return;
+  }
+  if (e.target.id === 'jf-submit') {
+    const q = jobs.quote; if (!q) return;
+    if (q.cost_usd > 0 && !$('jf-confirm')?.checked) return;
+    jobs.busy = 'submit'; redrawQuote();
+    try {
+      const r = await jobsApi('submit', { quote: q.quote, confirm_usd: q.cost_usd > 0 ? q.cost_usd : null });
+      jobs.msg = { ok: true, text: `Submitted ${r.job}; it downloads into the store when done.` };
+    } catch (err) { jobs.msg = { text: err.message }; }
+    jobs.quote = null; jobs.busy = false; redrawQuote(); loadJobs(); return;
+  }
+  const d = e.target.closest && e.target.closest('[data-job-download]');
+  if (d) {
+    d.disabled = true; delete jobs.rowErr[d.dataset.jobDownload];
+    try { await jobsApi('download/' + encodeURIComponent(d.dataset.jobDownload), {}); }
+    catch (err) { jobs.rowErr[d.dataset.jobDownload] = err.message; }
+    loadJobs();
+  }
+});
+setInterval(() => { if (state.tab === 'jobs') loadJobs(); }, 2000);
+
 function render() {
   // Rebuilding the page must never move the reader: keep the scroll position.
   const scrollY = window.scrollY;
@@ -983,6 +1148,7 @@ function render() {
   updateStoreNav();
   if (state.tab.startsWith('col:') && !state.navigated) return status();
   if ((state.tab === 'data' || state.tab === 'storage') && !state.navigated && catalogStamp() === state.catalogAt) return status();
+  if (state.tab === 'jobs' && !state.navigated) return status();
   state.navigated = false;
   state.catalogAt = catalogStamp();
   $('view').innerHTML = state.tab === 'overview' ? topology()
@@ -992,7 +1158,9 @@ function render() {
     : state.tab === 'calendar' ? calendarView()
     : state.tab === 'services' ? servicesTable()
     : state.tab === 'data' ? dataView()
+    : state.tab === 'jobs' ? jobsView()
     : state.tab === 'storage' ? storageView() : collectionView();
+  if (state.tab === 'jobs') jobsOpened();
   if (openDetails) { const d = document.querySelector('.detail > details'); if (d) d.open = true; }
   if ($('ev-list')) $('ev-list').scrollTop = evTop;
   if (focusId) { const n = document.querySelector(`[data-node="${CSS.escape(focusId)}"]`); if (n) n.focus({ preventScroll: true }); }
@@ -1129,7 +1297,7 @@ $('theme-btn').addEventListener('click', () => {
     state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true;
     const d = hc.docs.find(x => x.index === state.doc); if (d) revealDoc(hc, d);
   }
-  else if (['overview', 'services', 'market', 'data', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
+  else if (['overview', 'services', 'market', 'data', 'jobs', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
   else if (['accounts', 'news', 'calendar'].includes(h)) { state.tab = h; state.navigated = true; }
   else if (h === 'charts') { state.tab = 'market'; state.navigated = true; }
   await loadTopology(); await poll();

@@ -10,7 +10,8 @@
 //!   uploads one file of a provider batch, verified on arrival;
 //!   `GET /incoming` lists batches waiting; `POST /incorporate/{provider}/{batch}`
 //!   files a complete batch into the standard layout, with provenance and a
-//!   migration ledger (see the ingest module).
+//!   migration ledger (see the ingest module). `GET /batches/{provider}`
+//!   says which batches the volumes hold, and how.
 //!
 //! It runs natively (under launchd on a Mac), not in a container, so it sees
 //! the real disks, and binds to loopback by default.
@@ -183,6 +184,7 @@ async fn main() {
         .route("/incoming", get(list_incoming))
         .route("/incoming/{provider}/{batch}/{file}", put(upload))
         .route("/incorporate/{provider}/{batch}", post(incorporate))
+        .route("/batches/{provider}", get(batches))
         .with_state(store.clone())
         .merge(observer.router())
         .merge(store.events.router());
@@ -413,6 +415,65 @@ async fn incorporate(
         }
         Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+/// Every batch the volumes hold for a provider, by batch ID: `filed` (its
+/// receipts are in `provenance/`), `incoming` (uploaded, not yet filed) or
+/// `folder` (a provider download folder, as at the top of a volume).
+async fn batches(AxState(store): AxState<Shared>, UrlPath(provider): UrlPath<String>) -> Reply {
+    let Some(pdir) = ingest::provider_dir(&provider) else {
+        return refused(
+            StatusCode::NOT_FOUND,
+            format!("unknown provider {provider}"),
+        );
+    };
+    let volumes = store.volumes.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        let mut out = serde_json::Map::new();
+        let dirs = |p: &std::path::Path| -> Vec<std::fs::DirEntry> {
+            std::fs::read_dir(p)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .collect()
+        };
+        for v in &volumes {
+            let root = v.path.join(pdir);
+            // Raw download folders first, so a filed copy wins.
+            for parent in [v.path.clone(), root.clone()] {
+                for e in dirs(&parent) {
+                    if e.path().join("manifest.json").is_file()
+                        && e.path().join("metadata.json").is_file()
+                    {
+                        let id = e.file_name().to_string_lossy().into_owned();
+                        out.entry(id).or_insert(
+                            json!({ "volume": v.name, "how": "folder", "path": e.path() }),
+                        );
+                    }
+                }
+            }
+            for (dir, how) in [
+                (root.join(ingest::INCOMING), "incoming"),
+                (root.join("provenance"), "filed"),
+            ] {
+                for e in dirs(&dir) {
+                    let id = e.file_name().to_string_lossy().into_owned();
+                    out.insert(
+                        id,
+                        json!({ "volume": v.name, "how": how, "path": e.path() }),
+                    );
+                }
+            }
+        }
+        Value::Object(out)
+    })
+    .await
+    .unwrap_or_default();
+    reply(
+        StatusCode::OK,
+        json!({ "provider": pdir, "batches": found }),
+    )
 }
 
 /// Today's UTC date, `YYYY-MM-DD`.
