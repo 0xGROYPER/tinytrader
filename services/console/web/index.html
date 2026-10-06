@@ -23,10 +23,8 @@
   /* The interface is monospace, after tinygrad; long reading stays proportional. */
   --ui: var(--mono);
   --link: var(--fg);
-  /* The header band: dark brown in every palette, the wordmark in cream. */
-  --header-bg: #3B2A1E; --header-fg: #F3E7D7; --header-line: #2C1F16; --header-ctl: rgba(243, 231, 215, .22);
 }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --header-bg: #2A1E15; --header-fg: #EFE2D0; --header-line: #1E150F; --header-ctl: rgba(239, 226, 208, .2);
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #0E0E0E; --surface: #171717; --line: #2E2E2E; --line-soft: #1F1F1F; --nav-bg: #121212; --nav-hover: rgba(255, 255, 255, .06);
   --fg: #EDEDED; --fg-2: #C4C4C4; --muted: #8F8F8F;
   --accent: #F2F2F2; --accent-mark: #DADADA; --accent-2: #8F8F8F; --accent-soft: #262626;
@@ -37,7 +35,7 @@
   --grid: #222222; --up: #4CC38A; --down: #EF6B73;
   color-scheme: dark;
 } }
-:root[data-theme="dark"] { --header-bg: #2A1E15; --header-fg: #EFE2D0; --header-line: #1E150F; --header-ctl: rgba(239, 226, 208, .2);
+:root[data-theme="dark"] {
   --bg: #0E0E0E; --surface: #171717; --line: #2E2E2E; --line-soft: #1F1F1F; --nav-bg: #121212; --nav-hover: rgba(255, 255, 255, .06);
   --fg: #EDEDED; --fg-2: #C4C4C4; --muted: #8F8F8F;
   --accent: #F2F2F2; --accent-mark: #DADADA; --accent-2: #8F8F8F; --accent-soft: #262626;
@@ -57,19 +55,16 @@ h1, h2 { text-wrap: balance; }
 .muted { color: var(--muted); }
 button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--header-bg); color: var(--header-fg); border-bottom: 1px solid var(--header-line);
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line);
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; }
 .brand { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
-.home { display: inline-flex; align-items: center; color: var(--header-fg); text-decoration: none; border-radius: 4px; padding: 4px 2px; }
-.home:hover { color: #FFFFFF; }
+.home { display: inline-flex; align-items: center; color: var(--fg); text-decoration: none; border-radius: 4px; padding: 4px 2px; }
+.home:hover { color: var(--accent); }
 /* The wordmark is drawn from a 5-row bitmap font as squares, so it stays crisp. */
 .wordmark { display: block; height: 25px; width: auto; }
 
 .icon-btn { width: 46px; height: 46px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); cursor: pointer; }
 .icon-btn:hover { background: var(--surface); }
-.top .icon-btn, .top .palette { background: transparent; color: var(--header-fg); border-color: var(--header-ctl); }
-.top .icon-btn:hover, .top .palette:hover { background: rgba(255, 255, 255, .08); }
-.top .palette option { color: initial; background: initial; }
 /* Palettes, chosen in the header: Frost (the default), Spruce, PB&J and Amber. */
 :root[data-palette="spruce"] { --accent: #2E5E4E; --accent-mark: #3B7562; --accent-2: #8DBFA0; --accent-soft: #E6F0EB; --nav-hover: rgba(46, 94, 78, .07); --link: var(--accent); }
 @media (prefers-color-scheme: dark) { :root[data-palette="spruce"]:not([data-theme="light"]) { --accent: #8DC9AC; --accent-mark: #6FB394; --accent-2: #2E5E4E; --accent-soft: #16261F; --nav-hover: rgba(141, 201, 172, .08); --link: var(--accent); } }
