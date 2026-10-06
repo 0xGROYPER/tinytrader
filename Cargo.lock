@@ -771,6 +771,7 @@ dependencies = [
  "serde_json",
  "time",
  "tinytrader-observe",
+ "tinytrader-schedule",
  "tokio",
 ]
 

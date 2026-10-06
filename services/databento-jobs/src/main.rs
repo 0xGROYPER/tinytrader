@@ -47,6 +47,18 @@ struct Args {
     /// How often to refresh the jobs list, in seconds.
     #[arg(long, env = "JOBS_REFRESH_SECONDS", default_value_t = 30)]
     refresh: u64,
+
+    /// Hours in New York time, e.g. `09:25-16:20`, set relative to the
+    /// regular session, when the service stays off the network: it doesn't
+    /// poll Databento, and downloads wait until the window ends. Trading
+    /// days come from `--calendar`.
+    #[arg(long, env = "JOBS_PAUSE_HOURS")]
+    pause_hours: Option<tinytrader_schedule::Schedule>,
+
+    /// Market calendar for the pause (`{ "days": [...] }`); without it,
+    /// every weekday is a trading day.
+    #[arg(long, env = "JOBS_CALENDAR")]
+    calendar: Option<String>,
 }
 
 /// How long a price stays good for submitting.
@@ -155,6 +167,8 @@ struct Jobs {
     delivered: Mutex<HashMap<String, u64>>,
     listed: Mutex<Value>,
     one_at_a_time: tokio::sync::Semaphore,
+    /// While in the pause window, when it ends (ns since the epoch); else 0.
+    paused_until: AtomicU64,
     events: Events,
     next_quote: AtomicU64,
 }
@@ -208,17 +222,22 @@ async fn main() {
         one_at_a_time: tokio::sync::Semaphore::new(1),
         events: Events::default(),
         next_quote: AtomicU64::new(1),
+        paused_until: AtomicU64::new(0),
     });
     let listen = listen_address("JOBS_LISTEN", "127.0.0.1:9121");
     let observer = Observer::new("databento-jobs", env!("CARGO_PKG_VERSION"));
+    let mut schedule = vec![
+        json!({ "name": "Databento job list", "kind": "interval", "every_seconds": args.refresh, "when": format!("every {} s, outside market hours", args.refresh) }),
+        json!({ "name": "Download of jobs submitted here", "kind": "event", "when": "when Databento finishes them, outside market hours" }),
+    ];
+    if let Some(h) = args.pause_hours {
+        schedule.insert(0, json!({ "name": "Off the network for market hours", "kind": "window", "hours": h.to_string(), "when": format!("paused {h} ET on trading days") }));
+    }
     observer.describe(json!({
         "role": "Databento batch jobs: prices and submits requests, and downloads finished jobs into the store.",
         "upstream": [{ "id": "databento", "label": "databento", "sub": "batch API", "kind": "flow", "via": "https" }],
         "streams": { "jobs": "/jobs", "events": "/events" },
-        "schedule": [
-            { "name": "Databento job list", "kind": "interval", "every_seconds": args.refresh, "when": format!("every {} s", args.refresh) },
-            { "name": "Download of jobs submitted here", "kind": "event", "when": "when Databento finishes them" },
-        ],
+        "schedule": schedule,
     }));
 
     let app = Router::new()
@@ -252,7 +271,38 @@ async fn main() {
     });
 
     let every = Duration::from_secs(args.refresh.max(10));
+    let mut calendar = (tinytrader_schedule::Calendar::default(), None::<Instant>);
     loop {
+        // During market hours, stay off the network.
+        if let Some(pause) = args.pause_hours {
+            if let Some(url) = &args.calendar
+                && calendar
+                    .1
+                    .is_none_or(|at| at.elapsed() > Duration::from_secs(3600))
+                && let Ok(r) = jobs.http.get(url).send().await
+                && let Ok(c) = r.json::<tinytrader_schedule::Calendar>().await
+                && !c.days.is_empty()
+            {
+                calendar = (c, Some(Instant::now()));
+            }
+            let now = (tinytrader_observe::unix_seconds() * 1e9) as u64;
+            if let Some((start, end)) = pause.next(now, &calendar.0)
+                && start <= now
+            {
+                jobs.paused_until.store(end, Ordering::Relaxed);
+                observer.set_state(
+                    State::Idle,
+                    &format!(
+                        "paused for market hours until {}",
+                        tinytrader_schedule::describe(end)
+                    ),
+                );
+                tokio::time::sleep(Duration::from_nanos(end - now).min(Duration::from_secs(60)))
+                    .await;
+                continue;
+            }
+            jobs.paused_until.store(0, Ordering::Relaxed);
+        }
         match refresh(&jobs).await {
             Ok(n) => observer.set_state(State::Ready, &format!("{n} jobs")),
             Err(e) => observer.set_state(State::Degraded, &e),
@@ -602,6 +652,11 @@ fn start_download(jobs: &Shared, job: String) {
     let jobs = jobs.clone();
     tokio::spawn(async move {
         let _turn = jobs.one_at_a_time.acquire().await;
+        // Downloads wait out market hours.
+        while jobs.paused_until.load(Ordering::Relaxed) != 0 {
+            set(&jobs, &job, |t| t.state = "waiting for the close".into());
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
         let result = fetch_and_file(&jobs, &job).await;
         match result {
             Ok(n) => {

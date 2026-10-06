@@ -383,6 +383,10 @@ body:not(.docs-mode) .nav { display: none; }
 .drive-sum b { font: 600 13px var(--mono); color: var(--fg); }
 .drive-sum span { color: var(--muted); font-family: var(--mono); }
 td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ds-filter { width: min(360px, 100%); box-sizing: border-box; min-height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: 14px var(--mono); }
+.cov-chip { margin: 2px 4px 2px 0; padding: 2px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg-2); font: 12px var(--mono); cursor: pointer; }
+.cov-chip span { color: var(--muted); }
+.cov-chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-2); color: var(--accent); }
 /* The tinytrader shell: read-only commands over this deployment. */
 .term { flex: 1; display: flex; flex-direction: column; min-height: 320px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: 13px/1.5 var(--mono); }
 .tile-body > .term { border: 0; border-radius: 0; margin: -14px -16px; }
@@ -965,64 +969,93 @@ function updateStoreNav() {
   if (has === !!el.childElementCount) return;
   el.innerHTML = has ? `<div class="nav-sec"><div class="nav-label">Store</div><div class="nav-items"><button type="button" data-tab="data"><span class="chev"></span><span class="lbl">Data</span></button><button type="button" data-tab="jobs"><span class="chev"></span><span class="lbl">Jobs</span></button><button type="button" data-tab="storage"><span class="chev"></span><span class="lbl">Storage</span></button></div></div>` : '';
 }
-function dsRange(d) {
-  const days = Object.values(d.schemas).flatMap(s => Object.keys(s.days || {})).sort();
-  return days.length ? [days[0], days[days.length - 1], new Set(days).size] : [null, null, 0];
+// Data: coverage by dataset and symbol, merged across drives. Pick a row
+// (or a schema chip) to see that schema's days on a calendar; the filter
+// narrows the rows as you type.
+function coverage() {
+  const m = new Map();
+  for (const r of catalogRoots()) for (const d of r.datasets || []) {
+    const key = d.id + ' ' + (d.symbol || '');
+    const e = m.get(key) || { key, id: d.id, symbol: d.symbol, schemas: {}, drives: new Set(), sources: [] };
+    e.drives.add(r.name); e.sources.push(...(d.sources || []).map(x => `${r.name}: ${x}`));
+    for (const [name, s] of Object.entries(d.schemas)) {
+      const t = e.schemas[name] || (e.schemas[name] = { bytes: 0, days: {}, where: {}, encodings: new Set() });
+      t.bytes += s.bytes; (s.encodings || []).forEach(x => t.encodings.add(x));
+      for (const [day, b] of Object.entries(s.days || {})) { t.days[day] = (t.days[day] || 0) + b; (t.where[day] ||= new Set()).add(r.name); }
+    }
+    m.set(key, e);
+  }
+  return [...m.values()].sort((a, b) => a.id.localeCompare(b.id) || (a.symbol || '').localeCompare(b.symbol || ''));
 }
+const coveredSize = e => Object.values(e.schemas).reduce((a, s) => a + s.bytes, 0);
 function dataView() {
   const roots = catalogRoots();
-  const rows = roots.flatMap(r => (r.datasets || []).map(d => ({ r, d, key: r.service + '|' + r.name + '|' + d.id + '|' + (d.symbol || '') })));
-  const head = `<div><h1>Data</h1><p class="muted" style="margin:0">Everything on the store's drives: datasets it recognises, then everything else.</p></div>`;
+  const head = `<div><h1>Data</h1><p class="muted" style="margin:0">What the store's drives hold, by dataset and symbol, across drives.</p></div>`;
   if (!roots.length) return head + '<p class="muted">The store is not reachable.</p>';
-  const sizeOf = d => Object.values(d.schemas).reduce((a, s) => a + s.bytes, 0);
-  // Per drive: datasets, other data, free.
   const summary = `<div class="drive-sum">${roots.filter(r => r.present).map(r => `<div><b>${esc(r.name)}</b><span>${bytes(r.dataset_bytes || 0)} in datasets</span><span>${bytes(r.other_bytes || 0)} other</span><span>${r.volume?.available_bytes != null ? bytes(r.volume.available_bytes) + ' free' : ''}</span></div>`).join('')}</div>`;
-  if (!rows.some(x => x.key === state.ds)) state.ds = rows[0]?.key;
-  const table = rows.slice().sort((x, y) => x.d.id.localeCompare(y.d.id) || (x.d.symbol || '').localeCompare(y.d.symbol || '') || x.r.name.localeCompare(y.r.name)).map(({ r, d, key }) => {
-    const [first, last, n] = dsRange(d);
-    return `<tr class="ds-row${key === state.ds ? ' sel' : ''}" data-ds="${esc(key)}"><td class="mono" style="color:var(--fg)">${esc(d.id)}</td><td class="mono">${esc(d.symbol || '—')}</td><td class="mono">${esc(r.name)}</td>
-      <td class="mono">${Object.keys(d.schemas).map(esc).join(', ')}</td><td class="mono" style="white-space:nowrap">${first ?? '—'} → ${last ?? '—'}</td>
-      <td class="mono num">${n}</td><td class="mono num">${bytes(sizeOf(d))}</td></tr>`;
+  const rows = coverage();
+  if (!rows.some(e => e.key === state.ds)) state.ds = rows[0]?.key;
+  const sel = rows.find(e => e.key === state.ds);
+  const table = rows.map(e => {
+    const chips = Object.entries(e.schemas).sort((a, b) => b[1].bytes - a[1].bytes).map(([name, s]) =>
+      `<button type="button" class="cov-chip" data-cov="${esc(e.key)}" data-schema="${esc(name)}"${e === sel && name === state.dsSchema ? ' aria-pressed="true"' : ''}>${esc(name)} <span>${Object.keys(s.days).length}d</span></button>`).join('');
+    return `<tr class="ds-row${e === sel ? ' sel' : ''}" data-cov="${esc(e.key)}" data-text="${esc((e.id + ' ' + (e.symbol || '') + ' ' + Object.keys(e.schemas).join(' ')).toLowerCase())}">
+      <td class="mono" style="color:var(--fg)">${esc(e.symbol || '—')}</td><td class="mono">${esc(e.id)}</td><td>${chips}</td>
+      <td class="mono num">${bytes(coveredSize(e))}</td><td class="mono">${[...e.drives].map(esc).join(', ')}</td></tr>`;
   }).join('');
-  const sel = rows.find(x => x.key === state.ds);
   const other = roots.flatMap(r => (r.other || []).map(o => ({ r, o }))).sort((x, y) => y.o.bytes - x.o.bytes);
   const otherTable = other.length ? `<section><div class="sec-head"><h2>Other data on disk</h2><span class="muted" style="font-size:13px">Folders the store doesn't recognise as datasets, largest first</span></div>
     <div class="box scroll"><table><thead><tr><th>Folder</th><th>Drive</th><th style="text-align:right">Size</th><th style="text-align:right">Files</th><th>Last changed</th></tr></thead><tbody>${other.map(({ r, o }) =>
       `<tr><td class="mono" style="color:var(--fg)">${esc(o.name)}</td><td class="mono">${esc(r.name)}</td><td class="mono num">${bytes(o.bytes)}</td><td class="mono num">${(o.files || 0).toLocaleString()}</td><td class="muted">${o.modified ? esc(ago(new Date(o.modified * 1000).toISOString())) : '—'}</td></tr>`).join('')}</tbody></table></div></section>` : '';
-  return head + summary + (rows.length ? `<div class="box scroll"><table class="ds-tbl"><thead><tr><th>Dataset</th><th>Symbol</th><th>Drive</th><th>Schemas</th><th>Range</th><th style="text-align:right">Days</th><th style="text-align:right">Size</th></tr></thead><tbody>${table}</tbody></table></div>` : '<p class="muted">No recognised datasets yet.</p>')
-    + (sel ? datasetPanel(sel.r, sel.d) : '') + otherTable;
+  return head + summary + `<input class="ds-filter" id="ds-filter" placeholder="Filter: XSP, SPY.OPT, cmbp-1…" value="${esc(state.dsFilter || '')}" autocomplete="off" spellcheck="false">
+    <div class="box scroll"><table class="ds-tbl"><thead><tr><th>Symbol</th><th>Dataset</th><th>Schemas (days with data)</th><th style="text-align:right">Size</th><th>Drives</th></tr></thead><tbody>${table}</tbody></table></div>
+    ${sel ? coveragePanel(sel) : ''}${otherTable}`;
 }
-function datasetPanel(r, d) {
-  const schemas = Object.keys(d.schemas);
-  if (!schemas.includes(state.dsSchema)) state.dsSchema = schemas.slice().sort((a, b) => d.schemas[b].bytes - d.schemas[a].bytes)[0];
-  const s = d.schemas[state.dsSchema], days = s.days || {};
-  const keys = Object.keys(days).sort();
+function coveragePanel(e) {
+  const names = Object.keys(e.schemas);
+  if (!names.includes(state.dsSchema)) state.dsSchema = names.includes('cmbp-1') ? 'cmbp-1' : names.sort((a, b) => e.schemas[b].bytes - e.schemas[a].bytes)[0];
+  const s = e.schemas[state.dsSchema], keys = Object.keys(s.days).sort();
+  const first = keys[0], last = keys[keys.length - 1];
+  // Weekdays in the range with no data (market holidays count among them).
+  const missing = [];
+  for (let t = Date.parse(first + 'T12:00:00Z'); t <= Date.parse(last + 'T12:00:00Z'); t += 864e5) {
+    const d = new Date(t), k = d.toISOString().slice(0, 10), wd = d.getUTCDay();
+    if (wd !== 0 && wd !== 6 && !s.days[k]) missing.push(k);
+  }
+  const perDrive = {}; for (const set of Object.values(s.where)) for (const n of set) perDrive[n] = (perDrive[n] || 0) + 1;
   let cal = '';
-  if (keys.length) {
-    const first = Date.parse(keys[0] + 'T00:00:00Z'), last = Date.parse(keys[keys.length - 1] + 'T00:00:00Z');
-    const start = first - ((new Date(first).getUTCDay() + 6) % 7) * 864e5; // back to Monday
-    for (let t = start; t <= last + 6 * 864e5; t += 864e5) {
-      const k = new Date(t).toISOString().slice(0, 10), wd = new Date(t).getUTCDay();
-      const cls = t < first || t > last ? 'out' : days[k] ? 'has' : (wd === 0 || wd === 6) ? 'weekend' : '';
-      cal += `<i class="${cls}" title="${k}${days[k] ? ' · ' + bytes(days[k]) : cls === '' ? ' · no data' : ''}"></i>`;
-    }
+  const start = Date.parse(first + 'T00:00:00Z') - ((new Date(first + 'T00:00:00Z').getUTCDay() + 6) % 7) * 864e5;
+  for (let t = start; t <= Date.parse(last + 'T00:00:00Z') + 6 * 864e5; t += 864e5) {
+    const k = new Date(t).toISOString().slice(0, 10), wd = new Date(t).getUTCDay();
+    const out = k < first || k > last, has = s.days[k];
+    const cls = out ? 'out' : has ? 'has' : (wd === 0 || wd === 6) ? 'weekend' : '';
+    cal += `<i class="${cls}" title="${k}${has ? ` · ${bytes(has)} · ${[...s.where[k]].join(', ')}` : cls === '' ? ' · no data' : ''}"></i>`;
   }
   return `<section class="panel">
-    <div class="sec-head" style="margin:0"><h2 class="mono" style="font-weight:500">${esc(d.id)}${d.symbol ? ' › ' + esc(d.symbol) : ''} <span class="muted" style="font-size:13px;font-family:var(--ui)">on ${esc(r.name)}</span></h2></div>
-    <div class="chips">${schemas.map(x => `<button type="button" class="chip-btn" data-schema="${esc(x)}" aria-pressed="${x === state.dsSchema}">${esc(x)}</button>`).join('')}</div>
+    <div class="sec-head" style="margin:0"><h2 class="mono" style="font-weight:500">${esc(e.symbol || e.id)} <span class="muted" style="font-size:13px;font-family:var(--ui)">${esc(e.symbol ? e.id : '')}</span></h2></div>
+    <div class="chips">${names.map(x => `<button type="button" class="chip-btn" data-cov="${esc(e.key)}" data-schema="${esc(x)}" aria-pressed="${x === state.dsSchema}">${esc(x)}</button>`).join('')}</div>
     <div class="facts">
-      <div><div class="k">Files</div><div class="v">${s.files.toLocaleString()}</div></div>
-      <div><div class="k">Size</div><div class="v">${bytes(s.bytes)}</div></div>
       <div><div class="k">Days with data</div><div class="v">${keys.length}</div></div>
-      <div><div class="k">Range</div><div class="v">${keys[0] ?? '—'} → ${keys[keys.length - 1] ?? '—'}</div></div>
-      ${(s.symbols || []).length ? `<div><div class="k">Symbols</div><div class="v">${s.symbols.map(esc).join(', ')}</div></div>` : ''}
-      ${(s.encodings || []).length ? `<div><div class="k">Encoding</div><div class="v">${s.encodings.map(esc).join(', ')}</div></div>` : ''}
+      <div><div class="k">First → last</div><div class="v">${first} → ${last}</div></div>
+      <div><div class="k">Weekdays without data</div><div class="v">${missing.length}${missing.length ? ` <span class="muted" style="font-size:12px">(holidays included)</span>` : ''}</div></div>
+      <div><div class="k">Size</div><div class="v">${bytes(s.bytes)}</div></div>
+      <div><div class="k">Drives</div><div class="v">${Object.entries(perDrive).map(([n, c]) => `${esc(n)} (${c}d)`).join(', ')}</div></div>
     </div>
-    ${keys.length ? `<div class="cal-wrap"><div class="cal" aria-label="Days with data">${cal}</div></div>
-    <div class="cal-legend"><span><i style="background:var(--accent-mark)"></i>data</span><span><i style="background:var(--line-soft)"></i>weekday without data</span><span><i style="outline:1px dashed var(--line-soft)"></i>weekend</span></div>` : ''}
-    <div><div class="k" style="font-size:12px;color:var(--muted);margin-bottom:4px">Sources</div>${d.sources.map(x => `<div class="mono" style="font-size:13px">${esc(x)}</div>`).join('')}</div>
+    <div class="cal-wrap"><div class="cal" aria-label="Days with data">${cal}</div></div>
+    <div class="cal-legend"><span><i style="background:var(--accent-mark)"></i>data</span><span><i style="background:var(--line-soft)"></i>weekday without data</span><span><i style="outline:1px dashed var(--line-soft)"></i>weekend</span></div>
+    ${missing.length && missing.length <= 40 ? `<div class="muted" style="font-size:12px;font-family:var(--mono);overflow-wrap:anywhere">Missing: ${missing.join(', ')}</div>` : ''}
   </section>`;
 }
+$('view').addEventListener('click', e => {
+  const c = e.target.closest && e.target.closest('[data-cov]'); if (!c) return;
+  state.ds = c.dataset.cov; if (c.dataset.schema) state.dsSchema = c.dataset.schema;
+  state.navigated = true; render();
+}, true);
+$('view').addEventListener('input', e => {
+  if (e.target.id !== 'ds-filter') return;
+  state.dsFilter = e.target.value; const q = state.dsFilter.toLowerCase().split(/\s+/).filter(Boolean);
+  document.querySelectorAll('.ds-tbl tr[data-text]').forEach(tr => { tr.hidden = !q.every(w => tr.dataset.text.includes(w)); });
+});
 function storageView() {
   const roots = catalogRoots();
   const statusPill = { ok: ['OK', 'p-ok'], warning: ['Warning', 'p-warn'], critical: ['Critical', 'p-crit'], floor: ['Full', 'p-crit'], unknown: ['Space unknown', 'p-idle'] };
@@ -1749,6 +1782,7 @@ function render() {
   document.documentElement.style.setProperty('--top-h', document.querySelector('.top').offsetHeight + 'px');
   $('view').innerHTML = viewHtml(state.tab);
   if ($('jobs-list')) jobsOpened();
+  if ($('ds-filter') && state.dsFilter) $('ds-filter').dispatchEvent(new Event('input', { bubbles: true }));
   { const out = $('term-out'); if (out) out.scrollTop = out.scrollHeight; }
   if (openDetails) { const d = document.querySelector('.detail > details'); if (d) d.open = true; }
   if ($('ev-list')) $('ev-list').scrollTop = evTop;
@@ -1825,9 +1859,7 @@ document.querySelector('.nav').addEventListener('click', e => {
 $('view').addEventListener('click', e => {
   const ns = e.target.closest('[data-news-symbol]');
   if (ns) { state.newsSymbol = ns.dataset.newsSymbol || null; render(); return; }
-  const dr = e.target.closest('[data-ds]');
-  if (dr) { state.ds = dr.dataset.ds; state.navigated = true; render(); return; }
-  const sc = e.target.closest('[data-schema]');
+  const sc = e.target.closest('[data-schema]:not([data-cov])');
   if (sc) { state.dsSchema = sc.dataset.schema; state.navigated = true; render(); return; }
   const dc = e.target.closest('[data-doc]');
   if (dc) { openDoc(dc.dataset.doc === '' ? null : +dc.dataset.doc); return; }
