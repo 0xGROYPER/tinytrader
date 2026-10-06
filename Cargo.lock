@@ -32,6 +32,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tinytrader-observe",
+ "tinytrader-schedule",
  "tokio",
 ]
 
@@ -2507,6 +2508,7 @@ dependencies = [
  "time",
  "tinytrader-dbn",
  "tinytrader-observe",
+ "tinytrader-schedule",
  "tokio",
  "tokio-tungstenite 0.27.0",
 ]
@@ -3183,6 +3185,13 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "serde_json",
+]
+
+[[package]]
+name = "tinytrader-schedule"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

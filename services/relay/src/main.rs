@@ -95,7 +95,7 @@ struct Args {
     /// them the relay disconnects from its provider and reports itself idle.
     /// Always active when unset.
     #[arg(long, env = "RELAY_HOURS")]
-    hours: Option<relay::schedule::Schedule>,
+    hours: Option<tinytrader_schedule::Schedule>,
 
     /// Market calendar for active hours (`{ "days": [{ "date", "open",
     /// "close" }] }`), e.g. an accounts service's `/calendar`. Without it,

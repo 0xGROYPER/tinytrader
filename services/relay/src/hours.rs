@@ -4,8 +4,8 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use relay::schedule::{self, Calendar, Schedule};
 use tinytrader_observe::{Observer, State};
+use tinytrader_schedule::{self as schedule, Calendar, Schedule};
 
 use crate::hub::{Hub, lock};
 use crate::protocol;

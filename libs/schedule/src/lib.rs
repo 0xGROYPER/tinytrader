@@ -160,8 +160,11 @@ pub fn describe(ns: u64) -> String {
 mod tests {
     use super::*;
 
+    /// `YYYY-MM-DDTHH:MM:SSZ` as ns since the epoch.
     fn ns(text: &str) -> u64 {
-        crate::iex::timestamp(text).unwrap()
+        let n = |a: usize, b: usize| text[a..b].parse::<i64>().unwrap();
+        let days = days_from_civil(n(0, 4), n(5, 7), n(8, 10));
+        u64::try_from((days * 86_400 + n(11, 13) * 3600 + n(14, 16) * 60 + n(17, 19)) * NS).unwrap()
     }
 
     #[test]

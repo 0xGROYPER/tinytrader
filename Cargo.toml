@@ -9,6 +9,7 @@ members = [
     "services/relay",
     "libs/dbn",
     "libs/tinytrader",
+    "libs/schedule",
     "services/catalog",
     "services/console",
     "services/databento-live",
@@ -36,4 +37,5 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tinytrader-dbn = { path = "libs/dbn" }
 tinytrader-fleet = { path = "libs/fleet" }
+tinytrader-schedule = { path = "libs/schedule" }
 tinytrader-observe = { path = "libs/observe" }

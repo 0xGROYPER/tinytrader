@@ -13,6 +13,7 @@ workspace = true
 axum.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 tinytrader-observe.workspace = true
+tinytrader-schedule.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

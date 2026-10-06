@@ -15,6 +15,7 @@ clap = { version = "4", features = ["derive", "env"] }
 databento = { version = "0.63", default-features = false, features = ["live"] }
 tinytrader-dbn.workspace = true
 tinytrader-observe.workspace = true
+tinytrader-schedule.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 rustls.workspace = true

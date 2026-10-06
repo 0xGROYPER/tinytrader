@@ -116,6 +116,13 @@ struct Args {
     /// Seconds between polls of each account.
     #[arg(long, env = "ALPACA_ACCOUNT_INTERVAL", default_value_t = 15)]
     interval: u64,
+
+    /// Active hours in New York time, e.g. `07:55-17:05`, relative to the
+    /// regular session on trading days (from Alpaca's calendar). Outside them
+    /// the service reports itself idle and calls nothing; it reads every
+    /// account once when it starts. Always active when unset.
+    #[arg(long, env = "ALPACA_ACCOUNT_HOURS")]
+    hours: Option<tinytrader_schedule::Schedule>,
 }
 
 /// One account and its latest reading.
@@ -301,7 +308,46 @@ async fn main() {
         .expect("http client");
     let every = Duration::from_secs(args.interval.max(5));
     let mut calendar_due: Option<std::time::Instant> = None;
+    let mut first = true;
     loop {
+        // Outside active hours, call nothing: wait for the next window, using
+        // the calendar already read. The first pass always reads, so the
+        // accounts are known even when the service starts after hours.
+        if let Some(hours) = args.hours
+            && !first
+        {
+            let now = (unix_seconds() * 1e9) as u64;
+            let calendar: tinytrader_schedule::Calendar =
+                serde_json::from_value(lock(&shared.calendar).clone()).unwrap_or_default();
+            match hours.next(now, &calendar) {
+                Some((start, _)) if start > now => {
+                    observer.set_state(
+                        State::Idle,
+                        &format!(
+                            "off schedule until {}",
+                            tinytrader_schedule::describe(start)
+                        ),
+                    );
+                    // Read the calendar afresh when the window opens.
+                    calendar_due = None;
+                    tokio::time::sleep(
+                        Duration::from_nanos(start - now).min(Duration::from_secs(300)),
+                    )
+                    .await;
+                    continue;
+                }
+                None => {
+                    observer.set_state(
+                        State::Idle,
+                        "off schedule: no trading day in the next two weeks",
+                    );
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                    continue;
+                }
+                Some(_) => {}
+            }
+        }
+        first = false;
         // The calendar is the same for every account; the first one reads it.
         if calendar_due.is_none_or(|t| t.elapsed() > Duration::from_secs(600)) {
             let a = &shared.accounts[0];

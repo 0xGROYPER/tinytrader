@@ -1,0 +1,13 @@
+[package]
+name = "tinytrader-schedule"
+description = "When a market service is active: a daily window in New York time on trading days"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
