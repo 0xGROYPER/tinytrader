@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>tinytrader</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inconsolata:wght@400;500;600&family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&family=Inconsolata:wght@400;500;600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
 /* Layout: docs-style shell; light or dark, following the system unless the viewer picks one. Monochrome, after tinygrad: ink on paper, with colour only where it means something (green and red for prices, status colours for health). */
 :root {
@@ -65,10 +65,10 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 
 .icon-btn { width: 46px; height: 46px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); cursor: pointer; }
 .icon-btn:hover { background: var(--surface); }
-/* Palettes, chosen in the header: Frost (the default), Spruce, PB&J and Amber. */
-:root[data-palette="spruce"] { --accent: #2E5E4E; --accent-mark: #3B7562; --accent-2: #8DBFA0; --accent-soft: #E6F0EB; --nav-hover: rgba(46, 94, 78, .07); --link: var(--accent); }
-@media (prefers-color-scheme: dark) { :root[data-palette="spruce"]:not([data-theme="light"]) { --accent: #8DC9AC; --accent-mark: #6FB394; --accent-2: #2E5E4E; --accent-soft: #16261F; --nav-hover: rgba(141, 201, 172, .08); --link: var(--accent); } }
-:root[data-palette="spruce"][data-theme="dark"] { --accent: #8DC9AC; --accent-mark: #6FB394; --accent-2: #2E5E4E; --accent-soft: #16261F; --nav-hover: rgba(141, 201, 172, .08); --link: var(--accent); }
+/* Palettes, chosen in the header: Frost (the default), Spruce, PB&J, Amber, Swiss Signal and PB&J v2. */
+:root[data-palette="spruce"] { --nav-bg: #FAF6F0; --accent: #2E5E4E; --accent-mark: #3B7562; --accent-2: #B8916A; --accent-soft: #E6F0EB; --nav-hover: rgba(46, 94, 78, .07); --link: var(--accent); }
+@media (prefers-color-scheme: dark) { :root[data-palette="spruce"]:not([data-theme="light"]) { --nav-bg: #15130F; --accent: #8DC9AC; --accent-mark: #6FB394; --accent-2: #A8835C; --accent-soft: #16261F; --nav-hover: rgba(141, 201, 172, .08); --link: var(--accent); } }
+:root[data-palette="spruce"][data-theme="dark"] { --nav-bg: #15130F; --accent: #8DC9AC; --accent-mark: #6FB394; --accent-2: #A8835C; --accent-soft: #16261F; --nav-hover: rgba(141, 201, 172, .08); --link: var(--accent); }
 :root[data-palette="frost"] { --bg: #FFFFFF; --surface: #F5F8FC; --line: #D5DFEB; --line-soft: #E8EEF5; --nav-bg: #F8FAFD; --nav-hover: rgba(65, 103, 179, .07); --fg: #1C283A; --fg-2: #3A4A60; --muted: #5C6B80; --accent: #4167B3; --accent-mark: #5277C3; --accent-2: #7EBAE4; --accent-soft: #EAF3FB; --idle: #4F5D72; --idle-soft: #ECF0F5; --grid: #E3EAF2; --link: var(--accent); }
 @media (prefers-color-scheme: dark) { :root[data-palette="frost"]:not([data-theme="light"]) { --bg: #0D141F; --surface: #131C2A; --line: #26344A; --line-soft: #1B2636; --nav-bg: #101827; --nav-hover: rgba(142, 195, 234, .07); --fg: #E3EAF3; --fg-2: #B8C5D6; --muted: #8B9AB0; --accent: #8EC3EA; --accent-mark: #7EBAE4; --accent-2: #5277C3; --accent-soft: #16273E; --idle: #A9B6C8; --idle-soft: #1E2838; --grid: #1F2B3D; --link: var(--accent); } }
 :root[data-palette="frost"][data-theme="dark"] { --bg: #0D141F; --surface: #131C2A; --line: #26344A; --line-soft: #1B2636; --nav-bg: #101827; --nav-hover: rgba(142, 195, 234, .07); --fg: #E3EAF3; --fg-2: #B8C5D6; --muted: #8B9AB0; --accent: #8EC3EA; --accent-mark: #7EBAE4; --accent-2: #5277C3; --accent-soft: #16273E; --idle: #A9B6C8; --idle-soft: #1E2838; --grid: #1F2B3D; --link: var(--accent); }
@@ -78,6 +78,30 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 :root[data-palette="amber"] { --accent: #A84A12; --accent-mark: #C25A1E; --accent-2: #E7A174; --accent-soft: #F8EBE1; --nav-hover: rgba(168, 74, 18, .07); --link: var(--accent); }
 @media (prefers-color-scheme: dark) { :root[data-palette="amber"]:not([data-theme="light"]) { --accent: #F0995E; --accent-mark: #E98A4C; --accent-2: #A84A12; --accent-soft: #2C1B10; --nav-hover: rgba(240, 153, 94, .08); --link: var(--accent); } }
 :root[data-palette="amber"][data-theme="dark"] { --accent: #F0995E; --accent-mark: #E98A4C; --accent-2: #A84A12; --accent-soft: #2C1B10; --nav-hover: rgba(240, 153, 94, .08); --link: var(--accent); }
+:root[data-palette="spruce"] .nav-label { color: var(--accent-2); }
+:root[data-palette="spruce"] .top { border-bottom-color: var(--accent-2); }
+/* Swiss Signal: white page, black type, one orange for whatever needs attention. Archivo and JetBrains Mono, heavy rules. */
+:root[data-palette="swiss"] { --bg: #FAFAFA; --surface: #F0F0EC; --line: #D9D9D4; --line-soft: #E6E6E1; --nav-bg: #FAFAFA; --nav-hover: rgba(10, 10, 10, .05); --fg: #0A0A0A; --fg-2: #2A2A28; --muted: #4A4A47; --accent: #0A0A0A; --accent-mark: #0A0A0A; --accent-2: #FF4B12; --accent-soft: #E6E6E1; --warn: #C23A06; --warn-mark: #FF4B12; --warn-soft: #FFE6DC; --warn-line: #FFB79E; --idle: #4A4A47; --idle-soft: #E6E6E1; --grid: #E6E6E1; --link: var(--fg);
+  --sans: 'Archivo', -apple-system, 'Segoe UI', system-ui, sans-serif; --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace; }
+@media (prefers-color-scheme: dark) { :root[data-palette="swiss"]:not([data-theme="light"]) { --bg: #0A0A0A; --surface: #151514; --line: #33332F; --line-soft: #1F1F1D; --nav-bg: #0A0A0A; --nav-hover: rgba(250, 250, 250, .06); --fg: #FAFAFA; --fg-2: #D9D9D4; --muted: #A3A39C; --accent: #FAFAFA; --accent-mark: #FAFAFA; --accent-2: #FF5A24; --accent-soft: #24241F; --warn: #FF7A4A; --warn-mark: #FF5A24; --warn-soft: #2E140A; --warn-line: #6B2A12; --idle: #A3A39C; --idle-soft: #1F1F1D; --grid: #1F1F1D; --link: var(--fg); } }
+:root[data-palette="swiss"][data-theme="dark"] { --bg: #0A0A0A; --surface: #151514; --line: #33332F; --line-soft: #1F1F1D; --nav-bg: #0A0A0A; --nav-hover: rgba(250, 250, 250, .06); --fg: #FAFAFA; --fg-2: #D9D9D4; --muted: #A3A39C; --accent: #FAFAFA; --accent-mark: #FAFAFA; --accent-2: #FF5A24; --accent-soft: #24241F; --warn: #FF7A4A; --warn-mark: #FF5A24; --warn-soft: #2E140A; --warn-line: #6B2A12; --idle: #A3A39C; --idle-soft: #1F1F1D; --grid: #1F1F1D; --link: var(--fg); }
+:root[data-palette="swiss"] .top { border-top: 6px solid var(--fg); border-bottom: 2px solid var(--fg); }
+:root[data-palette="swiss"] h1 { font: 800 clamp(30px, 4vw, 44px)/1 var(--sans); letter-spacing: -0.04em; }
+:root[data-palette="swiss"] h1::after { content: "."; color: var(--accent-2); }
+:root[data-palette="swiss"] h2 { font-family: var(--sans); font-weight: 800; letter-spacing: -0.02em; }
+:root[data-palette="swiss"] .sec-head { border-top: 2px solid var(--fg); padding-top: 8px; }
+:root[data-palette="swiss"] th { color: var(--fg); font-weight: 600; border-bottom: 1px solid var(--fg); }
+:root[data-palette="swiss"] .box, :root[data-palette="swiss"] .panel { border-radius: 0; }
+:root[data-palette="swiss"] .nav button[aria-current="page"] { background: var(--fg); color: var(--bg); }
+/* PB&J v2: toast page, bread surfaces, peanut butter for structure, grape jelly for whatever needs attention. */
+:root[data-palette="pbj2"] { --bg: #F6E4B8; --surface: #FFF3D2; --line: #DFC589; --line-soft: #EBD6A2; --nav-bg: #FFF3D2; --nav-hover: rgba(201, 139, 43, .14); --fg: #2A0A3F; --fg-2: #4A2A63; --muted: #6B5072; --accent: #6B1F9E; --accent-mark: #6B1F9E; --accent-2: #B9812E; --accent-soft: #EFCF8A; --idle: #6B5072; --idle-soft: #EFDDB0; --grid: #EBD6A2; --link: var(--accent);
+  --sans: 'Archivo', -apple-system, 'Segoe UI', system-ui, sans-serif; --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace; }
+@media (prefers-color-scheme: dark) { :root[data-palette="pbj2"]:not([data-theme="light"]) { --bg: #1C0B2A; --surface: #261236; --line: #4A2A63; --line-soft: #331A47; --nav-bg: #170923; --nav-hover: rgba(201, 139, 43, .12); --fg: #FFF3D2; --fg-2: #EAD9B0; --muted: #B9A3C2; --accent: #CDA2F2; --accent-mark: #B57EE8; --accent-2: #D9A04A; --accent-soft: #3A2052; --idle: #B9A3C2; --idle-soft: #2C163D; --grid: #2C163D; --link: var(--accent); } }
+:root[data-palette="pbj2"][data-theme="dark"] { --bg: #1C0B2A; --surface: #261236; --line: #4A2A63; --line-soft: #331A47; --nav-bg: #170923; --nav-hover: rgba(201, 139, 43, .12); --fg: #FFF3D2; --fg-2: #EAD9B0; --muted: #B9A3C2; --accent: #CDA2F2; --accent-mark: #B57EE8; --accent-2: #D9A04A; --accent-soft: #3A2052; --idle: #B9A3C2; --idle-soft: #2C163D; --grid: #2C163D; --link: var(--accent); }
+:root[data-palette="pbj2"] .top { border-top: 6px solid var(--accent); }
+:root[data-palette="pbj2"] h1 { font: 800 clamp(30px, 4vw, 44px)/1 var(--sans); letter-spacing: -0.04em; }
+:root[data-palette="pbj2"] h2 { font-family: var(--sans); font-weight: 800; letter-spacing: -0.02em; }
+:root[data-palette="pbj2"] .panel, :root[data-palette="pbj2"] .box { background: var(--surface); border-color: var(--accent-2); }
 .palette { height: 46px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 13px var(--ui); cursor: pointer; }
 
 .top-right { display: flex; align-items: center; gap: 14px; }
@@ -300,7 +324,7 @@ tr:last-child td { border-bottom: 0; }
   </div>
   <div class="top-right">
     <select class="palette" id="palette" aria-label="Palette" title="Palette">
-      <option value="frost">Frost</option><option value="spruce">Spruce</option><option value="pbj">PB&amp;J</option><option value="amber">Amber</option>
+      <option value="frost">Frost</option><option value="spruce">Spruce</option><option value="pbj">PB&amp;J</option><option value="amber">Amber</option><option value="swiss">Swiss Signal</option><option value="pbj2">PB&amp;J v2</option>
     </select>
     <button type="button" class="icon-btn" id="theme-btn"></button>
   </div>
@@ -1072,7 +1096,7 @@ function jobState(j) {
 }
 function jobsTable() {
   if (jobs.err) return `<div class="box empty msg-err">${esc(jobs.err)}</div>`;
-  if (!jobs.list) return '<div class="box empty">Loading jobs…</div>';
+  if (!jobs.list || jobs.list.updated_at == null) return '<div class="box empty">Loading jobs…</div>';
   // Jobs that need something (or are moving) first, then the rest; newest first within each.
   const settled = j => !!j.held && !j.transfer || j.state === 'expired';
   const list = (jobs.list.jobs || []).slice().sort((a, b) => settled(a) - settled(b) || b.received - a.received);
@@ -1278,7 +1302,7 @@ darkQuery.addEventListener('change', applyTheme);
 // Palette: Frost by default; the choice is remembered per browser.
 (() => {
   const set = v => { if (v) document.documentElement.setAttribute('data-palette', v); else document.documentElement.removeAttribute('data-palette'); };
-  const palettes = ['frost', 'spruce', 'pbj', 'amber'];
+  const palettes = ['frost', 'spruce', 'pbj', 'amber', 'swiss', 'pbj2'];
   let saved = 'frost'; try { const v = localStorage.getItem('tinytrader-palette'); if (palettes.includes(v)) saved = v; } catch (_) {}
   set(saved); $('palette').value = saved;
   $('palette').addEventListener('change', e => { set(e.target.value); try { localStorage.setItem('tinytrader-palette', e.target.value); } catch (_) {} drawCharts(); });
