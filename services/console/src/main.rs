@@ -39,8 +39,12 @@
 //!   (optional). The one exception to read-only: `/api/jobs/...` is passed to
 //!   it, so the Data page can price, submit and download jobs. The jobs
 //!   service itself insists on an exact confirmation before any charge.
+//! - `CONSOLE_REMINDERS`: a JSON file for the roadmap's reminders, which the
+//!   console edits (`/api/reminders`); `CONSOLE_REMINDERS_SEED`: a Markdown
+//!   roadmap to start it from (optional).
 
 mod collections;
+mod reminders;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,6 +66,8 @@ struct App {
     poller: Poller,
     /// The jobs service's base URL, and a client to reach it.
     jobs: Option<(String, reqwest::Client)>,
+    /// The roadmap's reminders, if configured.
+    reminders: Option<reminders::Reminders>,
     polls: AtomicU64,
     collections: Vec<collections::Collection>,
 }
@@ -94,6 +100,18 @@ async fn main() {
             .ok()
             .filter(|s| !s.is_empty())
             .map(|u| (u.trim_end_matches('/').to_owned(), reqwest::Client::new())),
+        reminders: std::env::var("CONSOLE_REMINDERS")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|p| {
+                let seed = std::env::var("CONSOLE_REMINDERS_SEED")
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                reminders::Reminders::open(
+                    std::path::PathBuf::from(p),
+                    seed.as_deref().map(std::path::Path::new),
+                )
+            }),
     });
 
     let observer = Observer::new("console", env!("CARGO_PKG_VERSION"));
@@ -126,6 +144,7 @@ async fn main() {
         .route("/api/collections", get(list_collections))
         .route("/api/collections/{id}/{index}", get(collection_doc))
         .route("/api/jobs/{*rest}", get(jobs_proxy).post(jobs_proxy))
+        .route("/api/reminders", get(reminders_get).post(reminders_post))
         .with_state(app)
         .merge(observer.router());
     let listener = match tokio::net::TcpListener::bind(&listen).await {
@@ -214,6 +233,26 @@ async fn collection_doc(
             || (StatusCode::NOT_FOUND, "no such document").into_response(),
             |d| no_store(axum::Json(d)),
         )
+}
+
+async fn reminders_get(AxumState(app): AxumState<Arc<App>>) -> Response {
+    match &app.reminders {
+        Some(r) => no_store(axum::Json(r.get())),
+        None => (StatusCode::NOT_FOUND, "no reminders configured").into_response(),
+    }
+}
+
+async fn reminders_post(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::Json(change): axum::Json<serde_json::Value>,
+) -> Response {
+    let Some(r) = &app.reminders else {
+        return (StatusCode::NOT_FOUND, "no reminders configured").into_response();
+    };
+    match r.apply(&change) {
+        Ok(doc) => no_store(axum::Json(doc)),
+        Err(e) => (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": e }))).into_response(),
+    }
 }
 
 /// Pass a request to the jobs service and its answer back.

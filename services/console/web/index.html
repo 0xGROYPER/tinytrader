@@ -303,7 +303,7 @@ tr:last-child td { border-bottom: 0; }
 .tile-btn:hover { background: var(--nav-hover); color: var(--fg); }
 .tile-body { flex: 1; overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 16px; min-height: 0; }
 :root .ws .tile-body h1 { font-size: 20px; letter-spacing: -0.01em; }
-@media (max-width: 800px) { .ws, .ws-split { flex-direction: column; height: auto; } .ws-gutter { display: none; } .ws-a, .ws-b { flex: none !important; } .tile { height: 460px; } }
+@media (max-width: 800px) { .ws, .ws-split { flex-direction: column; height: auto; } .ws-gutter { display: none; } .ws-a, .ws-b { flex: none !important; } .tile { flex: none; height: 70vh; min-height: 420px; } }
 /* The workspace fills everything right of the sidebar and below the header. */
 body.ws-full main { padding: 0; }
 body.ws-full .col { max-width: none; }
@@ -387,6 +387,44 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 .cov-chip { margin: 2px 4px 2px 0; padding: 2px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg-2); font: 12px var(--mono); cursor: pointer; }
 .cov-chip span { color: var(--muted); }
 .cov-chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-2); color: var(--accent); }
+/* Roadmap: after iOS Reminders. */
+.rem { container-type: inline-size; display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 20px; min-height: 0; flex: 1; }
+.rem-side { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.rem-smart { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+.rem-card { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; align-items: center; gap: 4px 8px; padding: 10px; border: 0; border-radius: 10px; background: var(--surface); color: var(--fg); cursor: pointer; text-align: left; font: inherit; }
+.rem-card i { width: 26px; height: 26px; border-radius: 50%; }
+.rem-card b { justify-self: end; font: 700 20px var(--sans); }
+.rem-card span { grid-column: 1 / -1; font-size: 13px; color: var(--muted); font-weight: 600; }
+.rem-card[aria-pressed="true"] { outline: 2px solid var(--accent-mark); }
+.rem-h { margin: 6px 4px 2px; font-size: 12px; font-weight: 700; color: var(--muted); }
+.rem-l { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--fg); font: 14px var(--sans); cursor: pointer; text-align: left; }
+.rem-l i { flex: none; width: 22px; height: 22px; border-radius: 50%; }
+.rem-l span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rem-l em { font-style: normal; color: var(--muted); font-size: 13px; }
+.rem-l:hover { background: var(--nav-hover); } .rem-l[aria-pressed="true"] { background: var(--accent-soft); }
+.rem-add, .rem-showdone { align-self: flex-start; margin-top: 6px; padding: 4px 8px; border: 0; background: transparent; color: var(--accent); font: 500 13px var(--sans); cursor: pointer; }
+.rem-newlist { margin-top: 6px; min-height: 32px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: 14px var(--sans); }
+.rem-main { display: flex; flex-direction: column; min-width: 0; }
+.rem-pick { display: none; align-self: flex-start; margin-bottom: 8px; min-height: 32px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: 14px var(--sans); }
+.rem-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.rem-top h2 { font: 700 26px var(--sans); letter-spacing: -0.01em; }
+.rem-n { font: 700 26px var(--sans); }
+.rem-item { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto auto; gap: 10px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+.rem-check { width: 20px; height: 20px; margin-top: 2px; border-radius: 50%; border: 2px solid var(--line); background: transparent; cursor: pointer; padding: 0; }
+.rem-check:hover { border-color: var(--c); }
+.rem-check[aria-pressed="true"] { border-color: var(--c); background: radial-gradient(circle, var(--c) 0 45%, transparent 50%); }
+.rem-body { display: flex; flex-direction: column; min-width: 0; }
+.rem-title, .rem-notes { border: 0; outline: 0; background: transparent; color: var(--fg); font: 15px var(--sans); padding: 0; min-width: 0; width: 100%; }
+.rem-notes { color: var(--muted); font-size: 13px; }
+.rem-notes:placeholder-shown { display: none; } .rem-item:focus-within .rem-notes { display: block; }
+.rem-in { font-size: 12px; font-weight: 600; }
+.rem-item.done .rem-title { color: var(--muted); }
+.rem-flag, .rem-del { border: 0; background: transparent; color: var(--line); cursor: pointer; padding: 2px; }
+.rem-flag.on { color: #FF9500; } .rem-del { visibility: hidden; } .rem-item:hover .rem-del { visibility: visible; color: var(--muted); }
+.rem-new { display: flex; align-items: center; gap: 12px; padding: 10px 0 4px 3px; }
+.rem-new span { font: 600 20px var(--sans); }
+.rem-new input { flex: 1; border: 0; outline: 0; background: transparent; color: var(--fg); font: 15px var(--sans); }
+@container (max-width: 560px) { .rem { grid-template-columns: minmax(0, 1fr); } .rem-side { display: none; } .rem-pick { display: block; } }
 /* The tinytrader shell: read-only commands over this deployment. */
 .term { flex: 1; display: flex; flex-direction: column; min-height: 320px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: 13px/1.5 var(--mono); }
 .tile-body > .term { border: 0; border-radius: 0; margin: -14px -16px; }
@@ -1461,6 +1499,103 @@ function scheduleView() {
   return head + timeline + `<div class="box scroll"><table class="sched"><thead><tr><th>Service or feed</th><th>What</th><th>When</th><th>Now</th></tr></thead><tbody>${table}</tbody></table></div>`;
 }
 
+// Roadmap: the console's reminders, after iOS Reminders. Lists on the left
+// (with All, Flagged and Completed), the chosen list's items on the right:
+// tap the circle to complete, edit a title or notes in place, flag, add with
+// New Reminder. Saved by the console (/api/reminders).
+const rem = { doc: null, err: null, list: 'all', showDone: false, adding: false, loaded: 0 };
+async function remApi(change) {
+  const r = await fetch('/api/reminders', change ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(change) } : { cache: 'no-store' });
+  let v = null; try { v = await r.json(); } catch (_) {}
+  if (!r.ok) throw new Error(v?.error || (r.status === 404 ? 'Reminders are not configured on this console.' : `${r.status} ${r.statusText}`));
+  return v;
+}
+async function remLoad() {
+  try { rem.doc = await remApi(); rem.err = null; } catch (e) { rem.err = e.message; }
+  rem.loaded = Date.now(); remDraw();
+}
+async function remChange(change) {
+  try { rem.doc = await remApi(change); rem.err = null; } catch (e) { rem.err = e.message; }
+  remDraw();
+}
+const FLAG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3 1.5v13h1.5V9.6h7.2l-1.4-3.05L11.7 3.5H4.5V1.5z"/></svg>';
+function remView() { return '<div class="rem" id="rem">' + remHtml() + '</div>'; }
+function remHtml() {
+  if (rem.err && !rem.doc) return `<p class="msg-err">${esc(rem.err)}</p>`;
+  if (!rem.doc) return '<p class="muted">Loading reminders…</p>';
+  const { lists, items } = rem.doc;
+  const open = items.filter(i => !i.done);
+  const count = id => open.filter(i => i.list === id).length;
+  const list = lists.find(l => l.id === rem.list);
+  if (rem.list !== 'all' && rem.list !== 'flagged' && rem.list !== 'done' && !list) rem.list = 'all';
+  const smart = [['all', 'All', open.length, '#5F6B7A'], ['flagged', 'Flagged', open.filter(i => i.flagged).length, '#FF9500'], ['done', 'Completed', items.length - open.length, '#8E8E93']];
+  const side = `<aside class="rem-side">
+    <div class="rem-smart">${smart.map(([id, name, n, c]) => `<button type="button" class="rem-card" data-rem-list="${id}" aria-pressed="${rem.list === id}"><i style="background:${c}"></i><b>${n}</b><span>${name}</span></button>`).join('')}</div>
+    <div class="rem-h">My Lists</div>
+    ${lists.map(l => `<button type="button" class="rem-l" data-rem-list="${l.id}" aria-pressed="${rem.list === l.id}"><i style="background:${esc(l.color)}"></i><span>${esc(l.name)}</span><em>${count(l.id)}</em></button>`).join('')}
+    ${rem.adding ? '<input class="rem-newlist" id="rem-newlist" placeholder="List name" autocomplete="off">' : '<button type="button" class="rem-add" data-rem-addlist>+ Add List</button>'}
+  </aside>`;
+  const picker = `<select class="rem-pick" data-rem-pick aria-label="List">${smart.map(([id, name]) => `<option value="${id}"${rem.list === id ? ' selected' : ''}>${name}</option>`).join('')}${lists.map(l => `<option value="${l.id}"${rem.list === l.id ? ' selected' : ''}>${esc(l.name)}</option>`).join('')}</select>`;
+  const color = list?.color || (rem.list === 'flagged' ? '#FF9500' : rem.list === 'done' ? '#8E8E93' : 'var(--fg)');
+  const title = list?.name || { all: 'All', flagged: 'Flagged', done: 'Completed' }[rem.list];
+  let shown = rem.list === 'all' ? items : rem.list === 'flagged' ? items.filter(i => i.flagged) : rem.list === 'done' ? items.filter(i => i.done) : items.filter(i => i.list === rem.list);
+  const doneHere = shown.filter(i => i.done).length;
+  if (rem.list !== 'done' && !rem.showDone) shown = shown.filter(i => !i.done);
+  const listOf = i => lists.find(l => l.id === i.list);
+  const row = i => `<div class="rem-item${i.done ? ' done' : ''}" data-rem-item="${i.id}">
+    <button type="button" class="rem-check" data-rem-check="${i.id}" style="--c:${esc(listOf(i)?.color || '#8E8E93')}" aria-pressed="${i.done}" aria-label="${i.done ? 'Mark not done' : 'Complete'}"></button>
+    <div class="rem-body">
+      <input class="rem-title" data-rem-field="title" value="${esc(i.title)}" aria-label="Title">
+      <input class="rem-notes" data-rem-field="notes" value="${esc(i.notes || '')}" placeholder="Notes" aria-label="Notes">
+      ${rem.list === 'all' || rem.list === 'flagged' || rem.list === 'done' ? `<span class="rem-in" style="color:${esc(listOf(i)?.color || 'inherit')}">${esc(listOf(i)?.name || '')}</span>` : ''}
+    </div>
+    <button type="button" class="rem-flag${i.flagged ? ' on' : ''}" data-rem-flag="${i.id}" aria-pressed="${i.flagged}" aria-label="Flag" title="Flag">${FLAG}</button>
+    <button type="button" class="rem-del" data-rem-del="${i.id}" aria-label="Delete" title="Delete">${tileIcon.close}</button>
+  </div>`;
+  const canAdd = !!list;
+  return `${side}<section class="rem-main">${picker}
+    <div class="rem-top"><h2 style="color:${color}">${esc(title)}</h2><span class="rem-n" style="color:${color}">${shown.filter(i => !i.done).length || ''}</span></div>
+    ${rem.err ? `<p class="msg-err">${esc(rem.err)}</p>` : ''}
+    <div class="rem-items">${shown.map(row).join('') || (canAdd ? '' : '<p class="muted">Nothing here.</p>')}</div>
+    ${canAdd ? `<div class="rem-new"><span style="color:${esc(list.color)}">+</span><input id="rem-new" placeholder="New Reminder" autocomplete="off"></div>` : ''}
+    ${rem.list !== 'done' && doneHere ? `<button type="button" class="rem-showdone" data-rem-showdone>${rem.showDone ? 'Hide' : 'Show'} completed (${doneHere})</button>` : ''}
+  </section>`;
+}
+function remDraw() {
+  const box = $('rem'); if (!box) return;
+  const f = document.activeElement, keep = f && box.contains(f) ? { id: f.id, item: f.closest('[data-rem-item]')?.dataset.remItem, field: f.dataset.remField, pos: f.selectionStart } : null;
+  box.innerHTML = remHtml();
+  if (keep) {
+    const el = keep.id ? $(keep.id) : box.querySelector(`[data-rem-item="${keep.item}"] [data-rem-field="${keep.field}"]`);
+    if (el) { el.focus(); try { el.setSelectionRange(keep.pos, keep.pos); } catch (_) {} }
+  }
+}
+$('view').addEventListener('click', e => {
+  const t = e.target.closest && e.target.closest('[data-rem-list],[data-rem-check],[data-rem-flag],[data-rem-del],[data-rem-addlist],[data-rem-showdone]');
+  if (!t || !t.closest('#rem')) return;
+  if (t.dataset.remList) { const v = t.dataset.remList; rem.list = /^\d+$/.test(v) ? +v : v; remDraw(); return; }
+  if (t.dataset.remCheck) { const i = rem.doc.items.find(x => x.id === +t.dataset.remCheck); remChange({ op: 'update_item', id: i.id, done: !i.done }); return; }
+  if (t.dataset.remFlag) { const i = rem.doc.items.find(x => x.id === +t.dataset.remFlag); remChange({ op: 'update_item', id: i.id, flagged: !i.flagged }); return; }
+  if (t.dataset.remDel) { remChange({ op: 'delete_item', id: +t.dataset.remDel }); return; }
+  if ('remAddlist' in t.dataset) { rem.adding = true; remDraw(); $('rem-newlist')?.focus(); return; }
+  if ('remShowdone' in t.dataset) { rem.showDone = !rem.showDone; remDraw(); }
+});
+$('view').addEventListener('change', e => {
+  if (e.target.dataset?.remPick !== undefined && e.target.closest('#rem')) { const v = e.target.value; rem.list = /^\d+$/.test(v) ? +v : v; remDraw(); return; }
+  const f = e.target.dataset?.remField; if (!f || !e.target.closest('#rem')) return;
+  const id = +e.target.closest('[data-rem-item]').dataset.remItem, item = rem.doc.items.find(x => x.id === id);
+  if ((item[f] || '') !== e.target.value) remChange({ op: 'update_item', id, [f]: e.target.value });
+});
+$('view').addEventListener('keydown', e => {
+  if (!e.target.closest || !e.target.closest('#rem') || e.key !== 'Enter') return;
+  if (e.target.id === 'rem-new' && e.target.value.trim()) { const title = e.target.value; e.target.value = ''; remChange({ op: 'add_item', list: rem.list, title }); return; }
+  if (e.target.id === 'rem-newlist') { const name = e.target.value.trim(); rem.adding = false; if (name) remChange({ op: 'add_list', name }); else remDraw(); return; }
+  if (e.target.dataset.remField) e.target.blur();
+});
+$('view').addEventListener('focusout', e => { if (e.target.id === 'rem-newlist' && !e.target.value.trim()) { rem.adding = false; setTimeout(remDraw); } });
+// Keep it current, but never under someone typing.
+setInterval(() => { const box = $('rem'); if (box && !box.contains(document.activeElement) && Date.now() - rem.loaded > 15000) remLoad(); }, 5000);
+
 // One view's HTML, for the page or for a workspace tile.
 function viewHtml(tab) {
   return tab === 'overview' ? topology()
@@ -1476,14 +1611,15 @@ function viewHtml(tab) {
     : tab === 'shell' ? shellView()
     : tab === 'docs' ? docsWidget()
     : tab === 'schedule' ? scheduleView()
+    : tab === 'roadmap' ? remView()
     : tab === 'workspace' ? workspaceView() : collectionView();
 }
 
 // Workspace: tiles, each showing one view. Split right or down, change a
 // tile's view, close it, drag the dividers; the layout is kept per browser.
-const VIEWS = { docs: 'Docs', overview: 'System graph', schedule: 'Schedule', market: 'Market', prices: 'Prices', accounts: 'Accounts and equity', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
+const VIEWS = { roadmap: 'Roadmap', docs: 'Docs', overview: 'System graph', schedule: 'Schedule', market: 'Market', prices: 'Prices', accounts: 'Accounts and equity', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
 // Views that hold their own state (forms, input) and update themselves.
-const STEADY = new Set(['jobs', 'shell', 'data', 'storage']);
+const STEADY = new Set(['jobs', 'shell', 'data', 'storage', 'roadmap']);
 let wsSeq = 1;
 const wsDefault = () => ({ dir: 'row', ratio: 0.6, a: { view: 'market' }, b: { dir: 'col', ratio: 0.5, a: { view: 'accounts' }, b: { view: 'shell' } } });
 state.ws = (() => { try { const v = JSON.parse(localStorage.getItem('tinytrader-workspace')); if (v && (v.view || v.dir)) return v; } catch (_) {} return wsDefault(); })();
@@ -1561,6 +1697,7 @@ $('view').addEventListener('pointerdown', e => {
 const LAYOUTS = {
   Market: () => ({ dir: 'row', ratio: 0.68, a: { dir: 'col', ratio: 0.5, a: { view: 'prices' }, b: { view: 'accounts' } }, b: { dir: 'col', ratio: 0.6, a: { view: 'news' }, b: { view: 'calendar' } } }),
   Operations: () => ({ dir: 'row', ratio: 0.62, a: { dir: 'col', ratio: 0.5, a: { view: 'overview' }, b: { view: 'schedule' } }, b: { dir: 'col', ratio: 0.55, a: { view: 'services' }, b: { view: 'shell' } } }),
+  Roadmap: () => ({ view: 'roadmap' }),
   Data: () => ({ dir: 'row', ratio: 0.55, a: { view: 'jobs' }, b: { dir: 'col', ratio: 0.55, a: { view: 'data' }, b: { view: 'storage' } } }),
 }
 let wsFocus = null;
@@ -1660,6 +1797,12 @@ const lay = { list: [], current: null };
     try { earlier = (JSON.parse(localStorage.getItem('tinytrader-layouts')) || []).filter(l => !builtin.has(l.name)); } catch (_) {}
     lay.list = [...Object.entries(LAYOUTS).map(([name, make]) => ({ name, tree: make() })), ...earlier];
     lay.current = 'Market';
+  }
+  // New built-in workspaces join saved lists once.
+  for (const name of ['Roadmap']) {
+    let seen = []; try { seen = JSON.parse(localStorage.getItem('tinytrader-workspaces-offered')) || []; } catch (_) {}
+    if (!seen.includes(name) && LAYOUTS[name] && !lay.list.some(l => l.name === name)) lay.list.push({ name, tree: LAYOUTS[name]() });
+    try { localStorage.setItem('tinytrader-workspaces-offered', JSON.stringify([...new Set([...seen, name])])); } catch (_) {}
   }
   if (!lay.list.some(l => l.name === lay.current)) lay.current = lay.list[0].name;
 })();
@@ -1794,6 +1937,7 @@ function render() {
   document.documentElement.style.setProperty('--top-h', document.querySelector('.top').offsetHeight + 'px');
   $('view').innerHTML = viewHtml(state.tab);
   if ($('jobs-list')) jobsOpened();
+  if ($('rem')) remLoad();
   if ($('ds-filter') && state.dsFilter) $('ds-filter').dispatchEvent(new Event('input', { bubbles: true }));
   { const out = $('term-out'); if (out) out.scrollTop = out.scrollHeight; }
   if (openDetails) { const d = document.querySelector('.detail > details'); if (d) d.open = true; }
