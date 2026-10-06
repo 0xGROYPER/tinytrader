@@ -1552,12 +1552,13 @@ function remHtml() {
     <button type="button" class="rem-flag${i.flagged ? ' on' : ''}" data-rem-flag="${i.id}" aria-pressed="${i.flagged}" aria-label="Flag" title="Flag">${FLAG}</button>
     <button type="button" class="rem-del" data-rem-del="${i.id}" aria-label="Delete" title="Delete">${tileIcon.close}</button>
   </div>`;
-  const canAdd = !!list;
+  // New reminders go to the chosen list, or from All, Flagged and Completed to the first list.
+  const target = list || lists[0], canAdd = !!target;
   return `${side}<section class="rem-main">${picker}
     <div class="rem-top"><h2 style="color:${color}">${esc(title)}</h2><span class="rem-n" style="color:${color}">${shown.filter(i => !i.done).length || ''}</span></div>
     ${rem.err ? `<p class="msg-err">${esc(rem.err)}</p>` : ''}
     <div class="rem-items">${shown.map(row).join('') || (canAdd ? '' : '<p class="muted">Nothing here.</p>')}</div>
-    ${canAdd ? `<div class="rem-new"><span style="color:${esc(list.color)}">+</span><input id="rem-new" placeholder="New Reminder" autocomplete="off"></div>` : ''}
+    ${canAdd ? `<div class="rem-new"><span style="color:${esc(target.color)}">+</span><input id="rem-new" placeholder="New Reminder${list ? '' : ' in ' + esc(target.name)}" autocomplete="off"></div>` : ''}
     ${rem.list !== 'done' && doneHere ? `<button type="button" class="rem-showdone" data-rem-showdone>${rem.showDone ? 'Hide' : 'Show'} completed (${doneHere})</button>` : ''}
   </section>`;
 }
@@ -1588,7 +1589,10 @@ $('view').addEventListener('change', e => {
 });
 $('view').addEventListener('keydown', e => {
   if (!e.target.closest || !e.target.closest('#rem') || e.key !== 'Enter') return;
-  if (e.target.id === 'rem-new' && e.target.value.trim()) { const title = e.target.value; e.target.value = ''; remChange({ op: 'add_item', list: rem.list, title }); return; }
+  if (e.target.id === 'rem-new' && e.target.value.trim()) {
+    const title = e.target.value, target = rem.doc.lists.find(l => l.id === rem.list) || rem.doc.lists[0];
+    e.target.value = ''; remChange({ op: 'add_item', list: target.id, title, flagged: rem.list === 'flagged' }); return;
+  }
   if (e.target.id === 'rem-newlist') { const name = e.target.value.trim(); rem.adding = false; if (name) remChange({ op: 'add_list', name }); else remDraw(); return; }
   if (e.target.dataset.remField) e.target.blur();
 });
