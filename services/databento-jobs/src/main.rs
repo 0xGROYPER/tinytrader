@@ -304,7 +304,23 @@ async fn main() {
             jobs.paused_until.store(0, Ordering::Relaxed);
         }
         match refresh(&jobs).await {
-            Ok(n) => observer.set_state(State::Ready, &format!("{n} jobs")),
+            Ok(r) if !r.unread.is_empty() => observer.set_state(
+                State::Degraded,
+                &format!(
+                    "{} jobs; Databento couldn't be read for {}",
+                    r.jobs,
+                    r.unread.join(", ")
+                ),
+            ),
+            Ok(r) if !r.stale.is_empty() => observer.set_state(
+                State::Ready,
+                &format!(
+                    "{} jobs (Databento slow; last-known details for {})",
+                    r.jobs,
+                    r.stale.len()
+                ),
+            ),
+            Ok(r) => observer.set_state(State::Ready, &format!("{} jobs", r.jobs)),
             Err(e) => observer.set_state(State::Degraded, &e),
         }
         tokio::time::sleep(every).await;
@@ -313,7 +329,26 @@ async fn main() {
 
 /// Read the jobs list and the store's holdings, and start downloads of
 /// followed jobs that are done.
-async fn refresh(jobs: &Shared) -> Result<usize, String> {
+/// The first line of an API error, without an HTML error page.
+fn brief(e: &str) -> String {
+    e.split('<')
+        .next()
+        .unwrap_or(e)
+        .trim()
+        .trim_end_matches(':')
+        .chars()
+        .take(120)
+        .collect()
+}
+
+/// How a refresh went: how many jobs, and which Databento couldn't answer for.
+struct Refreshed {
+    jobs: usize,
+    stale: Vec<String>,
+    unread: Vec<String>,
+}
+
+async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
     let short = {
         let mut db = jobs.db.lock().await;
         db.batch()
@@ -337,26 +372,40 @@ async fn refresh(jobs: &Shared) -> Result<usize, String> {
         Err(_) => Value::Null,
     };
     let mut out = Vec::new();
+    // A finished job's details never change; others are read again each
+    // round. When Databento can't answer for one, its last-known details
+    // stand in, so one slow call doesn't blank the list.
+    let (mut stale, mut unread) = (Vec::new(), Vec::new());
     for s in &short {
         let known = lock(&jobs.details).get(&s.id).cloned();
         let job = match known {
-            Some(j) => j,
-            None => {
-                let mut db = jobs.db.lock().await;
-                match db.batch().get_job_details(&s.id).await {
-                    Ok(j) => j,
-                    Err(e) => return Err(format!("job {}: {e}", s.id)),
+            Some(j) if j.state == JobState::Done => j,
+            known => {
+                let fetched = {
+                    let mut db = jobs.db.lock().await;
+                    db.batch().get_job_details(&s.id).await
+                };
+                match (fetched, known) {
+                    (Ok(j), _) => j,
+                    (Err(e), Some(j)) => {
+                        stale.push(format!("{} ({})", s.id, brief(&e.to_string())));
+                        j
+                    }
+                    (Err(e), None) => {
+                        unread.push(format!("{} ({})", s.id, brief(&e.to_string())));
+                        continue;
+                    }
                 }
             }
         };
-        if job.state == JobState::Done {
-            lock(&jobs.details).insert(job.id.clone(), job.clone());
-            if held[&job.id].is_null() && !lock(&jobs.delivered).contains_key(&job.id) {
-                let files = jobs.db.lock().await.batch().list_files(&job.id).await;
-                if let Ok(files) = files {
-                    lock(&jobs.delivered)
-                        .insert(job.id.clone(), files.iter().map(|f| f.size).sum());
-                }
+        lock(&jobs.details).insert(job.id.clone(), job.clone());
+        if job.state == JobState::Done
+            && held[&job.id].is_null()
+            && !lock(&jobs.delivered).contains_key(&job.id)
+        {
+            let files = jobs.db.lock().await.batch().list_files(&job.id).await;
+            if let Ok(files) = files {
+                lock(&jobs.delivered).insert(job.id.clone(), files.iter().map(|f| f.size).sum());
             }
         }
         out.push(job);
@@ -382,7 +431,11 @@ async fn refresh(jobs: &Shared) -> Result<usize, String> {
         lock(&jobs.follow).remove(&id);
         start_download(jobs, id);
     }
-    Ok(out.len())
+    Ok(Refreshed {
+        jobs: out.len(),
+        stale,
+        unread,
+    })
 }
 
 /// `bytes` is what downloading delivers (compressed); Databento's own job
