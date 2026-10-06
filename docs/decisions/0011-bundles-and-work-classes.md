@@ -44,8 +44,8 @@ Every service and automation has one class:
 
 | Class | Examples | Rule |
 |---|---|---|
-| capture | live data that can't be fetched again later, such as the OPRA relays and recorders | Never yields. Protected. |
-| interactive | the console, store reads, pricing a job, live feeds whose history the provider keeps (the IEX relay), the accounts session | Runs; kept light. |
+| capture | live feeds read in real time that the provider cuts or skips when read slowly, such as the OPRA relays (Databento's live gateway skips records for a slow reader) | Never yields. Protected. |
+| interactive | the console, store reads, pricing a job, live feeds nothing trades on in the moment (the IEX relay), the accounts session | Runs; kept light. |
 | background | downloads, filing, copies, hash checks, backtests, builds | Runs while no capture work is live, and throttled even then. |
 
 Background work follows three rules:
