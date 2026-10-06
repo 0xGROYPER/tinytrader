@@ -20,6 +20,8 @@
   --grid: #E3EAF2; --up: #1E8A5A; --down: #C8363F;
   --sans: 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif;
   --mono: 'Inconsolata', ui-monospace, 'SF Mono', Menlo, monospace;
+  /* The interface is monospace, after tinygrad; long reading stays proportional. */
+  --ui: var(--mono);
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #0D141F; --surface: #131C2A; --line: #26344A; --line-soft: #1B2636; --nav-bg: #101827; --nav-hover: rgba(142, 195, 234, .07);
@@ -45,7 +47,8 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; }
-body { background: var(--bg); color: var(--fg); font: 15px/1.5 var(--sans); }
+body { background: var(--bg); color: var(--fg); font: 15px/1.5 var(--ui); }
+.prose, .story p { font-family: var(--sans); }
 h1, h2 { text-wrap: balance; }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .muted { color: var(--muted); }
@@ -54,9 +57,10 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
 .top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line);
   display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; }
 .brand { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
-.brand b { font-weight: 650; font-size: 21px; letter-spacing: -.01em; }
-.home { display: inline-flex; align-items: center; gap: 10px; color: var(--fg); text-decoration: none; border-radius: 6px; }
-.home:hover b { color: var(--accent); }
+.home { display: inline-flex; align-items: center; color: var(--fg); text-decoration: none; border-radius: 4px; padding: 4px 2px; }
+.home:hover { color: var(--accent); }
+/* The wordmark is drawn from a 5-row bitmap font as squares, so it stays crisp. */
+.wordmark { display: block; height: 25px; width: auto; }
 
 .icon-btn { width: 46px; height: 46px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); cursor: pointer; }
 .icon-btn:hover { background: var(--surface); }
@@ -110,7 +114,7 @@ h2 { margin: 0; font-size: 18px; font-weight: 600; }
 .node:hover rect { stroke: var(--accent); }
 .node.sel rect { stroke: var(--accent); stroke-width: 2.2; }
 .n-label { font: 600 13px var(--mono); fill: var(--fg); pointer-events: none; }
-.n-sub { font: 12px var(--sans); fill: var(--muted); pointer-events: none; }
+.n-sub { font: 12px var(--ui); fill: var(--muted); pointer-events: none; }
 .node.s-warn .n-sub { fill: var(--warn); } .node.s-crit .n-sub { fill: var(--crit); }
 .sdot { fill: var(--ok); } .s-warn .sdot { fill: var(--warn-mark); } .s-crit .sdot { fill: var(--crit-mark); } .s-idle .sdot { fill: var(--idle); }
 .e { fill: none; stroke-width: 1.8; }
@@ -118,7 +122,7 @@ h2 { margin: 0; font-size: 18px; font-weight: 600; }
 .e-flow.on { animation: flow 1.2s linear infinite; }
 .e-read { stroke: var(--muted); stroke-dasharray: 1.5 4; }
 .arrhead { fill: var(--muted); }
-.e-label { font: 12px var(--sans); fill: var(--fg-2); paint-order: stroke; stroke: var(--surface); stroke-width: 5px; stroke-linejoin: round; }
+.e-label { font: 12px var(--ui); fill: var(--fg-2); paint-order: stroke; stroke: var(--surface); stroke-width: 5px; stroke-linejoin: round; }
 @keyframes flow { to { stroke-dashoffset: -22; } }
 @media (prefers-reduced-motion: reduce) { .e-flow.on { animation: none; } }
 
@@ -144,8 +148,8 @@ details summary { cursor: pointer; color: var(--accent); font-size: 14px; }
 .card .foot { font-size: 13px; color: var(--muted); }
 .pos { color: var(--up); } .neg { color: var(--down); }
 tr.today td { background: var(--accent-soft); }
-.acct h3 { display: flex; align-items: center; gap: 8px; font-family: var(--sans); font-weight: 600; }
-.env { font: 600 11px var(--sans); letter-spacing: .06em; text-transform: uppercase; border-radius: 4px; padding: 2px 7px; }
+.acct h3 { display: flex; align-items: center; gap: 8px; font-family: var(--ui); font-weight: 600; }
+.env { font: 600 11px var(--ui); letter-spacing: .06em; text-transform: uppercase; border-radius: 4px; padding: 2px 7px; }
 .env-live { background: var(--accent-soft); color: var(--accent); } .env-paper { background: var(--surface); color: var(--muted); border: 1px solid var(--line); }
 .acct-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px 16px; margin: 2px 0; }
 .acct-stats div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -217,7 +221,7 @@ tr:last-child td { border-bottom: 0; }
   .mobile-only { display: inline-block; margin-bottom: 10px; }
   .nav .mobile-only { display: flex; margin: 0; }
 }
-.back { align-self: flex-start; border: 0; background: none; color: var(--accent); font: 500 14px var(--sans); cursor: pointer; padding: 4px 0; }
+.back { align-self: flex-start; border: 0; background: none; color: var(--accent); font: 500 14px var(--ui); cursor: pointer; padding: 4px 0; }
 .prose { flex: 999 1 420px; min-width: 0; max-width: 76ch; color: var(--fg-2); line-height: 1.65; }
 .prose .path { font: 12px var(--mono); color: var(--muted); }
 .prose h1 { color: var(--fg); font-size: 26px; margin: 4px 0 12px; }
@@ -234,7 +238,7 @@ tr:last-child td { border-bottom: 0; }
 .events { border-top: 1px solid var(--line-soft); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
 .ev-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
 .ev-head b { font-size: 14px; }
-.ev-head .btn-sm { margin-left: auto; min-height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 500 13px var(--sans); cursor: pointer; }
+.ev-head .btn-sm { margin-left: auto; min-height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 500 13px var(--ui); cursor: pointer; }
 .ev-head .btn-sm:hover { background: var(--surface); }
 .ev-list { max-height: 340px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .ev-row { border-bottom: 1px solid var(--line-soft); }
@@ -253,7 +257,7 @@ tr:last-child td { border-bottom: 0; }
 <body>
 <header class="top">
   <div class="brand">
-    <a class="home" href="#market" title="Home"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke-width="1.8" aria-hidden="true"><path d="M12 2.5 20.2 7.25v9.5L12 21.5 3.8 16.75v-9.5Z" style="stroke:var(--accent-mark)"/><path d="M12 7.5 16 9.8v4.4L12 16.5 8 14.2V9.8Z" style="stroke:var(--accent-2)"/></svg><b>tinytrader</b></a>
+    <a class="home" href="#market" title="tinytrader: home"><svg class="wordmark" viewBox="0 0 37 5" width="185" height="25" fill="currentColor" shape-rendering="crispEdges" role="img" aria-label="tinytrader"><rect x="1" y="0" width="1" height="1"/><rect x="0" y="1" width="1" height="1"/><rect x="1" y="1" width="1" height="1"/><rect x="2" y="1" width="1" height="1"/><rect x="1" y="2" width="1" height="1"/><rect x="1" y="3" width="1" height="1"/><rect x="2" y="3" width="1" height="1"/><rect x="4" y="0" width="1" height="1"/><rect x="4" y="2" width="1" height="1"/><rect x="4" y="3" width="1" height="1"/><rect x="6" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/><rect x="6" y="2" width="1" height="1"/><rect x="8" y="2" width="1" height="1"/><rect x="6" y="3" width="1" height="1"/><rect x="8" y="3" width="1" height="1"/><rect x="10" y="1" width="1" height="1"/><rect x="12" y="1" width="1" height="1"/><rect x="10" y="2" width="1" height="1"/><rect x="11" y="2" width="1" height="1"/><rect x="12" y="2" width="1" height="1"/><rect x="12" y="3" width="1" height="1"/><rect x="10" y="4" width="1" height="1"/><rect x="11" y="4" width="1" height="1"/><rect x="15" y="0" width="1" height="1"/><rect x="14" y="1" width="1" height="1"/><rect x="15" y="1" width="1" height="1"/><rect x="16" y="1" width="1" height="1"/><rect x="15" y="2" width="1" height="1"/><rect x="15" y="3" width="1" height="1"/><rect x="16" y="3" width="1" height="1"/><rect x="18" y="1" width="1" height="1"/><rect x="19" y="1" width="1" height="1"/><rect x="20" y="1" width="1" height="1"/><rect x="18" y="2" width="1" height="1"/><rect x="18" y="3" width="1" height="1"/><rect x="22" y="1" width="1" height="1"/><rect x="23" y="1" width="1" height="1"/><rect x="23" y="2" width="1" height="1"/><rect x="24" y="2" width="1" height="1"/><rect x="22" y="3" width="1" height="1"/><rect x="23" y="3" width="1" height="1"/><rect x="24" y="3" width="1" height="1"/><rect x="28" y="0" width="1" height="1"/><rect x="27" y="1" width="1" height="1"/><rect x="28" y="1" width="1" height="1"/><rect x="26" y="2" width="1" height="1"/><rect x="28" y="2" width="1" height="1"/><rect x="27" y="3" width="1" height="1"/><rect x="28" y="3" width="1" height="1"/><rect x="30" y="1" width="1" height="1"/><rect x="31" y="1" width="1" height="1"/><rect x="32" y="1" width="1" height="1"/><rect x="30" y="2" width="1" height="1"/><rect x="31" y="2" width="1" height="1"/><rect x="30" y="3" width="1" height="1"/><rect x="31" y="3" width="1" height="1"/><rect x="32" y="3" width="1" height="1"/><rect x="34" y="1" width="1" height="1"/><rect x="35" y="1" width="1" height="1"/><rect x="36" y="1" width="1" height="1"/><rect x="34" y="2" width="1" height="1"/><rect x="34" y="3" width="1" height="1"/></svg></a>
   </div>
   <div class="top-right">
     <button type="button" class="icon-btn" id="theme-btn"></button>
@@ -548,7 +552,7 @@ function cards() {
       }).filter(Boolean).join(' · ');
       const pct = first ? ((chg / first) * 100).toFixed(3) : '0';
       return `<article class="card">
-        <h3>${esc((panel.title || '{key}').replace('{key}', key))} <span class="muted" style="font-family:var(--sans);font-size:12px">via ${esc(svc?.label || panel.service)}</span></h3>
+        <h3>${esc((panel.title || '{key}').replace('{key}', key))} <span class="muted" style="font-family:var(--ui);font-size:12px">via ${esc(svc?.label || panel.service)}</span></h3>
         <div class="val"><span class="big">${fmt(last, panel)}</span>${chg != null ? `<span class="chg ${cls}">${chg >= 0 ? '+' : '−'}${fmt(Math.abs(chg), { ...panel, prefix: '', suffix: '' })} (${pct}%) ${span}</span>` : ''}</div>
         <div class="chart" data-chart="${esc(panel.service)}|${esc(panel.source || 'recent')}|${esc(key)}" data-decimals="${panel.decimals ?? 2}"></div>
         <div class="foot">${esc(foot)}</div>
@@ -730,7 +734,7 @@ function datasetPanel(r, d) {
     }
   }
   return `<section class="panel">
-    <div class="sec-head" style="margin:0"><h2 class="mono" style="font-weight:500">${esc(d.id)} <span class="muted" style="font-size:13px;font-family:var(--sans)">in ${esc(r.name)}</span></h2></div>
+    <div class="sec-head" style="margin:0"><h2 class="mono" style="font-weight:500">${esc(d.id)} <span class="muted" style="font-size:13px;font-family:var(--ui)">in ${esc(r.name)}</span></h2></div>
     <div class="chips">${schemas.map(x => `<button type="button" class="chip-btn" data-schema="${esc(x)}" aria-pressed="${x === state.dsSchema}">${esc(x)}</button>`).join('')}</div>
     <div class="facts">
       <div><div class="k">Files</div><div class="v">${s.files.toLocaleString()}</div></div>
