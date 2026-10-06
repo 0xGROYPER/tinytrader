@@ -1,7 +1,7 @@
-//! Glacier's extensions to Databento's DBN format.
+//! tinytrader's extensions to Databento's DBN format.
 //!
 //! The official `dbn` crate defines Databento's records; this crate adds the
-//! records Glacier needs that DBN doesn't define yet, and re-exports `dbn` so
+//! records tinytrader needs that DBN doesn't define yet, and re-exports `dbn` so
 //! a consumer uses one dependency for both. Each extension is meant to be
 //! retired once Databento ships an equivalent (for trade conditions, see
 //! Databento's roadmap items for OPRA and US equity trade conditions).

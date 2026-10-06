@@ -24,8 +24,8 @@ use axum::Router;
 use axum::routing::get;
 use clap::Parser;
 use futures_util::{SinkExt as _, StreamExt as _};
-use glacier_observe::{Events, Observer, State, listen_address, unix_seconds};
 use serde_json::{Value, json};
+use tinytrader_observe::{Events, Observer, State, listen_address, unix_seconds};
 use tokio_tungstenite::tungstenite::Message;
 
 const NEWS_URL: &str = "https://data.alpaca.markets/v1beta1/news";
@@ -82,32 +82,32 @@ async fn main() {
         let s = shared.clone();
         observer.set_metrics(move |w| {
             w.counter(
-                "glacier_news_polls_total",
+                "tinytrader_news_polls_total",
                 "Polls of the news feed.",
                 &[],
                 s.polls.load(Ordering::Relaxed) as f64,
             );
             w.counter(
-                "glacier_news_reconnects_total",
+                "tinytrader_news_reconnects_total",
                 "Reconnections to the news stream.",
                 &[],
                 s.reconnects.load(Ordering::Relaxed) as f64,
             );
             w.counter(
-                "glacier_news_errors_total",
+                "tinytrader_news_errors_total",
                 "Failed polls.",
                 &[],
                 s.errors.load(Ordering::Relaxed) as f64,
             );
             w.gauge(
-                "glacier_news_items",
+                "tinytrader_news_items",
                 "Stories held.",
                 &[],
                 lock(&s.items).len() as f64,
             );
             if let Some(at) = *lock(&s.updated_at) {
                 w.gauge(
-                    "glacier_news_last_poll_age_seconds",
+                    "tinytrader_news_last_poll_age_seconds",
                     "Seconds since the last successful poll.",
                     &[],
                     unix_seconds() - at,

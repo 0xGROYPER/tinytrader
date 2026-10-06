@@ -39,7 +39,7 @@
         strictDeps = true;
         # alpaca-live builds OpenSSL from source (vendored), which needs perl.
         nativeBuildInputs = [ pkgs.perl ];
-        pname = "glacier-workspace";
+        pname = "tinytrader-workspace";
         version = "0.1.0";
       };
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -61,15 +61,15 @@
         );
 
       ticker = service "ticker" "Toy service streaming Coinbase public tickers to disk";
-      console = service "console" "Glacier Labs console";
+      console = service "console" "tinytrader console";
       databento-live = service "databento-live" "Example service streaming a Databento live subscription";
       alpaca-live = service "alpaca-live" "Example service streaming Alpaca real-time IEX data";
       dbn-tcp = service "dbn-tcp" "Example service reading a live DBN stream over TCP";
-      glacier-tui = service "glacier-tui" "Terminal view of a Glacier deployment";
+      tinytrader-tui = service "tinytrader-tui" "Terminal view of a tinytrader deployment";
       catalog = service "catalog" "Read-only catalog of data roots";
       alpaca-news = service "alpaca-news" "Example service serving market news from Alpaca (Benzinga)";
       alpaca-account = service "alpaca-account" "Example service serving an Alpaca account's balances and positions";
-      relay = service "relay" "Market data relay: one provider connection served to local clients (glacier.relay/1)";
+      relay = service "relay" "Market data relay: one provider connection served to local clients (tinytrader.relay/1)";
 
     in
     {
@@ -80,7 +80,7 @@
           databento-live
           alpaca-live
           dbn-tcp
-          glacier-tui
+          tinytrader-tui
           catalog
           alpaca-news
           alpaca-account

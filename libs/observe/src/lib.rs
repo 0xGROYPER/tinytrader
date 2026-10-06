@@ -1,4 +1,4 @@
-//! Health and metrics endpoints shared by Glacier services.
+//! Health and metrics endpoints shared by tinytrader services.
 //!
 //! Every long-running service exposes two read-only routes:
 //!
@@ -9,7 +9,7 @@
 //!   draw it without configuration (see [`Observer::describe`]).
 //!
 //! Metric names and the health document are a versioned contract
-//! (`glacier.observe/1`): changes are additive only. Labels stay low
+//! (`tinytrader.observe/1`): changes are additive only. Labels stay low
 //! cardinality: service, venue, product; never per-order or per-instrument ids.
 
 use std::collections::{HashMap, VecDeque};
@@ -25,7 +25,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 
 /// Schema identifier for the health document and metric names.
-pub const SCHEMA: &str = "glacier.observe/1";
+pub const SCHEMA: &str = "tinytrader.observe/1";
 
 /// Lifecycle state reported by `/health`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,8 +177,8 @@ impl Observer {
     pub fn metrics_text(&self) -> String {
         let mut w = MetricsWriter::default();
         w.gauge(
-            "glacier_observe_schema_version",
-            "Version of the glacier.observe metric contract.",
+            "tinytrader_observe_schema_version",
+            "Version of the tinytrader.observe metric contract.",
             &[],
             1.0,
         );
@@ -190,7 +190,7 @@ impl Observer {
         );
         let state = self.state();
         w.gauge(
-            "glacier_ready",
+            "tinytrader_ready",
             "1 when the service reports ready, otherwise 0.",
             &[("service", &self.inner.service)],
             if state == State::Ready { 1.0 } else { 0.0 },
@@ -486,12 +486,12 @@ async fn recent(AxumState(s): AxumState<Series>) -> axum::Json<serde_json::Value
 }
 
 /// The address a service serves its endpoints on: its own variable (such as
-/// `TICKER_LISTEN`) if set, otherwise `GLACIER_LISTEN`, which deployment
+/// `TICKER_LISTEN`) if set, otherwise `TINYTRADER_LISTEN`, which deployment
 /// tooling sets for every service, otherwise `default`.
 #[must_use]
 pub fn listen_address(service_var: &str, default: &str) -> String {
     std::env::var(service_var)
-        .or_else(|_| std::env::var("GLACIER_LISTEN"))
+        .or_else(|_| std::env::var("TINYTRADER_LISTEN"))
         .unwrap_or_else(|_| default.to_owned())
 }
 
@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(text.matches("# HELP demo_total").count(), 1);
         assert!(text.contains("demo_total{product=\"BTC-USD\"} 3"));
         assert!(text.contains("demo_total{product=\"a\\\"b\"} 1"));
-        assert!(text.contains("glacier_ready{service=\"demo\"} 0"));
+        assert!(text.contains("tinytrader_ready{service=\"demo\"} 0"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
-name = "glacier-dbn"
-description = "Glacier's extensions to Databento's DBN format: records the official dbn crate doesn't define yet"
+name = "tinytrader-dbn"
+description = "tinytrader's extensions to Databento's DBN format: records the official dbn crate doesn't define yet"
 edition.workspace = true
 license.workspace = true
 version.workspace = true

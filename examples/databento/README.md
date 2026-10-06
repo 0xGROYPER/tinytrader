@@ -1,6 +1,6 @@
 # Databento example
 
-A Databento live subscription streamed into the Glacier console. Select
+A Databento live subscription streamed into the tinytrader console. Select
 `databento-live` in the deployment graph to watch records arrive.
 
 You need Docker with Compose and a Databento API key whose plan covers the
@@ -34,7 +34,7 @@ Prefer low-volume schemas such as `trades` while trying things out.
 | Service | Does |
 |---|---|
 | `databento-live` | Holds one live session, reconnects with backoff, and serves `/health`, `/metrics` and `/events` on the Compose network. It does not record data. |
-| `console` | The Glacier console at `http://localhost:8080`, reachable from this machine only. |
+| `console` | The tinytrader console at `http://localhost:8080`, reachable from this machine only. |
 | `docker-proxy` | Read-only Docker API for container state. |
 
 Outside market hours an options or futures feed may be quiet: the service

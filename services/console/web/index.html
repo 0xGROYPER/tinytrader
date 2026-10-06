@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Glacier Labs</title>
+<title>tinytrader</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inconsolata:wght@400;500;600&family=Inter:wght@400;500;600&display=swap">
 <style>
@@ -253,7 +253,7 @@ tr:last-child td { border-bottom: 0; }
 <body>
 <header class="top">
   <div class="brand">
-    <a class="home" href="#market" title="Home"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke-width="1.8" aria-hidden="true"><path d="M12 2.5 20.2 7.25v9.5L12 21.5 3.8 16.75v-9.5Z" style="stroke:var(--accent-mark)"/><path d="M12 7.5 16 9.8v4.4L12 16.5 8 14.2V9.8Z" style="stroke:var(--accent-2)"/></svg><b>Glacier Labs</b></a>
+    <a class="home" href="#market" title="Home"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke-width="1.8" aria-hidden="true"><path d="M12 2.5 20.2 7.25v9.5L12 21.5 3.8 16.75v-9.5Z" style="stroke:var(--accent-mark)"/><path d="M12 7.5 16 9.8v4.4L12 16.5 8 14.2V9.8Z" style="stroke:var(--accent-2)"/></svg><b>tinytrader</b></a>
   </div>
   <div class="top-right">
     <button type="button" class="icon-btn" id="theme-btn"></button>
@@ -780,7 +780,7 @@ async function loadCollections() {
 }
 const groupLabel = g => g.split('/').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' › ');
 // The Docs section, after Databento's sidebar: folders form a tree (a
-// group `glacier/decisions` sits inside `glacier`), opening a folder closes
+// group `tinytrader/decisions` sits inside `tinytrader`), opening a folder closes
 // its siblings and opens its first document, and the open document's folders
 // are marked. With one collection its folders are the top level; with
 // several, each collection is a top-level folder.
@@ -976,7 +976,7 @@ function status() {
   $('banner').textContent = problems.join(' ');
 }
 async function loadTopology() {
-  try { const r = await fetch('/api/topology', { cache: 'no-store' }); if (r.ok) { state.topo = await r.json(); document.title = state.topo.name ? `Glacier Labs · ${state.topo.name}` : 'Glacier Labs'; if (state.node === undefined) state.node = state.topo.focus ?? state.topo.services?.[0]?.id ?? null; } } catch (_) {}
+  try { const r = await fetch('/api/topology', { cache: 'no-store' }); if (r.ok) { state.topo = await r.json(); document.title = state.topo.name ? `tinytrader · ${state.topo.name}` : 'tinytrader'; if (state.node === undefined) state.node = state.topo.focus ?? state.topo.services?.[0]?.id ?? null; } } catch (_) {}
 }
 async function poll() {
   try {
@@ -1055,7 +1055,7 @@ const themeIcon = {
   dark: '<svg width="22" height="22" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M16.5 12.5A7 7 0 0 1 7.5 3.5a7 7 0 1 0 9 9Z"/></svg>'
 };
 let themeChoice = null;
-try { const saved = localStorage.getItem('glacier-theme'); if (saved === 'light' || saved === 'dark') themeChoice = saved; } catch (_) {}
+try { const saved = localStorage.getItem('tinytrader-theme'); if (saved === 'light' || saved === 'dark') themeChoice = saved; } catch (_) {}
 function applyTheme() {
   if (themeChoice) document.documentElement.setAttribute('data-theme', themeChoice);
   else document.documentElement.removeAttribute('data-theme');
@@ -1069,7 +1069,7 @@ darkQuery.addEventListener('change', applyTheme);
 $('theme-btn').addEventListener('click', () => {
   const next = (themeChoice || systemTheme()) === 'dark' ? 'light' : 'dark';
   themeChoice = next === systemTheme() ? null : next;
-  try { if (themeChoice) localStorage.setItem('glacier-theme', themeChoice); else localStorage.removeItem('glacier-theme'); } catch (_) {}
+  try { if (themeChoice) localStorage.setItem('tinytrader-theme', themeChoice); else localStorage.removeItem('tinytrader-theme'); } catch (_) {}
   applyTheme();
   drawCharts();
 });

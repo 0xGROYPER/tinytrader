@@ -1,7 +1,7 @@
-# Glacier Labs quickstart: a toy collector and the console, on one machine.
+# tinytrader quickstart: a toy collector and the console, on one machine.
 #   docker compose up --build
 #   open http://localhost:8080
-name: glacier-quickstart
+name: tinytrader-quickstart
 
 # Every service: restarts, rotated logs (Docker keeps them forever by
 # default) and a memory cap.
@@ -17,9 +17,9 @@ services:
       context: ../..
       dockerfile: services/Dockerfile
       args: { SERVICE: ticker }
-    image: glacier/ticker:dev
+    image: tinytrader/ticker:dev
     labels:
-      glacier.observe: "9105"
+      tinytrader.observe: "9105"
     environment:
       TICKER_PRODUCTS: BTC-USD,ETH-USD
       TICKER_DATA_DIR: /data
@@ -35,17 +35,17 @@ services:
       context: ../..
       dockerfile: services/Dockerfile
       args: { SERVICE: console }
-    image: glacier/console:dev
+    image: tinytrader/console:dev
     labels:
-      glacier.observe: "8080"
+      tinytrader.observe: "8080"
     environment:
       CONSOLE_LISTEN: 0.0.0.0:8080
-      CONSOLE_TOPOLOGY: /etc/glacier/topology.json
+      CONSOLE_TOPOLOGY: /etc/tinytrader/topology.json
       CONSOLE_DOCKER: http://docker-proxy:2375
-      CONSOLE_COMPOSE_PROJECT: glacier-quickstart
+      CONSOLE_COMPOSE_PROJECT: tinytrader-quickstart
       CONSOLE_COLLECTIONS: Docs=/srv/docs
     volumes:
-      - ./topology.json:/etc/glacier/topology.json:ro
+      - ./topology.json:/etc/tinytrader/topology.json:ro
       - ../../docs:/srv/docs:ro
     ports:
       - "127.0.0.1:8080:8080"   # this machine only
@@ -58,7 +58,7 @@ services:
   docker-proxy:
     image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
     labels:
-      glacier.role: "Read-only view of the Docker API; the console reads container state through it."
+      tinytrader.role: "Read-only view of the Docker API; the console reads container state through it."
     environment:
       CONTAINERS: 1
       POST: 0

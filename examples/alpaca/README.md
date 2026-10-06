@@ -1,6 +1,6 @@
 # Alpaca example
 
-Alpaca's free real-time IEX trades and quotes streamed into the Glacier
+Alpaca's free real-time IEX trades and quotes streamed into the tinytrader
 console, with market news (supplied by Benzinga through Alpaca) and the
 balances and positions of your account. The home page shows the account,
 charts and news; select `alpaca-live` under **Overview** to watch trades

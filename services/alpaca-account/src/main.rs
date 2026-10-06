@@ -30,8 +30,8 @@ use std::time::Duration;
 use axum::Router;
 use axum::routing::get;
 use clap::{Parser, ValueEnum};
-use glacier_observe::{Events, Observer, Series, State, listen_address, unix_seconds};
 use serde_json::{Map, Value, json};
+use tinytrader_observe::{Events, Observer, Series, State, listen_address, unix_seconds};
 
 /// Account fields served, as Alpaca names them. Everything else, notably
 /// the account number and id, is dropped.
@@ -151,13 +151,13 @@ async fn main() {
         observer.set_metrics(move |w| {
             let l = [("environment", env.name())];
             w.counter(
-                "glacier_account_polls_total",
+                "tinytrader_account_polls_total",
                 "Polls of the account.",
                 &l,
                 s.polls.load(Ordering::Relaxed) as f64,
             );
             w.counter(
-                "glacier_account_errors_total",
+                "tinytrader_account_errors_total",
                 "Failed polls.",
                 &l,
                 s.errors.load(Ordering::Relaxed) as f64,
@@ -165,14 +165,19 @@ async fn main() {
             let doc = lock(&s.doc);
             if let Some(at) = doc["updated_at"].as_f64() {
                 w.gauge(
-                    "glacier_account_last_poll_age_seconds",
+                    "tinytrader_account_last_poll_age_seconds",
                     "Seconds since the last successful poll.",
                     &l,
                     unix_seconds() - at,
                 );
             }
             if let Some(n) = doc["positions"].as_array().map(Vec::len) {
-                w.gauge("glacier_account_positions", "Open positions.", &l, n as f64);
+                w.gauge(
+                    "tinytrader_account_positions",
+                    "Open positions.",
+                    &l,
+                    n as f64,
+                );
             }
         });
     }

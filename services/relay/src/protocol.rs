@@ -1,4 +1,4 @@
-//! The `glacier.relay/1` wire protocol: the client's join request, and the
+//! The `tinytrader.relay/1` wire protocol: the client's join request, and the
 //! DBN records the relay writes besides the provider's own.
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,7 +8,7 @@ use databento::dbn::{ErrorCode, ErrorMsg, Metadata, RecordRef, SystemCode, Syste
 use serde::Deserialize;
 use time::OffsetDateTime;
 
-pub const PROTOCOL: &str = "glacier.relay/1";
+pub const PROTOCOL: &str = "tinytrader.relay/1";
 
 /// The one line of JSON a client sends after connecting.
 #[derive(Debug, Deserialize)]
@@ -84,16 +84,16 @@ mod tests {
 
     #[test]
     fn parses_join_requests() {
-        let j = parse_join(r#"{"protocol":"glacier.relay/1"}"#).unwrap();
+        let j = parse_join(r#"{"protocol":"tinytrader.relay/1"}"#).unwrap();
         assert!(j.start.is_none() && !j.conditions);
         let j = parse_join(
-            r#"{"protocol":"glacier.relay/1","start":"2026-10-05T13:30:00Z","conditions":true}"#,
+            r#"{"protocol":"tinytrader.relay/1","start":"2026-10-05T13:30:00Z","conditions":true}"#,
         )
         .unwrap();
         assert_eq!(j.start.unwrap().unix_timestamp(), 1_791_207_000);
         assert!(j.conditions);
         assert!(parse_join(r#"{"protocol":"hyphae"}"#).is_err());
-        assert!(parse_join(r#"{"protocol":"glacier.relay/1","extra":1}"#).is_err());
+        assert!(parse_join(r#"{"protocol":"tinytrader.relay/1","extra":1}"#).is_err());
         assert!(parse_join("not json").is_err());
     }
 

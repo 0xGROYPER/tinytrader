@@ -1,4 +1,4 @@
-# 0002: The Glacier data store
+# 0002: The tinytrader data store
 
 - **Status:** Accepted
 - **Date:** 2026-10-05
@@ -10,7 +10,7 @@
 
 ## Context
 
-Every Glacier deployment collects, keeps and replays data: live market data
+Every tinytrader deployment collects, keeps and replays data: live market data
 first, later signals, fills and research outputs. Without a shared store,
 each service invents its own layout, recovery and verification, and every
 consumer learns a different set of files.
@@ -18,7 +18,7 @@ consumer learns a different set of files.
 The store should be standard, boring and convenient. Where an established
 convention exists, adopt it. Databento's file conventions are the main
 reference, because they are well designed, widely consumed, and already used
-by Glacier operators who buy historical data:
+by tinytrader operators who buy historical data:
 
 - datasets named `VENUE.FEED` (for example `OPRA.PILLAR`) and lower-case
   schema names (`definition`, `trades`, `mbp-1`);
@@ -57,7 +57,7 @@ Each capture keeps two forms:
 | Form | Purpose | Format |
 |---|---|---|
 | **Raw** | Exactly what the venue sent, with receive timestamps. Source of truth for re-normalization, audits and debugging. | Packet-capture style message log (see [Raw capture](#raw-capture)) |
-| **Normalized** | Typed records for replay, research and strategies. | DBN, zstd-compressed, with Glacier's schema extensions |
+| **Normalized** | Typed records for replay, research and strategies. | DBN, zstd-compressed, with tinytrader's schema extensions |
 
 Derived forms, such as Parquet copies for research, are produced from the
 normalized data, can be regenerated, and are not part of the source of truth.
@@ -108,7 +108,7 @@ Within a provider root:
 - Days are UTC, as in Databento.
 - Dataset names follow Databento's `VENUE.FEED`. For venues Databento doesn't
   cover, the feed part is the venue's own name for the feed:
-  `COINBASE.EXCHANGE`, `KRAKEN.SPOT`, `KRAKEN.FUTURES`. Glacier keeps a short
+  `COINBASE.EXCHANGE`, `KRAKEN.SPOT`, `KRAKEN.FUTURES`. tinytrader keeps a short
   registry of these names (`docs/datasets.md`) so deployments agree.
 - Files hold every symbol by default, one file per dataset, schema and day.
   A dataset that captures only some symbols can opt into a symbol level,
@@ -250,8 +250,8 @@ original messages.
 
 ### Schema extensions
 
-Glacier's custom schemas carry a distinct, versioned name, such as
-`glacier.mbp-1/1`, recorded in each file's metadata. A reader that doesn't
+tinytrader's custom schemas carry a distinct, versioned name, such as
+`tinytrader.mbp-1/1`, recorded in each file's metadata. A reader that doesn't
 know a schema version refuses the file rather than misreading it.
 
 They are implemented by a `dbn-ext` library that wraps the official `dbn`
@@ -291,7 +291,7 @@ recorded as a fact about the data, distinct from a writer's own failure.
 Manifests are the authority. A **SQLite index** built from them answers
 questions quickly: which datasets exist, what ranges they cover, where the
 gaps are, how large they are. The index can be deleted and rebuilt at any
-time with `glacier-store index`, so it needs no backup. The console's Data
+time with `tinytrader-store index`, so it needs no backup. The console's Data
 view reads it.
 
 ### Tiering
@@ -309,21 +309,21 @@ starting over, and nothing is released before it is verified.
 
 ### Reading
 
-- **`glacier-store` (Rust library):** list datasets, read a time range as one
+- **`tinytrader-store` (Rust library):** list datasets, read a time range as one
   record stream across compacted days and sealed segments, verify files.
-- **`glacier-store` (CLI):** `ls`, `verify`, `seal`, `compact`, `sync`,
+- **`tinytrader-store` (CLI):** `ls`, `verify`, `seal`, `compact`, `sync`,
   `index`, `export` (to Parquet).
 - **Bindings for Python and Julia** over the same library, so no consumer
   parses files on its own.
 
 Closed days are ordinary `.dbn.zst` files, so the standard DBN tools and the
-Databento client libraries can read them too, apart from Glacier's custom
+Databento client libraries can read them too, apart from tinytrader's custom
 schemas.
 
 ### Configuration
 
 Each deployment configures its stores as data; nothing about a particular
-deployment lives in Glacier. One format, `store.toml`, holds:
+deployment lives in tinytrader. One format, `store.toml`, holds:
 
 - **roots:** logical names mapped to paths on that machine;
 - **seal policy:** `max_age`, `max_bytes` and `at_day_end`, with defaults per
@@ -331,7 +331,7 @@ deployment lives in Glacier. One format, `store.toml`, holds:
 - **compaction:** when closed days are compacted;
 - **tiering:** destination roots and the age at which data moves.
 
-On NixOS, the `glacier.store` module options write `store.toml`; with Docker,
+On NixOS, the `tinytrader.store` module options write `store.toml`; with Docker,
 the file is mounted into the container. Both use the same format and the same
 documentation.
 

@@ -1,8 +1,8 @@
-# Glacier example: Alpaca's free real-time IEX feed and the Glacier console.
+# tinytrader example: Alpaca's free real-time IEX feed and the tinytrader console.
 #   export APCA_API_KEY_ID=... APCA_API_SECRET_KEY=...   # never commit them
 #   docker compose up --build -d
 #   open http://localhost:8080
-name: glacier-alpaca
+name: tinytrader-alpaca
 
 # Every service: restarts, rotated logs (Docker keeps them forever by
 # default) and a memory cap.
@@ -18,9 +18,9 @@ services:
       context: ../..
       dockerfile: services/Dockerfile
       args: { SERVICE: alpaca-live }
-    image: glacier/alpaca-live:dev
+    image: tinytrader/alpaca-live:dev
     labels:
-      glacier.observe: "9102"
+      tinytrader.observe: "9102"
     environment:
       APCA_API_KEY_ID_FILE: /run/secrets/apca_api_key_id
       APCA_API_SECRET_KEY_FILE: /run/secrets/apca_api_secret_key
@@ -37,9 +37,9 @@ services:
       context: ../..
       dockerfile: services/Dockerfile
       args: { SERVICE: alpaca-news }
-    image: glacier/alpaca-news:dev
+    image: tinytrader/alpaca-news:dev
     labels:
-      glacier.observe: "9106"
+      tinytrader.observe: "9106"
     environment:
       APCA_API_KEY_ID_FILE: /run/secrets/apca_api_key_id
       APCA_API_SECRET_KEY_FILE: /run/secrets/apca_api_secret_key
@@ -57,9 +57,9 @@ services:
       context: ../..
       dockerfile: services/Dockerfile
       args: { SERVICE: alpaca-account }
-    image: glacier/alpaca-account:dev
+    image: tinytrader/alpaca-account:dev
     labels:
-      glacier.observe: "9107"
+      tinytrader.observe: "9107"
     environment:
       APCA_API_KEY_ID_FILE: /run/secrets/apca_api_key_id
       APCA_API_SECRET_KEY_FILE: /run/secrets/apca_api_secret_key
@@ -74,16 +74,16 @@ services:
       context: ../..
       dockerfile: services/Dockerfile
       args: { SERVICE: console }
-    image: glacier/console:dev
+    image: tinytrader/console:dev
     labels:
-      glacier.observe: "8080"
+      tinytrader.observe: "8080"
     environment:
       CONSOLE_LISTEN: 0.0.0.0:8080
-      CONSOLE_TOPOLOGY: /etc/glacier/topology.json
+      CONSOLE_TOPOLOGY: /etc/tinytrader/topology.json
       CONSOLE_DOCKER: http://docker-proxy:2375
-      CONSOLE_COMPOSE_PROJECT: glacier-alpaca
+      CONSOLE_COMPOSE_PROJECT: tinytrader-alpaca
     volumes:
-      - ./topology.json:/etc/glacier/topology.json:ro
+      - ./topology.json:/etc/tinytrader/topology.json:ro
     ports:
       - "127.0.0.1:8080:8080"   # this machine only
     depends_on: [alpaca-live, docker-proxy]
@@ -94,7 +94,7 @@ services:
   docker-proxy:
     image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
     labels:
-      glacier.role: "Read-only view of the Docker API; the console reads container state through it."
+      tinytrader.role: "Read-only view of the Docker API; the console reads container state through it."
     environment:
       CONTAINERS: 1
       POST: 0

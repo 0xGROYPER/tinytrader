@@ -1,10 +1,10 @@
-//! `glacier.trade-conditions/1`: the sale conditions of one trade.
+//! `tinytrader.trade-conditions/1`: the sale conditions of one trade.
 //!
 //! Standard DBN has no field for trade condition codes. This record carries
 //! them beside a trade record, keeping the venue's codes exactly as sent, so
 //! they can be converted to Databento's representation losslessly once one
 //! exists. The byte layout is identical to Hyphae's `TradeConditions`
-//! (rtype `0xD4`, layout revision 1), so stored Hyphae data and Glacier's live
+//! (rtype `0xD4`, layout revision 1), so stored Hyphae data and tinytrader's live
 //! data read the same way.
 //!
 //! | Offset | Type | Field |
@@ -38,7 +38,7 @@ pub const REVISION: u8 = 1;
 /// most four single-character codes.
 pub const MAX_CODES: usize = 4;
 /// The record's name and version, as used in documentation and headers.
-pub const NAME: &str = "glacier.trade-conditions/1";
+pub const NAME: &str = "tinytrader.trade-conditions/1";
 
 /// Whether a reported trade was later changed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

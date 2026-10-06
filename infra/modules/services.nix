@@ -1,27 +1,27 @@
-# glacier.services.<name>: run a Glacier service as a hardened systemd unit,
+# tinytrader.services.<name>: run a tinytrader service as a hardened systemd unit,
 # and describe the host's services for consoles and terminal views.
 #
-#   glacier.services.ticker = {
+#   tinytrader.services.ticker = {
 #     enable = true;
-#     package = glacier.packages.x86_64-linux.ticker;
+#     package = tinytrader.packages.x86_64-linux.ticker;
 #     observe.port = 9105;
 #   };
 #
 # Each service gets its own transient user, a private state directory
-# (/var/lib/glacier/<name>), write access to nothing else unless granted
+# (/var/lib/tinytrader/<name>), write access to nothing else unless granted
 # through `writablePaths`, restart on failure (giving up after repeated fast
 # failures), and resource limits with sensible defaults (`resources`). The
 # journal is capped so logs can't fill the disk.
 #
-# A service with `observe.port` listens there (via GLACIER_LISTEN) and is
-# listed in /etc/glacier/topology.json, which consoles and terminal views on
+# A service with `observe.port` listens there (via TINYTRADER_LISTEN) and is
+# listed in /etc/tinytrader/topology.json, which consoles and terminal views on
 # this host read, so nothing is declared by hand. Health and metrics stay on
 # loopback unless `observe.bind` says otherwise. To show services from other
-# hosts, add their `glacier.topology.exported` lists to `extraServices`.
+# hosts, add their `tinytrader.topology.exported` lists to `extraServices`.
 { config, lib, ... }:
 let
   inherit (lib) mkOption types;
-  enabled = lib.filterAttrs (_: s: s.enable) config.glacier.services;
+  enabled = lib.filterAttrs (_: s: s.enable) config.tinytrader.services;
   observed = lib.filterAttrs (_: s: s.observe.port != null) enabled;
   host = config.networking.hostName;
   # "512M", "1G" or a byte count, as bytes.
@@ -38,7 +38,7 @@ let
       };
     in
     if factor ? ${unit} then number * factor.${unit} else lib.toInt size;
-  cfg = config.glacier.topology;
+  cfg = config.tinytrader.topology;
   # Where a service's endpoints are reached: from another host via the
   # advertised name, locally via loopback when bound to all interfaces, else
   # at the specific address it is bound to.
@@ -62,15 +62,15 @@ let
     }) observed;
 in
 {
-  options.glacier.services = mkOption {
+  options.tinytrader.services = mkOption {
     default = { };
-    description = "Glacier services to run on this host.";
+    description = "tinytrader services to run on this host.";
     type = types.attrsOf (
       types.submodule (
         { name, ... }:
         {
           options = {
-            enable = lib.mkEnableOption "the Glacier ${name} service";
+            enable = lib.mkEnableOption "the tinytrader ${name} service";
             package = mkOption {
               type = types.package;
               description = "Package providing the service; its main program is run.";
@@ -134,7 +134,7 @@ in
     );
   };
 
-  options.glacier.topology = {
+  options.tinytrader.topology = {
     name = mkOption {
       type = types.str;
       default = host;
@@ -172,7 +172,7 @@ in
     file = mkOption {
       type = types.str;
       readOnly = true;
-      default = "/etc/glacier/topology.json";
+      default = "/etc/tinytrader/topology.json";
       description = "Where the generated topology is written.";
     };
     exported = mkOption {
@@ -186,8 +186,8 @@ in
   config = lib.mkIf (enabled != { }) {
     systemd.services = lib.mapAttrs' (
       name: svc:
-      lib.nameValuePair "glacier-${name}" {
-        description = "Glacier ${name}";
+      lib.nameValuePair "tinytrader-${name}" {
+        description = "tinytrader ${name}";
         wantedBy = [ "multi-user.target" ];
         wants = [ "network-online.target" ];
         after = [ "network-online.target" ];
@@ -196,7 +196,7 @@ in
         startLimitBurst = 5;
         environment =
           lib.optionalAttrs (svc.observe.port != null) {
-            GLACIER_LISTEN = "${svc.observe.bind}:${toString svc.observe.port}";
+            TINYTRADER_LISTEN = "${svc.observe.bind}:${toString svc.observe.port}";
           }
           // svc.environment;
         serviceConfig = {
@@ -210,8 +210,8 @@ in
           TasksMax = svc.resources.tasks;
           LimitNOFILE = svc.resources.openFiles;
           DynamicUser = true;
-          StateDirectory = "glacier/${name}";
-          WorkingDirectory = "/var/lib/glacier/${name}";
+          StateDirectory = "tinytrader/${name}";
+          WorkingDirectory = "/var/lib/tinytrader/${name}";
           ReadWritePaths = svc.writablePaths;
           # Sandboxing
           ProtectSystem = "strict";
@@ -253,7 +253,7 @@ in
       MaxRetentionSec=1month
     '';
 
-    environment.etc."glacier/topology.json".text = builtins.toJSON (
+    environment.etc."tinytrader/topology.json".text = builtins.toJSON (
       {
         inherit (cfg) name;
         hosts = [

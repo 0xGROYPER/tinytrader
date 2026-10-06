@@ -1,6 +1,6 @@
 [package]
-name = "glacier-fleet"
-description = "Discovers and polls a Glacier deployment; shared by the web console and terminal UIs"
+name = "tinytrader-fleet"
+description = "Discovers and polls a tinytrader deployment; shared by the web console and terminal UIs"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -9,7 +9,7 @@ version.workspace = true
 workspace = true
 
 [dependencies]
-glacier-observe.workspace = true
+tinytrader-observe.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

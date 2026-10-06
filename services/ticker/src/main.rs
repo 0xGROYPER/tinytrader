@@ -10,7 +10,7 @@
 //! Configuration (environment):
 //! - `TICKER_PRODUCTS`: comma-separated product ids (default `BTC-USD,ETH-USD`)
 //! - `TICKER_DATA_DIR`: output directory (default `./data`)
-//! - `TICKER_LISTEN` (or `GLACIER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9105`)
+//! - `TICKER_LISTEN` (or `TINYTRADER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9105`)
 //! - `TICKER_FEED`: websocket URL (default Coinbase Exchange public feed)
 
 use std::collections::HashMap;
@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
-use glacier_observe::{Events, Observer, Series, State, unix_seconds};
+use tinytrader_observe::{Events, Observer, Series, State, unix_seconds};
 use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_FEED: &str = "wss://ws-feed.exchange.coinbase.com";
@@ -58,7 +58,7 @@ async fn main() {
         .filter(|p| !p.is_empty())
         .collect();
     let data_dir = PathBuf::from(env("TICKER_DATA_DIR", "./data"));
-    let listen = glacier_observe::listen_address("TICKER_LISTEN", "127.0.0.1:9105");
+    let listen = tinytrader_observe::listen_address("TICKER_LISTEN", "127.0.0.1:9105");
     let feed = env("TICKER_FEED", DEFAULT_FEED);
 
     let observer = Observer::new("ticker", env!("CARGO_PKG_VERSION"));
@@ -74,14 +74,14 @@ async fn main() {
         "role": format!("Streams Coinbase tickers for {} to JSON Lines files.", products.join(", ")),
         "upstream": [{ "id": "coinbase", "label": "coinbase", "sub": "public ticker feed", "kind": "flow", "via": "websocket" }],
         "streams": { "events": "/events", "series": "/recent" },
-        "stores": [{ "id": "data", "label": "ticker-data", "sub": "JSON Lines files", "metric": "glacier_ticker_bytes_written_total" }],
+        "stores": [{ "id": "data", "label": "ticker-data", "sub": "JSON Lines files", "metric": "tinytrader_ticker_bytes_written_total" }],
         "panels": [{
             "heading": "Live data",
             "note": "Sampled once per second",
             "decimals": 2,
             "footer": [
-                { "metric": "glacier_ticker_messages_total", "match": "product", "format": "count", "suffix": " messages" },
-                { "metric": "glacier_ticker_last_message_age_seconds", "match": "product", "format": "age", "prefix": "last ", "suffix": " ago" }
+                { "metric": "tinytrader_ticker_messages_total", "match": "product", "format": "count", "suffix": " messages" },
+                { "metric": "tinytrader_ticker_last_message_age_seconds", "match": "product", "format": "age", "prefix": "last ", "suffix": " ago" }
             ]
         }]
     }));
@@ -265,7 +265,7 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>) {
     let s = shared.clone();
     observer.set_metrics(move |w| {
         w.gauge(
-            "glacier_ticker_connected",
+            "tinytrader_ticker_connected",
             "1 while the feed connection is receiving messages.",
             &[],
             if s.connected.load(Ordering::Relaxed) {
@@ -275,33 +275,33 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>) {
             },
         );
         w.counter(
-            "glacier_ticker_reconnects_total",
+            "tinytrader_ticker_reconnects_total",
             "Reconnect attempts since start.",
             &[],
             s.reconnects.load(Ordering::Relaxed) as f64,
         );
         w.counter(
-            "glacier_ticker_gaps_total",
+            "tinytrader_ticker_gaps_total",
             "Intervals with no connection, counted when streaming resumes.",
             &[],
             s.gaps.load(Ordering::Relaxed) as f64,
         );
         if let Some((start, end)) = *lock(&s.last_gap) {
             w.gauge(
-                "glacier_ticker_last_gap_start_seconds",
+                "tinytrader_ticker_last_gap_start_seconds",
                 "Start of the most recent gap.",
                 &[],
                 start,
             );
             w.gauge(
-                "glacier_ticker_last_gap_end_seconds",
+                "tinytrader_ticker_last_gap_end_seconds",
                 "End of the most recent gap.",
                 &[],
                 end,
             );
         }
         w.counter(
-            "glacier_ticker_bytes_written_total",
+            "tinytrader_ticker_bytes_written_total",
             "Bytes appended to data files.",
             &[],
             s.bytes_written.load(Ordering::Relaxed) as f64,
@@ -313,20 +313,20 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>) {
             let p = &map[name];
             let labels = [("product", name.as_str())];
             w.counter(
-                "glacier_ticker_messages_total",
+                "tinytrader_ticker_messages_total",
                 "Ticker messages received.",
                 &labels,
                 p.messages as f64,
             );
             w.gauge(
-                "glacier_ticker_last_price",
+                "tinytrader_ticker_last_price",
                 "Most recent trade price.",
                 &labels,
                 p.last_price,
             );
             if let Some(at) = p.last_at {
                 w.gauge(
-                    "glacier_ticker_last_message_age_seconds",
+                    "tinytrader_ticker_last_message_age_seconds",
                     "Seconds since the last message for this product.",
                     &labels,
                     at.elapsed().as_secs_f64(),

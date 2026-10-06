@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn lists_and_renders_markdown_without_raw_html() {
-        let dir = std::env::temp_dir().join(format!("glacier-docs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tinytrader-docs-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("decisions")).unwrap();
         std::fs::write(
             dir.join("a.md"),

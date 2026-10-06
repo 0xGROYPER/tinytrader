@@ -12,7 +12,7 @@ workspace = true
 axum.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 futures-util.workspace = true
-glacier-observe.workspace = true
+tinytrader-observe.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 serde_json.workspace = true

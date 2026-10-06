@@ -20,7 +20,7 @@ use databento::dbn::{
     ErrorCode, InstrumentDefMsg, Metadata, RecordHeader, StatMsg, SystemCode, UNDEF_TIMESTAMP,
     rtype,
 };
-use glacier_observe::Events;
+use tinytrader_observe::Events;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::OwnedWriteHalf;
@@ -421,7 +421,7 @@ fn after_cut(chunk: &[u8], cut: &mut u64) -> Vec<u8> {
             break;
         };
         at += len;
-        let market = rec[1] == rtype::MBP_1 || rec[1] == glacier_dbn::trade_conditions::RTYPE;
+        let market = rec[1] == rtype::MBP_1 || rec[1] == tinytrader_dbn::trade_conditions::RTYPE;
         let ts = u64_at(rec, 8).unwrap_or(0);
         if market && *cut != 0 {
             if ts < *cut {
@@ -528,7 +528,7 @@ mod tests {
     async fn forwards_records_and_reports_the_provider() {
         let hub = Arc::new(Hub::new(metadata(), 64, Duration::from_secs(1)));
         let addr = serving(hub.clone()).await;
-        let mut dec = join(&addr, "{\"protocol\":\"glacier.relay/1\"}\n").await;
+        let mut dec = join(&addr, "{\"protocol\":\"tinytrader.relay/1\"}\n").await;
         assert_eq!(dec.metadata().dataset, "TEST.DATA");
         assert_eq!(dec.metadata().version, 3);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -586,7 +586,7 @@ mod tests {
         chunk.extend(statistic(8, 9, 5)); // for the expired instrument
         hub.publish(chunk, 5);
 
-        let mut dec = join(&addr, "{\"protocol\":\"glacier.relay/1\"}\n").await;
+        let mut dec = join(&addr, "{\"protocol\":\"tinytrader.relay/1\"}\n").await;
         let mut seen = Vec::new();
         loop {
             let r = dec.decode_record_ref().await.unwrap().unwrap();
@@ -628,7 +628,7 @@ mod tests {
         let addr = serving(hub.clone()).await;
         // Connect but never read.
         let mut s = TcpStream::connect(&addr).await.unwrap();
-        s.write_all(b"{\"protocol\":\"glacier.relay/1\"}\n")
+        s.write_all(b"{\"protocol\":\"tinytrader.relay/1\"}\n")
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;

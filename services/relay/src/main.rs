@@ -1,9 +1,9 @@
-//! Market data relay (`glacier.relay/1`): holds one provider connection and
+//! Market data relay (`tinytrader.relay/1`): holds one provider connection and
 //! serves its records to any number of local clients. It only forwards; it
 //! keeps no recording. See decision 0006 for the protocol.
 //!
 //! A client connects over TCP and sends one line of JSON,
-//! `{"protocol":"glacier.relay/1"}`, optionally with
+//! `{"protocol":"tinytrader.relay/1"}`, optionally with
 //! `"start":"<RFC 3339 time>"` and `"conditions":true`. The relay answers with
 //! a DBN v3 stream: reference records (definitions, and statistics where the
 //! source has them), any catch-up the source supports, a `ReplayCompleted`
@@ -14,7 +14,7 @@
 //!   reference data only; Databento can't replay `cmbp-1`.
 //! - `alpaca-iex`: Alpaca's IEX quotes and trades as `ALPACA.IEX` MBP-1.
 //!   Catch-up replays history from `start`; `conditions` interleaves a
-//!   `glacier.trade-conditions/1` record after each trade.
+//!   `tinytrader.trade-conditions/1` record after each trade.
 //!
 //! Credentials: `DATABENTO_API_KEY`, or `APCA_API_KEY_ID` and
 //! `APCA_API_SECRET_KEY`; each also as `<NAME>_FILE` naming a file.
@@ -31,9 +31,9 @@ use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use databento::Databento;
-use glacier_observe::{Observer, State, listen_address};
 use hub::{ClientGuard, Hub, Upstream};
 use serde_json::json;
+use tinytrader_observe::{Observer, State, listen_address};
 
 use ::databento::dbn::{Metadata, SType, Schema};
 
@@ -246,49 +246,49 @@ fn register_metrics(observer: &Observer, hub: &Arc<Hub>) {
     observer.set_metrics(move |w| {
         let c = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed) as f64;
         w.gauge(
-            "glacier_relay_clients",
+            "tinytrader_relay_clients",
             "Connected clients.",
             &[],
             c(&hub.clients),
         );
         w.gauge(
-            "glacier_relay_reference_records",
+            "tinytrader_relay_reference_records",
             "Reference records (definitions, statistics) held for joining clients.",
             &[],
             hub.reference_len() as f64,
         );
         w.gauge(
-            "glacier_relay_upstream_up",
+            "tinytrader_relay_upstream_up",
             "1 while the provider connection is up.",
             &[],
             f64::from(u8::from(hub.upstream() == Upstream::Up)),
         );
         w.counter(
-            "glacier_relay_records_total",
+            "tinytrader_relay_records_total",
             "Records received from the provider.",
             &[],
             c(&hub.records),
         );
         w.counter(
-            "glacier_relay_bytes_total",
+            "tinytrader_relay_bytes_total",
             "Bytes received from the provider.",
             &[],
             c(&hub.bytes),
         );
         w.counter(
-            "glacier_relay_upstream_reconnects_total",
+            "tinytrader_relay_upstream_reconnects_total",
             "Provider connections restored after a loss.",
             &[],
             c(&hub.reconnects),
         );
         w.counter(
-            "glacier_relay_slow_disconnects_total",
+            "tinytrader_relay_slow_disconnects_total",
             "Clients disconnected for falling behind.",
             &[],
             c(&hub.slow_disconnects),
         );
         w.counter(
-            "glacier_relay_refused_total",
+            "tinytrader_relay_refused_total",
             "Join requests refused.",
             &[],
             c(&hub.refused),

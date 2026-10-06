@@ -1,7 +1,7 @@
 # Quickstart
 
-Run a small Glacier deployment on your own machine: a toy collector that
-streams live Coinbase prices to disk, and the Glacier console showing the
+Run a small tinytrader deployment on your own machine: a toy collector that
+streams live Coinbase prices to disk, and the tinytrader console showing the
 deployment graph and live state of every service.
 
 You need Docker with Compose. No Nix, accounts or API keys.
@@ -33,7 +33,7 @@ console picks up the change within 30 seconds.
 - **Read the data.** The images have no shell, so look through a throwaway
   container:
   ```sh
-  docker run --rm -v glacier-quickstart_ticker-data:/d alpine sh -c 'ls -lR /d; tail -n 2 /d/BTC-USD/*.jsonl'
+  docker run --rm -v tinytrader-quickstart_ticker-data:/d alpine sh -c 'ls -lR /d; tail -n 2 /d/BTC-USD/*.jsonl'
   ```
 - **Query the console's API.** Everything the page shows comes from here:
   ```sh

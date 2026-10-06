@@ -11,7 +11,7 @@ plans, 50 on Plus and Unlimited. Several local programs want the same live
 data at once: strategies, research notebooks and the console. A **relay**
 holds the provider connection and serves any number of local clients.
 
-Hyphae has a working relay. This decision describes Glacier's replacement,
+Hyphae has a working relay. This decision describes tinytrader's replacement,
 informed by it but simpler:
 
 - It **only forwards.** It keeps no recording; durable capture belongs to the
@@ -50,14 +50,14 @@ Symbols are configuration, so adding more is a deployment change.
 Out of scope for now: recording, caching market data, filtering by
 instrument or expiry, and quote conditions.
 
-## Protocol (`glacier.relay/1`)
+## Protocol (`tinytrader.relay/1`)
 
 ### Connection
 
 TCP, one port per relay. The client speaks first, with one line of JSON:
 
 ```json
-{"protocol": "glacier.relay/1", "start": "2026-10-05T13:30:00Z", "conditions": true}
+{"protocol": "tinytrader.relay/1", "start": "2026-10-05T13:30:00Z", "conditions": true}
 ```
 
 | Field | Meaning |
@@ -92,8 +92,8 @@ The relay answers with a DBN v3 stream: a metadata header (dataset, schema,
     `ts_recv = ts_event` and DBN's `F_BAD_TS_RECV` flag. The same encoder
     serves live and history.
 - **Trade conditions.** Standard DBN has no field for trade condition codes.
-  A client that asks with `"conditions": true` receives a Glacier extension
-  record, `glacier.trade-conditions/1`, immediately after each trade, holding
+  A client that asks with `"conditions": true` receives a tinytrader extension
+  record, `tinytrader.trade-conditions/1`, immediately after each trade, holding
   that trade's conditions. Other clients receive only standard DBN.
 - **Catch-up.** When `start` is in the past:
   - IEX: the relay pages Alpaca's historical trades and quotes from `start`,
@@ -141,14 +141,14 @@ is disconnected rather than slowing the provider connection or other clients.
 
 ## Operation
 
-- A Glacier service with `/health`, `/metrics` and `/describe`. The console
+- A tinytrader service with `/health`, `/metrics` and `/describe`. The console
   shows the relay, its provider, and its clients.
 - **Active hours** (decision 0005): IEX 04:00–20:00 ET and OPRA
-  09:30–16:15 ET on trading days, taken from the market calendar Glacier
+  09:30–16:15 ET on trading days, taken from the market calendar tinytrader
   already serves. Outside them it disconnects from the provider and reports
   "off schedule".
 - Configuration by flags and environment, with credentials from files
-  (`*_FILE`), like Glacier's other services.
+  (`*_FILE`), like tinytrader's other services.
 - Implementation: tokio, the official `databento` and `dbn` crates (including
   their reconnect handling), and `apca` for Alpaca's stream and history.
 
@@ -157,9 +157,9 @@ is disconnected rather than slowing the provider connection or other clients.
 1. Build and test the relay against recorded data and the providers.
 2. Run OPRA side by side with Hyphae's relay on different ports (Databento
    allows several sessions) and compare.
-3. Hyphae and Reactor update their clients to `glacier.relay/1`.
+3. Hyphae and Reactor update their clients to `tinytrader.relay/1`.
 4. Switch IEX in one move, since Alpaca allows a single stream: stop Hyphae's
-   IEX relay, start Glacier's.
+   IEX relay, start tinytrader's.
 5. Retire Hyphae's relays and their recordings.
 
 ## Resolved
@@ -168,7 +168,7 @@ is disconnected rather than slowing the provider connection or other clients.
 - OPRA quotes are not replayed, since Databento can't replay `cmbp-1`; the
   relay holds definitions and statistics and sends them to every joining
   client. Reopen if missed quotes become a problem.
-- Trade conditions are an opt-in Glacier extension record.
+- Trade conditions are an opt-in tinytrader extension record.
 - IEX encoding follows Databento's MBP-1 conventions, with replayed rows
   flagged `F_BAD_TS_RECV`.
 - IEX instrument ids are the relay's own and need not match Hyphae's.

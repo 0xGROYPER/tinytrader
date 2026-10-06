@@ -10,13 +10,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use glacier_dbn::TradeConditions;
-use glacier_dbn::dbn::{FlagSet, Mbp1Msg, RecordRef};
-use glacier_observe::{Observer, State};
 use relay::iex::{self, Encoder, RawQuote, RawTrade, Row};
 use serde::Deserialize;
 use serde_json::json;
 use serde_json::value::RawValue;
+use tinytrader_dbn::TradeConditions;
+use tinytrader_dbn::dbn::{FlagSet, Mbp1Msg, RecordRef};
+use tinytrader_observe::{Observer, State};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 

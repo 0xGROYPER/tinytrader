@@ -1,5 +1,5 @@
 {
-  description = "Glacier Labs: services, deployment modules and an operator console";
+  description = "tinytrader: services, deployment modules and an operator console";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -35,26 +35,26 @@
 
         # The example host's services as plain systemd unit files, for Linux
         # distributions other than NixOS that have Nix installed: copy the
-        # units to /etc/systemd/system and topology.json to /etc/glacier.
-        # Generated from the same glacier.services definitions, so they match
+        # units to /etc/systemd/system and topology.json to /etc/tinytrader.
+        # Generated from the same tinytrader.services definitions, so they match
         # what NixOS runs.
         systemdUnits.x86_64-linux.example =
           let
             pkgs = nixpkgs.legacyPackages.x86_64-linux;
             config = self.nixosConfigurations.example.config;
             units = config.systemd.units;
-            ours = nixpkgs.lib.filterAttrs (name: _: nixpkgs.lib.hasPrefix "glacier-" name) units;
+            ours = nixpkgs.lib.filterAttrs (name: _: nixpkgs.lib.hasPrefix "tinytrader-" name) units;
           in
-          pkgs.linkFarm "glacier-example-units" (
+          pkgs.linkFarm "tinytrader-example-units" (
             nixpkgs.lib.mapAttrsToList (name: unit: {
               inherit name;
               path = pkgs.writeText name unit.text;
             }) ours
             ++ [
               {
-                # Copy to /etc/glacier/topology.json alongside the units.
+                # Copy to /etc/tinytrader/topology.json alongside the units.
                 name = "topology.json";
-                path = pkgs.writeText "topology.json" config.environment.etc."glacier/topology.json".text;
+                path = pkgs.writeText "topology.json" config.environment.etc."tinytrader/topology.json".text;
               }
             ]
           );
@@ -72,20 +72,20 @@
               in
               {
                 networking.hostName = "example";
-                glacier.services.ticker = {
+                tinytrader.services.ticker = {
                   enable = true;
                   package = packages.ticker;
                   observe.port = 9105;
-                  environment.TICKER_DATA_DIR = "/var/lib/glacier/ticker";
+                  environment.TICKER_DATA_DIR = "/var/lib/tinytrader/ticker";
                 };
-                glacier.services.console = {
+                tinytrader.services.console = {
                   enable = true;
                   package = packages.console;
                   observe.port = 8080;
                   # Reads the topology this module generates from the services above.
-                  environment.CONSOLE_TOPOLOGY = config.glacier.topology.file;
+                  environment.CONSOLE_TOPOLOGY = config.tinytrader.topology.file;
                 };
-                glacier.topology.overrides.focus = "ticker";
+                tinytrader.topology.overrides.focus = "ticker";
 
                 boot.loader.grub.enable = false;
                 fileSystems."/" = {

@@ -19,9 +19,9 @@
 //! Configuration (environment):
 //! - `DBN_TCP_ADDR`: `host:port` serving the stream (required)
 //! - `DBN_TCP_JOIN`: a line to send after connecting, for sources that wait
-//!   for one, e.g. `{"protocol":"glacier.relay/1"}` for a Glacier relay
+//!   for one, e.g. `{"protocol":"tinytrader.relay/1"}` for a tinytrader relay
 //! - `DBN_TCP_SOURCE`: name of the source in the console graph (default: the address)
-//! - `DBN_TCP_LISTEN` (or `GLACIER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9103`)
+//! - `DBN_TCP_LISTEN` (or `TINYTRADER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9103`)
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -33,7 +33,7 @@ use dbn::decode::AsyncDbnDecoder;
 use dbn::{
     ErrorMsg, InstrumentDefMsg, Mbp1Msg, SymbolMappingMsg, SystemMsg, TradeMsg, UNDEF_PRICE,
 };
-use glacier_observe::{Events, Observer, Series, State};
+use tinytrader_observe::{Events, Observer, Series, State};
 
 #[derive(Default)]
 struct Shared {
@@ -57,7 +57,7 @@ async fn main() {
         std::process::exit(2);
     };
     let source = env("DBN_TCP_SOURCE", &addr);
-    let listen = glacier_observe::listen_address("DBN_TCP_LISTEN", "127.0.0.1:9103");
+    let listen = tinytrader_observe::listen_address("DBN_TCP_LISTEN", "127.0.0.1:9103");
     let observer = Observer::new("dbn-tcp", env!("CARGO_PKG_VERSION"));
     let shared = Arc::new(Shared::default());
     register_metrics(&observer, &shared);
@@ -322,7 +322,7 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>) {
     let s = shared.clone();
     observer.set_metrics(move |w| {
         w.gauge(
-            "glacier_dbn_tcp_connected",
+            "tinytrader_dbn_tcp_connected",
             "1 while connected to the source.",
             &[],
             if s.connected.load(Ordering::Relaxed) {
@@ -332,54 +332,54 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>) {
             },
         );
         w.counter(
-            "glacier_dbn_tcp_reconnects_total",
+            "tinytrader_dbn_tcp_reconnects_total",
             "Reconnect attempts since start.",
             &[],
             s.reconnects.load(Ordering::Relaxed) as f64,
         );
         for (kind, n) in lock(&s.records).iter() {
             w.counter(
-                "glacier_dbn_tcp_records_total",
+                "tinytrader_dbn_tcp_records_total",
                 "Records received, by kind.",
                 &[("kind", kind)],
                 *n as f64,
             );
         }
         w.counter(
-            "glacier_dbn_tcp_gaps_total",
+            "tinytrader_dbn_tcp_gaps_total",
             "Intervals the source reported as lost upstream.",
             &[],
             s.gaps.load(Ordering::Relaxed) as f64,
         );
         if let Some((from, to)) = *lock(&s.last_gap) {
             w.gauge(
-                "glacier_dbn_tcp_last_gap_start_seconds",
+                "tinytrader_dbn_tcp_last_gap_start_seconds",
                 "Start of the most recent reported gap.",
                 &[],
                 from,
             );
             w.gauge(
-                "glacier_dbn_tcp_last_gap_end_seconds",
+                "tinytrader_dbn_tcp_last_gap_end_seconds",
                 "End of the most recent reported gap.",
                 &[],
                 to,
             );
         }
         w.counter(
-            "glacier_dbn_tcp_upstream_reconnects_total",
+            "tinytrader_dbn_tcp_upstream_reconnects_total",
             "Times the source reported reconnecting to its own upstream.",
             &[],
             s.upstream_reconnects.load(Ordering::Relaxed) as f64,
         );
         w.counter(
-            "glacier_dbn_tcp_slow_consumer_drops_total",
+            "tinytrader_dbn_tcp_slow_consumer_drops_total",
             "Times the source dropped this reader for falling behind.",
             &[],
             s.slow_consumer_drops.load(Ordering::Relaxed) as f64,
         );
         if let Some(at) = *lock(&s.last_record) {
             w.gauge(
-                "glacier_dbn_tcp_last_record_age_seconds",
+                "tinytrader_dbn_tcp_last_record_age_seconds",
                 "Seconds since the last record of any kind.",
                 &[],
                 at.elapsed().as_secs_f64(),

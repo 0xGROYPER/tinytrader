@@ -1,14 +1,14 @@
-//! Terminal view of a Glacier deployment, with two screens:
+//! Terminal view of a tinytrader deployment, with two screens:
 //!
 //! - **Services:** every service with its status, details of the selected
 //!   one, and its live event tail.
 //! - **Hosts:** an htop-style view of one machine: CPU, memory, swap, load
-//!   and disks (from the host's node_exporter), and the Glacier services on
+//!   and disks (from the host's node_exporter), and the tinytrader services on
 //!   it with CPU and memory against their limits.
 //!
 //! ```text
-//! glacier-tui --console http://localhost:8080          # read a running console
-//! glacier-tui --topology FILE                           # poll the services it lists
+//! tinytrader-tui --console http://localhost:8080          # read a running console
+//! tinytrader-tui --topology FILE                           # poll the services it lists
 //!             [--docker URL --project NAME]             # ...and a Compose project
 //! ```
 //!
@@ -24,9 +24,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use glacier_fleet::{
-    FleetEvent, HostState, Poller, PollerConfig, ServiceState, Snapshot, Source, Status, Topology,
-};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -35,6 +32,9 @@ use ratatui::widgets::{
     Block, Cell, Gauge, LineGauge, List, ListItem, ListState, Paragraph, Row, Table, Wrap,
 };
 use ratatui::{DefaultTerminal, Frame};
+use tinytrader_fleet::{
+    FleetEvent, HostState, Poller, PollerConfig, ServiceState, Snapshot, Source, Status, Topology,
+};
 
 /// What the screen shows, filled in by the background refresh task.
 #[derive(Default)]
@@ -73,7 +73,7 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "glacier-tui: {e}\n\nusage: glacier-tui --console URL\n       glacier-tui --topology FILE [--docker URL --project NAME]"
+                "tinytrader-tui: {e}\n\nusage: tinytrader-tui --console URL\n       tinytrader-tui --topology FILE [--docker URL --project NAME]"
             );
             std::process::exit(2);
         }
@@ -86,7 +86,7 @@ fn main() {
     let result = run(&mut terminal, &view, &label);
     ratatui::restore();
     if let Err(e) = result {
-        eprintln!("glacier-tui: {e}");
+        eprintln!("tinytrader-tui: {e}");
     }
 }
 
@@ -229,7 +229,7 @@ fn draw(f: &mut Frame, v: &View, label: &str) {
         .updated
         .is_some_and(|t| t.elapsed() < Duration::from_secs(6));
     let mut header = vec![
-        Span::styled("Glacier Labs", Style::new().bold()),
+        Span::styled("tinytrader", Style::new().bold()),
         Span::raw(" / "),
         Span::raw(if v.topology.name.is_empty() {
             "…"
@@ -269,7 +269,7 @@ fn draw_services(f: &mut Frame, body: Rect, v: &View) {
         .iter()
         .map(|s| {
             let state = v.snapshot.services.get(&s.id);
-            let status = state.map_or(Status::Idle, glacier_fleet::ServiceState::status);
+            let status = state.map_or(Status::Idle, tinytrader_fleet::ServiceState::status);
             ListItem::new(Line::from(vec![
                 Span::styled("● ", Style::new().fg(colour(status))),
                 Span::raw(s.name().to_owned()),
@@ -277,7 +277,7 @@ fn draw_services(f: &mut Frame, body: Rect, v: &View) {
                     format!(
                         "  {}",
                         state
-                            .map(glacier_fleet::ServiceState::detail)
+                            .map(tinytrader_fleet::ServiceState::detail)
                             .unwrap_or_default()
                     ),
                     Style::new().dark_gray(),
@@ -318,7 +318,10 @@ fn draw_services(f: &mut Frame, body: Rect, v: &View) {
                 .and_then(|h| h.state.clone())
                 .or_else(|| container.and_then(|c| c.state.clone())),
         ));
-        lines.push(field("Detail", st.map(glacier_fleet::ServiceState::detail)));
+        lines.push(field(
+            "Detail",
+            st.map(tinytrader_fleet::ServiceState::detail),
+        ));
         lines.push(field(
             "Uptime",
             health.and_then(|h| h.uptime_seconds).map(duration),
@@ -502,7 +505,7 @@ fn draw_hosts(f: &mut Frame, body: Rect, v: &View) {
         }
     }
 
-    let mut rows: Vec<(&glacier_fleet::ServiceInfo, Option<&ServiceState>)> = v
+    let mut rows: Vec<(&tinytrader_fleet::ServiceInfo, Option<&ServiceState>)> = v
         .topology
         .services
         .iter()
@@ -530,7 +533,7 @@ fn draw_hosts(f: &mut Frame, body: Rect, v: &View) {
             let status = st.map_or(Status::Idle, |s| s.status());
             let c = st.and_then(|s| s.container.as_ref());
             let (used, limit) = c
-                .map(glacier_fleet::Container::memory_use)
+                .map(tinytrader_fleet::Container::memory_use)
                 .unwrap_or_default();
             let health = st
                 .and_then(|s| s.health.as_ref())
@@ -598,7 +601,7 @@ fn draw_hosts(f: &mut Frame, body: Rect, v: &View) {
             ])
             .bold(),
         )
-        .block(Block::bordered().title(format!(" Glacier services · sorted by {sort} "))),
+        .block(Block::bordered().title(format!(" tinytrader services · sorted by {sort} "))),
         services,
     );
 }

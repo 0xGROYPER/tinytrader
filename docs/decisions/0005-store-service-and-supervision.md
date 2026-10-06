@@ -60,10 +60,10 @@ scheduler jobs.
 
 ## Consequences
 
-- Glacier generates launchd jobs only for the store service and Docker's
+- tinytrader generates launchd jobs only for the store service and Docker's
   start, alongside the systemd units it already generates.
 - Market data relays, recorders and readers are containers that stream into
-  and out of the store service. Rewriting the relays in Glacier is the first
+  and out of the store service. Rewriting the relays in tinytrader is the first
   step.
 - Until the store service exists, services that need durable local files on a
   Mac run natively and say so; this is a temporary exception, not a pattern.

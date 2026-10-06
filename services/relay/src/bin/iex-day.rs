@@ -14,10 +14,10 @@ use std::fs::File;
 use std::io::{BufWriter, Read as _, Write as _};
 
 use clap::Parser;
-use glacier_dbn::dbn::encode::dbn::MetadataEncoder;
-use glacier_dbn::dbn::{Metadata, RecordRef, SType, Schema};
 use relay::iex::{self, RawQuote, RawTrade};
 use serde::Deserialize;
+use tinytrader_dbn::dbn::encode::dbn::MetadataEncoder;
+use tinytrader_dbn::dbn::{Metadata, RecordRef, SType, Schema};
 
 /// Encode a stored day of Alpaca IEX pages as DBN.
 #[derive(Parser, Debug)]

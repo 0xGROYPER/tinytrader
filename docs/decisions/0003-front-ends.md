@@ -15,7 +15,7 @@ that logic.
 
 - **`libs/fleet` owns the data layer.** It discovers a deployment, polls its
   services and produces the topology, snapshots and event pages. Its JSON is
-  the console API (`glacier.fleet/1`); `Topology`, `Snapshot` and
+  the console API (`tinytrader.fleet/1`); `Topology`, `Snapshot` and
   `EventsPage` are the same data, typed.
 - **Front ends stay thin.** The web console serves what a `Poller` collects;
   `apps/tui` renders it with Ratatui. Neither re-implements discovery,

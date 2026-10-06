@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use databento::LiveClient;
 use databento::dbn::{SType, Schema, VersionUpgradePolicy};
 use databento::live::Subscription;
-use glacier_observe::{Observer, State};
 use time::OffsetDateTime;
+use tinytrader_observe::{Observer, State};
 
 use crate::hub::Hub;
 

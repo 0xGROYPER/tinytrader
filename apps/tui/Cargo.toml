@@ -1,6 +1,6 @@
 [package]
-name = "glacier-tui"
-description = "Terminal view of a Glacier deployment: services, health and live events"
+name = "tinytrader-tui"
+description = "Terminal view of a tinytrader deployment: services, health and live events"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -9,6 +9,6 @@ version.workspace = true
 workspace = true
 
 [dependencies]
-glacier-fleet.workspace = true
+tinytrader-fleet.workspace = true
 ratatui = "0.30"
 tokio.workspace = true

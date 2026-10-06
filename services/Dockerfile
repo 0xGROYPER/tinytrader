@@ -1,5 +1,5 @@
-# Builds one Glacier service from the workspace into a minimal, non-root image.
-#   docker build -f services/Dockerfile --build-arg SERVICE=ticker -t glacier/ticker .
+# Builds one tinytrader service from the workspace into a minimal, non-root image.
+#   docker build -f services/Dockerfile --build-arg SERVICE=ticker -t tinytrader/ticker .
 FROM rust:1.96.1-bookworm AS build
 ARG SERVICE
 WORKDIR /src

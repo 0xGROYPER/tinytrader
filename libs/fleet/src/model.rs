@@ -1,4 +1,4 @@
-//! Typed form of the console API (`glacier.fleet/1`). Every field is
+//! Typed form of the console API (`tinytrader.fleet/1`). Every field is
 //! optional on the wire, so older and newer documents both parse; open-ended
 //! parts (metrics, series, panel specs) stay as JSON values.
 
@@ -168,7 +168,7 @@ pub struct HealthResult {
     pub error: Option<String>,
 }
 
-/// The `glacier.observe/1` health document.
+/// The `tinytrader.observe/1` health document.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Health {

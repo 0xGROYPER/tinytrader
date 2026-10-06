@@ -10,7 +10,7 @@
 //!   `_FILE` suffix pointing at files containing them
 //! - `ALPACA_SYMBOLS`: comma-separated (required)
 //! - `ALPACA_CHANNELS`: any of `trades`, `quotes` (default `trades,quotes`)
-//! - `ALPACA_LISTEN` (or `GLACIER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9102`)
+//! - `ALPACA_LISTEN` (or `TINYTRADER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9102`)
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,7 +21,7 @@ use apca::data::v2::stream::{Data, IEX, MarketData, RealtimeData, drive};
 use apca::{ApiInfo, Client};
 use axum::Router;
 use futures_util::{FutureExt as _, StreamExt as _};
-use glacier_observe::{Events, Observer, Series, State};
+use tinytrader_observe::{Events, Observer, Series, State};
 
 /// Alpaca's API base URL; market data streams are the same for paper and live accounts.
 const BASE_URL: &str = "https://paper-api.alpaca.markets";
@@ -54,7 +54,7 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let listen = glacier_observe::listen_address("ALPACA_LISTEN", "127.0.0.1:9102");
+    let listen = tinytrader_observe::listen_address("ALPACA_LISTEN", "127.0.0.1:9102");
     let observer = Observer::new("alpaca-live", env!("CARGO_PKG_VERSION"));
     let shared = Arc::new(Shared::default());
     register_metrics(&observer, &shared);
@@ -183,7 +183,7 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>) {
     observer.set_metrics(move |w| {
         let base = [("venue", "alpaca"), ("feed", "iex")];
         w.gauge(
-            "glacier_alpaca_connected",
+            "tinytrader_alpaca_connected",
             "1 while the stream is subscribed.",
             &base,
             if s.connected.load(Ordering::Relaxed) {
@@ -193,14 +193,14 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>) {
             },
         );
         w.counter(
-            "glacier_alpaca_reconnects_total",
+            "tinytrader_alpaca_reconnects_total",
             "Reconnect attempts since start.",
             &base,
             s.reconnects.load(Ordering::Relaxed) as f64,
         );
         for (kind, n) in lock(&s.records).iter() {
             w.counter(
-                "glacier_alpaca_records_total",
+                "tinytrader_alpaca_records_total",
                 "Records received, by kind.",
                 &[base[0], base[1], ("kind", kind)],
                 *n as f64,
@@ -208,7 +208,7 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>) {
         }
         if let Some(at) = *lock(&s.last_record) {
             w.gauge(
-                "glacier_alpaca_last_record_age_seconds",
+                "tinytrader_alpaca_last_record_age_seconds",
                 "Seconds since the last record.",
                 &base,
                 at.elapsed().as_secs_f64(),

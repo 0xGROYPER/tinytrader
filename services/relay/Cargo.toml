@@ -1,6 +1,6 @@
 [package]
 name = "relay"
-description = "Market data relay: holds one provider connection and serves its records to local clients (glacier.relay/1)"
+description = "Market data relay: holds one provider connection and serves its records to local clients (tinytrader.relay/1)"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -12,8 +12,8 @@ workspace = true
 axum.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 databento = { version = "0.63", default-features = false, features = ["live"] }
-glacier-dbn.workspace = true
-glacier-observe.workspace = true
+tinytrader-dbn.workspace = true
+tinytrader-observe.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 rustls.workspace = true

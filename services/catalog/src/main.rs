@@ -3,7 +3,7 @@
 //!
 //! It never writes to a root. It recognises two layouts:
 //!
-//! - **Store layout** (Glacier's, which follows Databento's file naming):
+//! - **Store layout** (tinytrader's, which follows Databento's file naming):
 //!   `<DATASET>/<schema>/<YYYY-MM-DD>.dbn.zst`, optionally with a symbol level,
 //!   `<DATASET>/<symbol>/<schema>/<YYYY-MM-DD>.dbn.zst`, where `DATASET` is
 //!   `VENUE.FEED`.
@@ -26,10 +26,10 @@ use std::time::Duration;
 use axum::Router;
 use axum::routing::get;
 use clap::Parser;
-use glacier_observe::{Observer, State, listen_address, unix_seconds};
 use serde_json::{Value, json};
+use tinytrader_observe::{Observer, State, listen_address, unix_seconds};
 
-/// Read-only catalog of Glacier data roots.
+/// Read-only catalog of tinytrader data roots.
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
@@ -101,14 +101,14 @@ async fn main() {
                 let name = root["name"].as_str().unwrap_or("?");
                 let labels = [("root", name)];
                 w.gauge(
-                    "glacier_catalog_root_present",
+                    "tinytrader_catalog_root_present",
                     "1 when the root's path exists.",
                     &labels,
                     if root["present"] == true { 1.0 } else { 0.0 },
                 );
                 if let Some(u) = root["volume"]["used_fraction"].as_f64() {
                     w.gauge(
-                        "glacier_catalog_volume_used_ratio",
+                        "tinytrader_catalog_volume_used_ratio",
                         "Fraction of the root's volume in use.",
                         &labels,
                         u,
@@ -116,7 +116,7 @@ async fn main() {
                 }
                 if let Some(b) = root["dataset_bytes"].as_f64() {
                     w.gauge(
-                        "glacier_catalog_dataset_bytes",
+                        "tinytrader_catalog_dataset_bytes",
                         "Bytes in recognised datasets.",
                         &labels,
                         b,
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn recognises_both_layouts() {
-        let root = std::env::temp_dir().join(format!("glacier-catalog-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("tinytrader-catalog-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let day = root.join("OPRA.PILLAR/SPY.OPT/definition");
         std::fs::create_dir_all(&day).unwrap();

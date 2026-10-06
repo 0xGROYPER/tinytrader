@@ -12,6 +12,6 @@ workspace = true
 apca = { version = "0.31", features = ["vendored-openssl"] }  # OpenSSL linked in, so minimal images work
 axum.workspace = true
 futures-util.workspace = true
-glacier-observe.workspace = true
+tinytrader-observe.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

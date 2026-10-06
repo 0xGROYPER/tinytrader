@@ -1,4 +1,4 @@
-//! Glacier Labs console backend.
+//! tinytrader console backend.
 //!
 //! Serves the console page and a small read-only API:
 //!
@@ -13,11 +13,11 @@
 //! or to any service; it should reach Docker through a read-only proxy.
 //!
 //! **Discovery.** With Docker configured, every container in the project
-//! appears in the graph. A container labelled `glacier.observe=<port>` is
+//! appears in the graph. A container labelled `tinytrader.observe=<port>` is
 //! asked for its `/describe` document, which supplies its role, upstream
 //! sources, stores, event and series endpoints and suggested panels. Other
-//! labels: `glacier.role` (a description for containers without
-//! `/describe`), `glacier.label` and `glacier.host`. Without Docker, or for
+//! labels: `tinytrader.role` (a description for containers without
+//! `/describe`), `tinytrader.label` and `tinytrader.host`. Without Docker, or for
 //! services Docker doesn't run, a topology entry such as
 //! `{ "id": "ticker", "observe": "http://127.0.0.1:9105" }` is described and
 //! polled the same way.
@@ -29,7 +29,7 @@
 //! leave out. Without Docker, the file alone describes the deployment.
 //!
 //! Configuration (environment):
-//! - `CONSOLE_LISTEN` (or `GLACIER_LISTEN`): address to serve on (default `127.0.0.1:8080`)
+//! - `CONSOLE_LISTEN` (or `TINYTRADER_LISTEN`): address to serve on (default `127.0.0.1:8080`)
 //! - `CONSOLE_TOPOLOGY`: path to the optional topology file (default `topology.json`)
 //! - `CONSOLE_DOCKER`: Docker Engine API base URL, e.g. `http://docker-proxy:2375` (optional)
 //! - `CONSOLE_COMPOSE_PROJECT`: only show containers from this Compose project (optional)
@@ -48,9 +48,9 @@ use axum::extract::State as AxumState;
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
-use glacier_fleet::{EventsError, Poller, PollerConfig};
-use glacier_observe::{Observer, State};
 use serde_json::json;
+use tinytrader_fleet::{EventsError, Poller, PollerConfig};
+use tinytrader_observe::{Observer, State};
 
 const PAGE: &str = include_str!("../web/index.html");
 
@@ -62,7 +62,7 @@ struct App {
 
 #[tokio::main]
 async fn main() {
-    let listen = glacier_observe::listen_address("CONSOLE_LISTEN", "127.0.0.1:8080");
+    let listen = tinytrader_observe::listen_address("CONSOLE_LISTEN", "127.0.0.1:8080");
     let config = PollerConfig {
         topology: env("CONSOLE_TOPOLOGY", "topology.json"),
         docker: std::env::var("CONSOLE_DOCKER")
@@ -95,7 +95,7 @@ async fn main() {
         let a = app.clone();
         observer.set_metrics(move |w| {
             w.counter(
-                "glacier_console_polls_total",
+                "tinytrader_console_polls_total",
                 "Snapshot refreshes since start.",
                 &[],
                 a.polls.load(Ordering::Relaxed) as f64,

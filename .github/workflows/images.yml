@@ -1,6 +1,6 @@
 # Builds each service's container image from services/Dockerfile on native
 # Linux runners and publishes a multi-architecture image to GitHub Container
-# Registry: ghcr.io/<owner>/glacier-<service>:<git sha> and :latest.
+# Registry: ghcr.io/<owner>/tinytrader-<service>:<git sha> and :latest.
 name: images
 on:
   push:
@@ -23,7 +23,7 @@ jobs:
       - name: Build and push
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          ref="ghcr.io/$owner/glacier-${{ matrix.service }}:${GITHUB_SHA}-${{ matrix.platform.arch }}"
+          ref="ghcr.io/$owner/tinytrader-${{ matrix.service }}:${GITHUB_SHA}-${{ matrix.platform.arch }}"
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker build -f services/Dockerfile --build-arg SERVICE=${{ matrix.service }} -t "$ref" .
           docker push "$ref"
@@ -37,7 +37,7 @@ jobs:
       - name: Publish multi-architecture tags
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          base="ghcr.io/$owner/glacier-${{ matrix.service }}"
+          base="ghcr.io/$owner/tinytrader-${{ matrix.service }}"
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           for tag in "$GITHUB_SHA" latest; do
             docker buildx imagetools create -t "$base:$tag" "$base:$GITHUB_SHA-amd64" "$base:$GITHUB_SHA-arm64"

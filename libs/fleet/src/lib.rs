@@ -1,7 +1,7 @@
-//! The fleet data layer shared by every Glacier front end.
+//! The fleet data layer shared by every tinytrader front end.
 //!
 //! [`Poller`] discovers a deployment and polls its services: with Docker it
-//! lists the project's containers and asks those labelled `glacier.observe`
+//! lists the project's containers and asks those labelled `tinytrader.observe`
 //! to `/describe` themselves; services listed in the topology file with an
 //! `observe` address are described the same way, whatever runs them. It
 //! then applies the topology overrides, and
@@ -9,7 +9,7 @@
 //! web console serves what the poller collects; a terminal UI can embed a
 //! poller directly or read a running console through [`Source::Console`].
 //!
-//! The JSON it produces is the console API contract (`glacier.fleet/1`);
+//! The JSON it produces is the console API contract (`tinytrader.fleet/1`);
 //! [`Topology`], [`Snapshot`] and [`EventsPage`] are its typed form.
 
 mod model;
@@ -25,8 +25,8 @@ use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use glacier_observe::unix_seconds;
 use serde_json::{Value, json};
+use tinytrader_observe::unix_seconds;
 
 /// Where a poller finds the deployment.
 #[derive(Clone, Debug, Default)]
@@ -197,11 +197,11 @@ async fn discover(app: &Poller, containers: &HashMap<String, Value>, addressed: 
         let label = |k: &str| labels[k].as_str().map(str::to_owned);
         let mut svc = json!({
             "id": name,
-            "host": label("glacier.host").unwrap_or_else(|| "local".into()),
-            "label": label("glacier.label").unwrap_or_else(|| name.clone()),
-            "role": label("glacier.role"),
+            "host": label("tinytrader.host").unwrap_or_else(|| "local".into()),
+            "label": label("tinytrader.label").unwrap_or_else(|| name.clone()),
+            "role": label("tinytrader.role"),
         });
-        if let Some(port) = label("glacier.observe") {
+        if let Some(port) = label("tinytrader.observe") {
             let base = format!("http://{name}:{port}");
             observe_into(
                 app,

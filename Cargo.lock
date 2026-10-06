@@ -29,9 +29,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
- "glacier-observe",
  "reqwest",
  "serde_json",
+ "tinytrader-observe",
  "tokio",
 ]
 
@@ -42,8 +42,8 @@ dependencies = [
  "apca",
  "axum",
  "futures-util",
- "glacier-observe",
  "serde_json",
+ "tinytrader-observe",
  "tokio",
 ]
 
@@ -54,10 +54,10 @@ dependencies = [
  "axum",
  "clap",
  "futures-util",
- "glacier-observe",
  "reqwest",
  "rustls",
  "serde_json",
+ "tinytrader-observe",
  "tokio",
  "tokio-tungstenite 0.27.0",
 ]
@@ -404,8 +404,8 @@ dependencies = [
  "axum",
  "clap",
  "fs4",
- "glacier-observe",
  "serde_json",
+ "tinytrader-observe",
  "tokio",
 ]
 
@@ -542,10 +542,10 @@ name = "console"
 version = "0.1.0"
 dependencies = [
  "axum",
- "glacier-fleet",
- "glacier-observe",
  "pulldown-cmark",
  "serde_json",
+ "tinytrader-fleet",
+ "tinytrader-observe",
  "tokio",
 ]
 
@@ -752,8 +752,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "databento",
- "glacier-observe",
  "serde_json",
+ "tinytrader-observe",
  "tokio",
 ]
 
@@ -797,8 +797,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "dbn",
- "glacier-observe",
  "serde_json",
+ "tinytrader-observe",
  "tokio",
 ]
 
@@ -1152,40 +1152,6 @@ dependencies = [
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "glacier-dbn"
-version = "0.1.0"
-dependencies = [
- "dbn",
-]
-
-[[package]]
-name = "glacier-fleet"
-version = "0.1.0"
-dependencies = [
- "glacier-observe",
- "reqwest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "glacier-observe"
-version = "0.1.0"
-dependencies = [
- "axum",
- "serde_json",
-]
-
-[[package]]
-name = "glacier-tui"
-version = "0.1.0"
-dependencies = [
- "glacier-fleet",
- "ratatui",
- "tokio",
 ]
 
 [[package]]
@@ -2533,14 +2499,14 @@ dependencies = [
  "databento",
  "flate2",
  "futures-util",
- "glacier-dbn",
- "glacier-observe",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
  "tar",
  "time",
+ "tinytrader-dbn",
+ "tinytrader-observe",
  "tokio",
  "tokio-tungstenite 0.27.0",
 ]
@@ -3138,9 +3104,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
- "glacier-observe",
  "rustls",
  "serde_json",
+ "tinytrader-observe",
  "tokio",
  "tokio-tungstenite 0.27.0",
 ]
@@ -3185,6 +3151,40 @@ checksum = "b1e27c91459209c2986af3dcf603a5a74a4368754ce37414f59acc971167f643"
 dependencies = [
  "displaydoc",
  "zerovec",
+]
+
+[[package]]
+name = "tinytrader-dbn"
+version = "0.1.0"
+dependencies = [
+ "dbn",
+]
+
+[[package]]
+name = "tinytrader-fleet"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tinytrader-observe",
+]
+
+[[package]]
+name = "tinytrader-observe"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "serde_json",
+]
+
+[[package]]
+name = "tinytrader-tui"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
+ "tinytrader-fleet",
+ "tokio",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 //! Alpaca IEX quotes and trades as DBN `MBP-1`, with trade conditions as
-//! `glacier.trade-conditions/1` records.
+//! `tinytrader.trade-conditions/1` records.
 //!
 //! The mapping matches the `ALPACA.IEX` history that models are trained on
 //! (Hyphae's stored days), which follows Databento's conventions where they
@@ -22,14 +22,14 @@ use dbn::{
     BidAskPair, FlagSet, InstrumentDefMsg, Mbp1Msg, RecordHeader, UNDEF_PRICE, UNDEF_TIMESTAMP,
     rtype,
 };
-use glacier_dbn::dbn;
-use glacier_dbn::{TradeConditions, TradeUpdate};
 use serde::Deserialize;
 use serde_json::value::RawValue;
+use tinytrader_dbn::dbn;
+use tinytrader_dbn::{TradeConditions, TradeUpdate};
 
 /// The dataset name.
 pub const DATASET: &str = "ALPACA.IEX";
-/// Publisher id for Alpaca's IEX feed in Glacier's data. Not a Databento
+/// Publisher id for Alpaca's IEX feed in tinytrader's data. Not a Databento
 /// allocation.
 pub const PUBLISHER: u16 = 40001;
 /// From this day on, Alpaca reports quote sizes in shares; before it, in
@@ -342,7 +342,7 @@ impl Encoder {
         ts_recv: u64,
     ) -> (
         Mbp1Msg,
-        Result<TradeConditions, glacier_dbn::trade_conditions::Invalid>,
+        Result<TradeConditions, tinytrader_dbn::trade_conditions::Invalid>,
     ) {
         let book = if t.ts > self.book_ts {
             self.book

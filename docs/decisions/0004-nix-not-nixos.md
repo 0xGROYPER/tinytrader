@@ -5,14 +5,14 @@
 
 ## Context
 
-Glacier's first host configurations target NixOS, and service discovery
+tinytrader's first host configurations target NixOS, and service discovery
 began with Docker labels. Left unchecked, either could become a hidden
 requirement: a deployment would need NixOS to be configured, or Docker to be
 seen.
 
 ## Decision
 
-**Glacier's contracts depend on nothing.** `glacier.observe/1`, the topology
+**tinytrader's contracts depend on nothing.** `tinytrader.observe/1`, the topology
 format and the store layout are plain HTTP, JSON and files. Any process on
 any operating system that speaks them is part of a deployment.
 
@@ -25,9 +25,9 @@ commitment:
 
 | Form | Runs services with | Discovered by |
 |---|---|---|
-| Docker Compose, any OS | Compose restart policies | `glacier.observe` labels |
-| Nix on any Linux | systemd units generated from `glacier.services` (`systemdUnits`) | `observe` addresses in the topology file |
-| NixOS | the `glacier.services` NixOS module | `observe` addresses (generated) |
+| Docker Compose, any OS | Compose restart policies | `tinytrader.observe` labels |
+| Nix on any Linux | systemd units generated from `tinytrader.services` (`systemdUnits`) | `observe` addresses in the topology file |
+| NixOS | the `tinytrader.services` NixOS module | `observe` addresses (generated) |
 
 Services can also be run by hand or by any other supervisor and listed by
 address.
@@ -50,7 +50,7 @@ Platform-specific capability is the exception, kept separate:
 
 ## Consequences
 
-- A Mac can run Glacier natively, in Docker, or both; the choice is the
+- A Mac can run tinytrader natively, in Docker, or both; the choice is the
   operator's, not forced by the code.
 - NixOS remains the most complete way to run a host, without being the only
   one.

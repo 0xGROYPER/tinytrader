@@ -11,7 +11,7 @@
 //! - `DATABENTO_SYMBOLS`: comma-separated (required)
 //! - `DATABENTO_SCHEMA`: default `trades`
 //! - `DATABENTO_STYPE_IN`: default `parent`
-//! - `DATABENTO_LISTEN` (or `GLACIER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9101`)
+//! - `DATABENTO_LISTEN` (or `TINYTRADER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9101`)
 //!
 //! Live data can be billed by usage. Check what a subscription costs on your
 //! plan before running this against a new dataset or schema.
@@ -28,7 +28,7 @@ use databento::dbn::{
     ErrorMsg, PitSymbolMap, SType, Schema, SymbolMappingMsg, SystemMsg, TradeMsg, UNDEF_PRICE,
 };
 use databento::live::Subscription;
-use glacier_observe::{Events, Observer, Series, State};
+use tinytrader_observe::{Events, Observer, Series, State};
 
 struct Config {
     key: String,
@@ -58,7 +58,7 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let listen = glacier_observe::listen_address("DATABENTO_LISTEN", "127.0.0.1:9101");
+    let listen = tinytrader_observe::listen_address("DATABENTO_LISTEN", "127.0.0.1:9101");
     let observer = Observer::new("databento-live", env!("CARGO_PKG_VERSION"));
     let shared = Arc::new(Shared {
         // Options feeds have thousands of instruments; chart the six most traded.
@@ -225,7 +225,7 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>, config: &Config) 
     observer.set_metrics(move |w| {
         let base = [("dataset", dataset.as_str()), ("schema", schema.as_str())];
         w.gauge(
-            "glacier_databento_connected",
+            "tinytrader_databento_connected",
             "1 while the live session is open.",
             &base,
             if s.connected.load(Ordering::Relaxed) {
@@ -235,14 +235,14 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>, config: &Config) 
             },
         );
         w.counter(
-            "glacier_databento_reconnects_total",
+            "tinytrader_databento_reconnects_total",
             "Reconnect attempts since start.",
             &base,
             s.reconnects.load(Ordering::Relaxed) as f64,
         );
         for (kind, n) in lock(&s.records).iter() {
             w.counter(
-                "glacier_databento_records_total",
+                "tinytrader_databento_records_total",
                 "Records received, by kind.",
                 &[base[0], base[1], ("kind", kind)],
                 *n as f64,
@@ -250,7 +250,7 @@ fn register_metrics(observer: &Observer, shared: &Arc<Shared>, config: &Config) 
         }
         if let Some(at) = *lock(&s.last_record) {
             w.gauge(
-                "glacier_databento_last_record_age_seconds",
+                "tinytrader_databento_last_record_age_seconds",
                 "Seconds since the last record of any kind, heartbeats included.",
                 &base,
                 at.elapsed().as_secs_f64(),
