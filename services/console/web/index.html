@@ -452,7 +452,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 #ws-root .dv-groupview { border: 0; }
 #ws-root .tile-body { height: 100%; box-sizing: border-box; }
 .dv-acts { display: flex; align-items: center; gap: 2px; height: 100%; padding: 0 4px; }
-/* The workspace switcher (⌥W): a tree of groups and a preview. */
+/* The workspace switcher (⌥S): a tree of groups and a preview. */
 .pal.sw { width: min(760px, 100%); }
 .sw-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); min-height: 300px; max-height: 60vh; }
 .sw-list { list-style: none; margin: 0; padding: 6px; overflow: auto; border-right: 1px solid var(--line-soft); }
@@ -1684,7 +1684,7 @@ function viewHtml(tab) {
 
 // Workspaces (decision 0008): Dockview manages the panels; each panel shows
 // one view. Workspaces are named layouts in groups, switched from the header
-// tabs (the current group's), the switcher (⌥W) and keys. Only the open
+// tabs (the current group's), the switcher (⌥S) and keys. Only the open
 // workspace runs: a panel renders while it is shown, and others are saved
 // layouts, which is all the switcher's previews read.
 const VIEWS = { roadmap: 'Roadmap', docs: 'Docs', overview: 'System graph', schedule: 'Schedule', market: 'Market', prices: 'Prices', accounts: 'Accounts and equity', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
@@ -1869,14 +1869,26 @@ const groups = () => [...new Set(lay.list.map(groupOf))];
 const inGroup = g => lay.list.filter(l => groupOf(l) === g);
 const layViews = l => l.dock ? Object.values(l.dock.panels || {}).map(p => p.params?.view) : (function leaves(n) { return n ? (n.view ? [n.view] : [...leaves(n.a), ...leaves(n.b)]) : []; })(l.tree);
 // Header: every workspace as a number, 1–9 then 0 (⌥1–⌥0), then 11 on.
-const wsNumber = i => i < 9 ? String(i + 1) : i === 9 ? '0' : String(i + 1);
+// At most ten: 1–9 then 0.
+const WS_MAX = 10;
+const wsNumber = i => i < 9 ? String(i + 1) : '0';
+// A new workspace, numbered next, with one panel to build on; it opens.
+function wsAdd(name) {
+  if (lay.list.length >= WS_MAX) return false;
+  let n = name || `Workspace ${wsNumber(lay.list.length)}`;
+  while (lay.list.some(l => l.name === n)) n += '′';
+  lay.list.push({ name: n, group: groupOf(lay.list.find(l => l.name === lay.current)) || undefined, tree: { view: 'overview' } });
+  layStore(); laySwitch(n); return true;
+}
 function updateLayoutNav() {
   const box = $('wtabs'); if (!box) return;
   const docs = state.tab.startsWith('col:') || state.tab === 'roadmap';
   const html = lay.list.map((l, i) => {
     const here = !docs && l.name === lay.current, n = wsNumber(i);
-    return `<button type="button" class="wtab wtab-num" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 10 ? ` (⌥${n})` : ''}${here ? ' · click for all workspaces (⌥W)' : ''}" aria-label="Workspace ${n}: ${esc(l.name)}"${here ? ' aria-current="page"' : ''}>${n}</button>`;
-  }).join('') + `<a class="wtab wtab-docs" href="/docs/"${docs ? ' aria-current="page"' : ''}>Docs</a>`;
+    return `<button type="button" class="wtab wtab-num" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 10 ? ` (⌥${n})` : ''}${here ? ' · click for all workspaces (⌥S)' : ''}" aria-label="Workspace ${n}: ${esc(l.name)}"${here ? ' aria-current="page"' : ''}>${n}</button>`;
+  }).join('')
+    + (lay.list.length < WS_MAX ? `<button type="button" class="wtab wtab-num" data-ws-add title="New workspace (⌥${wsNumber(lay.list.length)})" aria-label="New workspace">+</button>` : '')
+    + `<a class="wtab wtab-docs" href="/docs/"${docs ? ' aria-current="page"' : ''}>Docs</a>`;
   if (box.innerHTML !== html) box.innerHTML = html;
 }
 document.addEventListener('click', e => {
@@ -1891,16 +1903,22 @@ document.addEventListener('click', e => {
     try { history.replaceState(null, '', '/docs/'); } catch (_) {}
     render(); window.scrollTo(0, 0); return;
   }
+  if (e.target.closest && e.target.closest('[data-ws-add]')) { wsAdd(); return; }
   const b = e.target.closest && e.target.closest('[data-layout]');
   if (b) { if (b.getAttribute('aria-current') === 'page') swOpen(); else laySwitch(b.dataset.layout); }
 });
-// Keys: ⌥↑/⌥↓ (or ⌃↑/⌃↓) within the group, ⌥←/⌥→ between groups, ⌥1–⌥9 and ⌥0 the numbered workspaces, ⌥W the switcher.
+// Keys: ⌥↑/⌥↓ (or ⌃↑/⌃↓) within the group, ⌥←/⌥→ between groups, ⌥1–⌥9 and ⌥0 the numbered workspaces, ⌥S the switcher.
 document.addEventListener('keydown', e => {
   if (pal.open || sw.open || e.metaKey) return;
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
   const cur = lay.list.find(l => l.name === lay.current), g = groupOf(cur), tabs = inGroup(g), gs = groups();
-  if (e.altKey && e.code === 'KeyW') { e.preventDefault(); swOpen(); return; }
-  if (e.altKey && /^Digit[0-9]$/.test(e.code)) { const d = +e.code.slice(5), l = lay.list[d === 0 ? 9 : d - 1]; if (l) { e.preventDefault(); laySwitch(l.name); } return; }
+  if (e.altKey && e.code === 'KeyS') { e.preventDefault(); swOpen(); return; }
+  if (e.altKey && /^Digit[0-9]$/.test(e.code)) {
+    const d = +e.code.slice(5), i = d === 0 ? 9 : d - 1, l = lay.list[i];
+    e.preventDefault();
+    if (l) laySwitch(l.name); else if (i === lay.list.length) wsAdd();
+    return;
+  }
   if ((e.ctrlKey || e.altKey) && ['ArrowUp', 'ArrowDown'].includes(e.key)) {
     const i = tabs.indexOf(cur), n = tabs.length; e.preventDefault();
     laySwitch(tabs[(i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n].name); return;
@@ -1917,11 +1935,11 @@ function layoutCommands(q) {
   const cur = lay.list.find(l => l.name === lay.current);
   if (m && m[2]) {
     const arg = m[2].slice(0, 40), verb = m[1].toLowerCase();
-    if (verb === 'save') out.unshift({ label: `Save these panels as a new workspace “${arg}”`, always: true, run: () => { laySave(); lay.list = lay.list.filter(l => l.name !== arg); lay.list.push({ name: arg, group: groupOf(cur) || undefined, dock: dock?.toJSON() }); lay.current = arg; layStore(); } });
+    if (verb === 'save') out.unshift({ label: `Save these panels as a new workspace “${arg}”`, always: true, run: () => { if (!lay.list.some(l => l.name === arg) && lay.list.length >= WS_MAX) return; laySave(); lay.list = lay.list.filter(l => l.name !== arg); lay.list.push({ name: arg, group: groupOf(cur) || undefined, dock: dock?.toJSON() }); lay.current = arg; layStore(); } });
     if (verb === 'rename') out.unshift({ label: `Rename “${lay.current}” to “${arg}”`, always: true, run: () => { if (cur && !lay.list.some(l => l.name === arg)) { cur.name = arg; lay.current = arg; layStore(); } } });
     if (verb === 'group') out.unshift({ label: `Move “${lay.current}” to the group “${arg}”`, always: true, run: () => { if (cur) { cur.group = arg; layStore(); } } });
   } else out.push({ label: 'Save these panels as a new workspace… (type: save <name>)', run: () => {} }, { label: 'Rename this workspace… (type: rename <name>)', run: () => {} }, { label: 'Move this workspace to a group… (type: group <name>)', run: () => {} });
-  out.push({ label: 'Open the workspace switcher (⌥W)', run: swOpen });
+  out.push({ label: 'Open the workspace switcher (⌥S)', run: swOpen });
   if (lay.list.length > 1) out.push({ label: `Delete this workspace: ${lay.current}`, run: () => layDelete(lay.current) });
   return out;
 }
@@ -1932,7 +1950,7 @@ function layDelete(name) {
   if (lay.current === name) { lay.current = lay.list[Math.max(0, i - 1)].name; layStore(); state.navigated = true; render(); } else layStore();
 }
 
-// The switcher (⌥W): every workspace as a tree of groups. ↑↓ move, →/Tab
+// The switcher (⌥S): every workspace as a tree of groups. ↑↓ move, →/Tab
 // open a group, ← close it, Enter opens; F2 renames, D duplicates, G moves to
 // a group, N saves the current panels as a new workspace, ⌫ deletes (asks
 // first); drag a workspace to reorder it or onto a group to move it there.
@@ -1974,7 +1992,7 @@ function swDraw() {
   box.querySelector('.sw-foot').innerHTML = sw.confirm
     ? `<b>Delete “${esc(sw.confirm)}”?</b><span class="sw-btns"><button type="button" class="btn" data-sw-act="keep">Keep</button><button type="button" class="btn danger" data-sw-act="really-delete">Delete</button></span>`
     : sw.edit?.kind === 'new' ? '<input class="sw-in" id="sw-in" placeholder="New workspace name, then Enter" autocomplete="off">'
-    : `<button type="button" class="btn" data-sw-act="new">+ New workspace</button><span>↑↓ move · Enter go · F2 rename · D duplicate · G group · ⌫ delete</span>`;
+    : `${lay.list.length < WS_MAX ? '<button type="button" class="btn" data-sw-act="new">+ New workspace</button>' : '<span>Ten workspaces, the most there can be.</span>'}<span>↑↓ move · Enter go · F2 rename · D duplicate · G group · ⌫ delete</span>`;
   $('sw-in')?.focus();
 }
 function swOpen() {
@@ -1990,10 +2008,7 @@ function swCommit() {
   const { kind, l, value } = sw.edit; const v = value.trim().slice(0, 40); sw.edit = null;
   if (kind === 'rename' && v && !lay.list.some(x => x.name === v)) { if (lay.current === l.name) lay.current = v; l.name = v; }
   if (kind === 'group') { l.group = v || undefined; if (v) sw.expanded.add(v); }
-  if (kind === 'new' && v && !lay.list.some(x => x.name === v)) {
-    lay.list.push({ name: v, group: groupOf(lay.list.find(x => x.name === lay.current)) || undefined, tree: { view: 'overview' } });
-    layStore(); swClose(); laySwitch(v); return;
-  }
+  if (kind === 'new' && v && !lay.list.some(x => x.name === v) && lay.list.length < WS_MAX) { swClose(); wsAdd(v); return; }
   layStore(); swDraw();
 }
 document.addEventListener('keydown', e => {
@@ -2011,15 +2026,15 @@ document.addEventListener('keydown', e => {
     return;
   }
   const k = e.key;
-  if (k === 'Escape' || (e.altKey && e.code === 'KeyW')) { e.preventDefault(); swClose(); }
+  if (k === 'Escape' || (e.altKey && e.code === 'KeyS')) { e.preventDefault(); swClose(); }
   else if (k === 'ArrowDown' || k === 'ArrowUp') { e.preventDefault(); sw.sel = (sw.sel + (k === 'ArrowDown' ? 1 : -1) + sw.rows.length) % sw.rows.length; swDraw(); }
   else if ((k === 'ArrowRight' || k === 'Tab') && r?.kind === 'group') { e.preventDefault(); if (!r.open) sw.expanded.add(r.g); else sw.sel++; swDraw(); }
   else if (k === 'ArrowLeft') { e.preventDefault(); if (r?.kind === 'group') sw.expanded.delete(r.g); else if (r?.depth) { sw.expanded.delete(groupOf(r.l)); sw.sel = sw.rows.findIndex(x => x.kind === 'group' && x.g === groupOf(r.l)); } swDraw(); }
   else if (k === 'Enter') { e.preventDefault(); if (r?.kind === 'group') { r.open ? sw.expanded.delete(r.g) : sw.expanded.add(r.g); swDraw(); } else if (r) { swClose(); laySwitch(r.l.name); } }
   else if (k === 'F2' && r?.kind === 'ws') { e.preventDefault(); sw.edit = { kind: 'rename', row: sw.sel, l: r.l, value: r.l.name }; swDraw(); }
   else if ((k === 'g' || k === 'G') && r?.kind === 'ws') { e.preventDefault(); sw.edit = { kind: 'group', row: sw.sel, l: r.l, value: groupOf(r.l) }; swDraw(); }
-  else if ((k === 'd' || k === 'D') && r?.kind === 'ws') { e.preventDefault(); let n = r.l.name + ' copy'; while (lay.list.some(x => x.name === n)) n += '′'; lay.list.splice(lay.list.indexOf(r.l) + 1, 0, { ...JSON.parse(JSON.stringify(r.l)), name: n }); layStore(); swDraw(); }
-  else if (k === 'n' || k === 'N') { e.preventDefault(); sw.edit = { kind: 'new', row: sw.sel, l: null, value: '' }; swDraw(); }
+  else if ((k === 'd' || k === 'D') && r?.kind === 'ws' && lay.list.length < WS_MAX) { e.preventDefault(); let n = r.l.name + ' copy'; while (lay.list.some(x => x.name === n)) n += '′'; lay.list.splice(lay.list.indexOf(r.l) + 1, 0, { ...JSON.parse(JSON.stringify(r.l)), name: n }); layStore(); swDraw(); }
+  else if ((k === 'n' || k === 'N') && lay.list.length < WS_MAX) { e.preventDefault(); sw.edit = { kind: 'new', row: sw.sel, l: null, value: '' }; swDraw(); }
   else if ((k === 'Backspace' || k === 'Delete') && r?.kind === 'ws' && lay.list.length > 1) { e.preventDefault(); sw.confirm = r.l.name; swDraw(); }
 }, true);
 document.addEventListener('click', e => {
