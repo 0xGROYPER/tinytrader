@@ -1799,11 +1799,14 @@ const lay = { list: [], current: null };
     lay.current = 'Market';
   }
   // New built-in workspaces join saved lists once.
+  let added = false;
   for (const name of ['Roadmap']) {
-    let seen = []; try { seen = JSON.parse(localStorage.getItem('tinytrader-workspaces-offered')) || []; } catch (_) {}
-    if (!seen.includes(name) && LAYOUTS[name] && !lay.list.some(l => l.name === name)) lay.list.push({ name, tree: LAYOUTS[name]() });
-    try { localStorage.setItem('tinytrader-workspaces-offered', JSON.stringify([...new Set([...seen, name])])); } catch (_) {}
+    let seen = []; try { seen = JSON.parse(localStorage.getItem('tinytrader-workspaces-added')) || []; } catch (_) {}
+    if (!seen.includes(name) && LAYOUTS[name] && !lay.list.some(l => l.name === name)) { lay.list.push({ name, tree: LAYOUTS[name]() }); added = true; }
+    try { localStorage.setItem('tinytrader-workspaces-added', JSON.stringify([...new Set([...seen, name])])); } catch (_) {}
   }
+  // Kept at once, so a reload before any other change doesn't lose it.
+  if (added) try { localStorage.setItem(LS.list, JSON.stringify(lay.list)); } catch (_) {}
   if (!lay.list.some(l => l.name === lay.current)) lay.current = lay.list[0].name;
 })();
 layLoadOnStart();
