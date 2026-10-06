@@ -1,206 +1,23 @@
-//! Read-only catalog of data roots: what datasets they hold, which days each
-//! covers, how much space they use, and how full each volume is.
-//!
-//! It never writes to a root. It recognises two layouts:
-//!
-//! - **Store layout** (tinytrader's, which follows Databento's file naming):
-//!   `<DATASET>/<schema>/<YYYY-MM-DD>.dbn.zst`, optionally with a symbol level,
-//!   `<DATASET>/<symbol>/<schema>/<YYYY-MM-DD>.dbn.zst`, where `DATASET` is
-//!   `VENUE.FEED`.
-//! - **Databento batch downloads**: folders holding `metadata.json` and
-//!   `manifest.json`, whose files are named `<dataset>-<YYYYMMDD>.<schema>.<encoding>`
-//!   in any of Databento's encodings (DBN, CSV or JSON, compressed or not).
-//!
-//! Other top-level entries are listed as unrecognised. Volume usage is
-//! classified against fixed thresholds (warning, critical, floor), which the
-//! store's writers will act on: warn, pause non-capture writers, stop capture.
-//!
-//! Serves `/catalog` (see [`scan_root`] for its shape) plus the usual
-//! `/health`, `/metrics` and `/describe`.
+//! The catalog: what datasets the store's volumes hold, which days each
+//! covers, how much space they use, and how full each volume is. It only
+//! reads. It recognises the store layout
+//! (`<Provider>/<DATASET>/[<symbol>/]<schema>/<YYYY-MM-DD>.dbn.zst`, which
+//! follows Databento's file naming) and Databento batch downloads (folders
+//! holding `metadata.json` and `manifest.json`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use axum::Router;
-use axum::routing::get;
-use clap::Parser;
 use serde_json::{Value, json};
-use tinytrader_observe::{Observer, State, listen_address, unix_seconds};
-
-/// Read-only catalog of tinytrader data roots.
-#[derive(Parser, Debug)]
-#[command(version, about)]
-struct Args {
-    /// A data root as NAME=PATH. Repeat for several roots.
-    #[arg(
-        long = "root",
-        env = "CATALOG_ROOTS",
-        value_delimiter = ';',
-        required = true
-    )]
-    roots: Vec<String>,
-
-    /// How often to rescan, in seconds.
-    #[arg(long, env = "CATALOG_RESCAN_SECONDS", default_value_t = 300)]
-    rescan_seconds: u64,
-
-    /// Volume usage, as a percentage, at which a root is in warning.
-    #[arg(long, default_value_t = 80.0)]
-    warning: f64,
-
-    /// Volume usage at which non-capture writers pause.
-    #[arg(long, default_value_t = 90.0)]
-    critical: f64,
-
-    /// Volume usage at which capture stops cleanly.
-    #[arg(long, default_value_t = 97.0)]
-    floor: f64,
-}
 
 #[derive(Clone, Copy)]
-struct Thresholds {
-    warning: f64,
-    critical: f64,
-    floor: f64,
+pub struct Thresholds {
+    pub warning: f64,
+    pub critical: f64,
+    pub floor: f64,
 }
 
-#[tokio::main]
-async fn main() {
-    let args = Args::parse();
-    let roots: Vec<(String, PathBuf)> = args
-        .roots
-        .iter()
-        .filter_map(|r| {
-            r.split_once('=')
-                .map(|(n, p)| (n.trim().to_owned(), PathBuf::from(p.trim())))
-        })
-        .collect();
-    if roots.is_empty() {
-        eprintln!("catalog: give at least one --root NAME=PATH");
-        std::process::exit(2);
-    }
-    let limits = Thresholds {
-        warning: args.warning,
-        critical: args.critical,
-        floor: args.floor,
-    };
-    let listen = listen_address("CATALOG_LISTEN", "127.0.0.1:9104");
-    let observer = Observer::new("catalog", env!("CARGO_PKG_VERSION"));
-    let catalog = Arc::new(Mutex::new(json!({ "generated_at": null, "roots": [] })));
-    observer.describe(json!({
-        "role": format!("Read-only catalog of {}.", roots.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")),
-        "streams": { "catalog": "/catalog" },
-    }));
-    {
-        let c = catalog.clone();
-        observer.set_metrics(move |w| {
-            let c = lock(&c);
-            for root in c["roots"].as_array().into_iter().flatten() {
-                let name = root["name"].as_str().unwrap_or("?");
-                let labels = [("root", name)];
-                w.gauge(
-                    "tinytrader_catalog_root_present",
-                    "1 when the root's path exists.",
-                    &labels,
-                    if root["present"] == true { 1.0 } else { 0.0 },
-                );
-                if let Some(u) = root["volume"]["used_fraction"].as_f64() {
-                    w.gauge(
-                        "tinytrader_catalog_volume_used_ratio",
-                        "Fraction of the root's volume in use.",
-                        &labels,
-                        u,
-                    );
-                }
-                if let Some(b) = root["dataset_bytes"].as_f64() {
-                    w.gauge(
-                        "tinytrader_catalog_dataset_bytes",
-                        "Bytes in recognised datasets.",
-                        &labels,
-                        b,
-                    );
-                }
-            }
-        });
-    }
-
-    let app = Router::new()
-        .route(
-            "/catalog",
-            get({
-                let c = catalog.clone();
-                move || async move { axum::Json(lock(&c).clone()) }
-            }),
-        )
-        .merge(observer.router());
-    let listener = match tokio::net::TcpListener::bind(&listen).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("catalog: cannot listen on {listen}: {e}");
-            std::process::exit(2);
-        }
-    };
-    eprintln!(
-        "catalog: {} roots; endpoints on http://{listen}",
-        roots.len()
-    );
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app).await {
-            eprintln!("catalog: http server stopped: {e}");
-        }
-    });
-
-    let every = Duration::from_secs(args.rescan_seconds.max(10));
-    loop {
-        observer.set_state(
-            if lock(&catalog)["generated_at"].is_null() {
-                State::Starting
-            } else {
-                State::Ready
-            },
-            "scanning",
-        );
-        let r = roots.clone();
-        let scanned = tokio::task::spawn_blocking(move || {
-            r.iter()
-                .map(|(n, p)| scan_root(n, p, limits))
-                .collect::<Vec<_>>()
-        })
-        .await
-        .unwrap_or_default();
-        let worst = scanned
-            .iter()
-            .filter_map(|r| r["volume"]["status"].as_str())
-            .max_by_key(|s| severity(s))
-            .unwrap_or("ok")
-            .to_owned();
-        let missing: Vec<&str> = scanned
-            .iter()
-            .filter(|r| r["present"] != true)
-            .filter_map(|r| r["name"].as_str())
-            .collect();
-        let detail = if missing.is_empty() {
-            format!("{} roots; fullest volume {worst}", scanned.len())
-        } else {
-            format!("missing: {}", missing.join(", "))
-        };
-        let degraded = !missing.is_empty() || severity(&worst) >= 2;
-        *lock(&catalog) = json!({ "generated_at": unix_seconds(), "thresholds": { "warning": limits.warning, "critical": limits.critical, "floor": limits.floor }, "roots": scanned });
-        observer.set_state(
-            if degraded {
-                State::Degraded
-            } else {
-                State::Ready
-            },
-            &detail,
-        );
-        tokio::time::sleep(every).await;
-    }
-}
-
-fn severity(status: &str) -> u8 {
+pub fn severity(status: &str) -> u8 {
     match status {
         "warning" => 1,
         "critical" => 2,
@@ -213,7 +30,7 @@ fn severity(status: &str) -> u8 {
 /// used_fraction, status }, datasets: [{ id, sources, schemas: { schema:
 /// { files, bytes, symbols, days: { "YYYY-MM-DD": bytes } } } }],
 /// dataset_bytes, unrecognised: [names] }`.
-fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
+pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
     if !path.is_dir() {
         return json!({ "name": name, "path": path, "present": false, "datasets": [], "unrecognised": [] });
     }
@@ -252,7 +69,7 @@ fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
 }
 
 /// Space on the volume holding `path`, classified against the thresholds.
-fn volume(path: &Path, t: Thresholds) -> Value {
+pub fn volume(path: &Path, t: Thresholds) -> Value {
     let total = fs4::total_space(path).unwrap_or(0);
     let available = fs4::available_space(path).unwrap_or(0);
     let used = if total > 0 {
@@ -512,10 +329,6 @@ fn entries(dir: &Path) -> Vec<PathBuf> {
 fn file_name(p: &Path) -> String {
     p.file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

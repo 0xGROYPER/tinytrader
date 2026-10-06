@@ -25,7 +25,7 @@
           ../services/databento-live
           ../services/alpaca-live
           ../services/dbn-tcp
-          ../services/catalog
+          ../services/store
           ../services/alpaca-news
           ../services/alpaca-account
           ../services/relay
@@ -66,7 +66,7 @@
       alpaca-live = service "alpaca-live" "Example service streaming Alpaca real-time IEX data";
       dbn-tcp = service "dbn-tcp" "Example service reading a live DBN stream over TCP";
       tinytrader-tui = service "tinytrader-tui" "Terminal view of a tinytrader deployment";
-      catalog = service "catalog" "Read-only catalog of data roots";
+      store = service "store" "The data store: ingests provider downloads into the standard layout and catalogs the volumes";
       alpaca-news = service "alpaca-news" "Example service serving market news from Alpaca (Benzinga)";
       alpaca-account = service "alpaca-account" "Example service serving an Alpaca account's balances and positions";
       relay = service "relay" "Market data relay: one provider connection served to local clients (tinytrader.relay/1)";
@@ -81,7 +81,7 @@
           alpaca-live
           dbn-tcp
           tinytrader-tui
-          catalog
+          store
           alpaca-news
           alpaca-account
           relay

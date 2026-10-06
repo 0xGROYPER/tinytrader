@@ -1,0 +1,434 @@
+//! The tinytrader store (decision 0005): the one process that touches the
+//! data disks. Other services reach data through it over HTTP.
+//!
+//! - **Volumes**: each `--volume NAME=PATH` is a disk the store manages;
+//!   `NAME=PATH:ro` marks one read-only. New data goes to the writable volume
+//!   with the most free space below the critical threshold.
+//! - **Catalog** (`GET /catalog`): what datasets each volume holds, which
+//!   days they cover, and how full the volume is (see the catalog module).
+//! - **Ingest**: `PUT /incoming/{provider}/{batch}/{file}?size=&sha256=`
+//!   uploads one file of a provider batch, verified on arrival;
+//!   `GET /incoming` lists batches waiting; `POST /incorporate/{provider}/{batch}`
+//!   files a complete batch into the standard layout, with provenance and a
+//!   migration ledger (see the ingest module).
+//!
+//! It runs natively (under launchd on a Mac), not in a container, so it sees
+//! the real disks, and binds to loopback by default.
+
+mod catalog;
+mod ingest;
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use axum::body::Body;
+use axum::extract::{Path as UrlPath, Query, State as AxState};
+use axum::http::StatusCode;
+use axum::routing::{get, post, put};
+use axum::{Json, Router};
+use catalog::Thresholds;
+use clap::Parser;
+use futures_util::StreamExt as _;
+use ingest::Volume;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tinytrader_observe::{Events, Observer, State, listen_address, unix_seconds};
+
+/// The tinytrader data store.
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Args {
+    /// A volume as NAME=PATH, or NAME=PATH:ro for read-only. Repeat, or
+    /// separate with `;`.
+    #[arg(
+        long = "volume",
+        env = "STORE_VOLUMES",
+        value_delimiter = ';',
+        required = true
+    )]
+    volumes: Vec<String>,
+
+    /// How often to rescan the volumes, in seconds.
+    #[arg(long, env = "STORE_RESCAN_SECONDS", default_value_t = 300)]
+    rescan_seconds: u64,
+
+    /// Volume usage, as a percentage, at which a volume is in warning.
+    #[arg(long, default_value_t = 80.0)]
+    warning: f64,
+
+    /// Volume usage at which no new data is placed on a volume.
+    #[arg(long, default_value_t = 90.0)]
+    critical: f64,
+
+    /// Volume usage at which capture stops cleanly.
+    #[arg(long, default_value_t = 97.0)]
+    floor: f64,
+}
+
+struct Store {
+    volumes: Vec<Volume>,
+    limits: Thresholds,
+    catalog: Mutex<Value>,
+    events: Events,
+    rescan: tokio::sync::Notify,
+    bytes_in: AtomicU64,
+    batches_in: AtomicU64,
+}
+
+type Shared = Arc<Store>;
+type Reply = (StatusCode, Json<Value>);
+
+fn reply(code: StatusCode, v: Value) -> Reply {
+    (code, Json(v))
+}
+
+fn refused(code: StatusCode, why: impl Into<String>) -> Reply {
+    reply(code, json!({ "error": why.into() }))
+}
+
+#[tokio::main]
+async fn main() {
+    let args = Args::parse();
+    let volumes: Vec<Volume> = args
+        .volumes
+        .iter()
+        .filter_map(|v| {
+            let (name, path) = v.split_once('=')?;
+            let (path, writable) = match path.trim().strip_suffix(":ro") {
+                Some(p) => (p, false),
+                None => (path.trim(), true),
+            };
+            Some(Volume {
+                name: name.trim().to_owned(),
+                path: PathBuf::from(path),
+                writable,
+            })
+        })
+        .collect();
+    if volumes.is_empty() {
+        eprintln!("store: give at least one --volume NAME=PATH");
+        std::process::exit(2);
+    }
+    let limits = Thresholds {
+        warning: args.warning,
+        critical: args.critical,
+        floor: args.floor,
+    };
+    let store = Arc::new(Store {
+        volumes,
+        limits,
+        catalog: Mutex::new(json!({ "generated_at": null, "roots": [] })),
+        events: Events::default(),
+        rescan: tokio::sync::Notify::new(),
+        bytes_in: AtomicU64::new(0),
+        batches_in: AtomicU64::new(0),
+    });
+    let listen = listen_address("STORE_LISTEN", "127.0.0.1:9120");
+    let observer = Observer::new("store", env!("CARGO_PKG_VERSION"));
+    let names = store
+        .volumes
+        .iter()
+        .map(|v| format!("{}{}", v.name, if v.writable { "" } else { " (read-only)" }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    observer.describe(json!({
+        "role": format!("The data store: ingests provider downloads into the standard layout and catalogs {names}."),
+        "streams": { "catalog": "/catalog", "events": "/events" },
+    }));
+    {
+        let s = store.clone();
+        observer.set_metrics(move |w| {
+            w.counter(
+                "tinytrader_store_ingested_bytes_total",
+                "Bytes received for ingest.",
+                &[],
+                s.bytes_in.load(Ordering::Relaxed) as f64,
+            );
+            w.counter(
+                "tinytrader_store_batches_total",
+                "Batches incorporated.",
+                &[],
+                s.batches_in.load(Ordering::Relaxed) as f64,
+            );
+            let c = lock(&s.catalog);
+            for root in c["roots"].as_array().into_iter().flatten() {
+                let labels = [("volume", root["name"].as_str().unwrap_or("?"))];
+                if let Some(u) = root["volume"]["used_fraction"].as_f64() {
+                    w.gauge(
+                        "tinytrader_store_volume_used_ratio",
+                        "Fraction of the volume in use.",
+                        &labels,
+                        u,
+                    );
+                }
+                if let Some(b) = root["dataset_bytes"].as_f64() {
+                    w.gauge(
+                        "tinytrader_store_dataset_bytes",
+                        "Bytes in recognised datasets.",
+                        &labels,
+                        b,
+                    );
+                }
+            }
+        });
+    }
+
+    let app = Router::new()
+        .route(
+            "/catalog",
+            get(|AxState(s): AxState<Shared>| async move { Json(lock(&s.catalog).clone()) }),
+        )
+        .route("/incoming", get(list_incoming))
+        .route("/incoming/{provider}/{batch}/{file}", put(upload))
+        .route("/incorporate/{provider}/{batch}", post(incorporate))
+        .with_state(store.clone())
+        .merge(observer.router())
+        .merge(store.events.router());
+    let listener = match tokio::net::TcpListener::bind(&listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("store: cannot listen on {listen}: {e}");
+            std::process::exit(2);
+        }
+    };
+    eprintln!("store: {names}; endpoints on http://{listen}");
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            eprintln!("store: http server stopped: {e}");
+        }
+    });
+
+    let every = Duration::from_secs(args.rescan_seconds.max(10));
+    loop {
+        scan(&store, &observer).await;
+        tokio::select! {
+            () = tokio::time::sleep(every) => {}
+            () = store.rescan.notified() => {}
+        }
+    }
+}
+
+/// Rescan every volume into the catalog.
+async fn scan(store: &Shared, observer: &Observer) {
+    let (volumes, limits) = (store.volumes.clone(), store.limits);
+    let scanned = tokio::task::spawn_blocking(move || {
+        volumes
+            .iter()
+            .map(|v| {
+                let mut root = catalog::scan_root(&v.name, &v.path, limits);
+                root["writable"] = json!(v.writable);
+                root
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    let worst = scanned
+        .iter()
+        .filter_map(|r| r["volume"]["status"].as_str())
+        .max_by_key(|s| catalog::severity(s))
+        .unwrap_or("ok")
+        .to_owned();
+    let missing: Vec<&str> = scanned
+        .iter()
+        .filter(|r| r["present"] != true)
+        .filter_map(|r| r["name"].as_str())
+        .collect();
+    let detail = if missing.is_empty() {
+        format!("{} volumes; fullest {worst}", scanned.len())
+    } else {
+        format!("missing: {}", missing.join(", "))
+    };
+    let degraded = !missing.is_empty() || catalog::severity(&worst) >= 2;
+    *lock(&store.catalog) = json!({
+        "generated_at": unix_seconds(),
+        "thresholds": { "warning": store.limits.warning, "critical": store.limits.critical, "floor": store.limits.floor },
+        "roots": scanned,
+    });
+    observer.set_state(
+        if degraded {
+            State::Degraded
+        } else {
+            State::Ready
+        },
+        &detail,
+    );
+}
+
+impl Store {
+    /// The provider directory where `batch` is already incoming, if any.
+    fn batch_root(&self, provider: &str, batch: &str) -> Option<PathBuf> {
+        self.volumes
+            .iter()
+            .filter(|v| v.writable)
+            .map(|v| v.path.join(provider))
+            .find(|root| root.join(ingest::INCOMING).join(batch).is_dir())
+    }
+
+    /// The writable volume with the most free space below the critical
+    /// threshold, as its provider directory.
+    fn place(&self, provider: &str) -> Result<PathBuf, String> {
+        self.volumes
+            .iter()
+            .filter(|v| v.writable && v.path.is_dir())
+            .filter_map(|v| {
+                let total = fs4::total_space(&v.path).ok()?;
+                let free = fs4::available_space(&v.path).ok()?;
+                let used = 100.0 * (1.0 - free as f64 / total.max(1) as f64);
+                (used < self.limits.critical).then(|| (free, v.path.join(provider)))
+            })
+            .max_by_key(|(free, _)| *free)
+            .map(|(_, root)| root)
+            .ok_or_else(|| "no writable volume has room".to_owned())
+    }
+}
+
+#[derive(Deserialize)]
+struct Expect {
+    size: Option<u64>,
+    sha256: Option<String>,
+}
+
+async fn upload(
+    AxState(store): AxState<Shared>,
+    UrlPath((provider, batch, file)): UrlPath<(String, String, String)>,
+    Query(expect): Query<Expect>,
+    body: Body,
+) -> Reply {
+    let Some(pdir) = ingest::provider_dir(&provider) else {
+        return refused(
+            StatusCode::NOT_FOUND,
+            format!("unknown provider {provider}"),
+        );
+    };
+    if !ingest::safe(&batch) || !ingest::safe(&file) {
+        return refused(StatusCode::BAD_REQUEST, "unsafe batch or file name");
+    }
+    let root = match store.batch_root(pdir, &batch) {
+        Some(r) => r,
+        None => match store.place(pdir) {
+            Ok(r) => r,
+            Err(e) => return refused(StatusCode::INSUFFICIENT_STORAGE, e),
+        },
+    };
+    let dir = root.join(ingest::INCOMING).join(&batch);
+    let mut up = match tokio::task::block_in_place(|| ingest::Upload::start(&dir, &file)) {
+        Ok(u) => u,
+        Err(e) => return refused(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => return refused(StatusCode::BAD_REQUEST, format!("upload interrupted: {e}")),
+        };
+        store
+            .bytes_in
+            .fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        if let Err(e) = tokio::task::block_in_place(|| up.write(&chunk)) {
+            return refused(StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
+    }
+    match tokio::task::block_in_place(|| up.finish(expect.size, expect.sha256.as_deref())) {
+        Ok((size, sha)) => {
+            let text = format!("received {pdir}/{batch}/{file} ({size} bytes)");
+            store.events.push(
+                text,
+                json!({ "file": file, "batch": batch, "bytes": size, "sha256": sha }).to_string(),
+            );
+            reply(
+                StatusCode::OK,
+                json!({ "file": file, "bytes": size, "sha256": sha }),
+            )
+        }
+        Err(e) => refused(StatusCode::UNPROCESSABLE_ENTITY, e),
+    }
+}
+
+/// Batches waiting to be incorporated, with their files.
+async fn list_incoming(AxState(store): AxState<Shared>) -> Json<Value> {
+    let mut out = Vec::new();
+    for v in store.volumes.iter().filter(|v| v.writable) {
+        let Ok(providers) = std::fs::read_dir(&v.path) else {
+            continue;
+        };
+        for p in providers.flatten() {
+            let inc = p.path().join(ingest::INCOMING);
+            let Ok(batches) = std::fs::read_dir(&inc) else {
+                continue;
+            };
+            for b in batches.flatten() {
+                let files: Vec<Value> = std::fs::read_dir(b.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter(|f| !f.file_name().to_string_lossy().ends_with(".sha256"))
+                    .map(|f| json!({ "name": f.file_name().to_string_lossy(), "bytes": f.metadata().map(|m| m.len()).unwrap_or(0) }))
+                    .collect();
+                out.push(json!({ "volume": v.name, "provider": p.file_name().to_string_lossy(), "batch": b.file_name().to_string_lossy(), "files": files }));
+            }
+        }
+    }
+    Json(json!({ "batches": out }))
+}
+
+async fn incorporate(
+    AxState(store): AxState<Shared>,
+    UrlPath((provider, batch)): UrlPath<(String, String)>,
+) -> Reply {
+    let Some(pdir) = ingest::provider_dir(&provider) else {
+        return refused(
+            StatusCode::NOT_FOUND,
+            format!("unknown provider {provider}"),
+        );
+    };
+    if !ingest::safe(&batch) {
+        return refused(StatusCode::BAD_REQUEST, "unsafe batch name");
+    }
+    let Some(root) = store.batch_root(pdir, &batch) else {
+        return refused(StatusCode::NOT_FOUND, format!("no incoming batch {batch}"));
+    };
+    let today = today();
+    let (b, r) = (batch.clone(), root.clone());
+    let result =
+        tokio::task::spawn_blocking(move || ingest::incorporate_databento(&r, &b, &today)).await;
+    match result {
+        Ok(Ok(summary)) => {
+            store.batches_in.fetch_add(1, Ordering::Relaxed);
+            let n = summary["files"].as_array().map_or(0, Vec::len);
+            store.events.push(
+                format!("incorporated {pdir}/{batch}: {n} files"),
+                summary.to_string(),
+            );
+            store.rescan.notify_one();
+            reply(StatusCode::OK, summary)
+        }
+        Ok(Err(e)) => {
+            store
+                .events
+                .push(format!("refused {pdir}/{batch}: {e}"), e.clone());
+            refused(StatusCode::CONFLICT, e)
+        }
+        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// Today's UTC date, `YYYY-MM-DD`.
+fn today() -> String {
+    let days = (unix_seconds() / 86_400.0) as i64;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}

@@ -67,3 +67,11 @@ scheduler jobs.
   step.
 - Until the store service exists, services that need durable local files on a
   Mac run natively and say so; this is a temporary exception, not a pattern.
+
+## Status, 2026-10-06
+
+The store service exists (`services/store`) and replaces the catalog service.
+Its first version ingests provider batches (Databento) into the standard
+layout of decision 0002, with provenance and a migration ledger, and serves
+the catalog. Reading data back over the network and live recording come
+later.

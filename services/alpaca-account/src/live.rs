@@ -296,7 +296,9 @@ async fn listen(
                     .map_err(|e| e.to_string())?;
             }
             Some("authorization") => return Err("not authorized".into()),
-            Some("listening") => eprintln!("alpaca-account: account {index} listening for order events"),
+            Some("listening") => {
+                eprintln!("alpaca-account: account {index} listening for order events")
+            }
             Some("trade_updates") => {
                 let _ = events.send(index).await;
             }

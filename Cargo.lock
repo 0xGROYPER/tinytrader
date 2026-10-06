@@ -403,18 +403,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "catalog"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "fs4",
- "serde_json",
- "tinytrader-observe",
- "tokio",
-]
-
-[[package]]
 name = "cc"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2878,6 +2866,21 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "store"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "fs4",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tinytrader-observe",
+ "tokio",
+]
 
 [[package]]
 name = "strsim"

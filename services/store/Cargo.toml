@@ -1,6 +1,6 @@
 [package]
-name = "catalog"
-description = "Read-only catalog of a tinytrader deployment's data roots: datasets, coverage and disk space"
+name = "store"
+description = "The data store: the one process that touches the disks. Ingests provider downloads into the standard layout, and catalogs the volumes"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -13,6 +13,9 @@ workspace = true
 axum.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 fs4 = "1.1"
+futures-util.workspace = true
 tinytrader-observe.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+serde.workspace = true
+sha2 = "0.10"
+tokio = { workspace = true, features = ["fs", "io-util"] }
