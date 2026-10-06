@@ -77,6 +77,10 @@ async fn main() {
         "role": if symbols.is_empty() { "Market news from Alpaca (Benzinga), all symbols.".to_owned() } else { format!("Market news from Alpaca (Benzinga) for {}.", symbols.join(", ")) },
         "upstream": [{ "id": "benzinga", "label": "benzinga", "sub": "news via Alpaca", "kind": "flow", "via": "websocket" }],
         "streams": { "events": "/events", "news": "/news" },
+        "schedule": [
+            { "name": "News stream", "kind": "always", "when": "always" },
+            { "name": "Catch-up of missed stories", "kind": "event", "when": "at start and after each reconnect" },
+        ],
     }));
     {
         let s = shared.clone();

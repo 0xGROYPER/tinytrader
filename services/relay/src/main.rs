@@ -189,6 +189,10 @@ async fn run(args: Args) -> Result<(), String> {
         "streams": { "events": "/events", "series": "/recent" },
         "panels": [{ "heading": format!("{dataset} {}", args.symbols.join(", ")), "note": "Trade prices of the most active instruments, sampled once per second", "decimals": 2 }],
         "relay": { "protocol": protocol::PROTOCOL, "listen": args.listen, "symbols": args.symbols },
+        "schedule": [match args.hours {
+            Some(h) => json!({ "name": "Market data session", "kind": "window", "hours": h.to_string(), "when": format!("{h} ET on trading days") }),
+            None => json!({ "name": "Market data session", "kind": "always", "when": "always" }),
+        }],
     }));
     register_metrics(&observer, &hub);
 

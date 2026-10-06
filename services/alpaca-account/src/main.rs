@@ -259,6 +259,14 @@ async fn main() {
         "role": format!("Balances and positions of Alpaca accounts: {}. Read only.", names.join(", ")),
         "upstream": [{ "id": "alpaca-trading", "label": "alpaca", "sub": "trading API", "kind": "flow", "via": "REST, read only" }],
         "streams": { "events": "/events", "series": "/recent", "accounts": "/accounts", "calendar": "/calendar" },
+        "schedule": [
+            match args.hours {
+                Some(h) => json!({ "name": "Account session: order events and relay prices", "kind": "window", "hours": h.to_string(), "when": format!("{h} ET on trading days") }),
+                None => json!({ "name": "Account session: order events and relay prices", "kind": "always", "when": "always" }),
+            },
+            { "name": "Full read of every account", "kind": "interval", "every_seconds": args.refresh, "when": format!("every {} min during the session", args.refresh / 60) },
+            { "name": "Market calendar", "kind": "event", "when": "read at start, a year ahead" },
+        ],
     }));
     {
         let s = shared.clone();

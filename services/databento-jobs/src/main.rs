@@ -215,6 +215,10 @@ async fn main() {
         "role": "Databento batch jobs: prices and submits requests, and downloads finished jobs into the store.",
         "upstream": [{ "id": "databento", "label": "databento", "sub": "batch API", "kind": "flow", "via": "https" }],
         "streams": { "jobs": "/jobs", "events": "/events" },
+        "schedule": [
+            { "name": "Databento job list", "kind": "interval", "every_seconds": args.refresh, "when": format!("every {} s", args.refresh) },
+            { "name": "Download of jobs submitted here", "kind": "event", "when": "when Databento finishes them" },
+        ],
     }));
 
     let app = Router::new()

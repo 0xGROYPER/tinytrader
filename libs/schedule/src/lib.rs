@@ -42,6 +42,19 @@ impl std::str::FromStr for Schedule {
     }
 }
 
+impl std::fmt::Display for Schedule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02}:{:02}-{:02}:{:02}",
+            self.start / 60,
+            self.start % 60,
+            self.end / 60,
+            self.end % 60
+        )
+    }
+}
+
 /// A trading day from a market calendar.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Day {
@@ -159,6 +172,12 @@ pub fn describe(ns: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hours_print_as_they_were_given() {
+        let s: Schedule = "09:25-16:20".parse().unwrap();
+        assert_eq!(s.to_string(), "09:25-16:20");
+    }
 
     /// `YYYY-MM-DDTHH:MM:SSZ` as ns since the epoch.
     fn ns(text: &str) -> u64 {

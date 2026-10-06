@@ -142,6 +142,10 @@ async fn main() {
     observer.describe(json!({
         "role": format!("The data store: ingests provider downloads into the standard layout and catalogs {names}."),
         "streams": { "catalog": "/catalog", "events": "/events" },
+        "schedule": [
+            { "name": "Store", "kind": "always", "when": "always (launchd keeps it running)" },
+            { "name": "Catalog rescan", "kind": "interval", "every_seconds": args.rescan_seconds, "when": format!("every {} min, and after each filing", args.rescan_seconds / 60) },
+        ],
     }));
     {
         let s = store.clone();

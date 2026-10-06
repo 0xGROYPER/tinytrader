@@ -99,6 +99,7 @@ async fn main() {
     let observer = Observer::new("console", env!("CARGO_PKG_VERSION"));
     observer.describe(json!({
         "role": "The operator console: polls every service and Docker every two seconds.",
+        "schedule": [{ "name": "Polling every service and Docker", "kind": "interval", "every_seconds": 2, "when": "every 2 s" }],
         "upstream": proxy.map_or_else(Vec::new, |p| vec![json!({ "service": p, "kind": "read", "via": "container state" })]),
     }));
     {

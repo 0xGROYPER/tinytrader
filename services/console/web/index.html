@@ -357,6 +357,26 @@ body:not(.docs-mode) .nav { display: none; }
 .doc-links a { color: var(--fg); text-decoration: none; padding: 4px 6px; border-radius: 4px; font-size: 14px; }
 .doc-links a:hover { background: var(--nav-hover); color: var(--accent); }
 @media (max-width: 640px) { .brand { flex-wrap: wrap; row-gap: 6px; } .wtabs { flex: 1 0 100%; order: 3; } }
+/* Schedule: a day timeline of active hours (New York time), then every schedule. */
+.tl { display: flex; flex-direction: column; gap: 6px; container-type: inline-size; }
+.tl-row { display: grid; grid-template-columns: minmax(90px, 180px) minmax(0, 1fr); align-items: center; gap: 10px; }
+.tl-label { font: 13px var(--mono); color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tl-track { position: relative; height: 20px; border-radius: 4px; background: var(--surface); }
+.tl-axis .tl-label { color: var(--muted); font-size: 12px; }
+.tl-axis .tl-track { background: transparent; height: 16px; }
+.tl-axis .tl-track span { position: absolute; transform: translateX(-50%); font: 11px var(--mono); color: var(--muted); }
+.tl-axis .tl-track span:first-child { transform: none; } .tl-axis .tl-track span:last-child { transform: translateX(-100%); }
+.tl-session { position: absolute; top: 0; bottom: 0; background: var(--line-soft); }
+.tl-bar { position: absolute; top: 4px; bottom: 4px; border-radius: 3px; background: var(--accent-2); }
+.tl-bar.live { background: var(--accent-mark); }
+.tl-bar.off { background: transparent; border: 1px dashed var(--accent-2); }
+.tl-now { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--warn-mark); }
+.tl-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--muted); padding-left: 2px; }
+.tl-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.tl-key { display: inline-block; width: 14px; height: 8px; border-radius: 2px; }
+.tl-key.bar { background: var(--accent-2); } .tl-key.session { background: var(--line-soft); } .tl-key.now { width: 2px; height: 12px; background: var(--warn-mark); }
+@container (max-width: 420px) { .tl-row { grid-template-columns: 80px minmax(0, 1fr); } }
+.sched td { vertical-align: middle; }
 /* The tinytrader shell: read-only commands over this deployment. */
 .term { flex: 1; display: flex; flex-direction: column; min-height: 320px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: 13px/1.5 var(--mono); }
 .tile-body > .term { border: 0; border-radius: 0; margin: -14px -16px; }
@@ -1335,6 +1355,54 @@ $('view').addEventListener('click', async e => {
 });
 setInterval(() => { if ($('jobs-list')) loadJobs(); }, 2000);
 
+// Schedule: what every service runs and when, from each service's
+// `/describe`. The deployment graph shows the present; this shows intent:
+// active hours on a day timeline (New York time), then every schedule.
+function scheduleView() {
+  const svcs = (state.topo?.services || []).filter(s => Array.isArray(s.schedule));
+  const head = '<div><h1>Schedule</h1><p class="muted" style="margin:0">What each service runs and when, in New York time.</p></div>';
+  if (!svcs.length) return head + '<p class="muted">No service describes a schedule yet.</p>';
+  const rows = svcs.flatMap(s => s.schedule.map(x => ({ s, x })));
+  const mins = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+  const nyNow = new Date().toLocaleString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false, weekday: 'short' });
+  const [wd, hm] = nyNow.split(' '), nowMin = mins(hm), pctNow = (nowMin / 1440 * 100).toFixed(2);
+  const cal = svcs.map(s => svcState(s.id).calendar).find(c => c?.days?.length);
+  const todayNy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const session = cal?.days.find(d => d.date === todayNy);
+  const trading = cal ? !!session : !['Sat', 'Sun'].includes(wd);
+  // A window is set relative to the 09:30–16:00 session: an early close ends it early by as much.
+  const shift = session && session.close < '16:00' ? mins(session.close) - 16 * 60 : 0;
+  const windows = rows.filter(r => r.x.kind === 'window' && r.x.hours);
+  const ticks = [0, 3, 6, 9, 12, 15, 18, 21, 24].map(h => `<span style="left:${(h / 24 * 100).toFixed(2)}%">${String(h).padStart(2, '0')}</span>`).join('');
+  const session0 = `<div class="tl-session" style="left:${(570 / 1440 * 100).toFixed(2)}%;width:${(((session ? mins(session.close) : 960) - 570) / 1440 * 100).toFixed(2)}%" title="Regular session"></div>`;
+  const timeline = windows.length ? `<div class="tl">
+      <div class="tl-row tl-axis"><span class="tl-label">${trading ? 'Today, a trading day' : 'Today, markets closed'}</span><div class="tl-track">${ticks}</div></div>
+      ${windows.map(({ s, x }) => {
+        const [a, b] = x.hours.split('-').map(mins), end = b <= 16 * 60 + 60 ? b + shift : b;
+        const st = statusOf({ ...s, kind: 'svc' });
+        return `<div class="tl-row"><span class="tl-label" title="${esc(x.name)}">${esc(s.label || s.id)}</span><div class="tl-track">${session0}
+          <div class="tl-bar${trading ? '' : ' off'}${st === 'ok' ? ' live' : ''}" style="left:${(a / 1440 * 100).toFixed(2)}%;width:${((end - a) / 1440 * 100).toFixed(2)}%" title="${esc(x.when)}"></div>
+          <div class="tl-now" style="left:${pctNow}%"></div></div></div>`;
+      }).join('')}
+      <div class="tl-legend"><span><i class="tl-key bar"></i>active hours</span><span><i class="tl-key session"></i>regular session</span><span><i class="tl-key now"></i>now, ${esc(hm)} ET</span></div>
+    </div>` : '';
+  const order = { window: 0, always: 1, interval: 2, event: 3 };
+  const nowText = (s, x) => {
+    const h = svcState(s.id).health?.body || {}, st = statusOf({ ...s, kind: 'svc' });
+    if (st === 'crit') return '<span class="pill p-crit">Down</span>';
+    if (x.kind === 'window') {
+      const until = /until (.+)$/.exec(h.detail || '')?.[1];
+      return h.state === 'idle' ? `<span class="muted">next ${esc(until || 'session')}</span>` : '<span class="pill p-ok">Running</span>';
+    }
+    if (x.kind === 'always') return st === 'warn' ? '<span class="pill p-warn">Needs attention</span>' : '<span class="pill p-ok">Running</span>';
+    if (x.kind === 'interval') return h.state === 'idle' ? '<span class="muted">paused off-hours</span>' : '<span class="muted">repeating</span>';
+    return '<span class="muted">on event</span>';
+  };
+  const table = rows.slice().sort((p, q) => order[p.x.kind] - order[q.x.kind] || (p.s.label || p.s.id).localeCompare(q.s.label || q.s.id)).map(({ s, x }) =>
+    `<tr><td class="mono" style="color:var(--fg)">${esc(s.label || s.id)}</td><td>${esc(x.name)}</td><td class="mono">${esc(x.when)}</td><td>${nowText(s, x)}</td></tr>`).join('');
+  return head + timeline + `<div class="box scroll"><table class="sched"><thead><tr><th>Service</th><th>What</th><th>When</th><th>Now</th></tr></thead><tbody>${table}</tbody></table></div>`;
+}
+
 // One view's HTML, for the page or for a workspace tile.
 function viewHtml(tab) {
   return tab === 'overview' ? topology()
@@ -1349,12 +1417,13 @@ function viewHtml(tab) {
     : tab === 'storage' ? storageView()
     : tab === 'shell' ? shellView()
     : tab === 'docs' ? docsWidget()
+    : tab === 'schedule' ? scheduleView()
     : tab === 'workspace' ? workspaceView() : collectionView();
 }
 
 // Workspace: tiles, each showing one view. Split right or down, change a
 // tile's view, close it, drag the dividers; the layout is kept per browser.
-const VIEWS = { docs: 'Docs', overview: 'System graph', market: 'Market', prices: 'Prices', accounts: 'Accounts and equity', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
+const VIEWS = { docs: 'Docs', overview: 'System graph', schedule: 'Schedule', market: 'Market', prices: 'Prices', accounts: 'Accounts and equity', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
 // Views that hold their own state (forms, input) and update themselves.
 const STEADY = new Set(['jobs', 'shell', 'data', 'storage']);
 let wsSeq = 1;
@@ -1433,7 +1502,7 @@ $('view').addEventListener('pointerdown', e => {
 // it, or switch to a saved layout.
 const LAYOUTS = {
   Market: () => ({ dir: 'row', ratio: 0.68, a: { dir: 'col', ratio: 0.5, a: { view: 'prices' }, b: { view: 'accounts' } }, b: { dir: 'col', ratio: 0.6, a: { view: 'news' }, b: { view: 'calendar' } } }),
-  Operations: () => ({ dir: 'row', ratio: 0.62, a: { dir: 'col', ratio: 0.58, a: { view: 'overview' }, b: { view: 'services' } }, b: { view: 'shell' } }),
+  Operations: () => ({ dir: 'row', ratio: 0.62, a: { dir: 'col', ratio: 0.5, a: { view: 'overview' }, b: { view: 'schedule' } }, b: { dir: 'col', ratio: 0.55, a: { view: 'services' }, b: { view: 'shell' } } }),
   Data: () => ({ dir: 'row', ratio: 0.55, a: { view: 'jobs' }, b: { dir: 'col', ratio: 0.55, a: { view: 'data' }, b: { view: 'storage' } } }),
 }
 let wsFocus = null;

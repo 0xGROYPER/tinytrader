@@ -285,6 +285,9 @@ async fn observe_into(
     if let Some(path) = d["streams"]["accounts"].as_str() {
         svc["accounts"] = json!(format!("{base}{path}"));
     }
+    if d["schedule"].is_array() {
+        svc["schedule"] = d["schedule"].clone();
+    }
     if let Some(path) = d["streams"]["calendar"].as_str() {
         svc["calendar"] = json!(format!("{base}{path}"));
     }
