@@ -313,7 +313,7 @@ body.ws-full .tile { border: 0; border-radius: 0; }
 body.ws-full .ws-gutter { flex-basis: 5px; background: var(--line); }
 body.ws-full .ws-gutter::after { background: var(--muted); opacity: .5; }
 body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--accent-mark); }
-@media (max-width: 800px) { body.ws-full .ws { height: auto; } }
+@media (max-width: 800px) { body.ws-full .ws, body.ws-full .nav { height: auto; } #nav-layouts kbd { display: none; } }
 .tile.focus .tile-bar { box-shadow: inset 0 -2px 0 var(--accent-mark); }
 .tile-cmd { width: auto; padding: 0 6px; font: 500 11px var(--mono); letter-spacing: .02em; }
 .pal-back { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .28); display: flex; justify-content: center; align-items: flex-start; padding: 12vh 16px 0; }
@@ -332,12 +332,14 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 @container tile (max-height: 560px) { .cal-coming { display: none; } }
 .mcal-now { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin-right: auto; margin-left: 8px; white-space: nowrap; }
 @container (max-width: 380px) { .mcal-now .muted { display: none; } }
-/* Saved layouts under Workspace in the sidebar. */
-.nav-sub { display: flex; flex-direction: column; }
-.nav .nav-sub button { min-height: 30px; padding-left: 40px; font-size: 13px; font-weight: 500; color: var(--muted); display: flex; align-items: center; gap: 8px; }
-.nav .nav-sub button .lbl { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.nav-sub kbd { font: 11px var(--mono); color: var(--muted); }
-.nav .nav-sub button[aria-current="page"] { color: var(--accent); background: transparent; }
+/* Header status: the worst state of any service; opens Operations. */
+.hstat { display: inline-flex; align-items: center; gap: 8px; height: 46px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 500 13px var(--ui); cursor: pointer; }
+.hstat:hover { background: var(--surface); }
+.hstat .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.hstat .dot.warn { background: var(--warn-mark); } .hstat .dot.crit { background: var(--crit-mark); }
+@media (max-width: 640px) { .hstat span { display: none; } }
+#nav-layouts kbd { margin-left: auto; font: 11px var(--mono); color: var(--muted); font-weight: 400; }
+#nav-layouts .nav-new { color: var(--muted); font-weight: 500; }
 /* The tinytrader shell: read-only commands over this deployment. */
 .term { flex: 1; display: flex; flex-direction: column; min-height: 320px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: 13px/1.5 var(--mono); }
 .tile-body > .term { border: 0; border-radius: 0; margin: -14px -16px; }
@@ -445,6 +447,7 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
     <a class="home" href="#market" title="tinytrader: home"><svg class="wordmark" viewBox="0 0 45 5" width="225" height="25" fill="currentColor" shape-rendering="crispEdges" role="img" aria-label="tinytrader"><rect x="1" y="0" width="1" height="1"/><rect x="0" y="1" width="1" height="1"/><rect x="1" y="1" width="1" height="1"/><rect x="2" y="1" width="1" height="1"/><rect x="1" y="2" width="1" height="1"/><rect x="1" y="3" width="1" height="1"/><rect x="2" y="3" width="1" height="1"/><rect x="4" y="0" width="1" height="1"/><rect x="4" y="2" width="1" height="1"/><rect x="4" y="3" width="1" height="1"/><rect x="6" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/><rect x="6" y="2" width="1" height="1"/><rect x="8" y="2" width="1" height="1"/><rect x="6" y="3" width="1" height="1"/><rect x="8" y="3" width="1" height="1"/><rect x="10" y="1" width="1" height="1"/><rect x="12" y="1" width="1" height="1"/><rect x="10" y="2" width="1" height="1"/><rect x="11" y="2" width="1" height="1"/><rect x="12" y="2" width="1" height="1"/><rect x="12" y="3" width="1" height="1"/><rect x="10" y="4" width="1" height="1"/><rect x="11" y="4" width="1" height="1"/><rect x="15" y="0" width="1" height="1"/><rect x="14" y="1" width="1" height="1"/><rect x="15" y="1" width="1" height="1"/><rect x="16" y="1" width="1" height="1"/><rect x="15" y="2" width="1" height="1"/><rect x="15" y="3" width="1" height="1"/><rect x="16" y="3" width="1" height="1"/><rect x="18" y="1" width="1" height="1"/><rect x="19" y="1" width="1" height="1"/><rect x="20" y="1" width="1" height="1"/><rect x="18" y="2" width="1" height="1"/><rect x="18" y="3" width="1" height="1"/><rect x="22" y="1" width="1" height="1"/><rect x="23" y="1" width="1" height="1"/><rect x="23" y="2" width="1" height="1"/><rect x="24" y="2" width="1" height="1"/><rect x="22" y="3" width="1" height="1"/><rect x="23" y="3" width="1" height="1"/><rect x="24" y="3" width="1" height="1"/><rect x="28" y="0" width="1" height="1"/><rect x="27" y="1" width="1" height="1"/><rect x="28" y="1" width="1" height="1"/><rect x="26" y="2" width="1" height="1"/><rect x="28" y="2" width="1" height="1"/><rect x="27" y="3" width="1" height="1"/><rect x="28" y="3" width="1" height="1"/><rect x="30" y="1" width="1" height="1"/><rect x="31" y="1" width="1" height="1"/><rect x="32" y="1" width="1" height="1"/><rect x="30" y="2" width="1" height="1"/><rect x="31" y="2" width="1" height="1"/><rect x="30" y="3" width="1" height="1"/><rect x="31" y="3" width="1" height="1"/><rect x="32" y="3" width="1" height="1"/><rect x="34" y="1" width="1" height="1"/><rect x="35" y="1" width="1" height="1"/><rect x="36" y="1" width="1" height="1"/><rect x="34" y="2" width="1" height="1"/><rect x="34" y="3" width="1" height="1"/><rect class="wm-dot" x="38" y="3" width="1" height="1"/><rect x="40" y="0" width="1" height="1"/><rect x="40" y="2" width="1" height="1"/><rect x="40" y="3" width="1" height="1"/><rect x="42" y="1" width="1" height="1"/><rect x="43" y="1" width="1" height="1"/><rect x="44" y="1" width="1" height="1"/><rect x="42" y="2" width="1" height="1"/><rect x="44" y="2" width="1" height="1"/><rect x="42" y="3" width="1" height="1"/><rect x="43" y="3" width="1" height="1"/><rect x="44" y="3" width="1" height="1"/></svg></a>
   </div>
   <div class="top-right">
+    <button type="button" class="hstat" id="hstat" hidden></button>
     <select class="palette" id="palette" aria-label="Palette" title="Palette">
       <option value="frost">Frost</option><option value="spruce">Spruce</option><option value="pbj">PB&amp;J</option><option value="amber">Amber</option><option value="swiss">Swiss Signal</option><option value="pbj2">PB&amp;J v2</option><option value="harbor">Harbor Fog</option><option value="dusk">Dusk</option>
     </select>
@@ -456,28 +459,16 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 <div class="shell">
   <nav class="nav" aria-label="Sections">
     <div class="nav-sec">
-      <div class="nav-label">Markets</div>
-      <div class="nav-items">
-        <button type="button" data-tab="news"><span class="chev"></span><span class="lbl">News</span></button>
-        <button type="button" data-tab="calendar"><span class="chev"></span><span class="lbl">Calendar</span></button>
-        <button type="button" data-tab="accounts"><span class="chev"></span><span class="lbl">Accounts</span></button>
-      </div>
+      <div class="nav-label">Workspaces</div>
+      <div class="nav-items" id="nav-layouts"></div>
     </div>
-    <div class="nav-sec">
-      <div class="nav-label">Operate</div>
-      <div class="nav-items">
-        <button type="button" data-tab="overview"><span class="chev"></span><span class="lbl">Overview</span></button>
-        <button type="button" data-tab="services"><span class="chev"></span><span class="lbl">Services</span></button><button type="button" data-tab="workspace"><span class="chev"></span><span class="lbl">Workspace</span></button><button type="button" data-tab="shell"><span class="chev"></span><span class="lbl">Shell</span></button>
-      </div>
-    </div>
-    <div id="nav-store"></div>
     <div id="nav-collections"></div>
   </nav>
   <main><div class="col" id="view"></div></main>
 </div>
 
 <script>
-const state = { openGroups: new Set(), navKey: '', tab: 'market', newsSymbol: null, topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
+const state = { openGroups: new Set(), navKey: '', tab: 'workspace', wsMax: null, newsSymbol: null, topo: null, snap: null, node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
   ev: { service: null, after: 0, rows: [], paused: false, open: new Set(), times: [], fresh: new Set() } };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -930,6 +921,7 @@ function catalogRoots() {
 const catalogStamp = () => Object.values(state.snap?.services || {}).map(s => s.catalog?.generated_at ?? '').join('|');
 function updateStoreNav() {
   const has = catalogRoots().length > 0, el = $('nav-store');
+  if (!el) return;
   if (has === !!el.childElementCount) return;
   el.innerHTML = has ? `<div class="nav-sec"><div class="nav-label">Store</div><div class="nav-items"><button type="button" data-tab="data"><span class="chev"></span><span class="lbl">Data</span></button><button type="button" data-tab="jobs"><span class="chev"></span><span class="lbl">Jobs</span></button><button type="button" data-tab="storage"><span class="chev"></span><span class="lbl">Storage</span></button></div></div>` : '';
 }
@@ -1328,6 +1320,7 @@ setInterval(() => { if ($('jobs-list')) loadJobs(); }, 2000);
 function viewHtml(tab) {
   return tab === 'overview' ? topology()
     : tab === 'market' ? marketView()
+    : tab === 'prices' ? (cards() || '<p class="muted">No prices yet: they appear while the market data relays are running (from 07:55 ET for stocks, 09:25 ET for options).</p>')
     : tab === 'accounts' ? `<div><h1>Accounts</h1><p class="muted" style="margin:0">Balances and positions of every brokerage account this deployment reads. Read only.</p></div>` + (accountsView(false) || '<p class="muted">No account service is running.</p>')
     : tab === 'news' ? newsView(true)
     : tab === 'calendar' ? calendarView()
@@ -1341,7 +1334,7 @@ function viewHtml(tab) {
 
 // Workspace: tiles, each showing one view. Split right or down, change a
 // tile's view, close it, drag the dividers; the layout is kept per browser.
-const VIEWS = { overview: 'System graph', market: 'Market', accounts: 'Accounts and equity', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
+const VIEWS = { overview: 'System graph', market: 'Market', prices: 'Prices', accounts: 'Accounts and equity', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
 // Views that hold their own state (forms, input) and update themselves.
 const STEADY = new Set(['jobs', 'shell', 'data', 'storage']);
 let wsSeq = 1;
@@ -1354,6 +1347,9 @@ const wsFind = (id, n = state.ws, parent = null) => n.id === id ? { n, parent } 
 const tileIcon = {
   row: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M8 2.5v11"/></svg>',
   col: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M1.5 8h13"/></svg>',
+  max: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9 7M2.5 13.5 7 9"/></svg>',
+  restore: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M13.5 6.5h-4v-4M2.5 9.5h4v4M9.5 6.5 14 2M6.5 9.5 2 14"/></svg>',
+  add: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>',
   close: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>',
 };
 function wsHtml(n) {
@@ -1361,13 +1357,14 @@ function wsHtml(n) {
   const open = new Set(wsLeaves().map(l => l.view)), many = wsLeaves().length > 1;
   const opts = Object.entries(VIEWS).map(([v, l]) => `<option value="${v}"${v === n.view ? ' selected' : ''}${v !== n.view && open.has(v) ? ' disabled' : ''}>${l}</option>`).join('');
   return `<div class="tile${wsFocus === n.id ? ' focus' : ''}" data-tile="${n.id}"><div class="tile-bar"><select class="tile-view" data-tile-view="${n.id}" aria-label="Tile view">${opts}</select><span class="tile-acts">
-    <button type="button" class="tile-btn tile-cmd" data-tile-cmd="${n.id}" title="Commands (⌘K)" aria-label="Commands">⌘K</button>
+    <button type="button" class="tile-btn" data-tile-add="${n.id}" title="Add a widget" aria-label="Add a widget">${tileIcon.add}</button>
+    <button type="button" class="tile-btn" data-tile-max="${n.id}" title="${state.wsMax ? 'Restore tiles (Esc)' : 'Maximise (⌥Enter)'}" aria-label="${state.wsMax ? 'Restore tiles' : 'Maximise'}">${state.wsMax ? tileIcon.restore : tileIcon.max}</button>
     <button type="button" class="tile-btn" data-tile-split="${n.id}|row" title="Split right" aria-label="Split right">${tileIcon.row}</button>
     <button type="button" class="tile-btn" data-tile-split="${n.id}|col" title="Split down" aria-label="Split down">${tileIcon.col}</button>
-    ${many ? `<button type="button" class="tile-btn" data-tile-close="${n.id}" title="Close tile" aria-label="Close tile">${tileIcon.close}</button>` : ''}</span></div>
+    ${many && !state.wsMax ? `<button type="button" class="tile-btn" data-tile-close="${n.id}" title="Close tile" aria-label="Close tile">${tileIcon.close}</button>` : ''}</span></div>
     <div class="tile-body" id="tile-${n.id}">${viewHtml(n.view)}</div></div>`;
 }
-const workspaceView = () => `<div class="ws" id="ws-root">${wsHtml(state.ws)}</div>`;
+const workspaceView = () => { const max = state.wsMax && wsFind(state.wsMax)?.n; return `<div class="ws" id="ws-root">${wsHtml(max?.view ? max : state.ws)}</div>`; };
 // On each refresh, only tiles without state of their own are redrawn.
 function refreshTiles() {
   for (const l of wsLeaves()) {
@@ -1415,11 +1412,10 @@ $('view').addEventListener('pointerdown', e => {
 // or below, add a column at the far right or a row along the bottom, close
 // it, or switch to a saved layout.
 const LAYOUTS = {
-  'Overview': () => ({ dir: 'row', ratio: 0.7, a: { dir: 'col', ratio: 0.5, a: { view: 'overview' }, b: { view: 'accounts' } }, b: { view: 'news' } }),
-  'Market': wsDefault,
-  'Data': () => ({ dir: 'col', ratio: 0.65, a: { dir: 'row', ratio: 0.6, a: { view: 'jobs' }, b: { view: 'storage' } }, b: { view: 'shell' } }),
-  'One tile': () => ({ view: 'market' }),
-};
+  Market: () => ({ dir: 'row', ratio: 0.68, a: { dir: 'col', ratio: 0.5, a: { view: 'prices' }, b: { view: 'accounts' } }, b: { dir: 'col', ratio: 0.6, a: { view: 'news' }, b: { view: 'calendar' } } }),
+  Operations: () => ({ dir: 'row', ratio: 0.62, a: { dir: 'col', ratio: 0.58, a: { view: 'overview' }, b: { view: 'services' } }, b: { view: 'shell' } }),
+  Data: () => ({ dir: 'row', ratio: 0.55, a: { view: 'jobs' }, b: { dir: 'col', ratio: 0.55, a: { view: 'data' }, b: { view: 'storage' } } }),
+}
 let wsFocus = null;
 const focusedLeaf = () => (wsFocus && wsFind(wsFocus)?.n.view && wsFind(wsFocus).n) || wsLeaves()[0];
 function wsPut(view) {
@@ -1446,11 +1442,12 @@ function wsCommands() {
   const out = [];
   for (const [v, label] of Object.entries(VIEWS)) {
     out.push({ label: `Show ${label} here`, run: () => wsPut(v) });
-    out.push({ label: `Split right: ${label}`, run: () => wsSplit(v, 'row') });
-    out.push({ label: `Split below: ${label}`, run: () => wsSplit(v, 'col') });
-    out.push({ label: `New column at the far right: ${label}`, run: () => wsSplit(v, 'row', true) });
-    out.push({ label: `New row along the bottom: ${label}`, run: () => wsSplit(v, 'col', true) });
+    out.push({ label: `Add ${label} to the right`, run: () => wsSplit(v, 'row') });
+    out.push({ label: `Add ${label} below`, run: () => wsSplit(v, 'col') });
+    out.push({ label: `Add ${label} as a column at the far right`, run: () => wsSplit(v, 'row', true) });
+    out.push({ label: `Add ${label} as a row along the bottom`, run: () => wsSplit(v, 'col', true) });
   }
+  out.push({ label: state.wsMax ? 'Restore all tiles' : 'Maximise this tile', run: () => { state.wsMax = state.wsMax ? null : focusedLeaf().id; } });
   if (wsLeaves().length > 1) out.push({ label: 'Close this tile', run: () => { const { parent } = wsFind(focusedLeaf().id); const keep = parent.a.id === focusedLeaf().id ? parent.b : parent.a; for (const k of ['view', 'dir', 'ratio', 'a', 'b']) delete parent[k]; Object.assign(parent, keep); wsFocus = null; } });
   for (const [name, make] of Object.entries(LAYOUTS)) out.push({ label: `Apply template: ${name}`, run: () => { const fresh = make(); for (const k of Object.keys(state.ws)) delete state.ws[k]; Object.assign(state.ws, fresh); (function number(n) { n.id = 'w' + wsSeq++; if (!n.view) { number(n.a); number(n.b); } })(state.ws); wsFocus = null; } });
   return out;
@@ -1463,10 +1460,10 @@ function palDraw() {
   pal.list = matching($('ws-pal-in').value).slice(0, 12); pal.sel = Math.min(pal.sel, Math.max(0, pal.list.length - 1));
   $('ws-pal-list').innerHTML = pal.list.map((c, i) => `<li role="option" data-pal="${i}" aria-selected="${i === pal.sel}">${esc(c.label)}</li>`).join('') || '<li class="muted">No matching command</li>';
 }
-function palOpen() {
+function palOpen(prefill = '') {
   if (state.tab !== 'workspace') { state.tab = 'workspace'; state.navigated = true; render(); }
   if (!$('ws-pal')) document.body.insertAdjacentHTML('beforeend', `<div class="pal-back" id="ws-pal"><div class="pal" role="dialog" aria-label="Workspace commands"><input id="ws-pal-in" placeholder="Type a command: news column, graph below, save Trading…" autocomplete="off" spellcheck="false"><ul id="ws-pal-list" role="listbox"></ul><p class="pal-hint">Acts on the focused tile: ${esc(VIEWS[focusedLeaf().view])}. ↑↓ to choose, Enter to run, Esc to close.</p></div></div>`);
-  pal.open = true; pal.sel = 0; $('ws-pal-in').value = ''; palDraw(); $('ws-pal-in').focus();
+  pal.open = true; pal.sel = 0; $('ws-pal-in').value = prefill; palDraw(); $('ws-pal-in').focus();
 }
 function palClose() { $('ws-pal')?.remove(); pal.open = false; }
 function palRun(i) { const c = pal.list[i]; if (!c) return; c.run(); palClose(); wsChanged(); }
@@ -1488,23 +1485,38 @@ $('view').addEventListener('pointerdown', e => {
   const t = e.target.closest && e.target.closest('[data-tile]'); if (!t) return;
   wsFocus = t.dataset.tile; document.querySelectorAll('.tile.focus').forEach(x => x.classList.remove('focus')); t.classList.add('focus');
 }, true);
-$('view').addEventListener('click', e => { if (e.target.closest && e.target.closest('[data-tile-cmd]')) { wsFocus = e.target.closest('[data-tile-cmd]').dataset.tileCmd; palOpen(); } });
+$('view').addEventListener('click', e => {
+  const add = e.target.closest && e.target.closest('[data-tile-add]');
+  if (add) { wsFocus = add.dataset.tileAdd; palOpen('add '); return; }
+  const mx = e.target.closest && e.target.closest('[data-tile-max]');
+  if (mx) { wsMaximise(mx.dataset.tileMax); }
+});
+function wsMaximise(id) { state.wsMax = state.wsMax ? null : id; wsFocus = id; state.navigated = true; render(); drawCharts(); }
+document.addEventListener('keydown', e => {
+  if (state.tab !== 'workspace' || pal.open) return;
+  if (e.altKey && e.key === 'Enter') { e.preventDefault(); wsMaximise(focusedLeaf().id); }
+  else if (e.key === 'Escape' && state.wsMax) { e.preventDefault(); wsMaximise(state.wsMax); }
+});
 
 // Saved layouts: each has a name and its tile tree. The current layout keeps
 // its own edits; ⌥1–⌥9 switch to the first nine, and the palette saves,
 // switches, renames and deletes them. Kept per browser.
-const LS = { list: 'tinytrader-layouts', current: 'tinytrader-layout' };
+const LS = { list: 'tinytrader-workspaces', current: 'tinytrader-workspace-current' };
 const plain = n => n.view ? { view: n.view } : { dir: n.dir, ratio: n.ratio, a: plain(n.a), b: plain(n.b) };
 const lay = { list: [], current: null };
 (() => {
   try { lay.list = JSON.parse(localStorage.getItem(LS.list)) || []; lay.current = localStorage.getItem(LS.current); } catch (_) {}
   if (!lay.list.length) {
-    // Start with the current workspace and the built-in layouts.
-    lay.list = [{ name: 'Main', tree: plain(state.ws) }, ...Object.entries(LAYOUTS).filter(([n]) => n !== 'One tile').map(([name, make]) => ({ name, tree: make() }))];
-    lay.current = 'Main';
+    // Start with the default workspaces, keeping layouts saved earlier under their own names.
+    const builtin = new Set(['Main', 'Overview', 'Market', 'Data', 'System graph and equity, news on the right', 'Market, accounts and shell', 'Jobs and storage, shell below']);
+    let earlier = [];
+    try { earlier = (JSON.parse(localStorage.getItem('tinytrader-layouts')) || []).filter(l => !builtin.has(l.name)); } catch (_) {}
+    lay.list = [...Object.entries(LAYOUTS).map(([name, make]) => ({ name, tree: make() })), ...earlier];
+    lay.current = 'Market';
   }
   if (!lay.list.some(l => l.name === lay.current)) lay.current = lay.list[0].name;
 })();
+layLoadOnStart();
 function laySave() {
   const cur = lay.list.find(l => l.name === lay.current); if (cur) cur.tree = plain(state.ws);
   try { localStorage.setItem(LS.list, JSON.stringify(lay.list)); localStorage.setItem(LS.current, lay.current ?? ''); } catch (_) {}
@@ -1519,19 +1531,29 @@ function layLoad(tree) {
 function laySwitch(name) {
   const to = lay.list.find(l => l.name === name); if (!to) return;
   laySave(); lay.current = name; layLoad(to.tree); laySave();
-  if (state.tab !== 'workspace') state.tab = 'workspace';
-  state.navigated = true; render();
+  state.tab = 'workspace'; state.doc = null; state.wsMax = null;
+  try { history.replaceState(null, '', '#w-' + encodeURIComponent(name)); } catch (_) {}
+  state.navigated = true; render(); window.scrollTo(0, 0);
 }
 // Every change to the workspace is kept in the current layout.
 const wsSaveTree = wsSave;
 wsSave = () => { wsSaveTree(); laySave(); };
 // Under Workspace in the sidebar: the saved layouts, with their shortcuts.
 function updateLayoutNav() {
-  const host = document.querySelector('.nav button[data-tab="workspace"]'); if (!host) return;
-  let box = $('nav-layouts');
-  if (!box) { host.insertAdjacentHTML('afterend', '<div class="nav-sub" id="nav-layouts"></div>'); box = $('nav-layouts'); }
-  box.innerHTML = lay.list.map((l, i) => `<button type="button" data-layout="${esc(l.name)}"${state.tab === 'workspace' && l.name === lay.current ? ' aria-current="page"' : ''}><span class="lbl">${esc(l.name)}</span>${i < 9 ? `<kbd>⌥${i + 1}</kbd>` : ''}</button>`).join('');
+  const box = $('nav-layouts'); if (!box) return;
+  const html = lay.list.map((l, i) => `<button type="button" data-layout="${esc(l.name)}"${state.tab === 'workspace' && l.name === lay.current ? ' aria-current="page"' : ''}><span class="chev"></span><span class="lbl">${esc(l.name)}</span>${i < 9 ? `<kbd>⌥${i + 1}</kbd>` : ''}</button>`).join('')
+    + '<button type="button" class="nav-new" data-new-ws><span class="chev"></span><span class="lbl">New workspace</span><kbd>⌘K</kbd></button>';
+  if (box.innerHTML !== html) box.innerHTML = html;
 }
+function layLoadOnStart() { const cur = lay.list.find(l => l.name === lay.current); if (cur) layLoad(cur.tree); }
+document.addEventListener('click', e => { if (e.target.closest && e.target.closest('[data-new-ws]')) palOpen('save '); });
+// ⌃↑/⌃↓ (or ⌥↑/⌥↓) move through the workspaces in the sidebar.
+document.addEventListener('keydown', e => {
+  if (!(e.ctrlKey || e.altKey) || e.metaKey || !['ArrowUp', 'ArrowDown'].includes(e.key) || pal.open) return;
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+  const i = lay.list.findIndex(l => l.name === lay.current), n = lay.list.length;
+  e.preventDefault(); laySwitch(lay.list[(i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n].name);
+});
 document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('[data-layout]'); if (b) laySwitch(b.dataset.layout); });
 document.addEventListener('keydown', e => {
   if (!e.altKey || e.metaKey || e.ctrlKey || !/^Digit[1-9]$/.test(e.code)) return;
@@ -1628,7 +1650,20 @@ function render() {
   status();
   if (window.scrollY !== scrollY) window.scrollTo(0, scrollY);
 }
+function updateHeaderStatus() {
+  const el = $('hstat'); if (!el || !state.topo) return;
+  const svcs = (state.topo.services || []).map(s => ({ s, st: statusOf({ ...s, kind: 'svc' }) }));
+  const down = svcs.filter(x => x.st === 'crit'), warn = svcs.filter(x => x.st === 'warn');
+  const tone = down.length ? 'crit' : warn.length ? 'warn' : 'ok';
+  const text = down.length ? `${down.length} down` : warn.length ? `${warn.length} need${warn.length === 1 ? 's' : ''} attention` : 'All healthy';
+  const html = `<i class="dot ${tone}"></i><span>${text}</span>`;
+  if (el.innerHTML !== html) el.innerHTML = html;
+  el.title = [...down, ...warn].map(x => x.s.id).join(', ') || 'Every service is running or off schedule';
+  el.hidden = false;
+}
+$('hstat').addEventListener('click', () => { if (lay.list.some(l => l.name === 'Operations')) laySwitch('Operations'); });
 function status() {
+  updateHeaderStatus();
   const age = state.lastOk ? (Date.now() - state.lastOk) / 1000 : null;
   const stale = age == null || age > 6;
   const problems = [];
@@ -1753,9 +1788,13 @@ $('theme-btn').addEventListener('click', () => {
     state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true;
     const d = hc.docs.find(x => x.index === state.doc); if (d) revealDoc(hc, d);
   }
-  else if (['overview', 'services', 'market', 'data', 'jobs', 'storage', 'workspace', 'shell'].includes(h)) { state.tab = h; state.navigated = true; }
-  else if (['accounts', 'news', 'calendar'].includes(h)) { state.tab = h; state.navigated = true; }
-  else if (h === 'charts') { state.tab = 'market'; state.navigated = true; }
+  else if (h.startsWith('w-') && lay.list.some(l => l.name === decodeURIComponent(h.slice(2)))) laySwitch(decodeURIComponent(h.slice(2)));
+  else if (h) {
+    // Old page links open the workspace holding that view, with it focused.
+    const view = { charts: 'prices', workspace: null }[h] ?? h;
+    const home = view && lay.list.find(l => JSON.stringify(l.tree).includes(`"view":"${view}"`));
+    if (home) { laySwitch(home.name); wsFocus = wsLeaves().find(l => l.view === view)?.id ?? null; state.navigated = true; }
+  }
   await loadTopology(); await poll();
   setInterval(poll, 2000);
   setInterval(pollEvents, 700);
