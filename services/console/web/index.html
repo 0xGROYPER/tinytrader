@@ -1698,6 +1698,8 @@ const STEADY = new Set(['jobs', 'shell', 'data', 'storage', 'roadmap']);
 const tileIcon = {
   max: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9 7M2.5 13.5 7 9"/></svg>',
   restore: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M13.5 6.5h-4v-4M2.5 9.5h4v4M9.5 6.5 14 2M6.5 9.5 2 14"/></svg>',
+  row: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M8 2.5v11"/></svg>',
+  col: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M1.5 8h13"/></svg>',
   add: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>',
   close: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>',
 };
@@ -1749,7 +1751,13 @@ function mountWorkspace() {
     },
     createRightHeaderActionComponent: group => {
       const el = document.createElement('div'); el.className = 'dv-acts';
-      el.innerHTML = `<button type="button" class="tile-btn" data-dv-add title="Add a widget" aria-label="Add a widget">${tileIcon.add}</button><button type="button" class="tile-btn" data-dv-max title="Maximise (⌥Enter)" aria-label="Maximise">${tileIcon.max}</button>`;
+      el.innerHTML = `<button type="button" class="tile-btn" data-dv-add title="Add a widget" aria-label="Add a widget">${tileIcon.add}</button><button type="button" class="tile-btn" data-dv-split="right" title="Split right" aria-label="Split right">${tileIcon.row}</button><button type="button" class="tile-btn" data-dv-split="below" title="Split down" aria-label="Split down">${tileIcon.col}</button><button type="button" class="tile-btn" data-dv-max title="Maximise (⌥Enter)" aria-label="Maximise">${tileIcon.max}</button>`;
+      // Split: the next widget not yet open goes beside or below this group.
+      el.querySelectorAll('[data-dv-split]').forEach(b => b.onclick = () => {
+        const open = new Set(openViews()), next = Object.keys(VIEWS).find(v => !open.has(v)), ref = group.activePanel;
+        if (!next || !ref) return;
+        dock.addPanel({ id: panelId(), component: 'view', params: { view: next }, title: VIEWS[next], position: { referencePanel: ref, direction: b.dataset.dvSplit } });
+      });
       el.querySelector('[data-dv-add]').onclick = () => { group.activePanel?.api.setActive(); palOpen('add '); };
       el.querySelector('[data-dv-max]').onclick = () => { const p = group.activePanel; if (p) { p.api.isMaximized() ? p.api.exitMaximized() : p.api.maximize(); } };
       return { element: el, init() {}, dispose() {} };
