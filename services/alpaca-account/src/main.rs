@@ -36,6 +36,8 @@ use axum::Router;
 use axum::routing::get;
 use clap::{Parser, ValueEnum};
 use serde_json::{Map, Value, json};
+mod live;
+
 use tinytrader_observe::{Events, Observer, Series, State, listen_address, unix_seconds};
 
 /// Account fields served, as Alpaca names them. Everything else, notably
@@ -87,6 +89,12 @@ impl Environment {
             Self::Live => "https://api.alpaca.markets",
         }
     }
+    fn stream(self) -> &'static str {
+        match self {
+            Self::Paper => "wss://paper-api.alpaca.markets/stream",
+            Self::Live => "wss://api.alpaca.markets/stream",
+        }
+    }
     fn name(self) -> &'static str {
         match self {
             Self::Paper => "paper",
@@ -113,16 +121,23 @@ struct Args {
     #[arg(long, env = "ALPACA_ACCOUNT_LABEL")]
     label: Option<String>,
 
-    /// Seconds between polls of each account.
-    #[arg(long, env = "ALPACA_ACCOUNT_INTERVAL", default_value_t = 15)]
-    interval: u64,
-
     /// Active hours in New York time, e.g. `07:55-17:05`, relative to the
     /// regular session on trading days (from Alpaca's calendar). Outside them
     /// the service reports itself idle and calls nothing; it reads every
     /// account once when it starts. Always active when unset.
     #[arg(long, env = "ALPACA_ACCOUNT_HOURS")]
     hours: Option<tinytrader_schedule::Schedule>,
+
+    /// Relays that price positions, as `stocks=ADDR` and `ROOT=ADDR` entries
+    /// separated by `;`, e.g. `stocks=relay-iex:7610;XSP=relay-opra-xsp:7602`.
+    /// Positions they don't cover keep Alpaca's prices.
+    #[arg(long, env = "ALPACA_ACCOUNT_RELAYS", default_value = "")]
+    relays: String,
+
+    /// Seconds between full re-reads of every account while active; order
+    /// events trigger a re-read of their account at once.
+    #[arg(long, env = "ALPACA_ACCOUNT_REFRESH", default_value_t = 600)]
+    refresh: u64,
 }
 
 /// One account and its latest reading.
@@ -201,6 +216,8 @@ fn load_accounts(args: &Args) -> Result<Vec<Account>, String> {
 
 #[tokio::main]
 async fn main() {
+    // One TLS crypto provider for the trade stream and HTTP clients.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let args = Args::parse();
     let accounts = match load_accounts(&args) {
         Ok(a) if !a.is_empty() => a,
@@ -306,92 +323,164 @@ async fn main() {
         .timeout(Duration::from_secs(15))
         .build()
         .expect("http client");
-    let every = Duration::from_secs(args.interval.max(5));
-    let mut calendar_due: Option<std::time::Instant> = None;
+    let relays = live::Relays::parse(&args.relays);
+    let prices = Arc::new(live::Prices::default());
+    let feeds = live::Feeds::new(prices.clone());
+    let refresh = Duration::from_secs(args.refresh.max(30));
     let mut first = true;
     loop {
         // Outside active hours, call nothing: wait for the next window, using
         // the calendar already read. The first pass always reads, so the
         // accounts are known even when the service starts after hours.
-        if let Some(hours) = args.hours
-            && !first
-        {
+        let mut end = u64::MAX;
+        if let Some(hours) = args.hours {
             let now = (unix_seconds() * 1e9) as u64;
             let calendar: tinytrader_schedule::Calendar =
                 serde_json::from_value(lock(&shared.calendar).clone()).unwrap_or_default();
             match hours.next(now, &calendar) {
-                Some((start, _)) if start > now => {
-                    observer.set_state(
-                        State::Idle,
-                        &format!(
+                Some((start, e)) if start <= now => end = e,
+                next if !first => {
+                    let detail = match next {
+                        Some((start, _)) => format!(
                             "off schedule until {}",
                             tinytrader_schedule::describe(start)
                         ),
-                    );
-                    // Read the calendar afresh when the window opens.
-                    calendar_due = None;
-                    tokio::time::sleep(
-                        Duration::from_nanos(start - now).min(Duration::from_secs(300)),
-                    )
-                    .await;
+                        None => "off schedule: no trading day in the next two weeks".to_owned(),
+                    };
+                    observer.set_state(State::Idle, &detail);
+                    let wait = next.map_or(Duration::from_secs(3600), |(start, _)| {
+                        Duration::from_nanos(start.saturating_sub(now))
+                            .min(Duration::from_secs(300))
+                    });
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
-                None => {
-                    observer.set_state(
-                        State::Idle,
-                        "off schedule: no trading day in the next two weeks",
-                    );
-                    tokio::time::sleep(Duration::from_secs(3600)).await;
-                    continue;
-                }
-                Some(_) => {}
+                _ => end = 0, // starting after hours: read once, then idle
             }
         }
         first = false;
         // The calendar is the same for every account; the first one reads it.
-        if calendar_due.is_none_or(|t| t.elapsed() > Duration::from_secs(600)) {
-            let a = &shared.accounts[0];
-            match read_calendar(&http, a.env, &a.key, &a.secret).await {
-                Ok(c) => {
-                    *lock(&shared.calendar) = c;
-                    calendar_due = Some(std::time::Instant::now());
+        let a = &shared.accounts[0];
+        match read_calendar(&http, a.env, &a.key, &a.secret).await {
+            Ok(c) => *lock(&shared.calendar) = c,
+            Err(e) => eprintln!("alpaca-account: calendar: {e}"),
+        }
+        read_all(&shared, &http, &observer).await;
+        if end == 0 {
+            continue;
+        }
+        // Active: order events re-read their account; relay prices value the
+        // positions every second.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let listeners: Vec<_> = shared
+            .accounts
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                tokio::spawn(live::trade_updates(
+                    a.env.stream().to_owned(),
+                    a.key.clone(),
+                    a.secret.clone(),
+                    i,
+                    tx.clone(),
+                ))
+            })
+            .collect();
+        feeds.want(&live::wanted(&docs(&shared), &relays));
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        let mut last_full = std::time::Instant::now();
+        loop {
+            let now = (unix_seconds() * 1e9) as u64;
+            if now >= end {
+                break;
+            }
+            tokio::select! {
+                Some(i) = rx.recv() => {
+                    let a = &shared.accounts[i];
+                    read_one(&shared, a, &http, &observer).await;
+                    feeds.want(&live::wanted(&docs(&shared), &relays));
                 }
-                Err(e) => eprintln!("alpaca-account: calendar: {e}"),
+                _ = tick.tick() => {
+                    if last_full.elapsed() >= refresh {
+                        read_all(&shared, &http, &observer).await;
+                        feeds.want(&live::wanted(&docs(&shared), &relays));
+                        last_full = std::time::Instant::now();
+                    }
+                    for a in &shared.accounts {
+                        let mut doc = lock(&a.doc);
+                        live::revalue(&mut doc, &relays, &prices);
+                        if let Some(e) = doc["account"]["equity"].as_f64() {
+                            shared.series.push(&a.label, e);
+                        }
+                    }
+                }
             }
         }
-        let mut failing = Vec::new();
-        for a in &shared.accounts {
-            let read = async {
-                let account = get_json(&http, a.env, &a.key, &a.secret, "/v2/account").await?;
-                let positions = get_json(&http, a.env, &a.key, &a.secret, "/v2/positions").await?;
-                Ok::<_, String>((account, positions))
-            };
-            match read.await {
-                Ok((account, positions)) => {
-                    a.polls.fetch_add(1, Ordering::Relaxed);
-                    update(&shared, a, &account, &positions);
-                }
-                Err(e) => {
-                    a.errors.fetch_add(1, Ordering::Relaxed);
-                    eprintln!("alpaca-account: {}: {e}", a.label);
-                    observer.record_error(&format!("{}: {e}", a.label));
-                    failing.push(a.label.clone());
-                }
+        for l in listeners {
+            l.abort();
+        }
+        feeds.want(&std::collections::HashSet::new());
+    }
+}
+
+/// Every account's current document.
+fn docs(shared: &Shared) -> Vec<Value> {
+    shared
+        .accounts
+        .iter()
+        .map(|a| lock(&a.doc).clone())
+        .collect()
+}
+
+/// Read one account's balances and positions from Alpaca.
+async fn read_one(
+    shared: &Shared,
+    a: &Account,
+    http: &reqwest::Client,
+    observer: &Observer,
+) -> bool {
+    let read = async {
+        let account = get_json(http, a.env, &a.key, &a.secret, "/v2/account").await?;
+        let positions = get_json(http, a.env, &a.key, &a.secret, "/v2/positions").await?;
+        Ok::<_, String>((account, positions))
+    };
+    match read.await {
+        Ok((account, positions)) => {
+            a.polls.fetch_add(1, Ordering::Relaxed);
+            update(shared, a, &account, &positions);
+            if let Some(e) = lock(&a.doc)["account"]["equity"].as_f64() {
+                shared.series.push(&a.label, e);
             }
+            true
         }
-        let n = shared.accounts.len();
-        if failing.is_empty() {
-            observer.set_state(
-                State::Ready,
-                &format!("{n} account{}", if n == 1 { "" } else { "s" }),
-            );
-        } else {
-            observer.set_state(
-                State::Degraded,
-                &format!("unreachable: {}; retrying", failing.join(", ")),
-            );
+        Err(e) => {
+            a.errors.fetch_add(1, Ordering::Relaxed);
+            eprintln!("alpaca-account: {}: {e}", a.label);
+            observer.record_error(&format!("{}: {e}", a.label));
+            false
         }
-        tokio::time::sleep(every).await;
+    }
+}
+
+/// Read every account, and report how that went.
+async fn read_all(shared: &Shared, http: &reqwest::Client, observer: &Observer) {
+    let mut failing = Vec::new();
+    for a in &shared.accounts {
+        if !read_one(shared, a, http, observer).await {
+            failing.push(a.label.clone());
+        }
+    }
+    let n = shared.accounts.len();
+    if failing.is_empty() {
+        observer.set_state(
+            State::Ready,
+            &format!("{n} account{}", if n == 1 { "" } else { "s" }),
+        );
+    } else {
+        observer.set_state(
+            State::Degraded,
+            &format!("unreachable: {}; retrying", failing.join(", ")),
+        );
     }
 }
 
@@ -498,9 +587,6 @@ fn update(shared: &Shared, acct: &Account, account: &Value, positions: &Value) {
             let line = format!("{}: {line}", acct.label);
             shared.events.push(line.clone(), line);
         }
-    }
-    if let Some(e) = account["equity"].as_f64() {
-        shared.series.push(&acct.label, e);
     }
     doc["account"] = account;
     doc["positions"] = json!(positions);

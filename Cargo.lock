@@ -29,11 +29,15 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "dbn",
+ "futures-util",
  "reqwest",
+ "rustls",
  "serde_json",
  "tinytrader-observe",
  "tinytrader-schedule",
  "tokio",
+ "tokio-tungstenite 0.27.0",
 ]
 
 [[package]]
