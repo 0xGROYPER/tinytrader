@@ -302,8 +302,18 @@ tr:last-child td { border-bottom: 0; }
 .tile-btn { width: 28px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
 .tile-btn:hover { background: var(--nav-hover); color: var(--fg); }
 .tile-body { flex: 1; overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 16px; min-height: 0; }
-.tile-body h1 { font-size: 20px; }
+:root .ws .tile-body h1 { font-size: 20px; letter-spacing: -0.01em; }
 @media (max-width: 800px) { .ws, .ws-split { flex-direction: column; height: auto; } .ws-gutter { display: none; } .ws-a, .ws-b { flex: none !important; } .tile { height: 460px; } }
+/* The workspace fills everything right of the sidebar and below the header. */
+body.ws-full main { padding: 0; }
+body.ws-full .col { max-width: none; }
+body.ws-full .nav { height: calc(100vh - var(--top-h, 67px)); }
+body.ws-full .ws { height: calc(100vh - var(--top-h, 67px)); min-height: 0; }
+body.ws-full .tile { border: 0; border-radius: 0; }
+body.ws-full .ws-gutter { flex-basis: 5px; background: var(--line); }
+body.ws-full .ws-gutter::after { background: var(--muted); opacity: .5; }
+body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--accent-mark); }
+@media (max-width: 800px) { body.ws-full .ws { height: auto; } }
 /* The tinytrader shell: read-only commands over this deployment. */
 .term { flex: 1; display: flex; flex-direction: column; min-height: 320px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: 13px/1.5 var(--mono); }
 .tile-body > .term { border: 0; border-radius: 0; margin: -14px -16px; }
@@ -1373,6 +1383,8 @@ function render() {
   if (state.tab === 'workspace' && !state.navigated && $('ws-root')) { refreshTiles(); drawCharts(); return status(); }
   state.navigated = false;
   state.catalogAt = catalogStamp();
+  document.body.classList.toggle('ws-full', state.tab === 'workspace');
+  document.documentElement.style.setProperty('--top-h', document.querySelector('.top').offsetHeight + 'px');
   $('view').innerHTML = viewHtml(state.tab);
   if ($('jobs-list')) jobsOpened();
   { const out = $('term-out'); if (out) out.scrollTop = out.scrollHeight; }
