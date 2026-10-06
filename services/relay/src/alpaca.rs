@@ -20,6 +20,7 @@ use tinytrader_observe::{Observer, State};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::hours::{self, Hours};
 use crate::hub::Hub;
 use crate::protocol;
 
@@ -105,7 +106,7 @@ impl Alpaca {
     }
 
     /// Keep the stream up, publishing its records to the hub.
-    pub async fn run(self: Arc<Self>, hub: Arc<Hub>, observer: Observer) {
+    pub async fn run(self: Arc<Self>, hub: Arc<Hub>, observer: Observer, hours: Arc<Hours>) {
         hub.publish(self.definitions(), self.symbols.len() as u64);
         let mut encoders: HashMap<String, Encoder> = self
             .symbols
@@ -114,8 +115,17 @@ impl Alpaca {
             .collect();
         let mut backoff = Duration::from_secs(1);
         loop {
+            let end = hours.wait_until_active(&hub, &observer).await;
             let began = Instant::now();
-            let outcome = self.stream(&hub, &observer, &mut encoders).await;
+            // At the end of the active window the stream is dropped, which
+            // disconnects it.
+            let outcome = tokio::select! {
+                r = self.stream(&hub, &observer, &mut encoders) => Some(r),
+                () = hours::until(end) => None,
+            };
+            let Some(outcome) = outcome else {
+                continue;
+            };
             hub.upstream_down();
             let why = match outcome {
                 Ok(()) => "Alpaca closed the stream".to_owned(),

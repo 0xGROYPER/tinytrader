@@ -125,6 +125,8 @@ The relay answers with a DBN v3 stream: a metadata header (dataset, schema,
 | Catch-up finished, now live | `SystemMsg`, code `ReplayCompleted` |
 | Provider connection lost | `SystemMsg`, text `upstream-down since=<ns>`; heartbeats continue |
 | Provider connection restored | `SystemMsg`, text `upstream-up gap_from=<ns> gap_to=<ns>` |
+| Outside active hours (provider disconnected on purpose) | `SystemMsg`, text `off-schedule until=<ns>`; heartbeats continue |
+| Active hours begin | `SystemMsg`, text `on-schedule` (not a gap) |
 | Client falling behind (queue half full) | `SystemMsg`, code `SlowReaderWarning` |
 | Client too slow (queue full) | `ErrorMsg`, then the connection closes |
 | Malformed or unsupported request | `ErrorMsg`, code `InvalidSubscription`, then close |
@@ -143,10 +145,13 @@ is disconnected rather than slowing the provider connection or other clients.
 
 - A tinytrader service with `/health`, `/metrics` and `/describe`. The console
   shows the relay, its provider, and its clients.
-- **Active hours** (decision 0005): IEX 04:00–20:00 ET and OPRA
-  09:30–16:15 ET on trading days, taken from the market calendar tinytrader
-  already serves. Outside them it disconnects from the provider and reports
-  "off schedule".
+- **Active hours** (decision 0005): a daily window in New York time set
+  relative to the regular session, so early closes shorten it (this
+  deployment: OPRA 09:25–16:20, IEX 07:55–17:05, IEX itself trading
+  08:00–17:00). Trading days and early closes come from the market calendar
+  the accounts service serves. Outside the window the relay disconnects from
+  its provider, reports itself idle ("off schedule until …"), and is left
+  out of the console's graph.
 - Configuration by flags and environment, with credentials from files
   (`*_FILE`), like tinytrader's other services.
 - Implementation: tokio, the official `databento` and `dbn` crates (including

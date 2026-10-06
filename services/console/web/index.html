@@ -339,12 +339,13 @@ function statusOf(node) {
   if (c && c.state && c.state !== 'running') return 'warn';
   if (h) {
     if (h.error) return c ? 'warn' : 'crit';
+    if (h.body?.state === 'idle') return 'off';
     if (h.body?.state && h.body.state !== 'ready') return 'warn';
     return 'ok';
   }
   return c ? 'ok' : 'idle';
 }
-const statusText = { ok: ['Healthy', 'p-ok'], warn: ['Needs attention', 'p-warn'], crit: ['Down', 'p-crit'], idle: ['No data', 'p-idle'] };
+const statusText = { ok: ['Healthy', 'p-ok'], warn: ['Needs attention', 'p-warn'], crit: ['Down', 'p-crit'], idle: ['No data', 'p-idle'], off: ['Off schedule', 'p-idle'] };
 function writerOf(storeId) {
   const e = (state.topo?.edges || []).find(e => e.to === storeId && e.kind === 'flow');
   return e && nodesById()[e.from];
@@ -404,8 +405,20 @@ function fmt(v, spec = {}) {
 
 // ---------- topology layout ----------
 const NW = 176, NH = 50, CG = 96, RG = 26, PAD = 24, HOST_TOP = 40;
+// The graph shows what is running now: services that are deliberately idle
+// (outside their active hours) are left out, with their edges, and so is any
+// outside source nothing active is connected to. The Services table still
+// lists them.
+function activeGraph() {
+  const all = nodesById(), edges = state.topo?.edges || [];
+  const off = new Set(Object.values(all).filter(n => n.kind === 'svc' && statusOf(n) === 'off').map(n => n.id));
+  const kept = edges.filter(e => !off.has(e.from) && !off.has(e.to));
+  const used = new Set(kept.flatMap(e => [e.from, e.to]));
+  const byId = Object.fromEntries(Object.entries(all).filter(([id, n]) => !off.has(id) && (n.kind !== 'ext' || used.has(id))));
+  return { byId, edges: kept };
+}
 function layout() {
-  const byId = nodesById(), edges = state.topo?.edges || [];
+  const { byId, edges } = activeGraph();
   const ids = Object.keys(byId);
   // Column = longest chain of edges leading to a node. Self-edges and edges
   // that would close a cycle are ignored, so no topology can stretch the graph.

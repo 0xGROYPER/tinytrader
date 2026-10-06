@@ -36,6 +36,8 @@ pub enum State {
     Recovering,
     Stopping,
     Failed,
+    /// Deliberately inactive, such as outside its active hours: not a fault.
+    Idle,
 }
 
 impl State {
@@ -48,6 +50,7 @@ impl State {
             State::Recovering => "recovering",
             State::Stopping => "stopping",
             State::Failed => "failed",
+            State::Idle => "idle",
         }
     }
 }

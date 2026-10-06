@@ -210,6 +210,7 @@ impl ServiceState {
             }
             Some(h) => match h.body.as_ref().and_then(|b| b.state.as_deref()) {
                 Some("ready") | None => Status::Ok,
+                Some("idle") => Status::Idle,
                 Some(_) => Status::Warn,
             },
             None if c.is_some() => Status::Ok,

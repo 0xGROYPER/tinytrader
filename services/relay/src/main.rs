@@ -21,6 +21,7 @@
 
 mod alpaca;
 mod databento;
+mod hours;
 mod hub;
 mod protocol;
 
@@ -88,6 +89,19 @@ struct Args {
     /// Seconds without data before a heartbeat is sent.
     #[arg(long, env = "RELAY_HEARTBEAT", default_value_t = 10)]
     heartbeat: u64,
+
+    /// Active hours in New York time, e.g. `09:25-16:20`, set relative to the
+    /// regular 09:30-16:00 session (an early close ends them early). Outside
+    /// them the relay disconnects from its provider and reports itself idle.
+    /// Always active when unset.
+    #[arg(long, env = "RELAY_HOURS")]
+    hours: Option<relay::schedule::Schedule>,
+
+    /// Market calendar for active hours (`{ "days": [{ "date", "open",
+    /// "close" }] }`), e.g. an accounts service's `/calendar`. Without it,
+    /// every weekday is a trading day.
+    #[arg(long, env = "RELAY_CALENDAR")]
+    calendar: Option<String>,
 
     /// Alpaca only: use Alpaca's test stream (symbol `FAKEPACA`), which runs
     /// at any time of day.
@@ -200,13 +214,21 @@ async fn run(args: Args) -> Result<(), String> {
         args.symbols.join(","),
         args.listen
     );
+    let hours = Arc::new(hours::Hours::new(
+        args.hours,
+        args.calendar.clone(),
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| e.to_string())?,
+    ));
     let alpaca = match &provider {
         Provider::Databento(d) => {
-            tokio::spawn(d.clone().run(hub.clone(), observer.clone()));
+            tokio::spawn(d.clone().run(hub.clone(), observer.clone(), hours.clone()));
             None
         }
         Provider::Alpaca(a) => {
-            tokio::spawn(a.clone().run(hub.clone(), observer.clone()));
+            tokio::spawn(a.clone().run(hub.clone(), observer.clone(), hours.clone()));
             Some(a.clone())
         }
     };

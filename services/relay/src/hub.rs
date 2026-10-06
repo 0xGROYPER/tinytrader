@@ -140,6 +140,8 @@ pub enum Upstream {
     Up,
     /// Lost at this time (ns since the epoch).
     Down(u64),
+    /// Deliberately disconnected outside active hours, until this time.
+    Off(u64),
 }
 
 pub struct Hub {
@@ -300,6 +302,10 @@ impl Hub {
     /// The provider connection is up; tell clients how long it was down.
     pub fn upstream_up(&self) {
         let mut u = lock(&self.upstream);
+        if let Upstream::Off(_) = *u {
+            self.events.push("on schedule".into(), "on schedule".into());
+            self.broadcast(protocol::system_text("on-schedule"));
+        }
         if let Upstream::Down(since) = *u {
             self.reconnects.fetch_add(1, Ordering::Relaxed);
             let text = format!("upstream-up gap_from={since} gap_to={}", protocol::now_ns());
@@ -309,10 +315,22 @@ impl Hub {
         *u = Upstream::Up;
     }
 
+    /// The relay is outside its active hours until `until`; tell clients once.
+    pub fn off_schedule(&self, until: u64) {
+        let mut u = lock(&self.upstream);
+        let was_off = matches!(*u, Upstream::Off(_));
+        *u = Upstream::Off(until);
+        if !was_off {
+            let text = format!("off-schedule until={until}");
+            self.events.push(text.clone(), text.clone());
+            self.broadcast(protocol::system_text(&text));
+        }
+    }
+
     /// The provider connection was lost; tell clients once.
     pub fn upstream_down(&self) {
         let mut u = lock(&self.upstream);
-        if matches!(*u, Upstream::Down(_)) {
+        if matches!(*u, Upstream::Down(_) | Upstream::Off(_)) {
             return;
         }
         let since = protocol::now_ns();
@@ -383,10 +401,14 @@ impl Hub {
         }
         let mut cut = join.cut;
         let mut tail = protocol::system_code(SystemCode::ReplayCompleted);
-        if let Upstream::Down(since) = self.upstream() {
-            tail.extend(protocol::system_text(&format!(
+        match self.upstream() {
+            Upstream::Down(since) => tail.extend(protocol::system_text(&format!(
                 "upstream-down since={since}"
-            )));
+            ))),
+            Upstream::Off(until) => tail.extend(protocol::system_text(&format!(
+                "off-schedule until={until}"
+            ))),
+            _ => {}
         }
         for chunk in &buffered {
             tail.extend(after_cut(chunk, &mut cut));

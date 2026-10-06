@@ -15,6 +15,7 @@ use databento::live::Subscription;
 use time::OffsetDateTime;
 use tinytrader_observe::{Observer, State};
 
+use crate::hours::{self, Hours};
 use crate::hub::Hub;
 
 /// Records are passed to clients in chunks of about this many bytes.
@@ -72,11 +73,20 @@ impl Databento {
     }
 
     /// Keep the standing session up, publishing its records to the hub.
-    pub async fn run(self: Arc<Self>, hub: Arc<Hub>, observer: Observer) {
+    pub async fn run(self: Arc<Self>, hub: Arc<Hub>, observer: Observer, hours: Arc<Hours>) {
         let mut backoff = Duration::from_secs(1);
         loop {
+            let end = hours.wait_until_active(&hub, &observer).await;
             let began = Instant::now();
-            let outcome = self.stream(&hub, &observer).await;
+            // At the end of the active window the session is dropped, which
+            // disconnects it.
+            let outcome = tokio::select! {
+                r = self.stream(&hub, &observer) => Some(r),
+                () = hours::until(end) => None,
+            };
+            let Some(outcome) = outcome else {
+                continue;
+            };
             hub.upstream_down();
             let why = match outcome {
                 Ok(()) => "Databento closed the session".to_owned(),
