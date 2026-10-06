@@ -332,6 +332,36 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 .term-in { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); }
 .term-in span { color: var(--accent); }
 .term-in input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--fg); font: inherit; }
+/* Calendar: a month grid that sizes itself to its container (page or tile). */
+.cal-now { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; }
+.mcal { container-type: inline-size; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--bg); }
+.mcal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.mcal-head h2 { margin: 0; font-size: 16px; }
+.mcal-nav { display: flex; align-items: center; gap: 4px; }
+.mcal-nav .tile-btn { font-size: 18px; }
+.mcal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.mcal-dow { padding: 6px 8px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--line-soft); }
+.cal-day { min-height: 68px; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); min-width: 0; }
+.mcal-grid > :nth-child(7n) { border-right: 0; }
+.cal-day .n { font: 500 13px var(--mono); color: var(--fg); width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; margin: -2px 0 0 -4px; }
+.cal-day .hrs { font: 12px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-day.k-weekend, .cal-day.blank { background: var(--surface); }
+.cal-day.k-weekend .n, .cal-day.k-unknown .n { color: var(--muted); }
+.cal-day.k-holiday { background: var(--warn-soft); }
+.cal-day.k-holiday .hrs, .cal-day.k-early .hrs { color: var(--warn); }
+.cal-day.k-early { box-shadow: inset 0 -3px 0 var(--warn-mark); }
+.cal-day.past { opacity: .5; }
+.cal-day.is-today .n { background: var(--accent); color: var(--bg); }
+@container (max-width: 460px) {
+  .cal-day { min-height: 40px; padding: 4px; align-items: center; }
+  .cal-day .hrs { display: none; }
+  .cal-day .n { margin: 0; }
+  .mcal-dow { padding: 6px 0; text-align: center; }
+}
+.cal-coming h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+.cal-coming ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font: 13px var(--mono); }
+.cal-coming li { display: flex; justify-content: space-between; gap: 16px; max-width: 360px; }
+.cal-coming .warn { color: var(--warn); }
 .chip-btn { min-height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 500 13px var(--mono); cursor: pointer; }
 .chip-btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-2); color: var(--accent); }
 .cal-wrap { overflow-x: auto; padding-bottom: 4px; }
@@ -750,6 +780,8 @@ function accountsView(withHeading = true) {
   return withHeading ? `<section><div class="sec-head"><h2>Accounts</h2><span class="muted" style="font-size:13px">Balances and positions, read only</span></div>${grid}</section>` : grid;
 }
 // The US market calendar, from the first service that serves one.
+// The market calendar as a month: one widget that reads well as a page or
+// in a narrow tile (it sizes itself to its container, not the window).
 function calendarView() {
   const cal = (state.topo?.services || []).map(s => svcState(s.id).calendar).find(c => c?.days?.length);
   const head = '<div><h1>Calendar</h1><p class="muted" style="margin:0">US equity market sessions, in New York time.</p></div>';
@@ -760,22 +792,52 @@ function calendarView() {
   const now = c.is_open
     ? `<span class="pill p-ok">Open</span> Closes ${esc(ny(c.next_close))} (in ${until(c.next_close)})`
     : `<span class="pill p-idle">Closed</span> Opens ${esc(ny(c.next_open))} (in ${until(c.next_open)})`;
-  // Weekdays missing from the calendar are holidays; closes before 16:00 are early closes.
   const sessions = new Map(cal.days.map(d => [d.date, d]));
-  const first = new Date(cal.days[0].date + 'T12:00:00Z'), last = new Date(cal.days[cal.days.length - 1].date + 'T12:00:00Z');
+  const firstDay = cal.days[0].date, lastDay = cal.days[cal.days.length - 1].date;
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const rows = [];
-  for (let d = first; d <= last; d = new Date(d.getTime() + 86400000)) {
-    const date = d.toISOString().slice(0, 10), wd = d.getUTCDay();
-    if (wd === 0 || wd === 6) continue;
-    const s = sessions.get(date), label = d.toLocaleDateString(undefined, { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' });
-    const note = !s ? '<span class="pill p-warn">Holiday</span>' : s.close < '16:00' ? '<span class="pill p-warn">Early close</span>' : '';
-    rows.push(`<tr${date === today ? ' class="today"' : ''}${date < today ? ' style="opacity:.55"' : ''}><td style="color:var(--fg)">${esc(label)}${date === today ? ' <span class="muted">today</span>' : ''}</td>
-      <td class="mono">${s ? esc(s.open) : '—'}</td><td class="mono">${s ? esc(s.close) : '—'}</td><td>${note}</td></tr>`);
+  // Weekdays inside the calendar's range with no session are holidays; a close before 16:00 is an early close.
+  const kind = (date, wd) => wd === 0 || wd === 6 ? 'weekend' : date < firstDay || date > lastDay ? 'unknown'
+    : !sessions.has(date) ? 'holiday' : sessions.get(date).close < '16:00' ? 'early' : 'open';
+  const months = [firstDay.slice(0, 7), lastDay.slice(0, 7)];
+  let month = state.calMonth || today.slice(0, 7);
+  if (month < months[0]) month = months[0];
+  if (month > months[1]) month = months[1];
+  state.calMonth = month;
+  const [y, m] = month.split('-').map(Number);
+  const lead = new Date(Date.UTC(y, m - 1, 1)).getUTCDay(), count = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const cells = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => `<div class="mcal-dow">${d}</div>`);
+  for (let i = 0; i < lead; i++) cells.push('<div class="cal-day blank"></div>');
+  for (let d = 1; d <= count; d++) {
+    const date = `${month}-${String(d).padStart(2, '0')}`, wd = (lead + d - 1) % 7, k = kind(date, wd), sess = sessions.get(date);
+    const hrs = k === 'holiday' ? 'Closed' : k === 'early' ? `Closes ${sess.close}` : k === 'open' ? `${sess.open}–${sess.close}` : k === 'unknown' ? '—' : '';
+    const title = `${date}${hrs ? ' · ' + hrs : k === 'weekend' ? ' · weekend' : ''}`;
+    cells.push(`<div class="cal-day k-${k}${date === today ? ' is-today' : ''}${date < today ? ' past' : ''}" title="${esc(title)}"><span class="n">${d}</span><span class="hrs">${esc(hrs)}</span></div>`);
   }
-  return head + `<div class="box" style="padding:14px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">${now}</div>
-    <div class="box scroll"><table><thead><tr><th>Day</th><th>Open</th><th>Close</th><th></th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
+  while (cells.length % 7) cells.push('<div class="cal-day blank"></div>');
+  const label = new Date(Date.UTC(y, m - 1, 15)).toLocaleDateString(undefined, { timeZone: 'UTC', month: 'long', year: 'numeric' });
+  const nav = (dir, text, off) => `<button type="button" class="tile-btn" data-cal-nav="${dir}"${off ? ' disabled' : ''} aria-label="${text}" title="${text}">${dir < 0 ? '‹' : '›'}</button>`;
+  // The next days that aren't a normal session.
+  const coming = [];
+  for (let t = Date.parse(today + 'T12:00:00Z'); coming.length < 4; t += 86400000) {
+    const date = new Date(t).toISOString().slice(0, 10); if (date > lastDay) break;
+    const k = kind(date, new Date(t).getUTCDay());
+    if (k === 'holiday' || k === 'early') coming.push(`<li><span>${esc(new Date(t).toLocaleDateString(undefined, { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' }))}</span><span class="${k === 'holiday' ? 'warn' : ''}">${k === 'holiday' ? 'Closed' : 'Closes ' + esc(sessions.get(date).close)}</span></li>`);
+  }
+  return head + `<div class="cal-now">${now}</div>
+    <div class="mcal">
+      <div class="mcal-head"><h2>${esc(label)}</h2><span class="mcal-nav">${nav(-1, 'Previous month', month <= months[0])}<button type="button" class="btn small" data-cal-nav="0"${month === today.slice(0, 7) ? ' disabled' : ''}>Today</button>${nav(1, 'Next month', month >= months[1])}</span></div>
+      <div class="mcal-grid">${cells.join('')}</div>
+    </div>
+    ${`${month}-01` <= lastDay && lastDay < `${month}-31` ? `<p class="muted" style="margin:0;font-size:13px">The calendar is known through ${esc(lastDay)}.</p>` : ''}
+    <div class="cal-coming"><h3>Coming up</h3>${coming.length ? `<ul>${coming.join('')}</ul>` : `<p class="muted" style="margin:0;font-size:13px">No holidays or early closes through ${esc(lastDay)}.</p>`}</div>`;
 }
+$('view').addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('[data-cal-nav]'); if (!b) return;
+  const dir = +b.dataset.calNav;
+  if (!dir) state.calMonth = null;
+  else { const [y, m] = state.calMonth.split('-').map(Number), d = new Date(Date.UTC(y, m - 1 + dir, 1)); state.calMonth = d.toISOString().slice(0, 7); }
+  state.navigated = true; render();
+});
 function money(v, cur) {
   if (v == null || !isFinite(v)) return '—';
   const s = Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });

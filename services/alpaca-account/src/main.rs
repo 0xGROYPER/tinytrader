@@ -560,7 +560,7 @@ async fn read_calendar(
     let path = format!(
         "/v2/calendar?start={}&end={}",
         civil_date(today - 7),
-        civil_date(today + 45)
+        civil_date(today + 400)
     );
     let days = get_json(http, env, key, secret, &path).await?;
     let days: Vec<Value> = days
