@@ -196,6 +196,10 @@ h2 { margin: 0; font-size: 18px; font-weight: 600; }
 @keyframes flow { to { stroke-dashoffset: -22; } }
 @media (prefers-reduced-motion: reduce) { .e-flow.on { animation: none; } }
 
+.node-pop { position: fixed; z-index: 40; width: min(440px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); box-shadow: 0 10px 30px rgba(0, 0, 0, .18); }
+.node-pop .detail { margin: 0; border: 0; }
+.node-pop:not(.pinned) { pointer-events: auto; }
+.node-pop .d-head .tile-btn { margin-left: 4px; }
 .detail { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
 .d-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
 .d-head b { font: 600 16px var(--mono); }
@@ -617,334 +621,24 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 import { esc, bytes, duration, fmt, ago } from '/lib/format.js';
 import { fleet, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf, newsItems } from '/lib/fleet.js';
 import { widget, widgetNames } from '/lib/widgets.js';
+import { drawCharts } from '/lib/charts.js';
+import { showNode } from '/widgets/graph.js';
 import '/widgets/schedule.js';
+import '/widgets/prices.js';
+import '/widgets/accounts.js';
 import '/widgets/news.js';
-const state = { openGroups: new Set(), navKey: '', tab: 'workspace', wsMax: null,  node: undefined, lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null,
-  ev: { service: null, after: 0, rows: [], paused: false, open: new Set(), times: [], fresh: new Set() } };
+import '/widgets/calendar.js';
+import '/widgets/services.js';
+const state = { openGroups: new Set(), navKey: '', tab: 'workspace', wsMax: null,  lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null };
 const $ = id => document.getElementById(id);
 
 
-// ---------- topology layout ----------
-const NW = 176, NH = 50, CG = 96, RG = 26, PAD = 24, HOST_TOP = 40;
-// The graph shows what is running now: services that are deliberately idle
-// (outside their active hours) are left out, with their edges, and so is any
-// outside source nothing active is connected to. The Services table still
-// lists them.
-function activeGraph() {
-  const all = nodesById(), edges = fleet.topo?.edges || [];
-  const off = new Set(Object.values(all).filter(n => n.kind === 'svc' && statusOf(n) === 'off').map(n => n.id));
-  const kept = edges.filter(e => !off.has(e.from) && !off.has(e.to));
-  const used = new Set(kept.flatMap(e => [e.from, e.to]));
-  const byId = Object.fromEntries(Object.entries(all).filter(([id, n]) => !off.has(id) && (n.kind !== 'ext' || used.has(id))));
-  return { byId, edges: kept };
-}
-function layout() {
-  const { byId, edges } = activeGraph();
-  const ids = Object.keys(byId);
-  // Column = longest chain of edges leading to a node. Self-edges and edges
-  // that would close a cycle are ignored, so no topology can stretch the graph.
-  const col = {}, onPath = new Set();
-  const colOf = id => {
-    if (col[id] !== undefined) return col[id];
-    if (byId[id].kind === 'ext') return (col[id] = 0);
-    onPath.add(id);
-    let c = 1;
-    for (const e of edges) {
-      if (e.to !== id || e.from === id || !byId[e.from] || onPath.has(e.from)) continue;
-      c = Math.max(c, byId[e.from].kind === 'ext' ? 1 : colOf(e.from) + 1);
-    }
-    onPath.delete(id);
-    return (col[id] = c);
-  };
-  ids.forEach(colOf);
-  const hosts = fleet.topo?.hosts || [{ id: 'local', label: 'local' }];
-  const hostOf = n => n.kind === 'ext' ? null : (n.host || hosts[0].id);
-  const maxCol = Math.max(1, ...Object.values(col));
-  const x = c => PAD + c * (NW + CG) + (c > 0 ? 16 : 0);
-  const pos = {}, boxes = [];
-  const ext = ids.filter(id => byId[id].kind === 'ext');
-  ext.forEach((id, r) => { pos[id] = { x: x(0), y: PAD + HOST_TOP + r * (NH + RG), w: NW - 30, h: NH }; });
-  let y = PAD;
-  for (const h of hosts) {
-    const members = ids.filter(id => hostOf(byId[id]) === h.id);
-    if (!members.length) continue;
-    const rowsByCol = {};
-    for (let c = 1; c <= maxCol; c++) {
-      const inCol = members.filter(id => col[id] === c);
-      inCol.sort((a, b) => avgRow(a) - avgRow(b));
-      inCol.forEach((id, r) => { pos[id] = { x: x(c), y: y + HOST_TOP + r * (NH + RG), w: NW, h: NH }; });
-      rowsByCol[c] = inCol.length;
-    }
-    const rows = Math.max(1, ...Object.values(rowsByCol));
-    const height = HOST_TOP + rows * (NH + RG) - RG + 18;
-    boxes.push({ x: x(1) - 18, y, w: maxCol * (NW + CG) - CG + 36, h: height, label: h.label || h.id, sub: h.sub || '' });
-    y += height + 28;
-  }
-  const width = x(maxCol) + NW + PAD + 2;
-  return { byId, edges, pos, boxes, width, height: Math.max(y - 28 + PAD, PAD * 2 + HOST_TOP + ext.length * (NH + RG)) };
 
-  function avgRow(id) {
-    const preds = edges.filter(e => e.to === id && pos[e.from]).map(e => pos[e.from].y);
-    return preds.length ? preds.reduce((a, b) => a + b, 0) / preds.length : 1e9;
-  }
-}
 
-function topology() {
-  if (!fleet.topo) return '<section><div class="empty">Loading topology…</div></section>';
-  const L = layout();
-  const anchor = (p, side) => side === 'r' ? [p.x + p.w, p.y + p.h / 2] : [p.x, p.y + p.h / 2];
-  const edges = L.edges.filter(e => L.pos[e.from] && L.pos[e.to]).map(e => {
-    const a = anchor(L.pos[e.from], 'r'), b = anchor(L.pos[e.to], 'l');
-    const k = Math.max(40, (b[0] - a[0]) / 2);
-    const d = `M${a}C${a[0] + k},${a[1]} ${b[0] - k},${b[1]} ${b}`;
-    const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-    const from = L.byId[e.from], to = L.byId[e.to];
-    const live = e.kind === 'flow' && statusOf(from.kind === 'ext' ? to : from) === 'ok';
-    return `<path class="e e-${esc(e.kind)}${live ? ' on' : ''}" d="${d}" marker-end="url(#arr)"/>` + (e.label ? `<text class="e-label" x="${mid[0]}" y="${mid[1] - 7}" text-anchor="middle">${esc(e.label)}</text>` : '');
-  }).join('');
-  const boxes = L.boxes.map(b => `<rect class="host-box" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="10"/><text class="host-name" x="${b.x + 14}" y="${b.y + 24}">${esc(b.label)}</text><text class="host-sub" x="${b.x + 14 + b.label.length * 7.4 + 10}" y="${b.y + 24}">${esc(b.sub)}</text>`).join('');
-  const nodes = Object.values(L.byId).filter(n => L.pos[n.id]).map(n => {
-    const p = L.pos[n.id], st = statusOf(n);
-    return `<g class="node k-${n.kind}${st ? ' s-' + st : ''}${state.node === n.id ? ' sel' : ''}" data-node="${esc(n.id)}" tabindex="0" role="button" aria-label="${esc(n.label || n.id)}">
-      <rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" rx="6"/>
-      ${st ? `<circle class="sdot" cx="${p.x + p.w - 12}" cy="${p.y + 13}" r="4"/>` : ''}
-      <text class="n-label" x="${p.x + 12}" y="${p.y + 20}">${esc(n.label || n.id)}</text>
-      <text class="n-sub" x="${p.x + 12}" y="${p.y + 37}">${esc(clip(subOf(n), 24))}</text></g>`;
-  }).join('');
-  return `<section>
-    <div class="sec-head"><h2>Deployed system</h2><span class="legend"><span><i class="lg"></i>data</span><span><i class="lg lg-read"></i>observation</span></span></div>
-    <div class="topo-wrap"><svg class="topo" viewBox="0 0 ${L.width} ${L.height}" style="min-width:${Math.min(L.width, 760)}px" role="group" aria-label="Deployed system">
-      <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 Z" class="arrhead"/></marker></defs>
-      ${boxes}${edges}${nodes}
-    </svg></div>
-    ${detail(L.byId[state.node])}
-  </section>`;
-}
-const clip = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
 
-function detail(node) {
-  if (!node) return '<div class="detail muted">Select any part of the system for details.</div>';
-  const st = statusOf(node), s = svcState(node.id), c = s.container, h = s.health?.body;
-  const facts = [];
-  if (node.kind === 'svc') {
-    facts.push(['Container', c ? `${c.state} · ${c.status}` : 'not reported']);
-    if (c?.image) facts.push(['Image', c.image]);
-    facts.push(['Uptime', duration(uptimeOf(node.id))]);
-    if (c) facts.push(['Restarts', c.restart_count ?? '—']);
-    if (c?.cpu_percent != null) facts.push(['CPU', c.cpu_percent.toFixed(1) + '%']);
-    if (c?.memory?.usage_bytes != null) facts.push(['Memory', bytes(c.memory.usage_bytes)]);
-    if (h) facts.push(['Health', `${h.state}${h.detail ? ' · ' + h.detail : ''}`], ['Build', h.build || '—']);
-    if (s.health?.error) facts.push(['Health', 'unreachable: ' + s.health.error]);
-    if (h?.last_error) facts.push(['Last error' + (h.last_error_at ? ` (${duration(Date.now() / 1000 - h.last_error_at)} ago)` : ''), h.last_error]);
-  } else if (node.kind === 'store') {
-    const w = writerOf(node.id);
-    facts.push(['Written by', w ? w.label || w.id : '—']);
-    if (node.metric) facts.push([node.metric.label || node.metric.name, fmt(metric(node.metric.service, node.metric.name), { ...node.metric, prefix: '', suffix: '' })]);
-  }
-  const metrics = s.metrics ? Object.entries(s.metrics).flatMap(([name, list]) => list.map(m => [name + labelText(m.labels), m.value])) : [];
-  return `<div class="detail">
-    <div class="d-head"><b>${esc(node.label || node.id)}</b>${st ? `<span class="pill ${statusText[st][1]}">${statusText[st][0]}</span>` : ''}<span class="muted" style="margin-left:auto">${esc(node.kind === 'ext' ? 'external' : (node.host || 'local'))}</span></div>
-    ${node.role ? `<div class="muted">${esc(node.role)}</div>` : ''}
-    ${facts.length ? `<div class="facts">${facts.map(([k, v]) => `<div><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('')}</div>` : ''}
-    ${node.kind === 'svc' && node.events ? eventsPanel(node) : ''}
-    ${metrics.length ? `<details><summary>All metrics (${metrics.length})</summary><div class="scroll" style="margin-top:8px"><table class="metrics-tbl"><tbody>${metrics.map(([k, v]) => `<tr><td class="mono">${esc(k)}</td><td class="mono">${esc(v == null ? 'NaN' : +v.toFixed(6))}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
-  </div>`;
-}
-// ---------- live events ----------
-// A service that declares an `events` URL in the topology gets a live tail here.
-function eventsPanel(node) {
-  if (state.ev.service !== node.id) Object.assign(state.ev, { service: node.id, after: 0, rows: [], open: new Set(), times: [], fresh: new Set() });
-  return `<div class="events">
-    <div class="ev-head"><b>Live events</b><span class="muted mono" id="ev-rate" style="font-size:13px">${evRate()}</span>
-      <button type="button" class="btn-sm" id="ev-pause" aria-pressed="${state.ev.paused}">${state.ev.paused ? 'Resume' : 'Pause'}</button></div>
-    <div class="ev-list" id="ev-list" aria-live="off">${evRows()}</div>
-  </div>`;
-}
-function evRows() {
-  if (!state.ev.rows.length) return '<div class="empty">Waiting for events…</div>';
-  return state.ev.rows.map(e => `<details class="ev-row${state.ev.fresh.has(e.seq) ? ' new' : ''}" data-seq="${e.seq}"${state.ev.open.has(e.seq) ? ' open' : ''}>
-    <summary><span class="ev-t">${new Date(e.received_ms).toISOString().slice(11, 23)}</span><span class="ev-s">${esc(e.summary)}</span></summary>
-    <pre>${esc(prettyRaw(e.raw))}</pre></details>`).join('');
-}
-function prettyRaw(raw) { try { return JSON.stringify(JSON.parse(raw), null, 2); } catch (_) { return raw; } }
-function evRate() {
-  const now = Date.now(); state.ev.times = state.ev.times.filter(t => now - t[0] < 10000);
-  const n = state.ev.times.reduce((a, t) => a + t[1], 0);
-  return state.ev.rows.length ? `${(n / 10).toFixed(1)} msg/s` : '';
-}
-async function pollEvents() {
-  const node = state.tab === 'overview' && nodesById()[state.node];
-  if (!node || node.kind !== 'svc' || !node.events || state.ev.paused || state.ev.service !== node.id) return;
-  try {
-    const r = await fetch(`/api/events/${encodeURIComponent(node.id)}?after=${state.ev.after}&limit=100`, { cache: 'no-store' });
-    if (!r.ok) return;
-    const body = await r.json();
-    if (state.ev.service !== node.id) return;
-    const fresh = body.events || [];
-    if (body.next < state.ev.after) state.ev.rows = []; // service restarted
-    state.ev.after = body.next ?? state.ev.after;
-    state.ev.fresh = new Set(fresh.map(e => e.seq));
-    if (fresh.length) { state.ev.times.push([Date.now(), fresh.length]); state.ev.rows = [...fresh.reverse(), ...state.ev.rows].slice(0, 200); }
-    const list = $('ev-list');
-    if (list) { const top = list.scrollTop; list.innerHTML = evRows(); list.scrollTop = top; }
-    const rate = $('ev-rate'); if (rate) rate.textContent = evRate();
-  } catch (_) {}
-}
 
-const labelText = l => { const e = Object.entries(l || {}); return e.length ? '{' + e.map(([k, v]) => `${k}="${v}"`).join(',') + '}' : ''; };
 
-// ---------- panels: time series a topology declares ----------
-// A panel reads a service's series endpoint (an object of key -> [[unix_ms, value], ...])
-// and draws one card per key. Titles, formats and footer metrics come from the topology.
-function cards() {
-  const sections = [];
-  for (const panel of fleet.topo?.panels || []) {
-    const series = svcState(panel.service)[panel.source || 'recent'];
-    if (!series) continue;
-    const svc = nodesById()[panel.service];
-    const out = Object.entries(series).sort().map(([key, pts]) => {
-      const last = pts.length ? pts[pts.length - 1][1] : null, first = pts.length ? pts[0][1] : null;
-      const chg = first != null && last != null ? last - first : null;
-      const cls = chg > 0 ? 'pos' : chg < 0 ? 'neg' : '';
-      const span = pts.length > 1 ? duration((pts[pts.length - 1][0] - pts[0][0]) / 1000) : '';
-      const foot = (panel.footer || []).map(f => {
-        const v = metric(panel.service, f.metric, f.match ? { [f.match]: key } : undefined);
-        return v == null ? '' : fmt(v, f);
-      }).filter(Boolean).join(' · ');
-      const pct = first ? ((chg / first) * 100).toFixed(3) : '0';
-      return `<article class="card">
-        <h3>${esc((panel.title || '{key}').replace('{key}', key))} <span class="muted" style="font-family:var(--ui);font-size:12px">via ${esc(svc?.label || panel.service)}</span></h3>
-        <div class="val"><span class="big">${fmt(last, panel)}</span>${chg != null ? `<span class="chg ${cls}">${chg >= 0 ? '+' : '−'}${fmt(Math.abs(chg), { ...panel, prefix: '', suffix: '' })} (${pct}%) ${span}</span>` : ''}</div>
-        <div class="chart" data-chart="${esc(panel.service)}|${esc(panel.source || 'recent')}|${esc(key)}" data-decimals="${panel.decimals ?? 2}"></div>
-        <div class="foot">${esc(foot)}</div>
-      </article>`;
-    });
-    if (out.length) sections.push(`<section><div class="sec-head"><h2>${esc(panel.heading || 'Live data')}</h2>${panel.note ? `<span class="muted" style="font-size:13px">${esc(panel.note)}</span>` : ''}</div><div class="cards">${out.join('')}</div></section>`);
-  }
-  return sections.join('');
-}
 
-function servicesTable() {
-  const rows = (fleet.topo?.services || []).map(svc => {
-    const n = { ...svc, kind: 'svc' }, st = statusOf(n), c = svcState(svc.id).container;
-    return `<tr><td class="mono" style="color:var(--fg)">${esc(svc.label || svc.id)}</td><td class="mono">${esc(svc.host || 'local')}</td>
-      <td><span class="pill ${statusText[st][1]}">${statusText[st][0]}</span></td><td>${esc(subOf(n))}</td>
-      <td class="mono">${duration(uptimeOf(svc.id))}</td><td class="mono">${c?.restart_count ?? '—'}</td>
-      <td class="mono">${c?.cpu_percent != null ? c.cpu_percent.toFixed(1) + '%' : '—'}</td><td class="mono">${bytes(c?.memory?.usage_bytes)}</td></tr>`;
-  }).join('');
-  return `<div><h1>Services</h1><p class="muted" style="margin:0">Container state from Docker; health and metrics from each service's own endpoints.</p></div>
-  <div class="box scroll"><table><thead><tr><th>Service</th><th>Host</th><th>Status</th><th>Detail</th><th>Up</th><th>Restarts</th><th>CPU</th><th>Memory</th></tr></thead><tbody>${rows}</tbody></table></div>`;
-}
-
-// Every service that serves an `account` stream gets a card: live accounts first.
-function accountsView(withHeading = true) {
-  // Every account of every service that serves an `accounts` stream.
-  const accts = (fleet.topo?.services || []).filter(s => s.accounts)
-    .flatMap(s => (svcState(s.id).accounts?.accounts || []).map(a => ({ svc: s, a })))
-    .sort((x, y) => (x.a?.environment === 'live' ? 0 : 1) - (y.a?.environment === 'live' ? 0 : 1) || (x.a?.label || x.svc.id).localeCompare(y.a?.label || y.svc.id));
-  if (!accts.length) return '';
-  const grid = `<div class="cards acct-cards">${accts.map(({ svc, a }) => accountCard(svc, a)).join('')}</div>`;
-  return withHeading ? `<section><div class="sec-head"><h2>Accounts</h2><span class="muted" style="font-size:13px">Balances and positions, read only</span></div>${grid}</section>` : grid;
-}
-// The US market calendar, from the first service that serves one.
-// The market calendar as a month: one widget that reads well as a page or
-// in a narrow tile (it sizes itself to its container, not the window).
-function calendarView() {
-  const cal = (fleet.topo?.services || []).map(s => svcState(s.id).calendar).find(c => c?.days?.length);
-  const head = '<div><h1>Calendar</h1><p class="muted" style="margin:0">US equity market sessions, in New York time.</p></div>';
-  if (!cal) return head + `<p class="muted">${(fleet.topo?.services || []).some(s => s.id === 'accounts') ? 'Loading the market calendar…' : 'No service is serving a market calendar.'}</p>`;
-  const ny = iso => new Date(iso).toLocaleString(undefined, { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-  const until = iso => duration((Date.parse(iso) - Date.now()) / 1000);
-  // The clock is a reading from when the calendar was fetched; carry it
-  // forward past the close or open it named.
-  const c = { ...(cal.clock || {}) };
-  if (c.is_open && Date.parse(c.next_close) <= Date.now()) c.is_open = false;
-  else if (!c.is_open && c.next_open && Date.parse(c.next_open) <= Date.now()) {
-    const d = cal.days.find(x => x.date === c.next_open.slice(0, 10));
-    if (d) { c.is_open = true; c.next_close = `${d.date}T${d.close}:00${c.next_open.slice(19)}`; }
-  }
-  const now = c.is_open
-    ? `<span class="pill p-ok" title="Closes ${esc(ny(c.next_close))}">Open</span><span class="muted">closes in ${until(c.next_close)}</span>`
-    : `<span class="pill p-idle" title="Opens ${esc(ny(c.next_open))}">Closed</span><span class="muted">opens in ${until(c.next_open)}</span>`;
-  const sessions = new Map(cal.days.map(d => [d.date, d]));
-  const firstDay = cal.days[0].date, lastDay = cal.days[cal.days.length - 1].date;
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  // Weekdays inside the calendar's range with no session are holidays; a close before 16:00 is an early close.
-  const kind = (date, wd) => wd === 0 || wd === 6 ? 'weekend' : date < firstDay || date > lastDay ? 'unknown'
-    : !sessions.has(date) ? 'holiday' : sessions.get(date).close < '16:00' ? 'early' : 'open';
-  const months = [firstDay.slice(0, 7), lastDay.slice(0, 7)];
-  let month = state.calMonth || today.slice(0, 7);
-  if (month < months[0]) month = months[0];
-  if (month > months[1]) month = months[1];
-  state.calMonth = month;
-  const [y, m] = month.split('-').map(Number);
-  const lead = new Date(Date.UTC(y, m - 1, 1)).getUTCDay(), count = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  const cells = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => `<div class="mcal-dow">${d}</div>`);
-  for (let i = 0; i < lead; i++) cells.push('<div class="cal-day blank"></div>');
-  for (let d = 1; d <= count; d++) {
-    const date = `${month}-${String(d).padStart(2, '0')}`, wd = (lead + d - 1) % 7, k = kind(date, wd), sess = sessions.get(date);
-    const hrs = k === 'holiday' ? 'Closed' : k === 'early' ? `Closes ${sess.close}` : k === 'open' ? `${sess.open}–${sess.close}` : k === 'unknown' ? '—' : '';
-    const title = `${date}${hrs ? ' · ' + hrs : k === 'weekend' ? ' · weekend' : ''}`;
-    cells.push(`<div class="cal-day k-${k}${date === today ? ' is-today' : ''}${date < today ? ' past' : ''}" title="${esc(title)}"><span class="n">${d}</span><span class="hrs">${esc(hrs)}</span></div>`);
-  }
-  while (cells.length % 7) cells.push('<div class="cal-day blank"></div>');
-  const label = new Date(Date.UTC(y, m - 1, 15)).toLocaleDateString(undefined, { timeZone: 'UTC', month: 'long', year: 'numeric' });
-  const nav = (dir, text, off) => `<button type="button" class="tile-btn" data-cal-nav="${dir}"${off ? ' disabled' : ''} aria-label="${text}" title="${text}">${dir < 0 ? '‹' : '›'}</button>`;
-  // The next days that aren't a normal session.
-  const coming = [];
-  for (let t = Date.parse(today + 'T12:00:00Z'); coming.length < 4; t += 86400000) {
-    const date = new Date(t).toISOString().slice(0, 10); if (date > lastDay) break;
-    const k = kind(date, new Date(t).getUTCDay());
-    if (k === 'holiday' || k === 'early') coming.push(`<li><span>${esc(new Date(t).toLocaleDateString(undefined, { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' }))}</span><span class="${k === 'holiday' ? 'warn' : ''}">${k === 'holiday' ? 'Closed' : 'Closes ' + esc(sessions.get(date).close)}</span></li>`);
-  }
-  const weeks = cells.length / 7 - 1;
-  return head + `<div class="mcal">
-      <div class="mcal-head"><h2>${esc(label)}</h2><span class="mcal-now">${now}</span><span class="mcal-nav">${nav(-1, 'Previous month', month <= months[0])}<button type="button" class="btn small" data-cal-nav="0"${month === today.slice(0, 7) ? ' disabled' : ''}>Today</button>${nav(1, 'Next month', month >= months[1])}</span></div>
-      <div class="mcal-grid" style="--weeks:${weeks}">${cells.join('')}</div>
-    </div>
-    ${`${month}-01` <= lastDay && lastDay < `${month}-31` ? `<p class="muted" style="margin:0;font-size:13px">The calendar is known through ${esc(lastDay)}.</p>` : ''}
-    <div class="cal-coming"><h3>Coming up</h3>${coming.length ? `<ul>${coming.join('')}</ul>` : `<p class="muted" style="margin:0;font-size:13px">No holidays or early closes through ${esc(lastDay)}.</p>`}</div>`;
-}
-$('view').addEventListener('click', e => {
-  const b = e.target.closest && e.target.closest('[data-cal-nav]'); if (!b) return;
-  const dir = +b.dataset.calNav;
-  if (!dir) state.calMonth = null;
-  else { const [y, m] = state.calMonth.split('-').map(Number), d = new Date(Date.UTC(y, m - 1 + dir, 1)); state.calMonth = d.toISOString().slice(0, 7); }
-  state.navigated = true; render();
-});
-function money(v, cur) {
-  if (v == null || !isFinite(v)) return '—';
-  const s = Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return (v < 0 ? '−' : '') + (cur === 'USD' || !cur ? '$' : cur + ' ') + s;
-}
-function signed(v, cur) { return v == null ? '—' : (v > 0 ? '+' : '') + money(v, cur); }
-function pct(v) { return v == null || !isFinite(v) ? '—' : (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v * 100).toFixed(2) + '%'; }
-const tone = v => v > 0 ? 'pos' : v < 0 ? 'neg' : '';
-function accountCard(svc, a) {
-  const acc = a?.account || {}, cur = acc.currency, env = a?.environment || 'paper';
-  const head = `<h3>${esc(a?.label || svc.label || svc.id)}<span class="env env-${env === 'live' ? 'live' : 'paper'}">${esc(env)}</span>
-    ${acc.status && acc.status !== 'ACTIVE' ? `<span class="pill p-warn">${esc(acc.status.toLowerCase())}</span>` : ''}
-    ${acc.trading_blocked || acc.account_blocked ? '<span class="pill p-crit">blocked</span>' : ''}</h3>`;
-  if (!a?.updated_at) {
-    const err = svcState(svc.id).health?.body?.last_error;
-    return `<article class="card acct">${head}<p class="muted" style="margin:0">${esc(err ? 'Cannot read the account: ' + err : 'Waiting for the first reading…')}</p></article>`;
-  }
-  const day = acc.equity != null && acc.last_equity != null ? acc.equity - acc.last_equity : null;
-  const stats = [['Cash', money(acc.cash, cur)], ['Buying power', money(acc.buying_power, cur)], ['Long', money(acc.long_market_value, cur)]];
-  if (acc.short_market_value) stats.push(['Short', money(acc.short_market_value, cur)]);
-  const pos = a.positions || [];
-  const rows = pos.slice().sort((x, y) => Math.abs(y.market_value || 0) - Math.abs(x.market_value || 0)).slice(0, 8).map(p => `<tr>
-    <td style="color:var(--fg)">${esc(p.symbol)}</td><td>${esc(String(p.qty ?? '—'))}</td><td>${money(p.market_value, cur)}</td>
-    <td class="${tone(p.unrealized_pl)}">${signed(p.unrealized_pl, cur)} <span class="muted">${pct(p.unrealized_plpc)}</span></td>
-    <td class="${tone(p.change_today)}">${pct(p.change_today)}</td></tr>`).join('');
-  return `<article class="card acct">${head}
-    <div class="val"><span class="big">${money(acc.equity, cur)}</span>${day != null ? `<span class="chg ${tone(day)}">${signed(day, cur)} (${pct(acc.last_equity ? day / acc.last_equity : null)}) today</span>` : ''}</div>
-    <div class="acct-stats">${stats.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('')}</div>
-    <div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2"></div>
-    ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Symbol</th><th>Qty</th><th>Value</th><th>Unrealized</th><th>Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted" style="margin:0;font-size:13px">No open positions.</p>'}
-    <div class="foot">${pos.length > 8 ? `${pos.length} positions, largest 8 shown · ` : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
-  </article>`;
-}
 
 // ---------- store: data and storage ----------
 // Catalogs come from services that describe a `catalog` stream. Every root of
@@ -1206,46 +900,6 @@ function resolveDocLink(href) {
   return c.docs.find(d => d.path === target) ?? null;
 }
 
-// ---------- charts ----------
-function tipAt(el, html, px, py) {
-  let tip = el.querySelector('.tip'); if (!tip) { tip = document.createElement('div'); tip.className = 'tip'; el.appendChild(tip); }
-  tip.innerHTML = html; tip.hidden = false;
-  const w = tip.offsetWidth;
-  tip.style.left = Math.min(Math.max(px - w / 2, 0), el.clientWidth - w) + 'px';
-  tip.style.top = (py - tip.offsetHeight - 10) + 'px';
-}
-function drawCharts() {
-  document.querySelectorAll('[data-chart]').forEach(el => {
-    const [id, source, key] = el.dataset.chart.split('|');
-    const decimals = +el.dataset.decimals;
-    const pts = (svcState(id)[source] || {})[key] || [];
-    if (pts.length < 2) { el.innerHTML = '<div class="empty" style="padding:8px 0">Collecting…</div>'; return; }
-    const W = el.clientWidth || 320, H = 110, m = { l: 0, r: 6, t: 8, b: 8 };
-    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
-    const x0 = xs[0], x1 = xs[xs.length - 1], lo = Math.min(...ys), hi = Math.max(...ys), pad = (hi - lo) * 0.12 || hi * 0.0005 || 1;
-    const X = x => m.l + (x - x0) / (x1 - x0 || 1) * (W - m.l - m.r), Y = y => m.t + (1 - (y - (lo - pad)) / (hi - lo + 2 * pad)) * (H - m.t - m.b);
-    const d = pts.map((p, i) => (i ? 'L' : 'M') + X(p[0]).toFixed(1) + ',' + Y(p[1]).toFixed(1)).join('');
-    const tone = ys[ys.length - 1] >= ys[0] ? 'up' : 'down', last = pts[pts.length - 1];
-    el.innerHTML = `<svg width="${W}" height="${H}" role="img" aria-label="${esc(key)}">
-      <line class="c-ref" x1="0" x2="${W}" y1="${Y(ys[0])}" y2="${Y(ys[0])}"/>
-      <path class="c-area ${tone}" d="${d}L${X(x1)},${H}L${X(x0)},${H}Z"/><path class="c-line ${tone}" d="${d}"/>
-      <circle class="c-dot ${tone}" cx="${X(last[0])}" cy="${Y(last[1])}" r="4"/>
-      <g class="hover" visibility="hidden"><line class="c-cross" y1="0" y2="${H}"/><circle class="c-dot ${tone}" r="4"/></g>
-      <rect class="c-hit" x="0" y="0" width="${W}" height="${H}"/></svg>`;
-    const svg = el.querySelector('svg'), hov = svg.querySelector('.hover'), cross = hov.querySelector('line'), dot = hov.querySelector('circle');
-    const move = e => {
-      const r = svg.getBoundingClientRect(), xv = x0 + (e.clientX - r.left) / W * (x1 - x0);
-      let best = pts[0]; for (const p of pts) if (Math.abs(p[0] - xv) < Math.abs(best[0] - xv)) best = p;
-      const cx = X(best[0]), cy = Y(best[1]);
-      cross.setAttribute('x1', cx); cross.setAttribute('x2', cx); dot.setAttribute('cx', cx); dot.setAttribute('cy', cy);
-      hov.setAttribute('visibility', 'visible');
-      tipAt(el, `${fmt(best[1], { decimals })}<span class="muted">${new Date(best[0]).toISOString().slice(11, 19)} UTC</span>`, cx, cy);
-    };
-    const hit = svg.querySelector('.c-hit');
-    hit.addEventListener('pointermove', move); hit.addEventListener('pointerdown', move);
-    hit.addEventListener('pointerleave', () => { hov.setAttribute('visibility', 'hidden'); const t = el.querySelector('.tip'); if (t) t.hidden = true; });
-  });
-}
 
 // ---------- render & polling ----------
 // Databento jobs, through the console's /api/jobs proxy to the jobs service:
@@ -1504,12 +1158,7 @@ setInterval(() => { const box = $('rem'); if (box && !box.contains(document.acti
 
 // One view's HTML, for the page or for a workspace tile.
 function viewHtml(tab) {
-  return tab === 'overview' ? topology()
-    : tab === 'prices' ? (cards() || '<p class="muted">No prices yet: they appear while the market data relays are running (from 07:55 ET for stocks, 09:25 ET for options).</p>')
-    : tab === 'accounts' ? `<div><h1>Accounts</h1><p class="muted" style="margin:0">Balances and positions of every brokerage account this deployment reads. Read only.</p></div>` + (accountsView(false) || '<p class="muted">No account service is running.</p>')
-    : tab === 'calendar' ? calendarView()
-    : tab === 'services' ? servicesTable()
-    : tab === 'data' ? dataView()
+  return tab === 'data' ? dataView()
     : tab === 'jobs' ? jobsView()
     : tab === 'storage' ? storageView()
     : tab === 'shell' ? shellView()
@@ -1523,7 +1172,7 @@ function viewHtml(tab) {
 // tabs (the current group's), the switcher (⌥W) and keys. Only the open
 // workspace runs: a panel renders while it is shown, and others are saved
 // layouts, which is all the switcher's previews read.
-const VIEWS = { roadmap: 'Roadmap', docs: 'Docs', overview: 'System graph', prices: 'Prices', accounts: 'Accounts and equity', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
+const VIEWS = { roadmap: 'Roadmap', docs: 'Docs', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
 // Widgets registered as modules (decision 0010) bring their own titles.
 for (const n of widgetNames()) VIEWS[n] = widget(n).title;
 // Views that hold their own state (forms, input) and update themselves.
@@ -2052,9 +1701,6 @@ function render() {
   // Rebuilding the page must never move the reader: keep the scroll position.
   const scrollY = window.scrollY;
   const focusId = document.activeElement?.dataset?.node;
-  const openDetails = !!document.querySelector('.detail > details[open]');
-  const evTop = $('ev-list')?.scrollTop ?? 0;
-  state.ev.fresh = new Set();
   // Collections only change on navigation, not on every refresh.
   updateStoreNav();
   if (state.tab.startsWith('col:') && !state.navigated) return status();
@@ -2072,8 +1718,6 @@ function render() {
   if ($('rem')) remLoad();
   if ($('ds-filter') && state.dsFilter) $('ds-filter').dispatchEvent(new Event('input', { bubbles: true }));
   { const out = $('term-out'); if (out) out.scrollTop = out.scrollHeight; }
-  if (openDetails) { const d = document.querySelector('.detail > details'); if (d) d.open = true; }
-  if ($('ev-list')) $('ev-list').scrollTop = evTop;
   if (focusId) { const n = document.querySelector(`[data-node="${CSS.escape(focusId)}"]`); if (n) n.focus({ preventScroll: true }); }
   updateCollectionsNav();
   const docOpen = state.tab.startsWith('col:') && state.doc !== null;
@@ -2111,7 +1755,7 @@ function bellToggle(open) {
 $('bell').addEventListener('click', e => { e.stopPropagation(); bellToggle($('bell-pop').hidden); });
 document.addEventListener('click', e => {
   const a = e.target.closest && e.target.closest('[data-alert]');
-  if (a) { bellToggle(false); state.node = a.dataset.alert; if (lay.list.some(l => l.name === 'Operations')) laySwitch('Operations'); else render(); return; }
+  if (a) { bellToggle(false); const home = lay.list.find(l => layViews(l).includes('overview')); if (home) { laySwitch(home.name); showNode(a.dataset.alert); } return; }
   if (!$('bell-pop').hidden && !e.target.closest('.bell-wrap')) bellToggle(false);
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('bell-pop').hidden) bellToggle(false); });
@@ -2128,7 +1772,7 @@ function status() {
   $('banner').textContent = problems.join(' ');
 }
 async function loadTopology() {
-  try { const r = await fetch('/api/topology', { cache: 'no-store' }); if (r.ok) { fleet.topo = await r.json(); document.title = fleet.topo.name ? `tinytrader · ${fleet.topo.name}` : 'tinytrader'; if (state.node === undefined) state.node = fleet.topo.focus ?? fleet.topo.services?.[0]?.id ?? null; } } catch (_) {}
+  try { const r = await fetch('/api/topology', { cache: 'no-store' }); if (r.ok) { fleet.topo = await r.json(); document.title = fleet.topo.name ? `tinytrader · ${fleet.topo.name}` : 'tinytrader'; } } catch (_) {}
 }
 async function poll() {
   try {
@@ -2176,19 +1820,6 @@ $('view').addEventListener('click', e => {
     else e.preventDefault();
     return;
   }
-  const n = e.target.closest('[data-node]'); if (n) { state.node = state.node === n.dataset.node ? null : n.dataset.node; render(); }
-});
-$('view').addEventListener('toggle', e => {
-  const row = e.target.closest && e.target.closest('.ev-row'); if (!row) return;
-  const seq = +row.dataset.seq; if (row.open) state.ev.open.add(seq); else state.ev.open.delete(seq);
-}, true);
-$('view').addEventListener('click', e => {
-  if (e.target.id !== 'ev-pause') return;
-  state.ev.paused = !state.ev.paused; e.target.textContent = state.ev.paused ? 'Resume' : 'Pause'; e.target.setAttribute('aria-pressed', state.ev.paused);
-});
-$('view').addEventListener('keydown', e => {
-  const n = e.target.closest && e.target.closest('[data-node]');
-  if (n && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); n.dispatchEvent(new MouseEvent('click', { bubbles: true })); }
 });
 let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(drawCharts, 150); });
 
@@ -2246,7 +1877,6 @@ $('theme-btn').addEventListener('click', () => {
   }
   await loadTopology(); await poll();
   setInterval(poll, 2000);
-  setInterval(pollEvents, 700);
   setInterval(loadTopology, 5000);
 })();
 </script>

@@ -38,3 +38,6 @@ export function ago(iso) {
 
 // Stories may carry HTML entities (&#39;); decode them to text, which esc() then escapes.
 export function unentity(str) { const t = document.createElement('textarea'); t.innerHTML = str || ''; return t.value; }
+
+export const labelText = l => { const e = Object.entries(l || {}); return e.length ? '{' + e.map(([k, v]) => `${k}="${v}"`).join(',') + '}' : ''; };
+export const clip = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
