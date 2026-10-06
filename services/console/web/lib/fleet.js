@@ -76,3 +76,15 @@ export function newsItems() {
   }
   return [...seen.values()].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 }
+
+// ---------- store: data and storage ----------
+// Catalogs come from services that describe a `catalog` stream. Every root of
+// every catalog is shown; nothing here knows about particular datasets.
+export function catalogRoots() {
+  const out = [];
+  for (const [svc, st] of Object.entries(fleet.snap?.services || {})) {
+    for (const r of st.catalog?.roots || []) out.push({ ...r, service: svc, thresholds: st.catalog.thresholds });
+  }
+  return out;
+}
+export const catalogStamp = () => Object.values(fleet.snap?.services || {}).map(s => s.catalog?.generated_at ?? '').join('|');

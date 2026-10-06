@@ -308,6 +308,8 @@ tr:last-child td { border-bottom: 0; }
 .tile-btn { width: 28px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
 .tile-btn:hover { background: var(--nav-hover); color: var(--fg); }
 .tile-body { flex: 1; overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+/* Content keeps its height and the panel scrolls; a scroll box (a table) would otherwise shrink to nothing. */
+.tile-body > * { flex-shrink: 0; }
 :root .ws .tile-body h1 { font-size: 20px; letter-spacing: -0.01em; }
 @media (max-width: 800px) { .ws, .ws-split { flex-direction: column; height: auto; } .ws-gutter { display: none; } .ws-a, .ws-b { flex: none !important; } .tile { flex: none; height: 70vh; min-height: 420px; } }
 /* The workspace fills everything right of the sidebar and below the header. */
@@ -622,14 +624,22 @@ import { esc, bytes, duration, fmt, ago } from '/lib/format.js';
 import { fleet, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf, newsItems } from '/lib/fleet.js';
 import { widget, widgetNames } from '/lib/widgets.js';
 import { drawCharts } from '/lib/charts.js';
+import { folderLabel, groupLabel, collections } from '/lib/docs.js';
+// The widgets, in the order the palette and Split offer them.
 import { showNode } from '/widgets/graph.js';
 import '/widgets/schedule.js';
+import '/widgets/services.js';
+import '/widgets/shell.js';
 import '/widgets/prices.js';
 import '/widgets/accounts.js';
 import '/widgets/news.js';
 import '/widgets/calendar.js';
-import '/widgets/services.js';
-const state = { openGroups: new Set(), navKey: '', tab: 'workspace', wsMax: null,  lastOk: 0, collections: [], doc: null, ds: null, dsSchema: null, catalogAt: null };
+import '/widgets/data.js';
+import '/widgets/jobs.js';
+import '/widgets/storage.js';
+import '/widgets/roadmap.js';
+import '/widgets/docs.js';
+const state = { openGroups: new Set(), navKey: '', tab: 'workspace', lastOk: 0, collections: [], doc: null };
 const $ = id => document.getElementById(id);
 
 
@@ -640,151 +650,20 @@ const $ = id => document.getElementById(id);
 
 
 
-// ---------- store: data and storage ----------
-// Catalogs come from services that describe a `catalog` stream. Every root of
-// every catalog is shown; nothing here knows about particular datasets.
-function catalogRoots() {
-  const out = [];
-  for (const [svc, st] of Object.entries(fleet.snap?.services || {})) {
-    for (const r of st.catalog?.roots || []) out.push({ ...r, service: svc, thresholds: st.catalog.thresholds });
-  }
-  return out;
-}
-const catalogStamp = () => Object.values(fleet.snap?.services || {}).map(s => s.catalog?.generated_at ?? '').join('|');
-function updateStoreNav() {
-  const has = catalogRoots().length > 0, el = $('nav-store');
-  if (!el) return;
-  if (has === !!el.childElementCount) return;
-  el.innerHTML = has ? `<div class="nav-sec"><div class="nav-label">Store</div><div class="nav-items"><button type="button" data-tab="data"><span class="chev"></span><span class="lbl">Data</span></button><button type="button" data-tab="jobs"><span class="chev"></span><span class="lbl">Jobs</span></button><button type="button" data-tab="storage"><span class="chev"></span><span class="lbl">Storage</span></button></div></div>` : '';
-}
-// Data: coverage by dataset and symbol, merged across drives. Pick a row
-// (or a schema chip) to see that schema's days on a calendar; the filter
-// narrows the rows as you type.
-function coverage() {
-  const m = new Map();
-  for (const r of catalogRoots()) for (const d of r.datasets || []) {
-    const key = d.id + ' ' + (d.symbol || '');
-    const e = m.get(key) || { key, id: d.id, symbol: d.symbol, schemas: {}, drives: new Set(), sources: [] };
-    e.drives.add(r.name); e.sources.push(...(d.sources || []).map(x => `${r.name}: ${x}`));
-    for (const [name, s] of Object.entries(d.schemas)) {
-      const t = e.schemas[name] || (e.schemas[name] = { bytes: 0, days: {}, where: {}, encodings: new Set() });
-      t.bytes += s.bytes; (s.encodings || []).forEach(x => t.encodings.add(x));
-      for (const [day, b] of Object.entries(s.days || {})) { t.days[day] = (t.days[day] || 0) + b; (t.where[day] ||= new Set()).add(r.name); }
-    }
-    m.set(key, e);
-  }
-  return [...m.values()].sort((a, b) => a.id.localeCompare(b.id) || (a.symbol || '').localeCompare(b.symbol || ''));
-}
-const coveredSize = e => Object.values(e.schemas).reduce((a, s) => a + s.bytes, 0);
-function dataView() {
-  const roots = catalogRoots();
-  const head = `<div><h1>Data</h1><p class="muted" style="margin:0">What the store's drives hold, by dataset and symbol, across drives.</p></div>`;
-  if (!roots.length) return head + '<p class="muted">The store is not reachable.</p>';
-  const summary = `<div class="drive-sum">${roots.filter(r => r.present).map(r => `<div><b>${esc(r.name)}</b><span>${bytes(r.dataset_bytes || 0)} in datasets</span><span>${bytes(r.other_bytes || 0)} other</span><span>${r.volume?.available_bytes != null ? bytes(r.volume.available_bytes) + ' free' : ''}</span></div>`).join('')}</div>`;
-  const rows = coverage();
-  if (!rows.some(e => e.key === state.ds)) state.ds = rows[0]?.key;
-  const sel = rows.find(e => e.key === state.ds);
-  const table = rows.map(e => {
-    const chips = Object.entries(e.schemas).sort((a, b) => b[1].bytes - a[1].bytes).map(([name, s]) =>
-      `<button type="button" class="cov-chip" data-cov="${esc(e.key)}" data-schema="${esc(name)}"${e === sel && name === state.dsSchema ? ' aria-pressed="true"' : ''}>${esc(name)} <span>${Object.keys(s.days).length}d</span></button>`).join('');
-    return `<tr class="ds-row${e === sel ? ' sel' : ''}" data-cov="${esc(e.key)}" data-text="${esc((e.id + ' ' + (e.symbol || '') + ' ' + Object.keys(e.schemas).join(' ')).toLowerCase())}">
-      <td class="mono" style="color:var(--fg)">${esc(e.symbol || '—')}</td><td class="mono">${esc(e.id)}</td><td>${chips}</td>
-      <td class="mono num">${bytes(coveredSize(e))}</td><td class="mono">${[...e.drives].map(esc).join(', ')}</td></tr>`;
-  }).join('');
-  const other = roots.flatMap(r => (r.other || []).map(o => ({ r, o }))).sort((x, y) => y.o.bytes - x.o.bytes);
-  const otherTable = other.length ? `<section><div class="sec-head"><h2>Other data on disk</h2><span class="muted" style="font-size:13px">Folders the store doesn't recognise as datasets, largest first</span></div>
-    <div class="box scroll"><table><thead><tr><th>Folder</th><th>Drive</th><th style="text-align:right">Size</th><th style="text-align:right">Files</th><th>Last changed</th></tr></thead><tbody>${other.map(({ r, o }) =>
-      `<tr><td class="mono" style="color:var(--fg)">${esc(o.name)}</td><td class="mono">${esc(r.name)}</td><td class="mono num">${bytes(o.bytes)}</td><td class="mono num">${(o.files || 0).toLocaleString()}</td><td class="muted">${o.modified ? esc(ago(new Date(o.modified * 1000).toISOString())) : '—'}</td></tr>`).join('')}</tbody></table></div></section>` : '';
-  return head + summary + `<input class="ds-filter" id="ds-filter" placeholder="Filter: XSP, SPY.OPT, cmbp-1…" value="${esc(state.dsFilter || '')}" autocomplete="off" spellcheck="false">
-    <div class="box scroll"><table class="ds-tbl"><thead><tr><th>Symbol</th><th>Dataset</th><th>Schemas (days with data)</th><th style="text-align:right">Size</th><th>Drives</th></tr></thead><tbody>${table}</tbody></table></div>
-    ${sel ? coveragePanel(sel) : ''}${otherTable}`;
-}
-function coveragePanel(e) {
-  const names = Object.keys(e.schemas);
-  if (!names.includes(state.dsSchema)) state.dsSchema = names.includes('cmbp-1') ? 'cmbp-1' : names.sort((a, b) => e.schemas[b].bytes - e.schemas[a].bytes)[0];
-  const s = e.schemas[state.dsSchema], keys = Object.keys(s.days).sort();
-  const first = keys[0], last = keys[keys.length - 1];
-  // Weekdays in the range with no data (market holidays count among them).
-  const missing = [];
-  for (let t = Date.parse(first + 'T12:00:00Z'); t <= Date.parse(last + 'T12:00:00Z'); t += 864e5) {
-    const d = new Date(t), k = d.toISOString().slice(0, 10), wd = d.getUTCDay();
-    if (wd !== 0 && wd !== 6 && !s.days[k]) missing.push(k);
-  }
-  const perDrive = {}; for (const set of Object.values(s.where)) for (const n of set) perDrive[n] = (perDrive[n] || 0) + 1;
-  let cal = '';
-  const start = Date.parse(first + 'T00:00:00Z') - ((new Date(first + 'T00:00:00Z').getUTCDay() + 6) % 7) * 864e5;
-  for (let t = start; t <= Date.parse(last + 'T00:00:00Z') + 6 * 864e5; t += 864e5) {
-    const k = new Date(t).toISOString().slice(0, 10), wd = new Date(t).getUTCDay();
-    const out = k < first || k > last, has = s.days[k];
-    const cls = out ? 'out' : has ? 'has' : (wd === 0 || wd === 6) ? 'weekend' : '';
-    cal += `<i class="${cls}" title="${k}${has ? ` · ${bytes(has)} · ${[...s.where[k]].join(', ')}` : cls === '' ? ' · no data' : ''}"></i>`;
-  }
-  return `<section class="panel">
-    <div class="sec-head" style="margin:0"><h2 class="mono" style="font-weight:500">${esc(e.symbol || e.id)} <span class="muted" style="font-size:13px;font-family:var(--ui)">${esc(e.symbol ? e.id : '')}</span></h2></div>
-    <div class="chips">${names.map(x => `<button type="button" class="chip-btn" data-cov="${esc(e.key)}" data-schema="${esc(x)}" aria-pressed="${x === state.dsSchema}">${esc(x)}</button>`).join('')}</div>
-    <div class="facts">
-      <div><div class="k">Days with data</div><div class="v">${keys.length}</div></div>
-      <div><div class="k">First → last</div><div class="v">${first} → ${last}</div></div>
-      <div><div class="k">Weekdays without data</div><div class="v">${missing.length}${missing.length ? ` <span class="muted" style="font-size:12px">(holidays included)</span>` : ''}</div></div>
-      <div><div class="k">Size</div><div class="v">${bytes(s.bytes)}</div></div>
-      <div><div class="k">Drives</div><div class="v">${Object.entries(perDrive).map(([n, c]) => `${esc(n)} (${c}d)`).join(', ')}</div></div>
-    </div>
-    <div class="cal-wrap"><div class="cal" aria-label="Days with data">${cal}</div></div>
-    <div class="cal-legend"><span><i style="background:var(--accent-mark)"></i>data</span><span><i style="background:var(--line-soft)"></i>weekday without data</span><span><i style="outline:1px dashed var(--line-soft)"></i>weekend</span></div>
-    ${missing.length && missing.length <= 40 ? `<div class="muted" style="font-size:12px;font-family:var(--mono);overflow-wrap:anywhere">Missing: ${missing.join(', ')}</div>` : ''}
-  </section>`;
-}
-$('view').addEventListener('click', e => {
-  const c = e.target.closest && e.target.closest('[data-cov]'); if (!c) return;
-  state.ds = c.dataset.cov; if (c.dataset.schema) state.dsSchema = c.dataset.schema;
-  state.navigated = true; render();
-}, true);
-$('view').addEventListener('input', e => {
-  if (e.target.id !== 'ds-filter') return;
-  state.dsFilter = e.target.value; const q = state.dsFilter.toLowerCase().split(/\s+/).filter(Boolean);
-  document.querySelectorAll('.ds-tbl tr[data-text]').forEach(tr => { tr.hidden = !q.every(w => tr.dataset.text.includes(w)); });
-});
-function storageView() {
-  const roots = catalogRoots();
-  const statusPill = { ok: ['OK', 'p-ok'], warning: ['Warning', 'p-warn'], critical: ['Critical', 'p-crit'], floor: ['Full', 'p-crit'], unknown: ['Space unknown', 'p-idle'] };
-  const t = roots[0]?.thresholds || {};
-  const cards = roots.map(r => {
-    const v = r.volume || {}, used = (v.used_fraction ?? 0) * 100, st = statusPill[v.status] || ['Missing', 'p-crit'];
-    const marks = [t.warning, t.critical, t.floor].filter(Boolean).map(x => `<em style="left:${x}%" title="${x}%"></em>`).join('');
-    return `<article class="panel">
-      <div class="d-head"><b>${esc(r.name)}</b><span class="pill ${r.present ? st[1] : 'p-crit'}">${r.present ? st[0] : 'Missing'}</span><span class="muted mono" style="margin-left:auto;font-size:12px">${esc(r.path)}</span></div>
-      ${r.present ? `${v.status === 'unknown' ? `<p class="muted" style="margin:0;font-size:14px">${esc(v.reason || 'Disk space is not available for this root.')}</p>` : `<div class="usage"><b class="${esc(v.status)}" style="width:${used.toFixed(1)}%"></b>${marks}</div>`}
-      <div class="facts">
-        ${v.status === 'unknown' ? '' : `<div><div class="k">Used</div><div class="v">${used.toFixed(0)}% of ${bytes(v.total_bytes)}</div></div>
-        <div><div class="k">Free</div><div class="v">${bytes(v.available_bytes)}</div></div>`}
-        <div><div class="k">In datasets</div><div class="v">${bytes(r.dataset_bytes)} · ${(r.datasets || []).length} datasets</div></div>
-      </div>
-      ${(r.unrecognised || []).length ? `<div><div class="k" style="font-size:12px;color:var(--muted);margin-bottom:6px">Not in the store layout</div><div class="chips">${r.unrecognised.map(x => `<span class="tag">${esc(x)}</span>`).join('')}</div></div>` : ''}`
-      : '<p class="muted" style="margin:0">This root\'s path is not available: the drive may be unplugged.</p>'}
-    </article>`;
-  }).join('');
-  return `<div><h1>Storage</h1><p class="muted" style="margin:0">Each data root and the volume it lives on. Marks show the thresholds: ${t.warning ?? 80}% warn, ${t.critical ?? 90}% pause non-capture writers, ${t.floor ?? 97}% stop capture. Nothing is ever deleted automatically.</p></div>
-    <div class="roots">${cards || '<p class="muted">No data roots configured.</p>'}</div>`;
-}
 
 // ---------- document collections ----------
 async function loadCollections() {
   try {
-    const r = await fetch('/api/collections', { cache: 'no-store' });
-    if (!r.ok) return;
-    state.collections = await r.json();
+    state.collections = await collections();
     state.navKey = '';
     updateCollectionsNav();
   } catch (_) {}
 }
-const groupLabel = g => g.split('/').map(p => folderLabel(p)).join(' › ');
 // The Docs section, after Databento's sidebar: folders form a tree (a
 // group `tinytrader/decisions` sits inside `tinytrader`), opening a folder closes
 // its siblings and opens its first document, and the open document's folders
 // are marked. With one collection its folders are the top level; with
 // several, each collection is a top-level folder.
-// Folder names are capitalized, except the platform's own lowercase name.
-const folderLabel = n => n === 'tinytrader' ? n : n.charAt(0).toUpperCase() + n.slice(1);
 const CHEV = '<span class="chev"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M8.3 13.3 11.7 10 8.3 6.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="square"/></svg></span>';
 function docTree(c) {
   const root = { path: '', docs: [], kids: new Map() };
@@ -851,11 +730,6 @@ function updateCollectionsNav() {
   $('nav-collections').innerHTML = `<div class="nav-sec"><button type="button" class="nav-label nav-home" data-docs-roadmap${here(state.tab === 'roadmap')}>Roadmap</button></div>
     <div class="nav-sec"><button type="button" class="nav-label nav-home" data-docs-home${here(state.tab.startsWith('col:') && state.doc === null)}>Docs</button><div class="nav-items">${items}</div></div>`;
 }
-function docsWidget() {
-  if (!state.collections.length) return '<p class="muted">No documents are configured.</p>';
-  return state.collections.map(c => [...new Set(c.docs.map(d => d.group))].map(g => `<section><div class="group-h">${esc(groupLabel(g))}</div><div class="doc-links">${c.docs.filter(d => d.group === g).map(d =>
-    `<a href="/docs/#${esc(c.id)}-${d.index}">${esc(d.title)}</a>`).join('')}</div></section>`).join('')).join('');
-}
 const currentCollection = () => state.collections.find(c => 'col:' + c.id === state.tab);
 function collectionView() {
   const c = currentCollection();
@@ -901,282 +775,18 @@ function resolveDocLink(href) {
 }
 
 
-// ---------- render & polling ----------
-// Databento jobs, through the console's /api/jobs proxy to the jobs service:
-// a request form that prices before it submits, and every job through to
-// filed in the store. The form is drawn once; only the list refreshes.
-const jobs = {
-  list: null, err: null, rowErr: {}, showHeld: false, datasets: null, schemas: {}, quote: null, quoteFor: '', msg: null, busy: false,
-  form: { dataset: 'OPRA.PILLAR', schema: 'cmbp-1', symbols: '', stype_in: 'parent', start: '', end: '' },
-};
-async function jobsApi(path, body) {
-  const r = await fetch('/api/jobs/' + path, body === undefined ? { cache: 'no-store' }
-    : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  let v = null; try { v = await r.json(); } catch (_) {}
-  if (!r.ok) throw new Error(v?.error || (r.status === 404 ? 'No jobs service is configured.' : `${r.status} ${r.statusText}`));
-  return v;
-}
-async function loadJobs() {
-  try { jobs.list = await jobsApi('jobs'); jobs.err = null; } catch (e) { jobs.err = e.message; }
-  if ($('jobs-list')) $('jobs-list').innerHTML = jobsTable();
-}
-async function loadSchemas(ds) {
-  if (!ds || jobs.schemas[ds]) return fillSchemas();
-  try { jobs.schemas[ds] = (await jobsApi('schemas?dataset=' + encodeURIComponent(ds))).schemas; } catch (_) { jobs.schemas[ds] = null; }
-  fillSchemas();
-}
-function fillSchemas() {
-  const el = $('jf-schema'); if (!el) return;
-  const list = jobs.schemas[jobs.form.dataset] || [jobs.form.schema];
-  if (!list.includes(jobs.form.schema)) jobs.form.schema = list.includes('cmbp-1') ? 'cmbp-1' : list[0];
-  el.innerHTML = list.map(x => `<option${x === jobs.form.schema ? ' selected' : ''}>${esc(x)}</option>`).join('');
-}
-const usd = n => '$' + (n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const day = t => new Date(t * 1000).toISOString().slice(0, 10);
-function jobsView() {
-  const f = jobs.form, stypes = [['parent', 'parent (SPX.OPT)'], ['raw_symbol', 'raw symbol'], ['continuous', 'continuous'], ['instrument_id', 'instrument ID']];
-  return `<div><h1>Jobs</h1><p class="muted" style="margin:0">Request historical data from a provider and download it into the store. Every request is priced first; anything that costs money needs your confirmation of the exact amount.</p></div>
-  <div class="field" style="max-width:260px"><label for="jf-provider">Provider</label><select id="jf-provider"><option value="databento" selected>Databento</option></select></div>
-  <section class="panel" id="job-form-panel">
-    <div class="sec-head" style="margin:0"><h2>New request</h2></div>
-    <form class="job-form" id="job-form" autocomplete="off">
-      <div class="field"><label for="jf-dataset">Dataset</label><input id="jf-dataset" name="dataset" list="jf-datasets" value="${esc(f.dataset)}" spellcheck="false"><datalist id="jf-datasets">${(jobs.datasets || []).map(d => `<option value="${esc(d)}">`).join('')}</datalist></div>
-      <div class="field"><label for="jf-schema">Schema</label><select id="jf-schema" name="schema"><option>${esc(f.schema)}</option></select></div>
-      <div class="field" style="grid-column: span 2"><label for="jf-symbols">Symbol</label><input id="jf-symbols" name="symbols" value="${esc(f.symbols)}" placeholder="SPX.OPT" spellcheck="false"></div>
-      <div class="field"><label for="jf-stype">Symbol type</label><select id="jf-stype" name="stype_in">${stypes.map(([v, l]) => `<option value="${v}"${v === f.stype_in ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
-      <div class="field"><label for="jf-start">First day</label><input id="jf-start" name="start" type="date" value="${esc(f.start)}"></div>
-      <div class="field"><label for="jf-end">Last day</label><input id="jf-end" name="end" type="date" value="${esc(f.end)}"></div>
-    </form>
-    <div class="quote" id="job-quote">${quoteLine()}</div>
-  </section>
-  <section><div class="sec-head"><h2>At Databento</h2><span class="muted" style="font-size:13px">Not yet expired at the provider; those needing attention first</span></div><div id="jobs-list">${jobsTable()}</div></section>`;
-}
-function quoteLine() {
-  const q = jobs.quote, current = q && jobs.quoteFor === JSON.stringify(jobs.form);
-  const msg = jobs.msg ? `<span class="${jobs.msg.ok ? 'msg-ok' : 'msg-err'}">${esc(jobs.msg.text)}</span>` : '';
-  const price = `<button type="button" class="btn${current ? '' : ' primary'}" id="jf-price"${jobs.busy ? ' disabled' : ''}>${jobs.busy === 'price' ? 'Pricing…' : 'Price'}</button>`;
-  if (!current) return price + msg;
-  const paid = q.cost_usd > 0;
-  const warn = (q.warnings || []).length ? `<span class="msg-warn">⚠ ${q.warnings.map(esc).join(' · ')}</span>` : '';
-  return `${price}<span class="cost">${usd(q.cost_usd)}</span><span class="muted">${paid ? 'charged to the Databento account' : 'included, no charge'} · ${bytes(q.billable_bytes)} billable (uncompressed)</span>
-    ${paid ? `<label><input type="checkbox" id="jf-confirm"> Charge ${usd(q.cost_usd)}</label>` : ''}
-    <button type="button" class="btn primary" id="jf-submit"${paid || jobs.busy ? ' disabled' : ''}>${jobs.busy === 'submit' ? 'Submitting…' : paid ? 'Submit for ' + usd(q.cost_usd) : 'Submit'}</button>${warn}${msg}`;
-}
-function jobState(j) {
-  const t = j.transfer, h = j.held;
-  if (t && t.state === 'downloading') {
-    const pct = t.total_bytes ? 100 * t.done_bytes / t.total_bytes : 0;
-    return [`<span class="pill p-idle">Downloading ${pct.toFixed(0)}%</span>`, `${esc(t.file)} · ${bytes(t.done_bytes)} of ${bytes(t.total_bytes)}<div class="bar"><b style="width:${pct.toFixed(1)}%"></b></div>`];
-  }
-  if (t && t.state === 'waiting') return ['<span class="pill p-idle">Waiting to download</span>', ''];
-  if (t && t.state === 'filing') return ['<span class="pill p-idle">Filing</span>', 'Checking every file against the manifest and filing it in the store'];
-  if (t && t.state === 'failed') return [`<span class="pill p-crit">Failed</span> <button type="button" class="btn small" data-job-download="${esc(j.id)}">Retry</button>`, esc(t.error || '')];
-  if (h && h.how === 'filed') return [`<span class="pill p-ok" title="Filed on ${esc(h.volume)}">In the store</span>`, ''];
-  if (h && h.how === 'folder') return [`<span class="pill p-ok" title="Downloaded to a folder on ${esc(h.volume)}, not yet filed in the store layout">Downloaded</span>`, ''];
-  if (h && h.how === 'incoming') return [`<span class="pill p-warn">Partly downloaded</span> <button type="button" class="btn small" data-job-download="${esc(j.id)}">Resume</button>`, ''];
-  if (j.state === 'done' && j.unfileable) return ['<span class="pill p-idle">Not fileable</span>', `Can't be filed in the store: ${esc(j.unfileable)}`];
-  if (j.state === 'done') return [`<span class="pill p-warn">Ready</span> <button type="button" class="btn small" data-job-download="${esc(j.id)}">Download</button>`, j.expires ? `Available until ${day(j.expires)}` : ''];
-  if (j.state === 'expired') return ['<span class="pill p-idle">Expired</span>', ''];
-  const what = j.state === 'queued' ? 'Queued' : `Processing${j.progress != null ? ' ' + j.progress + '%' : ''}`;
-  return [`<span class="pill p-idle">${what}</span>`, j.follow ? 'Downloads into the store when done' : ''];
-}
-function jobsTable() {
-  if (jobs.err) return `<div class="box empty msg-err">${esc(jobs.err)}</div>`;
-  if (!jobs.list || jobs.list.updated_at == null) return '<div class="box empty">Loading jobs…</div>';
-  // Jobs that need something (or are moving) first, then the rest; newest first within each.
-  const settled = j => !!j.held && !j.transfer || j.state === 'expired';
-  const all = (jobs.list.jobs || []).slice().sort((a, b) => settled(a) - settled(b) || b.received - a.received);
-  // Jobs already on disk are history; they're shown only on request.
-  const onDisk = all.filter(j => j.held && !j.transfer).length;
-  const list = jobs.showHeld ? all : all.filter(j => !(j.held && !j.transfer));
-  const toggle = onDisk ? `<button type="button" class="btn small" data-jobs-held>${jobs.showHeld ? 'Hide' : 'Show'} ${onDisk} already on disk</button>` : '';
-  if (!list.length) return `<div class="box empty">Nothing waiting: every job at Databento is already on disk.</div>${toggle}`;
-  const rows = list.map(j => {
-    let [st, sub] = jobState(j);
-    if (jobs.rowErr[j.id] && !j.transfer) sub = `<span class="msg-err">${esc(jobs.rowErr[j.id])}</span>`;
-    const last = day(j.end - 1), range = day(j.start) === last ? day(j.start) : `${day(j.start)} → ${last}`;
-    return `<tr${sub ? ' class="has-sub"' : ''}><td class="mono" style="color:var(--fg)">${esc(j.id)}</td>
-      <td class="mono">${esc(j.symbols)} <span class="muted">${esc(j.schema)}</span><div class="muted" style="font-size:12px">${esc(j.dataset)}</div></td>
-      <td class="mono" style="white-space:nowrap">${range}</td>
-      <td class="num mono">${j.bytes != null ? bytes(j.bytes) : '—'}</td>
-      <td class="num mono">${j.cost_usd != null ? usd(j.cost_usd) : '—'}</td>
-      <td style="white-space:nowrap">${st}</td></tr>${sub ? `<tr class="sub"><td></td><td colspan="5">${sub}</td></tr>` : ''}`;
-  }).join('');
-  return `<div class="box scroll"><table class="jobs-tbl"><thead><tr><th>Job</th><th>Request</th><th>Range</th><th style="text-align:right">Size</th><th style="text-align:right">Cost</th><th>State</th></tr></thead><tbody>${rows}</tbody></table></div>
-    ${toggle}
-    ${jobs.list.store_reachable === false ? '<p class="msg-err">The store is not reachable, so what it already holds is not shown.</p>' : ''}`;
-}
-async function jobsOpened() {
-  loadJobs();
-  if (!jobs.datasets) { try { jobs.datasets = (await jobsApi('datasets')).datasets; } catch (_) { jobs.datasets = []; }
-    const dl = $('jf-datasets'); if (dl) dl.innerHTML = jobs.datasets.map(d => `<option value="${esc(d)}">`).join(''); }
-  loadSchemas(jobs.form.dataset);
-}
-const redrawQuote = () => { const q = $('job-quote'); if (q) q.innerHTML = quoteLine(); };
-$('view').addEventListener('input', e => {
-  const el = e.target; if (!el.closest || !el.closest('#job-form')) return;
-  jobs.form[el.name] = el.value; jobs.msg = null;
-  if (el.name === 'symbols' && /\.(OPT|FUT)\b/i.test(el.value)) { jobs.form.stype_in = 'parent'; $('jf-stype').value = 'parent'; }
-  if (el.name === 'start' && (!jobs.form.end || jobs.form.end < el.value)) { jobs.form.end = el.value; $('jf-end').value = el.value; }
-  if (el.name === 'dataset') loadSchemas(el.value.trim());
-  redrawQuote();
-});
-$('view').addEventListener('change', e => {
-  if (e.target.id === 'jf-confirm') { const b = $('jf-submit'); if (b) b.disabled = !e.target.checked || !!jobs.busy; return; }
-  if (e.target.closest && e.target.closest('#job-form')) { jobs.form[e.target.name] = e.target.value; redrawQuote(); }
-});
-$('view').addEventListener('click', async e => {
-  if (e.target.id === 'jf-price') {
-    jobs.busy = 'price'; jobs.msg = null; redrawQuote();
-    const snapshot = JSON.stringify(jobs.form);
-    try { jobs.quote = await jobsApi('price', jobs.form); jobs.quoteFor = snapshot; }
-    catch (err) { jobs.quote = null; jobs.msg = { text: err.message }; }
-    jobs.busy = false; redrawQuote(); return;
-  }
-  if (e.target.id === 'jf-submit') {
-    const q = jobs.quote; if (!q) return;
-    if (q.cost_usd > 0 && !$('jf-confirm')?.checked) return;
-    jobs.busy = 'submit'; redrawQuote();
-    try {
-      const r = await jobsApi('submit', { quote: q.quote, confirm_usd: q.cost_usd > 0 ? q.cost_usd : null });
-      jobs.msg = { ok: true, text: `Submitted ${r.job}; it downloads into the store when done.` };
-    } catch (err) { jobs.msg = { text: err.message }; }
-    jobs.quote = null; jobs.busy = false; redrawQuote(); loadJobs(); return;
-  }
-  if (e.target.closest && e.target.closest('[data-jobs-held]')) { jobs.showHeld = !jobs.showHeld; $('jobs-list').innerHTML = jobsTable(); return; }
-  const d = e.target.closest && e.target.closest('[data-job-download]');
-  if (d) {
-    d.disabled = true; delete jobs.rowErr[d.dataset.jobDownload];
-    try { await jobsApi('download/' + encodeURIComponent(d.dataset.jobDownload), {}); }
-    catch (err) { jobs.rowErr[d.dataset.jobDownload] = err.message; }
-    loadJobs();
-  }
-});
-setInterval(() => { if ($('jobs-list')) loadJobs(); }, 2000);
 
 
-// Roadmap: the console's reminders, after iOS Reminders. Lists on the left
-// (with All, Flagged and Completed), the chosen list's items on the right:
-// tap the circle to complete, edit a title or notes in place, flag, add with
-// New Reminder. Saved by the console (/api/reminders).
-const rem = { doc: null, err: null, list: 'all', showDone: false, adding: false, loaded: 0 };
-async function remApi(change) {
-  const r = await fetch('/api/reminders', change ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(change) } : { cache: 'no-store' });
-  let v = null; try { v = await r.json(); } catch (_) {}
-  if (!r.ok) throw new Error(v?.error || (r.status === 404 ? 'Reminders are not configured on this console.' : `${r.status} ${r.statusText}`));
-  return v;
-}
-async function remLoad() {
-  try { rem.doc = await remApi(); rem.err = null; } catch (e) { rem.err = e.message; }
-  rem.loaded = Date.now(); remDraw();
-}
-async function remChange(change) {
-  try { rem.doc = await remApi(change); rem.err = null; } catch (e) { rem.err = e.message; }
-  remDraw();
-}
-const FLAG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3 1.5v13h1.5V9.6h7.2l-1.4-3.05L11.7 3.5H4.5V1.5z"/></svg>';
-function remView() { return (state.tab === 'roadmap' ? '<div><h1>Roadmap</h1><p class="muted" style="margin:0">What this deployment is working towards. Add, edit and check off items here.</p></div>' : '') + '<div class="rem" id="rem">' + remHtml() + '</div>'; }
-function remHtml() {
-  if (rem.err && !rem.doc) return `<p class="msg-err">${esc(rem.err)}</p>`;
-  if (!rem.doc) return '<p class="muted">Loading reminders…</p>';
-  const { lists, items } = rem.doc;
-  const open = items.filter(i => !i.done);
-  const count = id => open.filter(i => i.list === id).length;
-  const list = lists.find(l => l.id === rem.list);
-  if (rem.list !== 'all' && rem.list !== 'flagged' && rem.list !== 'done' && !list) rem.list = 'all';
-  const smart = [['all', 'All', open.length, '#5F6B7A'], ['flagged', 'Flagged', open.filter(i => i.flagged).length, '#FF9500'], ['done', 'Completed', items.length - open.length, '#8E8E93']];
-  const side = `<aside class="rem-side">
-    <div class="rem-smart">${smart.map(([id, name, n, c]) => `<button type="button" class="rem-card" data-rem-list="${id}" aria-pressed="${rem.list === id}"><i style="background:${c}"></i><b>${n}</b><span>${name}</span></button>`).join('')}</div>
-    <div class="rem-h">My Lists</div>
-    ${lists.map(l => `<button type="button" class="rem-l" data-rem-list="${l.id}" aria-pressed="${rem.list === l.id}"><i style="background:${esc(l.color)}"></i><span>${esc(l.name)}</span><em>${count(l.id)}</em></button>`).join('')}
-    ${rem.adding ? '<input class="rem-newlist" id="rem-newlist" placeholder="List name" autocomplete="off">' : '<button type="button" class="rem-add" data-rem-addlist>+ Add List</button>'}
-  </aside>`;
-  const picker = `<select class="rem-pick" data-rem-pick aria-label="List">${smart.map(([id, name]) => `<option value="${id}"${rem.list === id ? ' selected' : ''}>${name}</option>`).join('')}${lists.map(l => `<option value="${l.id}"${rem.list === l.id ? ' selected' : ''}>${esc(l.name)}</option>`).join('')}</select>`;
-  const color = list?.color || (rem.list === 'flagged' ? '#FF9500' : rem.list === 'done' ? '#8E8E93' : 'var(--fg)');
-  const title = list?.name || { all: 'All', flagged: 'Flagged', done: 'Completed' }[rem.list];
-  let shown = rem.list === 'all' ? items : rem.list === 'flagged' ? items.filter(i => i.flagged) : rem.list === 'done' ? items.filter(i => i.done) : items.filter(i => i.list === rem.list);
-  const doneHere = shown.filter(i => i.done).length;
-  if (rem.list !== 'done' && !rem.showDone) shown = shown.filter(i => !i.done);
-  const listOf = i => lists.find(l => l.id === i.list);
-  const row = i => `<div class="rem-item${i.done ? ' done' : ''}" data-rem-item="${i.id}">
-    <button type="button" class="rem-check" data-rem-check="${i.id}" style="--c:${esc(listOf(i)?.color || '#8E8E93')}" aria-pressed="${i.done}" aria-label="${i.done ? 'Mark not done' : 'Complete'}"></button>
-    <div class="rem-body">
-      <input class="rem-title" data-rem-field="title" value="${esc(i.title)}" aria-label="Title">
-      <input class="rem-notes" data-rem-field="notes" value="${esc(i.notes || '')}" placeholder="Notes" aria-label="Notes">
-      ${rem.list === 'all' || rem.list === 'flagged' || rem.list === 'done' ? `<span class="rem-in" style="color:${esc(listOf(i)?.color || 'inherit')}">${esc(listOf(i)?.name || '')}</span>` : ''}
-    </div>
-    <button type="button" class="rem-flag${i.flagged ? ' on' : ''}" data-rem-flag="${i.id}" aria-pressed="${i.flagged}" aria-label="Flag" title="Flag">${FLAG}</button>
-    <button type="button" class="rem-del" data-rem-del="${i.id}" aria-label="Delete" title="Delete">${tileIcon.close}</button>
-  </div>`;
-  // New reminders go to the chosen list, or from All, Flagged and Completed to the first list.
-  const target = list || lists[0], canAdd = !!target;
-  return `${side}<section class="rem-main">${picker}
-    <div class="rem-top"><h2 style="color:${color}">${esc(title)}</h2><span class="rem-n" style="color:${color}">${shown.filter(i => !i.done).length || ''}</span></div>
-    ${rem.err ? `<p class="msg-err">${esc(rem.err)}</p>` : ''}
-    <div class="rem-items">${shown.map(row).join('') || (canAdd ? '' : '<p class="muted">Nothing here.</p>')}</div>
-    ${canAdd ? `<div class="rem-new"><span style="color:${esc(target.color)}">+</span><input id="rem-new" placeholder="New Reminder${list ? '' : ' in ' + esc(target.name)}" autocomplete="off"></div>` : ''}
-    ${rem.list !== 'done' && doneHere ? `<button type="button" class="rem-showdone" data-rem-showdone>${rem.showDone ? 'Hide' : 'Show'} completed (${doneHere})</button>` : ''}
-  </section>`;
-}
-function remDraw() {
-  const box = $('rem'); if (!box) return;
-  const f = document.activeElement, keep = f && box.contains(f) ? { id: f.id, item: f.closest('[data-rem-item]')?.dataset.remItem, field: f.dataset.remField, pos: f.selectionStart } : null;
-  box.innerHTML = remHtml();
-  if (keep) {
-    const el = keep.id ? $(keep.id) : box.querySelector(`[data-rem-item="${keep.item}"] [data-rem-field="${keep.field}"]`);
-    if (el) { el.focus(); try { el.setSelectionRange(keep.pos, keep.pos); } catch (_) {} }
-  }
-}
-$('view').addEventListener('click', e => {
-  const t = e.target.closest && e.target.closest('[data-rem-list],[data-rem-check],[data-rem-flag],[data-rem-del],[data-rem-addlist],[data-rem-showdone]');
-  if (!t || !t.closest('#rem')) return;
-  if (t.dataset.remList) { const v = t.dataset.remList; rem.list = /^\d+$/.test(v) ? +v : v; remDraw(); return; }
-  if (t.dataset.remCheck) { const i = rem.doc.items.find(x => x.id === +t.dataset.remCheck); remChange({ op: 'update_item', id: i.id, done: !i.done }); return; }
-  if (t.dataset.remFlag) { const i = rem.doc.items.find(x => x.id === +t.dataset.remFlag); remChange({ op: 'update_item', id: i.id, flagged: !i.flagged }); return; }
-  if (t.dataset.remDel) { remChange({ op: 'delete_item', id: +t.dataset.remDel }); return; }
-  if ('remAddlist' in t.dataset) { rem.adding = true; remDraw(); $('rem-newlist')?.focus(); return; }
-  if ('remShowdone' in t.dataset) { rem.showDone = !rem.showDone; remDraw(); }
-});
-$('view').addEventListener('change', e => {
-  if (e.target.dataset?.remPick !== undefined && e.target.closest('#rem')) { const v = e.target.value; rem.list = /^\d+$/.test(v) ? +v : v; remDraw(); return; }
-  const f = e.target.dataset?.remField; if (!f || !e.target.closest('#rem')) return;
-  const id = +e.target.closest('[data-rem-item]').dataset.remItem, item = rem.doc.items.find(x => x.id === id);
-  if ((item[f] || '') !== e.target.value) remChange({ op: 'update_item', id, [f]: e.target.value });
-});
-$('view').addEventListener('keydown', e => {
-  if (!e.target.closest || !e.target.closest('#rem') || e.key !== 'Enter') return;
-  if (e.target.id === 'rem-new' && e.target.value.trim()) {
-    const title = e.target.value, target = rem.doc.lists.find(l => l.id === rem.list) || rem.doc.lists[0];
-    e.target.value = ''; remChange({ op: 'add_item', list: target.id, title, flagged: rem.list === 'flagged' }); return;
-  }
-  if (e.target.id === 'rem-newlist') { const name = e.target.value.trim(); rem.adding = false; if (name) remChange({ op: 'add_list', name }); else remDraw(); return; }
-  if (e.target.dataset.remField) e.target.blur();
-});
-$('view').addEventListener('focusout', e => { if (e.target.id === 'rem-newlist' && !e.target.value.trim()) { rem.adding = false; setTimeout(remDraw); } });
-// Keep it current, but never under someone typing.
-setInterval(() => { const box = $('rem'); if (box && !box.contains(document.activeElement) && Date.now() - rem.loaded > 15000) remLoad(); }, 5000);
 
 // One view's HTML, for the page or for a workspace tile.
-function viewHtml(tab) {
-  return tab === 'data' ? dataView()
-    : tab === 'jobs' ? jobsView()
-    : tab === 'storage' ? storageView()
-    : tab === 'shell' ? shellView()
-    : tab === 'docs' ? docsWidget()
-    : tab === 'roadmap' ? remView()
-    : tab === 'workspace' ? workspaceView() : collectionView();
-}
 
 // Workspaces (decision 0008): Dockview manages the panels; each panel shows
 // one view. Workspaces are named layouts in groups, switched from the header
 // tabs (the current group's), the switcher (⌥W) and keys. Only the open
 // workspace runs: a panel renders while it is shown, and others are saved
 // layouts, which is all the switcher's previews read.
-const VIEWS = { roadmap: 'Roadmap', docs: 'Docs', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
-// Widgets registered as modules (decision 0010) bring their own titles.
-for (const n of widgetNames()) VIEWS[n] = widget(n).title;
-// Views that hold their own state (forms, input) and update themselves.
-const STEADY = new Set(['jobs', 'shell', 'data', 'storage', 'roadmap']);
+// Every widget is a module registered with its title (decision 0010).
+const VIEWS = Object.fromEntries(widgetNames().map(n => [n, widget(n).title]));
 const tileIcon = {
   max: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9 7M2.5 13.5 7 9"/></svg>',
   restore: '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M13.5 6.5h-4v-4M2.5 9.5h4v4M9.5 6.5 14 2M6.5 9.5 2 14"/></svg>',
@@ -1199,8 +809,7 @@ const panelId = () => 'p' + Date.now().toString(36) + (panelSeq++);
 const openViews = () => (dock?.panels || []).map(p => p.params?.view);
 const activePanel = () => dock?.activePanel || dock?.panels[0];
 function workspaceView() { return '<div class="ws dv-tt" id="ws-root"></div>'; }
-// A registered widget is mounted into its panel and kept as an instance;
-// older views are HTML from viewHtml.
+// A widget is mounted into its panel and kept as an instance.
 const mounted = new Map(); // panel body → widget instance
 function unmount(body) { mounted.get(body)?.dispose?.(); mounted.delete(body); }
 function renderPanel(body, view) {
@@ -1208,18 +817,13 @@ function renderPanel(body, view) {
   body.dataset.view = view;
   const w = widget(view);
   if (w) { body.innerHTML = ''; mounted.set(body, w.mount(body) || {}); return; }
-  if (!VIEWS[view]) { body.innerHTML = `<p class="muted" style="padding:16px">There's no widget called “${esc(view)}” any more. Close this panel, or show another widget here from the palette (⌘K).</p>`; return; }
-  body.innerHTML = viewHtml(view);
-  if (view === 'jobs') jobsOpened(); if (view === 'roadmap') remLoad();
-  const out = body.querySelector('#term-out'); if (out) out.scrollTop = out.scrollHeight;
+  body.innerHTML = `<p class="muted" style="padding:16px">There's no widget called “${esc(view)}” any more. Close this panel, or show another widget here from the palette (⌘K).</p>`;
 }
 // On each refresh, only visible panels without state of their own redraw.
 function refreshTiles() {
   for (const body of panelBody.values()) {
     if (!body.isConnected) continue;
-    if (mounted.has(body)) { mounted.get(body).update?.(); continue; }
-    if (STEADY.has(body.dataset.view) || !VIEWS[body.dataset.view]) continue;
-    const top = body.scrollTop; body.innerHTML = viewHtml(body.dataset.view); body.scrollTop = top;
+    mounted.get(body)?.update?.();
   }
 }
 // Build a template tree into the dock: each split's second half takes the
@@ -1653,71 +1257,27 @@ document.addEventListener('drop', e => {
   layStore(); swDraw();
 });
 
-// The tinytrader shell: a terminal for read-only commands over this
-// deployment's state. It runs nothing on the machine itself.
-const sh = { lines: [{ k: 'sys', t: 'tinytrader shell: read-only commands over this deployment. Type help.' }], hist: [], at: 0 };
-const termLine = l => `<div class="${l.k}">${esc(l.t)}</div>`;
-function shellView() {
-  const term = `<div class="term"><div class="term-out" id="term-out">${sh.lines.map(termLine).join('')}</div><form class="term-in" id="term-form" autocomplete="off"><span>tinytrader$</span><input id="term-input" spellcheck="false" aria-label="Command" autocapitalize="off"></form></div>`;
-  return state.tab === 'shell' ? `<div><h1>Shell</h1><p class="muted" style="margin:0">Read-only commands over this deployment. It runs nothing on the machine itself.</p></div>${term}` : term;
-}
-const pad = (v, n) => String(v ?? '').padEnd(n);
-const row = s => { const h = svcState(s.id).health?.body || {}; return pad(s.id, 20) + pad(h.state || '?', 10) + (h.detail || ''); };
-const SHELL = {
-  help: () => ['help                 this list', 'status               every service and its state', 'relays               market data relays and their hours', 'accounts             equity and positions of each account', 'store                drives, free space and status', 'jobs                 provider jobs not yet on disk', 'news [n]             the latest n stories (5)', 'calendar             the next trading sessions', 'clear                clear the screen'].join('\n'),
-  status: () => (fleet.topo?.services || []).map(row).join('\n') || 'no services',
-  relays: () => (fleet.topo?.services || []).filter(s => s.id.startsWith('relay')).map(row).join('\n') || 'no relays',
-  accounts: () => (fleet.topo?.services || []).flatMap(s => svcState(s.id).accounts?.accounts || []).map(a => pad(a.label, 10) + pad(a.environment, 8) + pad('$' + Number(a.account?.equity ?? NaN).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }), 14) + (a.positions?.length ? a.positions.map(p => `${p.symbol} ${p.qty}`).join(', ') : 'no positions')).join('\n') || 'no accounts',
-  store: () => catalogRoots().map(r => { const v = r.volume || {}; return pad(r.name, 10) + (r.present ? pad(`${((v.used_fraction ?? 0) * 100).toFixed(0)}% used`, 11) + pad(bytes(v.available_bytes) + ' free', 14) + pad(v.status, 9) + (r.writable ? 'writable' : 'read-only') : 'MISSING'); }).join('\n') || 'no store',
-  jobs: async () => { const v = await jobsApi('jobs'); const w = (v.jobs || []).filter(j => !j.held); return w.length ? w.map(j => pad(j.id, 26) + pad(`${j.symbols} ${j.schema}`, 24) + pad(j.state, 12) + (j.bytes ? bytes(j.bytes) : '')).join('\n') : 'nothing waiting: every job is on disk'; },
-  news: n => newsItems().slice(0, +n || 5).map(x => `${pad(ago(x.created_at), 10)} ${x.headline}`).join('\n') || 'no news',
-  calendar: () => { const cal = (fleet.topo?.services || []).map(s => svcState(s.id).calendar).find(c => c?.days?.length); const today = new Date().toISOString().slice(0, 10); return cal ? cal.days.filter(d => d.date >= today).slice(0, 5).map(d => `${d.date}  ${d.open}–${d.close} ET`).join('\n') : 'no calendar'; },
-};
-async function runShell(line) {
-  const [cmd, ...args] = line.trim().split(/\s+/);
-  if (!cmd) return;
-  sh.hist.push(line); sh.at = sh.hist.length;
-  if (cmd === 'clear') sh.lines = [];
-  else {
-    sh.lines.push({ k: 'cmd', t: line });
-    const f = SHELL[cmd];
-    try { sh.lines.push(f ? { k: 'out', t: await f(...args) } : { k: 'err', t: `${cmd}: no such command (try help)` }); }
-    catch (err) { sh.lines.push({ k: 'err', t: String(err.message || err) }); }
-    sh.lines = sh.lines.slice(-400);
-  }
-  const out = $('term-out'); if (out) { out.innerHTML = sh.lines.map(termLine).join(''); out.scrollTop = out.scrollHeight; }
-}
-$('view').addEventListener('submit', e => {
-  if (e.target.id !== 'term-form') return;
-  e.preventDefault(); const i = $('term-input'); const v = i.value; i.value = ''; runShell(v);
-});
-$('view').addEventListener('keydown', e => {
-  if (e.target.id !== 'term-input' || !['ArrowUp', 'ArrowDown'].includes(e.key)) return;
-  e.preventDefault(); sh.at = Math.max(0, Math.min(sh.hist.length, sh.at + (e.key === 'ArrowUp' ? -1 : 1)));
-  e.target.value = sh.hist[sh.at] ?? '';
-});
 
 function render() {
   // Rebuilding the page must never move the reader: keep the scroll position.
   const scrollY = window.scrollY;
   const focusId = document.activeElement?.dataset?.node;
   // Collections only change on navigation, not on every refresh.
-  updateStoreNav();
   if (state.tab.startsWith('col:') && !state.navigated) return status();
-  if ((state.tab === 'data' || state.tab === 'storage') && !state.navigated && catalogStamp() === state.catalogAt) return status();
-  if ((state.tab === 'jobs' || state.tab === 'shell' || state.tab === 'roadmap') && !state.navigated) return status();
+  if (state.tab === 'roadmap' && !state.navigated) return status();
   if (state.tab === 'workspace' && !state.navigated && $('ws-root')) { refreshTiles(); drawCharts(); return status(); }
   state.navigated = false;
-  state.catalogAt = catalogStamp();
   document.body.classList.toggle('ws-full', state.tab === 'workspace');
   document.body.classList.toggle('docs-mode', state.tab.startsWith('col:') || state.tab === 'roadmap');
   document.documentElement.style.setProperty('--top-h', document.querySelector('.top').offsetHeight + 'px');
-  $('view').innerHTML = viewHtml(state.tab);
-  if (state.tab === 'workspace') mountWorkspace(); else if (dock) { for (const body of mounted.keys()) unmount(body); dock.dispose(); dock = null; panelBody.clear(); }
-  if ($('jobs-list')) jobsOpened();
-  if ($('rem')) remLoad();
-  if ($('ds-filter') && state.dsFilter) $('ds-filter').dispatchEvent(new Event('input', { bubbles: true }));
-  { const out = $('term-out'); if (out) out.scrollTop = out.scrollHeight; }
+  for (const body of mounted.keys()) unmount(body);
+  if (dock) { dock.dispose(); dock = null; panelBody.clear(); }
+  if (state.tab === 'workspace') { $('view').innerHTML = workspaceView(); mountWorkspace(); }
+  else if (state.tab === 'roadmap') {
+    // The docs pages' Roadmap: the widget under a heading.
+    $('view').innerHTML = '<div><h1>Roadmap</h1><p class="muted" style="margin:0">What this deployment is working towards. Add, edit and check off items here.</p></div><div class="page-widget"></div>';
+    const host = $('view').querySelector('.page-widget'); mounted.set(host, widget('roadmap').mount(host));
+  } else $('view').innerHTML = collectionView();
   if (focusId) { const n = document.querySelector(`[data-node="${CSS.escape(focusId)}"]`); if (n) n.focus({ preventScroll: true }); }
   updateCollectionsNav();
   const docOpen = state.tab.startsWith('col:') && state.doc !== null;
@@ -1806,8 +1366,6 @@ document.querySelector('.nav').addEventListener('click', e => {
   render(); window.scrollTo(0, 0);
 });
 $('view').addEventListener('click', e => {
-  const sc = e.target.closest('[data-schema]:not([data-cov])');
-  if (sc) { state.dsSchema = sc.dataset.schema; state.navigated = true; render(); return; }
   const dc = e.target.closest('[data-doc]');
   if (dc) { openDoc(dc.dataset.doc === '' ? null : +dc.dataset.doc); return; }
   const a = e.target.closest('.prose a[href]');
