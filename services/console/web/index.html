@@ -205,13 +205,18 @@ tr:last-child td { border-bottom: 0; }
 .doc-card span { font: 12px var(--mono); color: var(--muted); }
 .group-h { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 18px 0 8px; }
 .nav-tree { display: flex; flex-direction: column; gap: 1px; margin: 2px 0 6px 12px; padding-left: 4px; border-left: 1px solid var(--line-soft); }
+.nav-tree.flat { margin: 0; padding: 0; border-left: 0; }
 .nav .nav-tree button { min-height: 30px; font-size: 13.5px; }
 .nav .nav-tree .nav-group { font-weight: 600; color: var(--fg-2); gap: 6px; }
 .nav-group::before { content: ""; width: 0; height: 0; border-left: 5px solid var(--muted); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform .15s; }
 .nav-group[aria-expanded="true"]::before { transform: rotate(90deg); }
 .nav-leaves { display: flex; flex-direction: column; gap: 1px; margin-left: 11px; }
-.mobile-only { display: none; }
-@media (max-width: 780px) { .nav .nav-tree { display: none; } .mobile-only { display: inline-block; margin-bottom: 10px; } }
+.mobile-only, .nav .mobile-only { display: none; }
+@media (max-width: 780px) {
+  .nav .nav-tree { display: none; }
+  .mobile-only { display: inline-block; margin-bottom: 10px; }
+  .nav .mobile-only { display: flex; margin: 0; }
+}
 .back { align-self: flex-start; border: 0; background: none; color: var(--accent); font: 500 14px var(--sans); cursor: pointer; padding: 4px 0; }
 .prose { flex: 999 1 420px; min-width: 0; max-width: 76ch; color: var(--fg-2); line-height: 1.65; }
 .prose .path { font: 12px var(--mono); color: var(--muted); }
@@ -774,27 +779,31 @@ async function loadCollections() {
   } catch (_) {}
 }
 const groupLabel = g => g.split('/').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' › ');
-// The Reference section: each collection, and under the open one its
-// folders (collapsible) and documents, so documents need no second sidebar.
+// The Docs section. With one collection, its folders (collapsible) and
+// documents sit directly under the heading; with several, each collection is
+// an item and the open one expands. Documents never need a second sidebar.
 function updateCollectionsNav() {
   const key = [state.tab, state.doc, [...state.openGroups].join(','), state.collections.length].join('|');
   if (key === state.navKey) return;
   state.navKey = key;
   if (!state.collections.length) { $('nav-collections').innerHTML = ''; return; }
   const open = currentCollection();
-  const tree = c => {
+  const tree = (c, flat = false) => {
+    const cls = flat ? 'nav-tree flat' : 'nav-tree';
     const groups = [...new Set(c.docs.map(d => d.group))];
-    const leaf = d => `<button type="button" data-doc="${d.index}"${d.index === state.doc ? ' aria-current="page"' : ''}>${esc(d.title)}</button>`;
-    if (groups.length < 2) return `<div class="nav-tree">${c.docs.map(leaf).join('')}</div>`;
-    return `<div class="nav-tree">${groups.map(g => {
+    const leaf = d => `<button type="button" data-col="${esc(c.id)}" data-doc="${d.index}"${c === open && d.index === state.doc ? ' aria-current="page"' : ''}>${esc(d.title)}</button>`;
+    if (groups.length < 2) return `<div class="${cls}">${c.docs.map(leaf).join('')}</div>`;
+    return `<div class="${cls}">${groups.map(g => {
       const expanded = state.openGroups.has(g);
       return `<button type="button" class="nav-group" data-group="${esc(g)}" aria-expanded="${expanded}">${esc(groupLabel(g))}</button>` +
         (expanded ? `<div class="nav-leaves">${c.docs.filter(d => d.group === g).map(leaf).join('')}</div>` : '');
     }).join('')}</div>`;
   };
-  $('nav-collections').innerHTML = '<div class="nav-sec"><div class="nav-label">Reference</div><div class="nav-items">' +
-    state.collections.map(c => `<button type="button" data-tab="col:${esc(c.id)}">${esc(c.name)}</button>` + (c === open && c.docs.length ? tree(c) : '')).join('') +
-    '</div></div>';
+  const items = state.collections.length === 1
+    // On a phone the tree is hidden, so the collection's own page stands in.
+    ? `<button type="button" class="mobile-only" data-tab="col:${esc(state.collections[0].id)}">${esc(state.collections[0].name)}</button>` + tree(state.collections[0], true)
+    : state.collections.map(c => `<button type="button" data-tab="col:${esc(c.id)}">${esc(c.name)}</button>` + (c === open && c.docs.length ? tree(c) : '')).join('');
+  $('nav-collections').innerHTML = `<div class="nav-sec"><div class="nav-label">Docs</div><div class="nav-items">${items}</div></div>`;
 }
 const currentCollection = () => state.collections.find(c => 'col:' + c.id === state.tab);
 function collectionView() {
@@ -946,7 +955,7 @@ document.querySelector('.nav').addEventListener('click', e => {
   const g = e.target.closest('[data-group]');
   if (g) { const k = g.dataset.group; if (state.openGroups.has(k)) state.openGroups.delete(k); else state.openGroups.add(k); updateCollectionsNav(); return; }
   const dc = e.target.closest('[data-doc]');
-  if (dc) { openDoc(+dc.dataset.doc); return; }
+  if (dc) { state.tab = 'col:' + dc.dataset.col; openDoc(+dc.dataset.doc); return; }
   const b = e.target.closest('button[data-tab]'); if (!b) return;
   state.tab = b.dataset.tab; state.doc = null; state.navigated = true;
   const c = currentCollection();
