@@ -18,6 +18,8 @@
 //!
 //! Configuration (environment):
 //! - `DBN_TCP_ADDR`: `host:port` serving the stream (required)
+//! - `DBN_TCP_JOIN`: a line to send after connecting, for sources that wait
+//!   for one, e.g. `{"protocol":"glacier.relay/1"}` for a Glacier relay
 //! - `DBN_TCP_SOURCE`: name of the source in the console graph (default: the address)
 //! - `DBN_TCP_LISTEN` (or `GLACIER_LISTEN`): address for the HTTP endpoints (default `127.0.0.1:9103`)
 
@@ -112,9 +114,16 @@ async fn stream_forever(addr: &str, observer: &Observer, shared: &Shared) {
 }
 
 async fn stream_once(addr: &str, observer: &Observer, shared: &Shared) -> Result<(), String> {
-    let stream = tokio::net::TcpStream::connect(addr)
+    let mut stream = tokio::net::TcpStream::connect(addr)
         .await
         .map_err(|e| format!("connect to {addr} failed: {e}"))?;
+    if let Ok(line) = std::env::var("DBN_TCP_JOIN") {
+        use tokio::io::AsyncWriteExt as _;
+        stream
+            .write_all(format!("{}\n", line.trim_end()).as_bytes())
+            .await
+            .map_err(|e| format!("cannot send the join line to {addr}: {e}"))?;
+    }
     let mut decoder = AsyncDbnDecoder::new(stream)
         .await
         .map_err(|e| format!("not a DBN stream: {e}"))?;
