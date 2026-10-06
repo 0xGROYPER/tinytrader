@@ -45,6 +45,10 @@ enum Sent {
     Stalled,
 }
 
+/// How long past its stamped expiration a definition is kept (see
+/// `Reference::snapshot`).
+const EXPIRY_GRACE_NS: u64 = 2 * 86_400 * 1_000_000_000;
+
 /// The latest reference records, by instrument.
 #[derive(Default)]
 struct Reference {
@@ -100,10 +104,14 @@ impl Reference {
     }
 
     /// Every current definition, then every statistic, dropping instruments
-    /// that have expired.
+    /// that have expired. Databento stamps an option's `expiration` at 00:00
+    /// UTC of its expiry date (20:00 New York time the evening before), so a
+    /// definition is kept for two days past that stamp: through its whole
+    /// expiry day and the settlement statistics that follow.
     fn snapshot(&mut self, now: u64) -> Vec<u8> {
-        self.definitions
-            .retain(|_, (expires, _)| *expires == UNDEF_TIMESTAMP || *expires > now);
+        self.definitions.retain(|_, (expires, _)| {
+            *expires == UNDEF_TIMESTAMP || expires.saturating_add(EXPIRY_GRACE_NS) > now
+        });
         let defs = &self.definitions;
         self.statistics.retain(|(id, _), _| defs.contains_key(id));
         let mut out = Vec::new();
@@ -673,6 +681,35 @@ mod tests {
         }
         assert_eq!(seen, ["def 7 150", "stat 7 1000"]);
         assert_eq!(hub.reference_len(), 2);
+    }
+
+    #[tokio::test]
+    async fn keeps_contracts_expiring_today() {
+        // Databento stamps today's expiries at 00:00 UTC today, hours ago.
+        let now = protocol::now_ns();
+        let midnight_utc = now - now % (86_400 * 1_000_000_000);
+        let hub = Arc::new(Hub::new(metadata(), 64, Duration::from_secs(10)));
+        let addr = serving(hub.clone()).await;
+        let mut chunk = definition(9, midnight_utc, 300); // expires today
+        chunk.extend(definition(
+            8,
+            midnight_utc - 3 * 86_400 * 1_000_000_000,
+            200,
+        )); // three days ago
+        hub.publish(chunk, 5);
+        let mut dec = join(&addr, "{\"protocol\":\"tinytrader.relay/1\"}\n").await;
+        let mut seen = Vec::new();
+        loop {
+            let r = dec.decode_record_ref().await.unwrap().unwrap();
+            match r.as_enum().unwrap() {
+                RecordRefEnum::InstrumentDef(d) => seen.push(d.hd.instrument_id),
+                RecordRefEnum::System(m) if m.code().ok() == Some(SystemCode::ReplayCompleted) => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(seen, [9]);
     }
 
     #[test]
