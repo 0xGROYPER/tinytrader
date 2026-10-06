@@ -64,6 +64,12 @@ use tinytrader_fleet::{EventsError, Poller, PollerConfig};
 use tinytrader_observe::{Observer, State};
 
 const PAGE: &str = include_str!("../web/index.html");
+/// Libraries the page loads, built in (and read from beside `CONSOLE_PAGE`
+/// when that is set). Names carry their versions, so browsers may cache them.
+const VENDOR: &[(&str, &[u8])] = &[(
+    "dockview-core-8.4.1.min.js",
+    include_bytes!("../web/vendor/dockview-core-8.4.1.min.js"),
+)];
 
 struct App {
     poller: Poller,
@@ -141,6 +147,7 @@ async fn main() {
         .route("/", get(page))
         .route("/docs", get(page))
         .route("/docs/", get(page))
+        .route("/vendor/{file}", get(vendor))
         .route("/api/topology", get(topology))
         .route("/api/state", get(state))
         .route("/api/events/{service}", get(events))
@@ -182,6 +189,29 @@ async fn poll_forever(app: Arc<App>, observer: Observer) {
             }
         }
     }
+}
+
+async fn vendor(axum::extract::Path(file): axum::extract::Path<String>) -> Response {
+    let Some((name, built_in)) = VENDOR.iter().find(|(n, _)| *n == file) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let body: Vec<u8> = std::env::var("CONSOLE_PAGE")
+        .ok()
+        .and_then(|p| {
+            std::path::Path::new(&p)
+                .parent()
+                .map(|d| d.join("vendor").join(name))
+        })
+        .and_then(|p| std::fs::read(p).ok())
+        .unwrap_or_else(|| built_in.to_vec());
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 async fn page() -> Html<std::borrow::Cow<'static, str>> {
