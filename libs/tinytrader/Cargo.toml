@@ -1,0 +1,15 @@
+[package]
+name = "tinytrader"
+description = "Simple tools for trading on financial markets, built on Databento's DBN format"
+readme = "README.md"
+keywords = ["trading", "market-data", "dbn", "databento", "finance"]
+categories = ["finance", "encoding"]
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tinytrader-dbn = { path = "../dbn", version = "0.1.0" }

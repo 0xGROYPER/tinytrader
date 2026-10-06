@@ -4,6 +4,7 @@ description = "Terminal view of a tinytrader deployment: services, health and li
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+publish = false
 
 [lints]
 workspace = true

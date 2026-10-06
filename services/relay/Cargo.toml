@@ -4,6 +4,7 @@ description = "Market data relay: holds one provider connection and serves its r
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+publish = false
 
 [lints]
 workspace = true

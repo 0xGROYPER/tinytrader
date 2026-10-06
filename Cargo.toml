@@ -8,6 +8,7 @@ members = [
     "services/alpaca-account",
     "services/relay",
     "libs/dbn",
+    "libs/tinytrader",
     "services/catalog",
     "services/console",
     "services/databento-live",

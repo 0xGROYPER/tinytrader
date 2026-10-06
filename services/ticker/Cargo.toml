@@ -4,6 +4,7 @@ description = "Toy service: streams Coinbase public tickers to disk and exposes 
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+publish = false
 
 [lints]
 workspace = true

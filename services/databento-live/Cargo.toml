@@ -4,6 +4,7 @@ description = "Example service: streams a Databento live subscription and expose
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+publish = false
 
 [lints]
 workspace = true

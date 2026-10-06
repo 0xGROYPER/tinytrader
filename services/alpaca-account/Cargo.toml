@@ -4,6 +4,7 @@ description = "Example service: reads an Alpaca account's balances and positions
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+publish = false
 
 [lints]
 workspace = true

@@ -4,6 +4,7 @@ description = "Example service: reads a live DBN stream from a TCP address and e
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+publish = false
 
 [lints]
 workspace = true

@@ -3154,6 +3154,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinytrader"
+version = "0.1.0"
+dependencies = [
+ "tinytrader-dbn",
+]
+
+[[package]]
 name = "tinytrader-dbn"
 version = "0.1.0"
 dependencies = [

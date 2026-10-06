@@ -4,6 +4,7 @@ description = "tinytrader console: deployment graph and live service state"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+publish = false
 
 [lints]
 workspace = true

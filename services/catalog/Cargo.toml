@@ -4,6 +4,7 @@ description = "Read-only catalog of a tinytrader deployment's data roots: datase
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+publish = false
 
 [lints]
 workspace = true

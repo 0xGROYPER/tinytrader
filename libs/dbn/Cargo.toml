@@ -1,6 +1,9 @@
 [package]
 name = "tinytrader-dbn"
 description = "tinytrader's extensions to Databento's DBN format: records the official dbn crate doesn't define yet"
+readme = "README.md"
+keywords = ["dbn", "databento", "market-data", "trading"]
+categories = ["finance", "encoding"]
 edition.workspace = true
 license.workspace = true
 version.workspace = true

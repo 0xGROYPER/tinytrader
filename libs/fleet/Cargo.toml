@@ -4,6 +4,7 @@ description = "Discovers and polls a tinytrader deployment; shared by the web co
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+publish = false
 
 [lints]
 workspace = true
