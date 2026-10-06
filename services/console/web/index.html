@@ -1169,6 +1169,7 @@ function revealDoc(c, d) {
 }
 function updateCollectionsNav() {
   const key = [state.tab, state.doc, [...state.openGroups].join(','), state.collections.length].join('|');
+  if (state.tab === 'roadmap') state.navKey = '';
   if (key === state.navKey) return;
   state.navKey = key;
   if (!state.collections.length) { $('nav-collections').innerHTML = ''; return; }
@@ -1195,7 +1196,8 @@ function updateCollectionsNav() {
       return `<button type="button" data-tab="col:${esc(c.id)}" aria-expanded="${expanded}">${CHEV}<span class="lbl">${esc(c.name)}</span></button>` + (expanded ? rows(c, docTree(c), 1) : '');
     }).join('');
   }
-  $('nav-collections').innerHTML = `<div class="nav-sec"><button type="button" class="nav-label nav-home" data-docs-home>Docs</button><div class="nav-items">${items}</div></div>`;
+  const road = `<button type="button" class="doc-item" data-docs-roadmap${state.tab === 'roadmap' ? ' aria-current="page"' : ''}><span class="chev"></span><span class="lbl">Roadmap</span></button>`;
+  $('nav-collections').innerHTML = `<div class="nav-sec"><button type="button" class="nav-label nav-home" data-docs-home>Docs</button><div class="nav-items">${road}${items}</div></div>`;
 }
 function docsWidget() {
   if (!state.collections.length) return '<p class="muted">No documents are configured.</p>';
@@ -1519,7 +1521,7 @@ async function remChange(change) {
   remDraw();
 }
 const FLAG = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3 1.5v13h1.5V9.6h7.2l-1.4-3.05L11.7 3.5H4.5V1.5z"/></svg>';
-function remView() { return '<div class="rem" id="rem">' + remHtml() + '</div>'; }
+function remView() { return (state.tab === 'roadmap' ? '<div><h1>Roadmap</h1><p class="muted" style="margin:0">What this deployment is working towards. Add, edit and check off items here.</p></div>' : '') + '<div class="rem" id="rem">' + remHtml() + '</div>'; }
 function remHtml() {
   if (rem.err && !rem.doc) return `<p class="msg-err">${esc(rem.err)}</p>`;
   if (!rem.doc) return '<p class="muted">Loading reminders…</p>';
@@ -1701,7 +1703,6 @@ $('view').addEventListener('pointerdown', e => {
 const LAYOUTS = {
   Market: () => ({ dir: 'row', ratio: 0.68, a: { dir: 'col', ratio: 0.5, a: { view: 'prices' }, b: { view: 'accounts' } }, b: { dir: 'col', ratio: 0.6, a: { view: 'news' }, b: { view: 'calendar' } } }),
   Operations: () => ({ dir: 'row', ratio: 0.62, a: { dir: 'col', ratio: 0.5, a: { view: 'overview' }, b: { view: 'schedule' } }, b: { dir: 'col', ratio: 0.55, a: { view: 'services' }, b: { view: 'shell' } } }),
-  Roadmap: () => ({ view: 'roadmap' }),
   Data: () => ({ dir: 'row', ratio: 0.55, a: { view: 'jobs' }, b: { dir: 'col', ratio: 0.55, a: { view: 'data' }, b: { view: 'storage' } } }),
 }
 let wsFocus = null;
@@ -1804,7 +1805,11 @@ const lay = { list: [], current: null };
   }
   // New built-in workspaces join saved lists once.
   let added = false;
-  for (const name of ['Roadmap']) {
+  // The Roadmap moved to the docs pages: drop the workspace that held only it.
+  if (lay.list.some(l => l.name === 'Roadmap' && l.tree?.view === 'roadmap')) {
+    lay.list = lay.list.filter(l => !(l.name === 'Roadmap' && l.tree?.view === 'roadmap')); added = true;
+  }
+  for (const name of []) {
     let seen = []; try { seen = JSON.parse(localStorage.getItem('tinytrader-workspaces-added')) || []; } catch (_) {}
     if (!seen.includes(name) && LAYOUTS[name] && !lay.list.some(l => l.name === name)) { lay.list.push({ name, tree: LAYOUTS[name]() }); added = true; }
     try { localStorage.setItem('tinytrader-workspaces-added', JSON.stringify([...new Set([...seen, name])])); } catch (_) {}
@@ -1838,7 +1843,7 @@ wsSave = () => { wsSaveTree(); laySave(); };
 // Under Workspace in the sidebar: the saved layouts, with their shortcuts.
 function updateLayoutNav() {
   const box = $('wtabs'); if (!box) return;
-  const docs = state.tab.startsWith('col:');
+  const docs = state.tab.startsWith('col:') || state.tab === 'roadmap';
   const html = lay.list.map((l, i) => `<button type="button" class="wtab" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 9 ? ` (⌥${i + 1})` : ''}"${!docs && l.name === lay.current ? ' aria-current="page"' : ''}>${esc(l.name)}</button>`).join('')
     + '<button type="button" class="wtab wtab-new" data-new-ws title="New workspace from these tiles (⌘K, then save …)" aria-label="New workspace">+</button>'
     + `<a class="wtab wtab-docs" href="/docs/"${docs ? ' aria-current="page"' : ''}>Docs</a>`;
@@ -1846,6 +1851,11 @@ function updateLayoutNav() {
 }
 function layLoadOnStart() { const cur = lay.list.find(l => l.name === lay.current); if (cur) layLoad(cur.tree); }
 document.addEventListener('click', e => {
+  if (e.target.closest && e.target.closest('[data-docs-roadmap]')) {
+    state.tab = 'roadmap'; state.doc = null; state.navigated = true;
+    try { history.replaceState(null, '', '/docs/#roadmap'); } catch (_) {}
+    render(); window.scrollTo(0, 0); return;
+  }
   if (e.target.closest && e.target.closest('[data-new-ws]')) { palOpen('save '); return; }
   if (e.target.closest && e.target.closest('[data-docs-home]') && state.collections[0]) {
     state.tab = 'col:' + state.collections[0].id; state.doc = null; state.navigated = true;
@@ -1935,12 +1945,12 @@ function render() {
   updateStoreNav();
   if (state.tab.startsWith('col:') && !state.navigated) return status();
   if ((state.tab === 'data' || state.tab === 'storage') && !state.navigated && catalogStamp() === state.catalogAt) return status();
-  if ((state.tab === 'jobs' || state.tab === 'shell') && !state.navigated) return status();
+  if ((state.tab === 'jobs' || state.tab === 'shell' || state.tab === 'roadmap') && !state.navigated) return status();
   if (state.tab === 'workspace' && !state.navigated && $('ws-root')) { refreshTiles(); drawCharts(); return status(); }
   state.navigated = false;
   state.catalogAt = catalogStamp();
   document.body.classList.toggle('ws-full', state.tab === 'workspace');
-  document.body.classList.toggle('docs-mode', state.tab.startsWith('col:'));
+  document.body.classList.toggle('docs-mode', state.tab.startsWith('col:') || state.tab === 'roadmap');
   document.documentElement.style.setProperty('--top-h', document.querySelector('.top').offsetHeight + 'px');
   $('view').innerHTML = viewHtml(state.tab);
   if ($('jobs-list')) jobsOpened();
@@ -2091,7 +2101,8 @@ $('theme-btn').addEventListener('click', () => {
 (async () => {
   await loadCollections();
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
-  if (location.pathname.startsWith('/docs') && !hc && state.collections[0]) { state.tab = 'col:' + state.collections[0].id; state.doc = null; state.navigated = true; }
+  if (location.pathname.startsWith('/docs') && h === 'roadmap') { state.tab = 'roadmap'; state.navigated = true; }
+  else if (location.pathname.startsWith('/docs') && !hc && state.collections[0]) { state.tab = 'col:' + state.collections[0].id; state.doc = null; state.navigated = true; }
   if (hc) {
     state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true;
     const d = hc.docs.find(x => x.index === state.doc); if (d) revealDoc(hc, d);
