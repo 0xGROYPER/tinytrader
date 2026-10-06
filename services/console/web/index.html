@@ -385,6 +385,9 @@ body:not(.docs-mode) .nav { display: none; }
 .sc-dot.ok { background: var(--ok); } .sc-dot.warn { background: var(--warn-mark); } .sc-dot.crit { background: var(--crit-mark); } .sc-dot.start { background: var(--accent-2); }
 .sc-name { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sc-name em { font-style: normal; color: var(--muted); margin-left: 6px; font-size: 11px; }
+.sc-bundle { cursor: pointer; } .sc-bundle:hover .sc-name { color: var(--accent); }
+.sc-tw { display: inline-block; width: 14px; color: var(--muted); font-size: 11px; }
+.sc-member .sc-name { padding-left: 18px; color: var(--fg-2); }
 .sc-track { position: relative; height: 14px; border-radius: 3px; background: var(--surface); }
 .sc-bar { position: absolute; top: 3px; bottom: 3px; border-radius: 2px; background: var(--accent-2); }
 .sc-bar.live { background: var(--accent-mark); }

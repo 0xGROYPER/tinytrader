@@ -540,6 +540,11 @@ fn apply_overrides(mut topo: Value, o: &Value) -> Value {
         panels.extend(own.iter().cloned());
         topo["panels"] = json!(panels);
     }
+    // Bundles (decision 0011) are the operator's alone: named groups of
+    // services with shared hours and a work class.
+    if let Some(bundles) = o["bundles"].as_array() {
+        topo["bundles"] = json!(bundles);
+    }
     if let Some(hide) = o["hide"].as_array() {
         let hidden = |v: &Value| hide.contains(v);
         for list in ["services", "external", "stores"] {

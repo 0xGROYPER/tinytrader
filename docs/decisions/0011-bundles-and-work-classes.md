@@ -30,10 +30,13 @@ deployment, not in code:
 - its members: services or automations;
 - a class (below).
 
-Bundles live in the deployment's inventory beside the topology. Members take
-their hours from their bundle; the per-service `--hours` options become the
-fallback for a service run on its own. The Schedule widget shows one line
-per bundle, opening to its members.
+Bundles live in the deployment's inventory: the topology names each
+bundle's members and class, and the hours are written once in the
+deployment's Compose file and shared by every member (a member may keep
+narrower hours, as the options relays keep the session inside the wider
+day). The services keep their own `--hours` options; the deployment sets
+them from that one place. The Schedule widget shows one line per bundle,
+opening to its members.
 
 ### Work classes
 
@@ -48,16 +51,19 @@ Every service and automation has one class:
 Background work follows three rules:
 
 - **It yields to what is live, not to the clock.** It checks whether any
-  capture service is running (its health is ready, not idle). On a holiday,
-  or with the relays stopped, it runs. Work it pauses must be resumable;
-  downloads already are.
+  capture service is running (its health is anything but idle). A capture
+  service that doesn't answer isn't running, so isn't capturing: on a
+  holiday, or with the relays stopped, background work runs. It checks every
+  15 seconds while yielding and before each download file, so a file in
+  progress finishes; work it pauses must be resumable, as downloads are.
 - **The schedule predicts.** It doesn't start a long task shortly before a
   capture bundle's hours begin.
 - **Pressure slows it.** The relays' count of skipped upstream records
   rising, or memory pressure (swap nearly full), slows or pauses background
   work even outside any bundle's hours.
 
-When background work can't tell whether capture is live, it assumes it is.
+When background work can't tell whether capture is live (a capture service
+answers, but not readably), it assumes it is.
 
 ### Limits by resource
 
@@ -92,4 +98,5 @@ placement), which comes first because a new drive is arriving.
   remember.
 - Each background service needs a way to learn what is live; until there are
   two hosts it reads the capture services' health directly, as the console
-  does.
+  does. Its list of them repeats the bundle's members, beside the bundle in
+  the same deployment.

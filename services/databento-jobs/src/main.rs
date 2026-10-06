@@ -48,15 +48,23 @@ struct Args {
     #[arg(long, env = "JOBS_REFRESH_SECONDS", default_value_t = 30)]
     refresh: u64,
 
-    /// Hours in New York time, e.g. `09:25-16:20`, set relative to the
-    /// regular session, when the service stays off the network: it doesn't
-    /// poll Databento, and downloads wait until the window ends. Trading
-    /// days come from `--calendar`.
-    #[arg(long, env = "JOBS_PAUSE_HOURS")]
-    pause_hours: Option<tinytrader_schedule::Schedule>,
+    /// Capture services to yield to (decision 0011), as NAME=URL of each
+    /// one's observe endpoint, separated by `;`. While any of them is live
+    /// (its health says anything but idle), the service stays off the
+    /// network: it doesn't poll Databento, and downloads wait. One that
+    /// doesn't answer isn't running, so isn't capturing.
+    #[arg(long, env = "JOBS_YIELD_TO", value_delimiter = ';')]
+    yield_to: Vec<String>,
 
-    /// Market calendar for the pause (`{ "days": [...] }`); without it,
-    /// every weekday is a trading day.
+    /// The capture hours (New York time, e.g. `07:55-17:05`, set relative to
+    /// the regular session), used to look ahead: a file isn't started if
+    /// those hours begin before it could finish. Trading days come from
+    /// `--calendar`.
+    #[arg(long, env = "JOBS_CAPTURE_HOURS")]
+    capture_hours: Option<tinytrader_schedule::Schedule>,
+
+    /// Market calendar (`{ "days": [...] }`); without it, every weekday is a
+    /// trading day.
     #[arg(long, env = "JOBS_CALENDAR")]
     calendar: Option<String>,
 }
@@ -168,7 +176,11 @@ struct Jobs {
     listed: Mutex<Value>,
     one_at_a_time: tokio::sync::Semaphore,
     /// While in the pause window, when it ends (ns since the epoch); else 0.
+    /// Nonzero while yielding to live capture.
     paused_until: AtomicU64,
+    yield_to: Vec<(String, String)>,
+    capture_hours: Option<tinytrader_schedule::Schedule>,
+    calendar: Mutex<tinytrader_schedule::Calendar>,
     events: Events,
     next_quote: AtomicU64,
 }
@@ -223,6 +235,20 @@ async fn main() {
         events: Events::default(),
         next_quote: AtomicU64::new(1),
         paused_until: AtomicU64::new(0),
+        yield_to: args
+            .yield_to
+            .iter()
+            .filter_map(|y| {
+                y.split_once('=').map(|(n, u)| {
+                    (
+                        n.trim().to_owned(),
+                        u.trim().trim_end_matches('/').to_owned(),
+                    )
+                })
+            })
+            .collect(),
+        capture_hours: args.capture_hours,
+        calendar: Mutex::new(tinytrader_schedule::Calendar::default()),
     });
     let listen = listen_address("JOBS_LISTEN", "127.0.0.1:9121");
     let observer = Observer::new("databento-jobs", env!("CARGO_PKG_VERSION"));
@@ -230,8 +256,17 @@ async fn main() {
         json!({ "name": "Databento job list", "kind": "interval", "every_seconds": args.refresh, "when": format!("every {} s, outside market hours", args.refresh) }),
         json!({ "name": "Download of jobs submitted here", "kind": "event", "when": "when Databento finishes them, outside market hours" }),
     ];
-    if let Some(h) = args.pause_hours {
-        schedule.insert(0, json!({ "name": "Off the network for market hours", "kind": "pause", "hours": h.to_string(), "when": format!("paused {h} ET on trading days") }));
+    if !args.yield_to.is_empty() {
+        let names: Vec<&str> = args
+            .yield_to
+            .iter()
+            .filter_map(|y| y.split_once('=').map(|(n, _)| n.trim()))
+            .collect();
+        let mut entry = json!({ "name": "Yields to live capture", "kind": "yield", "class": "background", "yields_to": names, "when": format!("off the network while any of {} is live", names.join(", ")) });
+        if let Some(h) = args.capture_hours {
+            entry["hours"] = json!(h.to_string());
+        }
+        schedule.insert(0, entry);
     }
     observer.describe(json!({
         "role": "Databento batch jobs: prices and submits requests, and downloads finished jobs into the store.",
@@ -273,36 +308,25 @@ async fn main() {
     let every = Duration::from_secs(args.refresh.max(10));
     let mut calendar = (tinytrader_schedule::Calendar::default(), None::<Instant>);
     loop {
-        // During market hours, stay off the network.
-        if let Some(pause) = args.pause_hours {
-            if let Some(url) = &args.calendar
-                && calendar
-                    .1
-                    .is_none_or(|at| at.elapsed() > Duration::from_secs(3600))
-                && let Ok(r) = jobs.http.get(url).send().await
-                && let Ok(c) = r.json::<tinytrader_schedule::Calendar>().await
-                && !c.days.is_empty()
-            {
-                calendar = (c, Some(Instant::now()));
-            }
-            let now = (tinytrader_observe::unix_seconds() * 1e9) as u64;
-            if let Some((start, end)) = pause.next(now, &calendar.0)
-                && start <= now
-            {
-                jobs.paused_until.store(end, Ordering::Relaxed);
-                observer.set_state(
-                    State::Idle,
-                    &format!(
-                        "paused for market hours until {}",
-                        tinytrader_schedule::describe(end)
-                    ),
-                );
-                tokio::time::sleep(Duration::from_nanos(end - now).min(Duration::from_secs(60)))
-                    .await;
-                continue;
-            }
-            jobs.paused_until.store(0, Ordering::Relaxed);
+        if let Some(url) = &args.calendar
+            && calendar
+                .1
+                .is_none_or(|at| at.elapsed() > Duration::from_secs(3600))
+            && let Ok(r) = jobs.http.get(url).send().await
+            && let Ok(c) = r.json::<tinytrader_schedule::Calendar>().await
+            && !c.days.is_empty()
+        {
+            *lock(&jobs.calendar) = c.clone();
+            calendar = (c, Some(Instant::now()));
         }
+        // Background work (decision 0011): off the network while capture is live.
+        if let Some(who) = live_capture(&jobs).await {
+            jobs.paused_until.store(1, Ordering::Relaxed);
+            observer.set_state(State::Idle, &format!("yielding: {who} is live"));
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            continue;
+        }
+        jobs.paused_until.store(0, Ordering::Relaxed);
         match refresh(&jobs).await {
             Ok(r) if !r.unread.is_empty() => observer.set_state(
                 State::Degraded,
@@ -772,10 +796,10 @@ fn start_download(jobs: &Shared, job: String) {
     let jobs = jobs.clone();
     tokio::spawn(async move {
         let _turn = jobs.one_at_a_time.acquire().await;
-        // Downloads wait out market hours.
+        // Downloads wait while capture is live.
         while jobs.paused_until.load(Ordering::Relaxed) != 0 {
-            set(&jobs, &job, |t| t.state = "waiting for the close".into());
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            set(&jobs, &job, |t| t.state = "waiting: capture is live".into());
+            tokio::time::sleep(Duration::from_secs(15)).await;
         }
         let result = fetch_and_file(&jobs, &job).await;
         match result {
@@ -830,12 +854,27 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
             .filter(|f| have.get(&f.filename) == Some(&f.size))
             .map(|f| f.size)
             .sum::<u64>();
-    let room = room(jobs).await?;
-    if needed > room {
+    // Files are placed one by one on whichever drive has most room
+    // (decision 0007): the pool must hold them all, and a drive the largest.
+    let (pool, one) = room(jobs).await?;
+    if needed > pool {
         return Err(format!(
-            "needs {}, but the store has room for {} on any one volume",
+            "needs {}, but the store has room for {} across its drives",
             gb(needed),
-            gb(room)
+            gb(pool)
+        ));
+    }
+    let largest = files
+        .iter()
+        .filter(|f| have.get(&f.filename) != Some(&f.size))
+        .map(|f| f.size)
+        .max()
+        .unwrap_or(0);
+    if largest > one {
+        return Err(format!(
+            "its largest file is {}, but no drive has room for more than {}",
+            gb(largest),
+            gb(one)
         ));
     }
     set(jobs, job, |t| {
@@ -846,6 +885,20 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
     for f in &files {
         set(jobs, job, |t| t.file = f.filename.clone());
         if have.get(&f.filename) != Some(&f.size) {
+            // Each file starts only while no capture is live, and only if the
+            // capture hours don't begin before it could finish.
+            loop {
+                let why = match live_capture(jobs).await {
+                    Some(who) => Some(format!("waiting: {who} is live")),
+                    None => capture_soon(jobs, f.size).map(|at| {
+                        format!("waiting: capture starts at {at}, before this file could finish")
+                    }),
+                };
+                let Some(why) = why else { break };
+                set(jobs, job, |t| t.state = why.clone());
+                tokio::time::sleep(Duration::from_secs(15)).await;
+            }
+            set(jobs, job, |t| t.state = "downloading".into());
             let url = f
                 .urls
                 .get("https")
@@ -909,9 +962,9 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
     Ok(files.len())
 }
 
-/// The most the store can take on one writable volume before it reaches its
-/// critical threshold, in bytes.
-async fn room(jobs: &Jobs) -> Result<u64, String> {
+/// What the store can take before its writable volumes reach the critical
+/// threshold, in bytes: across them all, and on the roomiest one.
+async fn room(jobs: &Jobs) -> Result<(u64, u64), String> {
     let c: Value = jobs
         .http
         .get(format!("{}/catalog", jobs.store))
@@ -934,8 +987,43 @@ async fn room(jobs: &Jobs) -> Result<u64, String> {
             );
             Some((free - total * (1.0 - critical)).max(0.0) as u64)
         })
-        .max()
-        .unwrap_or(0))
+        .fold((0, 0), |(sum, max), r| (sum + r, max.max(r))))
+}
+
+/// The first capture service that is live, if any: its health says anything
+/// but idle. One that doesn't answer isn't running, so isn't capturing; one
+/// that answers with something unreadable might be, so counts as live.
+async fn live_capture(jobs: &Jobs) -> Option<String> {
+    for (name, url) in &jobs.yield_to {
+        let Ok(r) = jobs
+            .http
+            .get(format!("{url}/health"))
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+        else {
+            continue;
+        };
+        let state = r
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v["state"].as_str().map(str::to_owned));
+        if state.as_deref() != Some("idle") {
+            return Some(name.clone());
+        }
+    }
+    None
+}
+
+/// When the capture hours begin, if before a file of `size` bytes could be
+/// downloaded (at a cautious 20 MB/s, and never less than 15 minutes).
+fn capture_soon(jobs: &Jobs, size: u64) -> Option<String> {
+    let hours = jobs.capture_hours?;
+    let now = (tinytrader_observe::unix_seconds() * 1e9) as u64;
+    let need = (size / 20_000_000).max(15 * 60) * 1_000_000_000;
+    let (start, _) = hours.next(now, &lock(&jobs.calendar))?;
+    (start > now && start - now < need).then(|| tinytrader_schedule::describe(start))
 }
 
 fn gb(bytes: u64) -> String {
