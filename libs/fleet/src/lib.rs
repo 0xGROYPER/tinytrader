@@ -465,9 +465,10 @@ async fn slow(app: &Poller, url: &str, ttl: u64) -> Value {
             lock(&app.catalogs).insert(url.to_owned(), (Instant::now(), c.clone()));
             c
         }
-        Err(_) => lock(&app.catalogs)
+        // Without an earlier copy, the error is what the page shows.
+        Err(e) => lock(&app.catalogs)
             .get(url)
-            .map_or(Value::Null, |(_, c)| c.clone()),
+            .map_or_else(|| json!({ "error": e }), |(_, c)| c.clone()),
     }
 }
 

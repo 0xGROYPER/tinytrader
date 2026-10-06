@@ -142,7 +142,7 @@ button:focus-visible, a:focus-visible, .node:focus-visible { outline: 2px solid 
    36px rows, a fixed chevron slot so all labels align, 16px per level. */
 .nav { flex: 0 0 264px; max-width: 264px; padding: 12px 10px 24px; background: var(--nav-bg); border-right: 1px solid var(--line-soft); display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
 .nav-sec { display: flex; flex-direction: column; margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
-.nav > .nav-sec:first-child, #nav-store:first-child > .nav-sec { margin-top: 0; padding-top: 4px; border-top: 0; }
+.nav > .nav-sec:first-child, #nav-store:first-child > .nav-sec, #nav-collections:first-child > .nav-sec { margin-top: 0; padding-top: 4px; border-top: 0; }
 .nav-label { font-size: 12px; font-weight: 600; line-height: 20px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); padding: 0 10px 6px; }
 .nav-items { display: flex; flex-direction: column; }
 .nav button { --lvl: 0; display: flex; align-items: center; gap: 4px; width: 100%; text-align: left; min-height: 36px; padding: 0 10px 0 calc(6px + var(--lvl) * 16px); border: 0; border-radius: 4px; background: transparent; color: var(--fg-2); font: inherit; font-size: 14px; font-weight: 600; line-height: 1.35; cursor: pointer; }
@@ -340,6 +340,23 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 @media (max-width: 640px) { .hstat span { display: none; } }
 #nav-layouts kbd { margin-left: auto; font: 11px var(--mono); color: var(--muted); font-weight: 400; }
 #nav-layouts .nav-new { color: var(--muted); font-weight: 500; }
+/* Workspaces are tabs in the header; the sidebar only appears on the docs pages. */
+body:not(.docs-mode) .nav { display: none; }
+.brand { flex-wrap: nowrap; gap: 18px; min-width: 0; flex: 1 1 auto; }
+.wtabs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.wtabs::-webkit-scrollbar { display: none; }
+.wtab { flex: none; height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--fg-2); font: 500 14px var(--ui); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; white-space: nowrap; }
+.wtab:hover { background: var(--nav-hover); color: var(--fg); }
+.wtab[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
+.wtab-new { width: 36px; padding: 0; justify-content: center; font-size: 18px; color: var(--muted); }
+.wtab-docs { margin-left: 8px; border-left: 1px solid var(--line); border-radius: 0 6px 6px 0; }
+.nav-home { all: unset; display: block; cursor: pointer; }
+.nav .nav-home { padding: 0 10px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.nav .nav-home:hover { color: var(--fg); }
+.doc-links { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+.doc-links a { color: var(--fg); text-decoration: none; padding: 4px 6px; border-radius: 4px; font-size: 14px; }
+.doc-links a:hover { background: var(--nav-hover); color: var(--accent); }
+@media (max-width: 640px) { .brand { flex-wrap: wrap; row-gap: 6px; } .wtabs { flex: 1 0 100%; order: 3; } }
 /* The tinytrader shell: read-only commands over this deployment. */
 .term { flex: 1; display: flex; flex-direction: column; min-height: 320px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: 13px/1.5 var(--mono); }
 .tile-body > .term { border: 0; border-radius: 0; margin: -14px -16px; }
@@ -444,7 +461,8 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 <body>
 <header class="top">
   <div class="brand">
-    <a class="home" href="#market" title="tinytrader: home"><svg class="wordmark" viewBox="0 0 45 5" width="225" height="25" fill="currentColor" shape-rendering="crispEdges" role="img" aria-label="tinytrader"><rect x="1" y="0" width="1" height="1"/><rect x="0" y="1" width="1" height="1"/><rect x="1" y="1" width="1" height="1"/><rect x="2" y="1" width="1" height="1"/><rect x="1" y="2" width="1" height="1"/><rect x="1" y="3" width="1" height="1"/><rect x="2" y="3" width="1" height="1"/><rect x="4" y="0" width="1" height="1"/><rect x="4" y="2" width="1" height="1"/><rect x="4" y="3" width="1" height="1"/><rect x="6" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/><rect x="6" y="2" width="1" height="1"/><rect x="8" y="2" width="1" height="1"/><rect x="6" y="3" width="1" height="1"/><rect x="8" y="3" width="1" height="1"/><rect x="10" y="1" width="1" height="1"/><rect x="12" y="1" width="1" height="1"/><rect x="10" y="2" width="1" height="1"/><rect x="11" y="2" width="1" height="1"/><rect x="12" y="2" width="1" height="1"/><rect x="12" y="3" width="1" height="1"/><rect x="10" y="4" width="1" height="1"/><rect x="11" y="4" width="1" height="1"/><rect x="15" y="0" width="1" height="1"/><rect x="14" y="1" width="1" height="1"/><rect x="15" y="1" width="1" height="1"/><rect x="16" y="1" width="1" height="1"/><rect x="15" y="2" width="1" height="1"/><rect x="15" y="3" width="1" height="1"/><rect x="16" y="3" width="1" height="1"/><rect x="18" y="1" width="1" height="1"/><rect x="19" y="1" width="1" height="1"/><rect x="20" y="1" width="1" height="1"/><rect x="18" y="2" width="1" height="1"/><rect x="18" y="3" width="1" height="1"/><rect x="22" y="1" width="1" height="1"/><rect x="23" y="1" width="1" height="1"/><rect x="23" y="2" width="1" height="1"/><rect x="24" y="2" width="1" height="1"/><rect x="22" y="3" width="1" height="1"/><rect x="23" y="3" width="1" height="1"/><rect x="24" y="3" width="1" height="1"/><rect x="28" y="0" width="1" height="1"/><rect x="27" y="1" width="1" height="1"/><rect x="28" y="1" width="1" height="1"/><rect x="26" y="2" width="1" height="1"/><rect x="28" y="2" width="1" height="1"/><rect x="27" y="3" width="1" height="1"/><rect x="28" y="3" width="1" height="1"/><rect x="30" y="1" width="1" height="1"/><rect x="31" y="1" width="1" height="1"/><rect x="32" y="1" width="1" height="1"/><rect x="30" y="2" width="1" height="1"/><rect x="31" y="2" width="1" height="1"/><rect x="30" y="3" width="1" height="1"/><rect x="31" y="3" width="1" height="1"/><rect x="32" y="3" width="1" height="1"/><rect x="34" y="1" width="1" height="1"/><rect x="35" y="1" width="1" height="1"/><rect x="36" y="1" width="1" height="1"/><rect x="34" y="2" width="1" height="1"/><rect x="34" y="3" width="1" height="1"/><rect class="wm-dot" x="38" y="3" width="1" height="1"/><rect x="40" y="0" width="1" height="1"/><rect x="40" y="2" width="1" height="1"/><rect x="40" y="3" width="1" height="1"/><rect x="42" y="1" width="1" height="1"/><rect x="43" y="1" width="1" height="1"/><rect x="44" y="1" width="1" height="1"/><rect x="42" y="2" width="1" height="1"/><rect x="44" y="2" width="1" height="1"/><rect x="42" y="3" width="1" height="1"/><rect x="43" y="3" width="1" height="1"/><rect x="44" y="3" width="1" height="1"/></svg></a>
+    <a class="home" href="/" title="tinytrader: home"><svg class="wordmark" viewBox="0 0 45 5" width="225" height="25" fill="currentColor" shape-rendering="crispEdges" role="img" aria-label="tinytrader"><rect x="1" y="0" width="1" height="1"/><rect x="0" y="1" width="1" height="1"/><rect x="1" y="1" width="1" height="1"/><rect x="2" y="1" width="1" height="1"/><rect x="1" y="2" width="1" height="1"/><rect x="1" y="3" width="1" height="1"/><rect x="2" y="3" width="1" height="1"/><rect x="4" y="0" width="1" height="1"/><rect x="4" y="2" width="1" height="1"/><rect x="4" y="3" width="1" height="1"/><rect x="6" y="1" width="1" height="1"/><rect x="7" y="1" width="1" height="1"/><rect x="6" y="2" width="1" height="1"/><rect x="8" y="2" width="1" height="1"/><rect x="6" y="3" width="1" height="1"/><rect x="8" y="3" width="1" height="1"/><rect x="10" y="1" width="1" height="1"/><rect x="12" y="1" width="1" height="1"/><rect x="10" y="2" width="1" height="1"/><rect x="11" y="2" width="1" height="1"/><rect x="12" y="2" width="1" height="1"/><rect x="12" y="3" width="1" height="1"/><rect x="10" y="4" width="1" height="1"/><rect x="11" y="4" width="1" height="1"/><rect x="15" y="0" width="1" height="1"/><rect x="14" y="1" width="1" height="1"/><rect x="15" y="1" width="1" height="1"/><rect x="16" y="1" width="1" height="1"/><rect x="15" y="2" width="1" height="1"/><rect x="15" y="3" width="1" height="1"/><rect x="16" y="3" width="1" height="1"/><rect x="18" y="1" width="1" height="1"/><rect x="19" y="1" width="1" height="1"/><rect x="20" y="1" width="1" height="1"/><rect x="18" y="2" width="1" height="1"/><rect x="18" y="3" width="1" height="1"/><rect x="22" y="1" width="1" height="1"/><rect x="23" y="1" width="1" height="1"/><rect x="23" y="2" width="1" height="1"/><rect x="24" y="2" width="1" height="1"/><rect x="22" y="3" width="1" height="1"/><rect x="23" y="3" width="1" height="1"/><rect x="24" y="3" width="1" height="1"/><rect x="28" y="0" width="1" height="1"/><rect x="27" y="1" width="1" height="1"/><rect x="28" y="1" width="1" height="1"/><rect x="26" y="2" width="1" height="1"/><rect x="28" y="2" width="1" height="1"/><rect x="27" y="3" width="1" height="1"/><rect x="28" y="3" width="1" height="1"/><rect x="30" y="1" width="1" height="1"/><rect x="31" y="1" width="1" height="1"/><rect x="32" y="1" width="1" height="1"/><rect x="30" y="2" width="1" height="1"/><rect x="31" y="2" width="1" height="1"/><rect x="30" y="3" width="1" height="1"/><rect x="31" y="3" width="1" height="1"/><rect x="32" y="3" width="1" height="1"/><rect x="34" y="1" width="1" height="1"/><rect x="35" y="1" width="1" height="1"/><rect x="36" y="1" width="1" height="1"/><rect x="34" y="2" width="1" height="1"/><rect x="34" y="3" width="1" height="1"/><rect class="wm-dot" x="38" y="3" width="1" height="1"/><rect x="40" y="0" width="1" height="1"/><rect x="40" y="2" width="1" height="1"/><rect x="40" y="3" width="1" height="1"/><rect x="42" y="1" width="1" height="1"/><rect x="43" y="1" width="1" height="1"/><rect x="44" y="1" width="1" height="1"/><rect x="42" y="2" width="1" height="1"/><rect x="44" y="2" width="1" height="1"/><rect x="42" y="3" width="1" height="1"/><rect x="43" y="3" width="1" height="1"/><rect x="44" y="3" width="1" height="1"/></svg></a>
+    <nav class="wtabs" id="wtabs" aria-label="Workspaces"></nav>
   </div>
   <div class="top-right">
     <button type="button" class="hstat" id="hstat" hidden></button>
@@ -457,11 +475,7 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 <div class="banner" id="banner" hidden></div>
 
 <div class="shell">
-  <nav class="nav" aria-label="Sections">
-    <div class="nav-sec">
-      <div class="nav-label">Workspaces</div>
-      <div class="nav-items" id="nav-layouts"></div>
-    </div>
+  <nav class="nav" aria-label="Docs">
     <div id="nav-collections"></div>
   </nav>
   <main><div class="col" id="view"></div></main>
@@ -790,7 +804,7 @@ function accountsView(withHeading = true) {
 function calendarView() {
   const cal = (state.topo?.services || []).map(s => svcState(s.id).calendar).find(c => c?.days?.length);
   const head = '<div><h1>Calendar</h1><p class="muted" style="margin:0">US equity market sessions, in New York time.</p></div>';
-  if (!cal) return head + '<p class="muted">No service is serving a market calendar yet.</p>';
+  if (!cal) return head + `<p class="muted">${(state.topo?.services || []).some(s => s.id === 'accounts') ? 'Loading the market calendar…' : 'No service is serving a market calendar.'}</p>`;
   const ny = iso => new Date(iso).toLocaleString(undefined, { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   const until = iso => duration((Date.parse(iso) - Date.now()) / 1000);
   const c = cal.clock || {};
@@ -1077,7 +1091,12 @@ function updateCollectionsNav() {
       return `<button type="button" data-tab="col:${esc(c.id)}" aria-expanded="${expanded}">${CHEV}<span class="lbl">${esc(c.name)}</span></button>` + (expanded ? rows(c, docTree(c), 1) : '');
     }).join('');
   }
-  $('nav-collections').innerHTML = `<div class="nav-sec"><div class="nav-label">Docs</div><div class="nav-items">${items}</div></div>`;
+  $('nav-collections').innerHTML = `<div class="nav-sec"><button type="button" class="nav-label nav-home" data-docs-home>Docs</button><div class="nav-items">${items}</div></div>`;
+}
+function docsWidget() {
+  if (!state.collections.length) return '<p class="muted">No documents are configured.</p>';
+  return state.collections.map(c => [...new Set(c.docs.map(d => d.group))].map(g => `<section><div class="group-h">${esc(groupLabel(g))}</div><div class="doc-links">${c.docs.filter(d => d.group === g).map(d =>
+    `<a href="/docs/#${esc(c.id)}-${d.index}">${esc(d.title)}</a>`).join('')}</div></section>`).join('')).join('');
 }
 const currentCollection = () => state.collections.find(c => 'col:' + c.id === state.tab);
 function collectionView() {
@@ -1329,12 +1348,13 @@ function viewHtml(tab) {
     : tab === 'jobs' ? jobsView()
     : tab === 'storage' ? storageView()
     : tab === 'shell' ? shellView()
+    : tab === 'docs' ? docsWidget()
     : tab === 'workspace' ? workspaceView() : collectionView();
 }
 
 // Workspace: tiles, each showing one view. Split right or down, change a
 // tile's view, close it, drag the dividers; the layout is kept per browser.
-const VIEWS = { overview: 'System graph', market: 'Market', prices: 'Prices', accounts: 'Accounts and equity', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
+const VIEWS = { docs: 'Docs', overview: 'System graph', market: 'Market', prices: 'Prices', accounts: 'Accounts and equity', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
 // Views that hold their own state (forms, input) and update themselves.
 const STEADY = new Set(['jobs', 'shell', 'data', 'storage']);
 let wsSeq = 1;
@@ -1532,7 +1552,7 @@ function laySwitch(name) {
   const to = lay.list.find(l => l.name === name); if (!to) return;
   laySave(); lay.current = name; layLoad(to.tree); laySave();
   state.tab = 'workspace'; state.doc = null; state.wsMax = null;
-  try { history.replaceState(null, '', '#w-' + encodeURIComponent(name)); } catch (_) {}
+  try { history.replaceState(null, '', '/#w-' + encodeURIComponent(name)); } catch (_) {}
   state.navigated = true; render(); window.scrollTo(0, 0);
 }
 // Every change to the workspace is kept in the current layout.
@@ -1540,13 +1560,22 @@ const wsSaveTree = wsSave;
 wsSave = () => { wsSaveTree(); laySave(); };
 // Under Workspace in the sidebar: the saved layouts, with their shortcuts.
 function updateLayoutNav() {
-  const box = $('nav-layouts'); if (!box) return;
-  const html = lay.list.map((l, i) => `<button type="button" data-layout="${esc(l.name)}"${state.tab === 'workspace' && l.name === lay.current ? ' aria-current="page"' : ''}><span class="chev"></span><span class="lbl">${esc(l.name)}</span>${i < 9 ? `<kbd>⌥${i + 1}</kbd>` : ''}</button>`).join('')
-    + '<button type="button" class="nav-new" data-new-ws><span class="chev"></span><span class="lbl">New workspace</span><kbd>⌘K</kbd></button>';
+  const box = $('wtabs'); if (!box) return;
+  const docs = state.tab.startsWith('col:');
+  const html = lay.list.map((l, i) => `<button type="button" class="wtab" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 9 ? ` (⌥${i + 1})` : ''}"${!docs && l.name === lay.current ? ' aria-current="page"' : ''}>${esc(l.name)}</button>`).join('')
+    + '<button type="button" class="wtab wtab-new" data-new-ws title="New workspace from these tiles (⌘K, then save …)" aria-label="New workspace">+</button>'
+    + `<a class="wtab wtab-docs" href="/docs/"${docs ? ' aria-current="page"' : ''}>Docs</a>`;
   if (box.innerHTML !== html) box.innerHTML = html;
 }
 function layLoadOnStart() { const cur = lay.list.find(l => l.name === lay.current); if (cur) layLoad(cur.tree); }
-document.addEventListener('click', e => { if (e.target.closest && e.target.closest('[data-new-ws]')) palOpen('save '); });
+document.addEventListener('click', e => {
+  if (e.target.closest && e.target.closest('[data-new-ws]')) { palOpen('save '); return; }
+  if (e.target.closest && e.target.closest('[data-docs-home]') && state.collections[0]) {
+    state.tab = 'col:' + state.collections[0].id; state.doc = null; state.navigated = true;
+    try { history.replaceState(null, '', '/docs/'); } catch (_) {}
+    render(); window.scrollTo(0, 0);
+  }
+});
 // ⌃↑/⌃↓ (or ⌥↑/⌥↓) move through the workspaces in the sidebar.
 document.addEventListener('keydown', e => {
   if (!(e.ctrlKey || e.altKey) || e.metaKey || !['ArrowUp', 'ArrowDown'].includes(e.key) || pal.open) return;
@@ -1634,6 +1663,7 @@ function render() {
   state.navigated = false;
   state.catalogAt = catalogStamp();
   document.body.classList.toggle('ws-full', state.tab === 'workspace');
+  document.body.classList.toggle('docs-mode', state.tab.startsWith('col:'));
   document.documentElement.style.setProperty('--top-h', document.querySelector('.top').offsetHeight + 'px');
   $('view').innerHTML = viewHtml(state.tab);
   if ($('jobs-list')) jobsOpened();
@@ -1784,6 +1814,7 @@ $('theme-btn').addEventListener('click', () => {
 (async () => {
   await loadCollections();
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
+  if (location.pathname.startsWith('/docs') && !hc && state.collections[0]) { state.tab = 'col:' + state.collections[0].id; state.doc = null; state.navigated = true; }
   if (hc) {
     state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true;
     const d = hc.docs.find(x => x.index === state.doc); if (d) revealDoc(hc, d);

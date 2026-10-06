@@ -117,6 +117,8 @@ async fn main() {
 
     let router = Router::new()
         .route("/", get(page))
+        .route("/docs", get(page))
+        .route("/docs/", get(page))
         .route("/api/topology", get(topology))
         .route("/api/state", get(state))
         .route("/api/events/{service}", get(events))
