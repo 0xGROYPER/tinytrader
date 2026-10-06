@@ -284,6 +284,35 @@ tr:last-child td { border-bottom: 0; }
 .jobs-tbl tr.has-sub td { border-bottom: 0; }
 .bar { height: 4px; border-radius: 2px; background: var(--line-soft); margin-top: 6px; max-width: 320px; overflow: hidden; }
 .bar b { display: block; height: 100%; background: var(--accent-mark); }
+/* Workspace: tiles, each showing one console view; split right or down, resized by dragging. */
+.ws { display: flex; height: calc(100vh - 150px); min-height: 520px; }
+.ws-split { display: flex; flex: 1; min-width: 0; min-height: 0; gap: 0; }
+.ws-split.col { flex-direction: column; }
+.ws-a, .ws-b { display: flex; min-width: 0; min-height: 0; }
+.ws-gutter { flex: 0 0 8px; cursor: col-resize; position: relative; touch-action: none; }
+.ws-split.col > .ws-gutter { cursor: row-resize; }
+.ws-gutter::after { content: ""; position: absolute; inset: 0; margin: auto; width: 2px; height: 32px; border-radius: 1px; background: var(--line); }
+.ws-split.col > .ws-gutter::after { width: 32px; height: 2px; }
+.ws-gutter:hover::after, .ws-gutter.drag::after { background: var(--accent-mark); }
+.tile { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); overflow: hidden; }
+.tile-bar { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 8px; border-bottom: 1px solid var(--line); background: var(--nav-bg); }
+.tile-view { font: 500 13px var(--ui); color: var(--fg); background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 2px 4px; }
+.tile-view:hover { border-color: var(--line); }
+.tile-acts { margin-left: auto; display: flex; gap: 2px; }
+.tile-btn { width: 28px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
+.tile-btn:hover { background: var(--nav-hover); color: var(--fg); }
+.tile-body { flex: 1; overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+.tile-body h1 { font-size: 20px; }
+@media (max-width: 800px) { .ws, .ws-split { flex-direction: column; height: auto; } .ws-gutter { display: none; } .ws-a, .ws-b { flex: none !important; } .tile { height: 460px; } }
+/* The tinytrader shell: read-only commands over this deployment. */
+.term { flex: 1; display: flex; flex-direction: column; min-height: 320px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: 13px/1.5 var(--mono); }
+.tile-body > .term { border: 0; border-radius: 0; margin: -14px -16px; }
+.term-out { flex: 1; overflow: auto; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-2); }
+.term-out .cmd { color: var(--fg); } .term-out .cmd::before { content: "tinytrader$ "; color: var(--accent); }
+.term-out .err { color: var(--crit); } .term-out .sys { color: var(--muted); }
+.term-in { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); }
+.term-in span { color: var(--accent); }
+.term-in input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--fg); font: inherit; }
 .chip-btn { min-height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 500 13px var(--mono); cursor: pointer; }
 .chip-btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-2); color: var(--accent); }
 .cal-wrap { overflow-x: auto; padding-bottom: 4px; }
@@ -375,7 +404,7 @@ tr:last-child td { border-bottom: 0; }
       <div class="nav-label">Operate</div>
       <div class="nav-items">
         <button type="button" data-tab="overview"><span class="chev"></span><span class="lbl">Overview</span></button>
-        <button type="button" data-tab="services"><span class="chev"></span><span class="lbl">Services</span></button>
+        <button type="button" data-tab="services"><span class="chev"></span><span class="lbl">Services</span></button><button type="button" data-tab="workspace"><span class="chev"></span><span class="lbl">Workspace</span></button><button type="button" data-tab="shell"><span class="chev"></span><span class="lbl">Shell</span></button>
       </div>
     </div>
     <div id="nav-store"></div>
@@ -1065,7 +1094,7 @@ async function jobsApi(path, body) {
 }
 async function loadJobs() {
   try { jobs.list = await jobsApi('jobs'); jobs.err = null; } catch (e) { jobs.err = e.message; }
-  if (state.tab === 'jobs' && $('jobs-list')) $('jobs-list').innerHTML = jobsTable();
+  if ($('jobs-list')) $('jobs-list').innerHTML = jobsTable();
 }
 async function loadSchemas(ds) {
   if (!ds || jobs.schemas[ds]) return fillSchemas();
@@ -1198,7 +1227,136 @@ $('view').addEventListener('click', async e => {
     loadJobs();
   }
 });
-setInterval(() => { if (state.tab === 'jobs') loadJobs(); }, 2000);
+setInterval(() => { if ($('jobs-list')) loadJobs(); }, 2000);
+
+// One view's HTML, for the page or for a workspace tile.
+function viewHtml(tab) {
+  return tab === 'overview' ? topology()
+    : tab === 'market' ? marketView()
+    : tab === 'accounts' ? `<div><h1>Accounts</h1><p class="muted" style="margin:0">Balances and positions of every brokerage account this deployment reads. Read only.</p></div>` + (accountsView(false) || '<p class="muted">No account service is running.</p>')
+    : tab === 'news' ? newsView(true)
+    : tab === 'calendar' ? calendarView()
+    : tab === 'services' ? servicesTable()
+    : tab === 'data' ? dataView()
+    : tab === 'jobs' ? jobsView()
+    : tab === 'storage' ? storageView()
+    : tab === 'shell' ? shellView()
+    : tab === 'workspace' ? workspaceView() : collectionView();
+}
+
+// Workspace: tiles, each showing one view. Split right or down, change a
+// tile's view, close it, drag the dividers; the layout is kept per browser.
+const VIEWS = { overview: 'Overview', market: 'Market', accounts: 'Accounts', news: 'News', calendar: 'Calendar', services: 'Services', data: 'Data', jobs: 'Jobs', storage: 'Storage', shell: 'Shell' };
+// Views that hold their own state (forms, input) and update themselves.
+const STEADY = new Set(['jobs', 'shell', 'data', 'storage']);
+let wsSeq = 1;
+const wsDefault = () => ({ dir: 'row', ratio: 0.6, a: { view: 'market' }, b: { dir: 'col', ratio: 0.5, a: { view: 'accounts' }, b: { view: 'shell' } } });
+state.ws = (() => { try { const v = JSON.parse(localStorage.getItem('tinytrader-workspace')); if (v && (v.view || v.dir)) return v; } catch (_) {} return wsDefault(); })();
+(function number(n) { n.id = 'w' + wsSeq++; if (!n.view) { number(n.a); number(n.b); } })(state.ws);
+const wsSave = () => { try { localStorage.setItem('tinytrader-workspace', JSON.stringify(state.ws)); } catch (_) {} };
+const wsLeaves = (n = state.ws, out = []) => { if (n.view) out.push(n); else { wsLeaves(n.a, out); wsLeaves(n.b, out); } return out; };
+const wsFind = (id, n = state.ws, parent = null) => n.id === id ? { n, parent } : n.view ? null : wsFind(id, n.a, n) || wsFind(id, n.b, n);
+const tileIcon = {
+  row: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M8 2.5v11"/></svg>',
+  col: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M1.5 8h13"/></svg>',
+  close: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>',
+};
+function wsHtml(n) {
+  if (!n.view) return `<div class="ws-split ${n.dir}"><div class="ws-a" style="flex:${n.ratio} 1 0%">${wsHtml(n.a)}</div><div class="ws-gutter" data-gutter="${n.id}" role="separator" aria-orientation="${n.dir === 'row' ? 'vertical' : 'horizontal'}"></div><div class="ws-b" style="flex:${1 - n.ratio} 1 0%">${wsHtml(n.b)}</div></div>`;
+  const open = new Set(wsLeaves().map(l => l.view)), many = wsLeaves().length > 1;
+  const opts = Object.entries(VIEWS).map(([v, l]) => `<option value="${v}"${v === n.view ? ' selected' : ''}${v !== n.view && open.has(v) ? ' disabled' : ''}>${l}</option>`).join('');
+  return `<div class="tile"><div class="tile-bar"><select class="tile-view" data-tile-view="${n.id}" aria-label="Tile view">${opts}</select><span class="tile-acts">
+    <button type="button" class="tile-btn" data-tile-split="${n.id}|row" title="Split right" aria-label="Split right">${tileIcon.row}</button>
+    <button type="button" class="tile-btn" data-tile-split="${n.id}|col" title="Split down" aria-label="Split down">${tileIcon.col}</button>
+    ${many ? `<button type="button" class="tile-btn" data-tile-close="${n.id}" title="Close tile" aria-label="Close tile">${tileIcon.close}</button>` : ''}</span></div>
+    <div class="tile-body" id="tile-${n.id}">${viewHtml(n.view)}</div></div>`;
+}
+const workspaceView = () => `<div class="ws" id="ws-root">${wsHtml(state.ws)}</div>`;
+// On each refresh, only tiles without state of their own are redrawn.
+function refreshTiles() {
+  for (const l of wsLeaves()) {
+    if (STEADY.has(l.view)) continue;
+    const el = $('tile-' + l.id); if (!el) continue;
+    const top = el.scrollTop; el.innerHTML = viewHtml(l.view); el.scrollTop = top;
+  }
+}
+function wsChanged() { wsSave(); state.navigated = true; render(); }
+$('view').addEventListener('change', e => {
+  const v = e.target.dataset?.tileView; if (!v) return;
+  wsFind(v).n.view = e.target.value; wsChanged();
+});
+$('view').addEventListener('click', e => {
+  const sp = e.target.closest && e.target.closest('[data-tile-split]');
+  if (sp) {
+    const [id, dir] = sp.dataset.tileSplit.split('|'), { n } = wsFind(id);
+    const open = new Set(wsLeaves().map(l => l.view)), next = Object.keys(VIEWS).find(v => !open.has(v));
+    if (!next) return;
+    const a = { view: n.view, id: 'w' + wsSeq++ }, b = { view: next, id: 'w' + wsSeq++ };
+    delete n.view; Object.assign(n, { dir, ratio: 0.5, a, b }); wsChanged(); return;
+  }
+  const cl = e.target.closest && e.target.closest('[data-tile-close]');
+  if (cl) {
+    const { parent } = wsFind(cl.dataset.tileClose); if (!parent) return;
+    const keep = parent.a.id === cl.dataset.tileClose ? parent.b : parent.a;
+    for (const k of ['view', 'dir', 'ratio', 'a', 'b']) delete parent[k];
+    Object.assign(parent, keep); wsChanged();
+  }
+});
+$('view').addEventListener('pointerdown', e => {
+  const g = e.target.closest && e.target.closest('[data-gutter]'); if (!g) return;
+  e.preventDefault(); g.setPointerCapture(e.pointerId); g.classList.add('drag');
+  const { n } = wsFind(g.dataset.gutter), box = g.parentElement.getBoundingClientRect(), [a, b] = [g.previousElementSibling, g.nextElementSibling];
+  const move = ev => {
+    const r = n.dir === 'row' ? (ev.clientX - box.left) / box.width : (ev.clientY - box.top) / box.height;
+    n.ratio = Math.min(0.85, Math.max(0.15, r)); a.style.flex = `${n.ratio} 1 0%`; b.style.flex = `${1 - n.ratio} 1 0%`;
+  };
+  const up = () => { g.classList.remove('drag'); g.removeEventListener('pointermove', move); g.removeEventListener('pointerup', up); wsSave(); drawCharts(); };
+  g.addEventListener('pointermove', move); g.addEventListener('pointerup', up);
+});
+
+// The tinytrader shell: a terminal for read-only commands over this
+// deployment's state. It runs nothing on the machine itself.
+const sh = { lines: [{ k: 'sys', t: 'tinytrader shell: read-only commands over this deployment. Type help.' }], hist: [], at: 0 };
+const termLine = l => `<div class="${l.k}">${esc(l.t)}</div>`;
+function shellView() {
+  const term = `<div class="term"><div class="term-out" id="term-out">${sh.lines.map(termLine).join('')}</div><form class="term-in" id="term-form" autocomplete="off"><span>tinytrader$</span><input id="term-input" spellcheck="false" aria-label="Command" autocapitalize="off"></form></div>`;
+  return state.tab === 'shell' ? `<div><h1>Shell</h1><p class="muted" style="margin:0">Read-only commands over this deployment. It runs nothing on the machine itself.</p></div>${term}` : term;
+}
+const pad = (v, n) => String(v ?? '').padEnd(n);
+const row = s => { const h = svcState(s.id).health?.body || {}; return pad(s.id, 20) + pad(h.state || '?', 10) + (h.detail || ''); };
+const SHELL = {
+  help: () => ['help                 this list', 'status               every service and its state', 'relays               market data relays and their hours', 'accounts             equity and positions of each account', 'store                drives, free space and status', 'jobs                 provider jobs not yet on disk', 'news [n]             the latest n stories (5)', 'calendar             the next trading sessions', 'clear                clear the screen'].join('\n'),
+  status: () => (state.topo?.services || []).map(row).join('\n') || 'no services',
+  relays: () => (state.topo?.services || []).filter(s => s.id.startsWith('relay')).map(row).join('\n') || 'no relays',
+  accounts: () => (state.topo?.services || []).flatMap(s => svcState(s.id).accounts?.accounts || []).map(a => pad(a.label, 10) + pad(a.environment, 8) + pad('$' + Number(a.account?.equity ?? NaN).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }), 14) + (a.positions?.length ? a.positions.map(p => `${p.symbol} ${p.qty}`).join(', ') : 'no positions')).join('\n') || 'no accounts',
+  store: () => catalogRoots().map(r => { const v = r.volume || {}; return pad(r.name, 10) + (r.present ? pad(`${((v.used_fraction ?? 0) * 100).toFixed(0)}% used`, 11) + pad(bytes(v.available_bytes) + ' free', 14) + pad(v.status, 9) + (r.writable ? 'writable' : 'read-only') : 'MISSING'); }).join('\n') || 'no store',
+  jobs: async () => { const v = await jobsApi('jobs'); const w = (v.jobs || []).filter(j => !j.held); return w.length ? w.map(j => pad(j.id, 26) + pad(`${j.symbols} ${j.schema}`, 24) + pad(j.state, 12) + (j.bytes ? bytes(j.bytes) : '')).join('\n') : 'nothing waiting: every job is on disk'; },
+  news: n => newsItems().slice(0, +n || 5).map(x => `${pad(ago(x.created_at), 10)} ${x.headline}`).join('\n') || 'no news',
+  calendar: () => { const cal = (state.topo?.services || []).map(s => svcState(s.id).calendar).find(c => c?.days?.length); const today = new Date().toISOString().slice(0, 10); return cal ? cal.days.filter(d => d.date >= today).slice(0, 5).map(d => `${d.date}  ${d.open}–${d.close} ET`).join('\n') : 'no calendar'; },
+};
+async function runShell(line) {
+  const [cmd, ...args] = line.trim().split(/\s+/);
+  if (!cmd) return;
+  sh.hist.push(line); sh.at = sh.hist.length;
+  if (cmd === 'clear') sh.lines = [];
+  else {
+    sh.lines.push({ k: 'cmd', t: line });
+    const f = SHELL[cmd];
+    try { sh.lines.push(f ? { k: 'out', t: await f(...args) } : { k: 'err', t: `${cmd}: no such command (try help)` }); }
+    catch (err) { sh.lines.push({ k: 'err', t: String(err.message || err) }); }
+    sh.lines = sh.lines.slice(-400);
+  }
+  const out = $('term-out'); if (out) { out.innerHTML = sh.lines.map(termLine).join(''); out.scrollTop = out.scrollHeight; }
+}
+$('view').addEventListener('submit', e => {
+  if (e.target.id !== 'term-form') return;
+  e.preventDefault(); const i = $('term-input'); const v = i.value; i.value = ''; runShell(v);
+});
+$('view').addEventListener('keydown', e => {
+  if (e.target.id !== 'term-input' || !['ArrowUp', 'ArrowDown'].includes(e.key)) return;
+  e.preventDefault(); sh.at = Math.max(0, Math.min(sh.hist.length, sh.at + (e.key === 'ArrowUp' ? -1 : 1)));
+  e.target.value = sh.hist[sh.at] ?? '';
+});
 
 function render() {
   // Rebuilding the page must never move the reader: keep the scroll position.
@@ -1211,19 +1369,13 @@ function render() {
   updateStoreNav();
   if (state.tab.startsWith('col:') && !state.navigated) return status();
   if ((state.tab === 'data' || state.tab === 'storage') && !state.navigated && catalogStamp() === state.catalogAt) return status();
-  if (state.tab === 'jobs' && !state.navigated) return status();
+  if ((state.tab === 'jobs' || state.tab === 'shell') && !state.navigated) return status();
+  if (state.tab === 'workspace' && !state.navigated && $('ws-root')) { refreshTiles(); drawCharts(); return status(); }
   state.navigated = false;
   state.catalogAt = catalogStamp();
-  $('view').innerHTML = state.tab === 'overview' ? topology()
-    : state.tab === 'market' ? marketView()
-    : state.tab === 'accounts' ? `<div><h1>Accounts</h1><p class="muted" style="margin:0">Balances and positions of every brokerage account this deployment reads. Read only.</p></div>` + (accountsView(false) || '<p class="muted">No account service is running.</p>')
-    : state.tab === 'news' ? newsView(true)
-    : state.tab === 'calendar' ? calendarView()
-    : state.tab === 'services' ? servicesTable()
-    : state.tab === 'data' ? dataView()
-    : state.tab === 'jobs' ? jobsView()
-    : state.tab === 'storage' ? storageView() : collectionView();
-  if (state.tab === 'jobs') jobsOpened();
+  $('view').innerHTML = viewHtml(state.tab);
+  if ($('jobs-list')) jobsOpened();
+  { const out = $('term-out'); if (out) out.scrollTop = out.scrollHeight; }
   if (openDetails) { const d = document.querySelector('.detail > details'); if (d) d.open = true; }
   if ($('ev-list')) $('ev-list').scrollTop = evTop;
   if (focusId) { const n = document.querySelector(`[data-node="${CSS.escape(focusId)}"]`); if (n) n.focus({ preventScroll: true }); }
@@ -1360,7 +1512,7 @@ $('theme-btn').addEventListener('click', () => {
     state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true;
     const d = hc.docs.find(x => x.index === state.doc); if (d) revealDoc(hc, d);
   }
-  else if (['overview', 'services', 'market', 'data', 'jobs', 'storage'].includes(h)) { state.tab = h; state.navigated = true; }
+  else if (['overview', 'services', 'market', 'data', 'jobs', 'storage', 'workspace', 'shell'].includes(h)) { state.tab = h; state.navigated = true; }
   else if (['accounts', 'news', 'calendar'].includes(h)) { state.tab = h; state.navigated = true; }
   else if (h === 'charts') { state.tab = 'market'; state.navigated = true; }
   await loadTopology(); await poll();
