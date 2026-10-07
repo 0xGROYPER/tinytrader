@@ -18,7 +18,7 @@ for s in "$@"; do
     "$(nix build --no-link --print-out-paths --cores "$cores" "$src#image-$s")" | docker load
   else
     # Only the stream reaches stdout; the build's log goes to stderr.
-    docker run --rm \
+    docker run --rm --name "tinytrader-image-build-$s" \
       -v tinytrader-nix:/nix \
       -v "$src:/src:ro" \
       nixos/nix:2.35.2 sh -ec '
