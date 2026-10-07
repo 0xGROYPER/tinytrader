@@ -15,6 +15,58 @@ use crate::fmt;
 use crate::theme::{self, dim, panel, soft, strong, text};
 use crate::{Sort, View};
 
+/// `41k rec/s · 3.2 MB/s · last 0.2 s · 3 clients · 12 skips/min`, coloured
+/// where it matters: skips and a stale last record in amber or red.
+fn feed_spans(r: &data::Rates) -> Vec<Span<'static>> {
+    let rate = if r.records_s >= 1000.0 {
+        format!("{:.1}k rec/s", r.records_s / 1000.0)
+    } else {
+        format!("{:.0} rec/s", r.records_s)
+    };
+    let mut out = vec![
+        Span::styled(format!("{rate:>11}"), text()),
+        Span::styled(format!("  {:>9}/s", fmt::bytes(r.bytes_s)), soft()),
+    ];
+    if let Some(age) = r.last_age {
+        let colour = if age > 30.0 {
+            theme::CRIT
+        } else if age > 5.0 {
+            theme::WARN
+        } else {
+            theme::FG_2
+        };
+        out.push(Span::styled(
+            format!("  last {age:.1} s"),
+            Style::new().fg(colour),
+        ));
+    }
+    out.push(Span::styled(
+        format!(
+            "  {:.0} client{}",
+            r.clients,
+            if (r.clients - 1.0).abs() < 0.5 {
+                ""
+            } else {
+                "s"
+            }
+        ),
+        soft(),
+    ));
+    if r.skips_min > 0.0 {
+        out.push(Span::styled(
+            format!("  {:.0} skips/min", r.skips_min),
+            Style::new()
+                .fg(if r.skips_min >= 10.0 {
+                    theme::CRIT
+                } else {
+                    theme::WARN
+                })
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    out
+}
+
 /// A table header: the first column left-aligned, the rest right.
 fn header<const N: usize>(cols: [&'static str; N]) -> Row<'static> {
     Row::new(cols.into_iter().enumerate().map(|(i, h)| {
@@ -214,7 +266,21 @@ pub fn overview(f: &mut Frame, area: Rect, v: &View) {
         );
     }
 
-    series(f, prices, v, "Prices", false);
+    let mut feeds: Vec<Line> = v
+        .topology
+        .services
+        .iter()
+        .filter_map(|svc| v.rates.get(&svc.id).map(|r| (svc, r)))
+        .map(|(svc, r)| {
+            let mut spans = vec![Span::styled(format!("{:<16}", svc.name()), strong())];
+            spans.extend(feed_spans(r));
+            Line::from(spans)
+        })
+        .collect();
+    if feeds.is_empty() {
+        feeds.push(Line::styled("Measuring the feeds (two polls)…", dim()));
+    }
+    f.render_widget(Paragraph::new(feeds).block(panel("Feeds", false)), prices);
 
     let (today, _) = fmt::now_ny();
     let rel = data::releases(&v.snapshot, &today);
@@ -479,6 +545,11 @@ pub fn services(f: &mut Frame, area: Rect, v: &View) {
             _ => "—".into(),
         },
     ));
+    if let Some(r) = v.rates.get(&svc.id) {
+        let mut spans = vec![Span::styled(format!("{:<10}", "Feed"), dim())];
+        spans.extend(feed_spans(r));
+        lines.push(Line::from(spans));
+    }
     if let Some(e) = health.and_then(|h| h.last_error.clone()) {
         lines.push(Line::from(vec![
             Span::styled(format!("{:<10}", "Last error"), dim()),
@@ -563,10 +634,11 @@ pub fn services(f: &mut Frame, area: Rect, v: &View) {
 // ---------- Market ----------
 
 pub fn market(f: &mut Frame, area: Rect, v: &View) {
-    let [top, bottom] =
-        Layout::vertical([Constraint::Percentage(58), Constraint::Min(6)]).areas(area);
+    let [chart, rest] =
+        Layout::vertical([Constraint::Percentage(52), Constraint::Min(8)]).areas(area);
+    draw_chart(f, chart, v);
     let [left, right] =
-        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(top);
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(rest);
     let accts = data::accounts(&v.snapshot);
     if accts.is_empty() {
         empty(f, left, "Accounts", "No account service is running.");
@@ -709,26 +781,48 @@ pub fn market(f: &mut Frame, area: Rect, v: &View) {
         }
     }
     series(f, right, v, "Prices", false);
+}
 
-    let (today, _) = fmt::now_ny();
-    let rel = data::releases(&v.snapshot, &today);
-    if rel.is_empty() {
-        empty(
+fn draw_chart(f: &mut Frame, area: Rect, v: &View) {
+    let days = if v.chart_days == 0 { 1 } else { v.chart_days };
+    match &v.chart {
+        None => empty(
             f,
-            bottom,
-            "Economic calendar",
-            "No economic calendar is being served.",
-        );
-    } else {
-        let lines: Vec<Line> = rel
-            .iter()
-            .take(usize::from(bottom.height.saturating_sub(2)))
-            .map(release_line)
-            .collect();
-        f.render_widget(
-            Paragraph::new(lines).block(panel("Economic calendar · New York time", false)),
-            bottom,
-        );
+            area,
+            "Chart",
+            if data::chart_choices(&v.topology).is_empty() {
+                "No relay serves bars yet."
+            } else {
+                "Loading bars…"
+            },
+        ),
+        Some(Err(e)) => empty(f, area, "Chart", &format!("Bars unavailable: {e}")),
+        Some(Ok((sym, bars))) => {
+            let last = bars.last().map_or_else(String::new, |b| {
+                format!(
+                    " · {:.2} at {} ET",
+                    b[4],
+                    fmt::clock(b[0] * 1000.0).get(..5).unwrap_or("")
+                )
+            });
+            let block = panel(
+                &format!(
+                    "{sym} · one-minute bars · {days} day{}{last}",
+                    if days == 1 { "" } else { "s" }
+                ),
+                true,
+            );
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            if bars.is_empty() {
+                f.render_widget(
+                    Paragraph::new(Span::styled("No bars in this range yet.", dim())),
+                    inner,
+                );
+            } else {
+                f.render_widget(crate::candles::Candles { bars }, inner);
+            }
+        }
     }
 }
 

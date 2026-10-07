@@ -177,6 +177,8 @@ pub struct Hub {
     next_client: AtomicU64,
     pub clients: AtomicU64,
     pub records: AtomicU64,
+    /// When the last record arrived from the provider, ns since the epoch (0: none yet).
+    pub last_record_ns: AtomicU64,
     pub bytes: AtomicU64,
     pub reconnects: AtomicU64,
     /// Times the provider skipped records because the relay read too slowly.
@@ -208,6 +210,7 @@ impl Hub {
             roster: Mutex::new(BTreeMap::new()),
             next_client: AtomicU64::new(0),
             records: AtomicU64::new(0),
+            last_record_ns: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             reconnects: AtomicU64::new(0),
             upstream_skips: AtomicU64::new(0),
@@ -264,6 +267,8 @@ impl Hub {
     /// those that asked for trade conditions.
     pub fn publish_pair(&self, plain: Chunk, with_conditions: Chunk, records: u64) {
         self.records.fetch_add(records, Ordering::Relaxed);
+        self.last_record_ns
+            .store(protocol::now_ns(), Ordering::Relaxed);
         self.bytes.fetch_add(plain.len() as u64, Ordering::Relaxed);
         let mut reference = lock(&self.reference);
         reference.absorb(&plain);

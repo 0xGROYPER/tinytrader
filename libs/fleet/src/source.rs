@@ -49,6 +49,29 @@ impl Source {
         }
     }
 
+    /// A relay's one-minute bars for `symbol` over the last `days`
+    /// (`{ "bars": [[t, o, h, l, c, v], ...] }`).
+    pub async fn bars(
+        &self,
+        service: &str,
+        symbol: &str,
+        days: u32,
+    ) -> Result<serde_json::Value, String> {
+        let query = format!("symbol={symbol}&days={days}");
+        match self {
+            Self::Direct(p) => match p.bars_json(service, &query).await {
+                Ok((200, v)) => Ok(v),
+                Ok((code, v)) => Err(v["error"]
+                    .as_str()
+                    .map_or_else(|| format!("{code}"), str::to_owned)),
+                Err(e) => Err(e.to_string()),
+            },
+            Self::Console { base, http } => {
+                get(http, &format!("{base}/api/bars/{service}?{query}")).await
+            }
+        }
+    }
+
     /// Events from `service` newer than `after`, at most `limit`.
     pub async fn events(
         &self,

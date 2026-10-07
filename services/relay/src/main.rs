@@ -337,6 +337,15 @@ fn register_metrics(observer: &Observer, hub: &Arc<Hub>) {
             &[],
             f64::from(u8::from(hub.upstream() == Upstream::Up)),
         );
+        let last = hub.last_record_ns.load(Ordering::Relaxed);
+        if last > 0 {
+            w.gauge(
+                "tinytrader_relay_last_record_age_seconds",
+                "Seconds since the last record arrived from the provider.",
+                &[],
+                protocol::now_ns().saturating_sub(last) as f64 / 1e9,
+            );
+        }
         w.counter(
             "tinytrader_relay_records_total",
             "Records received from the provider.",

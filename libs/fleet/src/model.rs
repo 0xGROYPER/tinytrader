@@ -61,6 +61,8 @@ pub struct ServiceInfo {
     pub calendar: Option<String>,
     /// What the service runs and when (`/describe`'s `schedule`).
     pub schedule: Option<Value>,
+    /// One symbol's one-minute bars, on demand (relays).
+    pub bars: Option<String>,
 }
 
 impl ServiceInfo {

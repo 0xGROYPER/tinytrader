@@ -297,6 +297,69 @@ pub fn drives(s: &Snapshot) -> (Vec<Drive>, Vec<String>) {
     (out, found)
 }
 
+/// A metric's value for a service (summed over its label sets).
+pub fn metric(s: &Snapshot, id: &str, name: &str) -> Option<f64> {
+    let list = s
+        .services
+        .get(id)?
+        .metrics
+        .as_ref()?
+        .get(name)?
+        .as_array()?;
+    let values: Vec<f64> = list.iter().filter_map(|m| m["value"].as_f64()).collect();
+    (!values.is_empty()).then(|| values.iter().sum())
+}
+
+/// How a relay's feed is moving, from two polls' counters.
+#[derive(Clone, Copy, Default)]
+pub struct Rates {
+    pub records_s: f64,
+    pub bytes_s: f64,
+    pub skips_min: f64,
+    pub last_age: Option<f64>,
+    pub clients: f64,
+}
+
+/// The counters rates are taken from.
+#[derive(Clone, Copy)]
+pub struct Counters {
+    pub records: f64,
+    pub bytes: f64,
+    pub skips: f64,
+}
+
+pub fn counters(s: &Snapshot, id: &str) -> Option<Counters> {
+    Some(Counters {
+        records: metric(s, id, "tinytrader_relay_records_total")?,
+        bytes: metric(s, id, "tinytrader_relay_bytes_total").unwrap_or(0.0),
+        skips: metric(s, id, "tinytrader_relay_upstream_skips_total").unwrap_or(0.0),
+    })
+}
+
+/// Every (service, symbol) some relay serves bars for.
+pub fn chart_choices(t: &Topology) -> Vec<(String, String)> {
+    t.services
+        .iter()
+        .filter(|s| s.bars.is_some())
+        .flat_map(|s| {
+            let mut symbols: Vec<String> = s
+                .schedule
+                .as_ref()
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .flat_map(|x| x["symbols"].as_array().cloned().unwrap_or_default())
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            symbols.dedup();
+            symbols
+                .into_iter()
+                .map(|sym| (s.id.clone(), sym))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// A client connected to a relay.
 pub struct Client {
     pub name: Option<String>,

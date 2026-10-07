@@ -37,6 +37,7 @@ use ratatui::text::{Line, Span};
 use ratatui::{DefaultTerminal, Frame};
 use tinytrader_fleet::{FleetEvent, Poller, PollerConfig, Snapshot, Source, Topology};
 
+mod candles;
 mod data;
 mod fmt;
 mod screens;
@@ -60,6 +61,15 @@ struct View {
     sort: Sort,
     /// Each host's CPU use, once per refresh, newest last.
     cpu_history: HashMap<String, VecDeque<u64>>,
+    /// The Market chart: which symbol, how many days, and its bars (or why not).
+    chart_pick: usize,
+    chart_days: u32,
+    chart: Option<Result<(String, Vec<candles::Bar>), String>>,
+    chart_key: String,
+    chart_at: Option<Instant>,
+    /// Each relay's last counters and when they were read, and the rates since.
+    counters: HashMap<String, (Instant, data::Counters)>,
+    rates: HashMap<String, data::Rates>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -151,6 +161,39 @@ async fn refresh_forever(source: Source, view: Arc<Mutex<View>>) {
                 v.events_for == v.selected,
             )
         };
+        // The Market chart's bars, every 15 s while the screen is open.
+        let want = {
+            let v = lock(&view);
+            let choices = data::chart_choices(&v.topology);
+            (v.screen == Screen::Market && !choices.is_empty()).then(|| {
+                let (svc, sym) = choices[v.chart_pick % choices.len()].clone();
+                let days = if v.chart_days == 0 { 1 } else { v.chart_days };
+                let key = format!("{svc}|{sym}|{days}");
+                let due = v.chart_key != key
+                    || v.chart_at
+                        .is_none_or(|t| t.elapsed() > Duration::from_secs(15));
+                (svc, sym, days, key, due)
+            })
+        };
+        if let Some((svc, sym, days, key, true)) = want {
+            let got = source.bars(&svc, &sym, days).await.map(|v| {
+                let bars: Vec<candles::Bar> = v["bars"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|b| {
+                        let a = b.as_array()?;
+                        let n = |i: usize| a.get(i).and_then(serde_json::Value::as_f64);
+                        Some([n(0)?, n(1)?, n(2)?, n(3)?, n(4)?, n(5).unwrap_or(0.0)])
+                    })
+                    .collect();
+                (sym.clone(), bars)
+            });
+            let mut v = lock(&view);
+            v.chart = Some(got);
+            v.chart_key = key;
+            v.chart_at = Some(Instant::now());
+        }
         let page = match (&selected, paused) {
             (Some(id), false) => Some(source.events(id, if same { after } else { 0 }, 100).await),
             _ => None,
@@ -166,6 +209,41 @@ async fn refresh_forever(source: Source, view: Arc<Mutex<View>>) {
                         );
                         while hist.len() > 600 {
                             hist.pop_front();
+                        }
+                    }
+                    // Rates since the last poll, for every relay.
+                    let now = Instant::now();
+                    for svc in &t.services {
+                        let Some(c) = data::counters(&s, &svc.id) else {
+                            continue;
+                        };
+                        if let Some((at, before)) = v.counters.get(&svc.id).copied() {
+                            let dt = now.duration_since(at).as_secs_f64();
+                            if dt >= 0.5 {
+                                let per = |a: f64, b: f64| ((a - b) / dt).max(0.0);
+                                v.rates.insert(
+                                    svc.id.clone(),
+                                    data::Rates {
+                                        records_s: per(c.records, before.records),
+                                        bytes_s: per(c.bytes, before.bytes),
+                                        skips_min: per(c.skips, before.skips) * 60.0,
+                                        last_age: data::metric(
+                                            &s,
+                                            &svc.id,
+                                            "tinytrader_relay_last_record_age_seconds",
+                                        ),
+                                        clients: data::metric(
+                                            &s,
+                                            &svc.id,
+                                            "tinytrader_relay_clients",
+                                        )
+                                        .unwrap_or(0.0),
+                                    },
+                                );
+                                v.counters.insert(svc.id.clone(), (now, c));
+                            }
+                        } else {
+                            v.counters.insert(svc.id.clone(), (now, c));
                         }
                     }
                     v.topology = t;
@@ -224,6 +302,16 @@ fn run(terminal: &mut DefaultTerminal, view: &Mutex<View>, label: &str) -> std::
                 KeyCode::Up | KeyCode::Char('k') => step(&mut v, -1),
                 KeyCode::Right | KeyCode::Char('l') => v.host = v.host.saturating_add(1),
                 KeyCode::Left | KeyCode::Char('h') => v.host = v.host.saturating_sub(1),
+                KeyCode::Char('s') if v.screen == Screen::Market => {
+                    v.chart_pick = v.chart_pick.wrapping_add(1)
+                }
+                KeyCode::Char('d') if v.screen == Screen::Market => {
+                    v.chart_days = match v.chart_days {
+                        0 | 1 => 2,
+                        2 => 5,
+                        _ => 1,
+                    }
+                }
                 KeyCode::Char('c') => v.sort = Sort::Cpu,
                 KeyCode::Char('m') => v.sort = Sort::Memory,
                 KeyCode::Char('n') => v.sort = Sort::Name,
@@ -332,7 +420,7 @@ fn draw(f: &mut Frame, v: &View, label: &str) {
                 },
             ),
         ],
-        Screen::Market => &[("↑↓", "account")],
+        Screen::Market => &[("↑↓", "account"), ("s", "symbol"), ("d", "1/2/5 days")],
         Screen::Hosts => &[("←→", "host"), ("c m n", "sort by CPU, memory, name")],
         _ => &[],
     };
