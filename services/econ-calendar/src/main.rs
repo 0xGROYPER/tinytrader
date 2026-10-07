@@ -8,11 +8,19 @@
 //! - The Federal Reserve: FOMC decisions from its meeting calendar page.
 //! - Weekly jobless claims (Labor Department): Thursdays at 08:30 ET, by rule.
 //!
-//! Each source is read every few hours; when a read fails, its last good copy
+//! - Earnings report dates (`earnings.rs`): Alpha Vantage, Finnhub and
+//!   Nasdaq.com compared, each used when configured (its key set; Nasdaq
+//!   needs none). Served at `/earnings` (`?from=&to=&min=`, by default a week
+//!   back to three months ahead, medium and high: a company of $10 billion
+//!   or more is medium, $200 billion or more high, and `EARNINGS_WATCH`
+//!   symbols always high). Only BLS is sent the contact address.
+//!
+//! Each source is read once a day; when a read fails, its last good copy
 //! is kept and the failure reported. Serves `/events` (`?from=YYYY-MM-DD&
 //! to=YYYY-MM-DD&min=low|medium|high`; by default a month back to six months
 //! ahead, medium and high), and the usual `/health`, `/metrics` and `/describe`.
 
+mod earnings;
 mod sources;
 
 use std::collections::HashMap;
@@ -45,26 +53,58 @@ struct Args {
     /// Hours between reads of each source.
     #[arg(long, env = "ECON_REFRESH_HOURS", default_value_t = 24)]
     refresh_hours: u64,
+
+    /// Companies whose earnings always count as high importance
+    /// (comma-separated symbols).
+    #[arg(long, env = "EARNINGS_WATCH", value_delimiter = ',')]
+    watch: Vec<String>,
+
+    /// How many days ahead to read Finnhub and Nasdaq (one request per day
+    /// each); Alpha Vantage always gives three months.
+    #[arg(long, env = "EARNINGS_DAYS", default_value_t = 42)]
+    earnings_days: i64,
 }
 
 /// A source's last good events, and how its last read went.
-#[derive(Default)]
-struct Source {
-    events: Vec<Event>,
+struct Source<T = Event> {
+    events: Vec<T>,
     error: Option<String>,
     read_at: f64,
 }
 
+impl<T> Default for Source<T> {
+    fn default() -> Self {
+        Self {
+            events: Vec::new(),
+            error: None,
+            read_at: 0.0,
+        }
+    }
+}
+
 type Sources = HashMap<&'static str, Source>;
+
+/// Earnings: each source's last good rows and how its last read went, and
+/// the reports merged from them.
+#[derive(Default)]
+struct Earnings {
+    sources: HashMap<&'static str, Source<earnings::Row>>,
+    reports: Vec<earnings::Report>,
+    watch: Vec<String>,
+}
 
 #[derive(Default)]
 struct Shared {
     sources: Mutex<Sources>,
+    earnings: Mutex<Earnings>,
 }
 
 impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, Sources> {
         self.sources.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+    fn earnings(&self) -> std::sync::MutexGuard<'_, Earnings> {
+        self.earnings.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -73,17 +113,30 @@ async fn main() {
     let args = Args::parse();
     let _ = rustls::crypto::ring::default_provider().install_default();
     let shared = Arc::new(Shared::default());
+    shared.earnings().watch = args.watch.iter().map(|w| w.trim().to_uppercase()).collect();
+    let keys = Keys {
+        alpha_vantage: tinytrader_observe::secret("ALPHAVANTAGE_API_KEY").ok(),
+        finnhub: tinytrader_observe::secret("FINNHUB_API_KEY").ok(),
+    };
+    let mut upstream = vec![
+        json!({ "id": "bls", "label": "BLS", "sub": "release schedule", "kind": "flow", "via": "https" }),
+        json!({ "id": "bea", "label": "BEA", "sub": "release schedule", "kind": "flow", "via": "https" }),
+        json!({ "id": "fed", "label": "Federal Reserve", "sub": "FOMC calendar", "kind": "flow", "via": "https" }),
+        json!({ "id": "nasdaq", "label": "Nasdaq.com", "sub": "earnings calendar", "kind": "flow", "via": "https" }),
+    ];
+    if keys.alpha_vantage.is_some() {
+        upstream.push(json!({ "id": "alphavantage", "label": "Alpha Vantage", "sub": "earnings calendar", "kind": "flow", "via": "https" }));
+    }
+    if keys.finnhub.is_some() {
+        upstream.push(json!({ "id": "finnhub", "label": "Finnhub", "sub": "earnings calendar", "kind": "flow", "via": "https" }));
+    }
     let observer = Observer::new("econ-calendar", env!("CARGO_PKG_VERSION"));
     observer.set_state(State::Starting, "reading the agencies' schedules");
     observer.describe(json!({
-        "role": "Scheduled US economic releases (BLS, BEA, jobless claims) and FOMC decisions, from the agencies' own schedules.",
-        "upstream": [
-            { "id": "bls", "label": "BLS", "sub": "release schedule", "kind": "flow", "via": "https" },
-            { "id": "bea", "label": "BEA", "sub": "release schedule", "kind": "flow", "via": "https" },
-            { "id": "fed", "label": "Federal Reserve", "sub": "FOMC calendar", "kind": "flow", "via": "https" },
-        ],
-        "streams": { "econ": "/events" },
-        "schedule": [{ "name": "Read the agencies' schedules", "kind": "interval", "every_seconds": args.refresh_hours * 3600, "when": format!("every {} h", args.refresh_hours) }],
+        "role": "Scheduled US economic releases (BLS, BEA, jobless claims) and FOMC decisions, from the agencies' own schedules, and earnings dates compared across calendars.",
+        "upstream": upstream,
+        "streams": { "econ": "/events", "earnings": "/earnings" },
+        "schedule": [{ "name": "Read the agencies' schedules and the earnings calendars", "kind": "interval", "every_seconds": args.refresh_hours * 3600, "when": format!("every {} h", args.refresh_hours) }],
     }));
     {
         let s = shared.clone();
@@ -107,6 +160,7 @@ async fn main() {
     }
     let app = Router::new()
         .route("/events", get(events))
+        .route("/earnings", get(earnings_list))
         .with_state(shared.clone())
         .merge(observer.router());
     let listen = listen_address("ECON_LISTEN", "127.0.0.1:9122");
@@ -136,9 +190,20 @@ async fn main() {
         .timeout(Duration::from_secs(30))
         .build()
         .expect("an HTTP client");
+    // The earnings calendars get no contact address: only BLS asks for one.
+    // Nasdaq.com answers only browser-like agents.
+    let plain = reqwest::Client::builder()
+        .user_agent(format!(
+            "Mozilla/5.0 (compatible; tinytrader-econ-calendar/{})",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("an HTTP client");
     loop {
         read_all(&http, &shared, args.contact.is_some()).await;
-        let (failing, held) = {
+        read_earnings(&plain, &shared, &keys, args.earnings_days).await;
+        let (mut failing, held) = {
             let sources = shared.lock();
             let failing: Vec<String> = sources
                 .iter()
@@ -149,13 +214,20 @@ async fn main() {
                 sources.values().map(|src| src.events.len()).sum::<usize>(),
             )
         };
-        if failing.is_empty() {
-            observer.set_state(State::Ready, &format!("{held} events"));
-        } else {
-            observer.set_state(
-                State::Degraded,
-                &format!("{held} events; {}", failing.join("; ")),
+        let reports = {
+            let e = shared.earnings();
+            failing.extend(
+                e.sources
+                    .iter()
+                    .filter_map(|(n, src)| src.error.as_ref().map(|err| format!("{n}: {err}"))),
             );
+            e.reports.len()
+        };
+        let held = format!("{held} events, {reports} earnings reports");
+        if failing.is_empty() {
+            observer.set_state(State::Ready, &held);
+        } else {
+            observer.set_state(State::Degraded, &format!("{held}; {}", failing.join("; ")));
         }
         tokio::time::sleep(Duration::from_secs(args.refresh_hours.max(1) * 3600)).await;
     }
@@ -259,5 +331,156 @@ async fn events(AxState(shared): AxState<Arc<Shared>>, Query(ask): Query<Ask>) -
         .into();
     Json(
         json!({ "events": events, "sources": status, "from": from, "to": to, "min": min.as_str() }),
+    )
+}
+
+/// Keys for the earnings calendars that need one.
+struct Keys {
+    alpha_vantage: Option<String>,
+    finnhub: Option<String>,
+}
+
+/// Read the earnings calendars and merge them; a source that fails keeps
+/// its last good rows. Requests are a second apart, gently.
+async fn read_earnings(http: &reqwest::Client, shared: &Shared, keys: &Keys, days: i64) {
+    async fn get(r: reqwest::RequestBuilder) -> Result<String, String> {
+        // Errors without the URL, which may carry a key.
+        let r = r.send().await.map_err(|e| e.without_url().to_string())?;
+        if !r.status().is_success() {
+            return Err(format!("answered {}", r.status()));
+        }
+        r.text().await.map_err(|e| e.without_url().to_string())
+    }
+    let json = |t: String| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string());
+    let pause = || tokio::time::sleep(Duration::from_millis(1100));
+    let now = unix_seconds() as i64;
+    let day = |d: i64| ny_date_time(now + d * 86_400).0;
+    let mut got: Vec<(&'static str, Result<Vec<earnings::Row>, String>)> = Vec::new();
+
+    if let Some(key) = &keys.alpha_vantage {
+        let r = get(http.get("https://www.alphavantage.co/query").query(&[
+            ("function", "EARNINGS_CALENDAR"),
+            ("horizon", "3month"),
+            ("apikey", key),
+        ]))
+        .await
+        .and_then(|t| earnings::alpha_vantage(&t));
+        got.push((earnings::ALPHA_VANTAGE, r));
+    }
+    if let Some(key) = &keys.finnhub {
+        // A week at a time (each answer holds at most 1,500), from a week back
+        // so recent reports carry their actual EPS.
+        let mut rows = Ok(Vec::new());
+        for start in (-7..days).step_by(7) {
+            pause().await;
+            let r = get(http
+                .get("https://finnhub.io/api/v1/calendar/earnings")
+                .header("X-Finnhub-Token", key)
+                .query(&[("from", day(start)), ("to", day((start + 6).min(days)))]))
+            .await
+            .and_then(json)
+            .and_then(|v| earnings::finnhub(&v));
+            match (&mut rows, r) {
+                (Ok(all), Ok(mut more)) => all.append(&mut more),
+                (Ok(_), Err(e)) => rows = Err(e),
+                _ => {}
+            }
+        }
+        got.push((earnings::FINNHUB, rows));
+    }
+    let mut rows = Ok(Vec::new());
+    for d in 0..days {
+        let (date, _, weekday) = ny_date_time(now + d * 86_400);
+        // No reports on weekends.
+        if weekday == 0 || weekday == 6 {
+            continue;
+        }
+        pause().await;
+        let r = get(http
+            .get("https://api.nasdaq.com/api/calendar/earnings")
+            .header("Accept", "application/json")
+            .query(&[("date", &date)]))
+        .await
+        .and_then(json)
+        .and_then(|v| earnings::nasdaq(&v, &date));
+        match (&mut rows, r) {
+            (Ok(all), Ok(mut more)) => all.append(&mut more),
+            (Ok(_), Err(e)) => rows = Err(format!("{date}: {e}")),
+            _ => {}
+        }
+    }
+    got.push((earnings::NASDAQ, rows));
+
+    let mut e = shared.earnings();
+    let read_at = unix_seconds();
+    for (name, result) in got {
+        let entry = e.sources.entry(name).or_default();
+        match result {
+            Ok(rows) if !rows.is_empty() => {
+                *entry = Source {
+                    events: rows,
+                    error: None,
+                    read_at,
+                }
+            }
+            Ok(_) => entry.error = Some("no reports found (has the format changed?)".into()),
+            Err(err) => entry.error = Some(err),
+        }
+    }
+    let all: Vec<earnings::Row> = e.sources.values().flat_map(|s| s.events.clone()).collect();
+    e.reports = earnings::merge(all);
+}
+
+/// How much a report matters: by company size, or always high when watched.
+fn report_importance(r: &earnings::Report, watch: &[String]) -> Importance {
+    match r.market_cap {
+        _ if watch.contains(&r.symbol) => Importance::High,
+        Some(c) if c >= 200e9 => Importance::High,
+        Some(c) if c >= 10e9 => Importance::Medium,
+        _ => Importance::Low,
+    }
+}
+
+async fn earnings_list(
+    AxState(shared): AxState<Arc<Shared>>,
+    Query(ask): Query<Ask>,
+) -> Json<Value> {
+    let now = unix_seconds() as i64;
+    let day = |s: i64| ny_date_time(s).0;
+    let from = ask.from.unwrap_or_else(|| day(now - 7 * 86_400));
+    let to = ask.to.unwrap_or_else(|| day(now + 92 * 86_400));
+    let min = ask
+        .min
+        .as_deref()
+        .and_then(Importance::parse)
+        .unwrap_or(Importance::Medium);
+    let e = shared.earnings();
+    let reports: Vec<Value> = e
+        .reports
+        .iter()
+        .filter(|r| r.date >= from && r.date <= to)
+        .filter_map(|r| {
+            let importance = report_importance(r, &e.watch);
+            (importance >= min).then(|| {
+                json!({
+                    "symbol": r.symbol, "name": r.name, "date": r.date, "when": r.when.as_str(),
+                    "eps_estimate": r.eps_estimate, "eps_actual": r.eps_actual, "market_cap": r.market_cap,
+                    "dates": r.dates, "disputed": r.disputed, "importance": importance.as_str(),
+                })
+            })
+        })
+        .collect();
+    let sources: serde_json::Map<String, Value> = e
+        .sources
+        .iter()
+        .map(|(n, s)| {
+            (
+                (*n).to_owned(),
+                json!({ "rows": s.events.len(), "error": s.error, "read_at": s.read_at }),
+            )
+        })
+        .collect();
+    Json(
+        json!({ "reports": reports, "sources": sources, "from": from, "to": to, "min": min.as_str() }),
     )
 }

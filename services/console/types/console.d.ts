@@ -203,6 +203,7 @@ interface ServiceState {
   catalog?: Catalog;
   calendar?: { clock?: { is_open: boolean; next_open?: string; next_close?: string }; days: { date: string; open: string; close: string }[] };
   clients?: { clients: RelayClient[] };
+  earnings?: { reports: { symbol: string; name: string | null; date: string; when: 'before-open' | 'after-close' | 'unknown'; eps_estimate: number | null; eps_actual: number | null; market_cap: number | null; dates: Record<string, string>; disputed: boolean; importance: 'low' | 'medium' | 'high' }[]; sources?: Record<string, { rows: number; error: string | null }> };
   econ?: { events: { at: number; date: string; time: string; title: string; source: string; importance: 'low' | 'medium' | 'high' }[]; sources?: Record<string, { events: number; error: string | null }> };
   news?: { items: { id: string; headline: string; summary?: string; url?: string; source?: string; author?: string; symbols?: string[]; created_at?: string }[] };
   accounts?: { accounts: Account[] };

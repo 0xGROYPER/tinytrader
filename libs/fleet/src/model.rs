@@ -142,6 +142,8 @@ pub struct ServiceState {
     pub calendar: Option<Value>,
     /// Scheduled economic releases it serves, if any (`{ "events": [...] }`).
     pub econ: Option<Value>,
+    /// Earnings report dates it serves, if any (`{ "reports": [...] }`).
+    pub earnings: Option<Value>,
     /// A relay's connected clients (`{ "clients": [...] }`).
     pub clients: Option<Value>,
 }

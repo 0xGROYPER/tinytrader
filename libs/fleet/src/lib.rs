@@ -336,6 +336,9 @@ async fn observe_into(
     if let Some(path) = d["streams"]["econ"].as_str() {
         svc["econ"] = json!(format!("{base}{path}"));
     }
+    if let Some(path) = d["streams"]["earnings"].as_str() {
+        svc["earnings"] = json!(format!("{base}{path}"));
+    }
     for u in d["upstream"].as_array().into_iter().flatten() {
         let kind = u["kind"].as_str().unwrap_or("flow");
         let from = if let Some(other) = u["service"].as_str() {
@@ -719,6 +722,9 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
         // Scheduled releases change a few times a day at most.
         if let Some(url) = svc["econ"].as_str() {
             entry.insert("econ".into(), slow(app, url, 600).await);
+        }
+        if let Some(url) = svc["earnings"].as_str() {
+            entry.insert("earnings".into(), slow(app, url, 600).await);
         }
         if let Some(url) = svc["calendar"].as_str() {
             entry.insert("calendar".into(), slow(app, url, 60).await);
