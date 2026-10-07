@@ -335,6 +335,82 @@ impl Alpaca {
         })
     }
 
+    /// One-minute bars for a symbol from Alpaca's IEX history, oldest first.
+    pub async fn bars(
+        &self,
+        symbol: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<crate::bars::Bar>, String> {
+        #[derive(Deserialize)]
+        struct Raw<'a> {
+            t: &'a str,
+            o: f64,
+            h: f64,
+            l: f64,
+            c: f64,
+            v: f64,
+        }
+        #[derive(Deserialize)]
+        struct BarsPage<'a> {
+            #[serde(borrow, default)]
+            bars: Option<std::collections::BTreeMap<&'a str, Vec<Raw<'a>>>>,
+            next_page_token: Option<String>,
+        }
+        let (start, end) = (rfc3339(start), rfc3339(end));
+        let mut out = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut req = self
+                .http
+                .get(format!("{HISTORY_URL}/bars"))
+                .header("APCA-API-KEY-ID", &self.key)
+                .header("APCA-API-SECRET-KEY", &self.secret)
+                .query(&[
+                    ("symbols", symbol),
+                    ("timeframe", "1Min"),
+                    ("feed", "iex"),
+                    ("start", &start),
+                    ("end", &end),
+                    ("limit", "10000"),
+                    ("sort", "asc"),
+                ]);
+            if let Some(t) = &token {
+                req = req.query(&[("page_token", t)]);
+            }
+            let r = req.send().await.map_err(|e| format!("bars: {e}"))?;
+            if !r.status().is_success() {
+                return Err(format!("bars: Alpaca answered {}", r.status()));
+            }
+            let text = r.text().await.map_err(|e| format!("bars: {e}"))?;
+            let page: BarsPage = serde_json::from_str(&text).map_err(|e| format!("bars: {e}"))?;
+            for b in page
+                .bars
+                .into_iter()
+                .flat_map(|m| m.into_values())
+                .flatten()
+            {
+                let t = time::OffsetDateTime::parse(
+                    b.t,
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .map_err(|e| format!("bars: {e}"))?;
+                out.push(crate::bars::Bar {
+                    t: t.unix_timestamp() as u64,
+                    o: b.o,
+                    h: b.h,
+                    l: b.l,
+                    c: b.c,
+                    v: b.v as u64,
+                });
+            }
+            token = page.next_page_token;
+            if token.is_none() {
+                return Ok(out);
+            }
+        }
+    }
+
     /// Every page of one kind of history for a symbol, oldest first.
     async fn pages(
         &self,

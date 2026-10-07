@@ -575,6 +575,13 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 .cal i.d2, .cal-legend i.d2 { background: var(--ok); }
 .cal-legend i.has { background: var(--accent-mark); } .cal-legend i.has.d2 { background: var(--ok); }
 .cal-legend i.l1 { opacity: .35; } .cal-legend i.l2 { opacity: .55; } .cal-legend i.l3 { opacity: .78; }
+.cd { display: flex; flex-direction: column; gap: 8px; height: 100%; min-height: 240px; }
+.cd-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+.cd-bar .chips { margin: 0; }
+.cd-last { margin-left: auto; color: var(--fg); font-size: 13px; }
+.cd-chart { flex: 1 1 auto; min-height: 200px; position: relative; }
+.cd-msg { margin: 0; font-size: 13px; } .cd-msg:empty { display: none; }
+.tile-body:has(> .cd) { overflow: hidden; }
 .pool { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
 .pool b { font: 600 24px var(--sans); color: var(--fg); }
 .pool span { font-size: 14px; color: var(--fg-2); } .pool .muted { color: var(--muted); font-size: 13px; }
@@ -670,6 +677,7 @@ import '/widgets/schedule.js';
 import '/widgets/services.js';
 import '/widgets/shell.js';
 import '/widgets/prices.js';
+import '/widgets/candles.js';
 import '/widgets/accounts.js';
 import '/widgets/news.js';
 import '/widgets/calendar.js';

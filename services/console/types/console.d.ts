@@ -26,6 +26,8 @@ interface TopoNode {
 
 interface TopoService extends TopoNode {
   schedule?: ScheduleEntry[];
+  /** One symbol's one-minute bars, on demand (`?symbol=SPY&days=2`). */
+  bars?: string;
   events?: string;
   accounts?: unknown;
   observe?: string;
@@ -190,6 +192,9 @@ interface Snapshot {
   docker?: { configured: boolean; error?: string };
   error?: string;
 }
+
+/** TradingView's Lightweight Charts (standalone build), loaded by the Candles widget. */
+declare var LightweightCharts: any;
 
 /** A mounted widget (decision 0010). */
 interface WidgetInstance {

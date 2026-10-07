@@ -20,6 +20,7 @@
 //! `APCA_API_SECRET_KEY`; each also as `<NAME>_FILE` naming a file.
 
 mod alpaca;
+mod bars;
 mod databento;
 mod hours;
 mod hub;
@@ -193,7 +194,7 @@ async fn run(args: Args) -> Result<(), String> {
     observer.describe(json!({
         "role": format!("Relays {dataset} {schema_name} for {} to local clients ({}).", args.symbols.join(", "), protocol::PROTOCOL),
         "upstream": [{ "id": provider_id, "label": provider_id, "sub": dataset, "kind": "flow", "via": via }],
-        "streams": { "events": "/events", "series": "/recent" },
+        "streams": { "events": "/events", "series": "/recent", "bars": "/bars" },
         "panels": [{ "heading": format!("{dataset} {}", args.symbols.join(", ")), "note": "Trade prices of the most active instruments, sampled once per second", "decimals": 2 }],
         "relay": { "protocol": protocol::PROTOCOL, "listen": args.listen, "symbols": args.symbols },
         // Relays carrying the same feed on the same hours are one line on a schedule.
@@ -204,11 +205,19 @@ async fn run(args: Args) -> Result<(), String> {
     }));
     register_metrics(&observer, &hub);
 
+    // Bars for charts: the relay's own symbols, with history where the
+    // source keeps it (Alpaca); Databento's intraday history isn't served live.
+    hub.bars.keep(&args.symbols);
+    let bar_history = match &provider {
+        Provider::Alpaca(a) => Some(a.clone()),
+        _ => None,
+    };
     let observe_at = listen_address("RELAY_OBSERVE_LISTEN", "127.0.0.1:9110");
     let app = observer
         .router()
         .merge(hub.events.router())
-        .merge(hub.series.router());
+        .merge(hub.series.router())
+        .merge(bars::router(hub.bars.clone(), bar_history));
     let observe = tokio::net::TcpListener::bind(&observe_at)
         .await
         .map_err(|e| format!("cannot listen on {observe_at}: {e}"))?;

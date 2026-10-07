@@ -143,6 +143,36 @@ impl Poller {
     }
 }
 
+impl Poller {
+    /// A service's bars for one symbol (`/api/bars/<service>`): `query` is
+    /// passed on as given (`symbol=SPY&days=2`). Returns the service's status
+    /// and answer.
+    ///
+    /// # Errors
+    /// If the service serves no bars, or doesn't answer.
+    pub async fn bars_json(&self, service: &str, query: &str) -> Result<(u16, Value), EventsError> {
+        let url = self.topology_json()["services"]
+            .as_array()
+            .and_then(|list| list.iter().find(|s| s["id"].as_str() == Some(service)))
+            .and_then(|s| s["bars"].as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| EventsError::NotDeclared(service.to_owned()))?;
+        let r = self
+            .http
+            .get(format!("{url}?{query}"))
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| EventsError::Unreachable(short_error(&e)))?;
+        let code = r.status().as_u16();
+        let v = r
+            .json::<Value>()
+            .await
+            .map_err(|e| EventsError::Unreachable(short_error(&e)))?;
+        Ok((code, v))
+    }
+}
+
 /// Why a service's events could not be fetched.
 #[derive(Debug)]
 pub enum EventsError {
@@ -272,6 +302,10 @@ async fn observe_into(
     }
     if let Some(path) = d["streams"]["events"].as_str() {
         svc["events"] = json!(format!("{base}{path}"));
+    }
+    // On demand, never polled: one symbol's bars when a chart asks.
+    if let Some(path) = d["streams"]["bars"].as_str() {
+        svc["bars"] = json!(format!("{base}{path}"));
     }
     if let Some(path) = d["streams"]["series"].as_str() {
         svc["recent"] = json!(format!("{base}{path}"));

@@ -169,6 +169,8 @@ pub struct Hub {
     reference: Mutex<Reference>,
     pub events: Events,
     /// Trade prices of the most active instruments, by symbol, for charts.
+    /// One-minute bars of the relay's own symbols, for charts.
+    pub bars: Arc<crate::bars::Bars>,
     pub series: Series,
     pub clients: AtomicU64,
     pub records: AtomicU64,
@@ -197,6 +199,7 @@ impl Hub {
             upstream: Mutex::new(Upstream::Starting),
             reference: Mutex::new(Reference::default()),
             series: Series::new(900, 1000, 6),
+            bars: Arc::new(crate::bars::Bars::default()),
             events: Events::default(),
             clients: AtomicU64::new(0),
             records: AtomicU64::new(0),
@@ -274,9 +277,17 @@ impl Hub {
                 return;
             };
             at += len;
-            let (action, price) = match rec[1] {
-                rtype::MBP_1 => (offset_of!(Mbp1Msg, action), offset_of!(Mbp1Msg, price)),
-                rtype::CMBP_1 => (offset_of!(Cmbp1Msg, action), offset_of!(Cmbp1Msg, price)),
+            let (action, price, size) = match rec[1] {
+                rtype::MBP_1 => (
+                    offset_of!(Mbp1Msg, action),
+                    offset_of!(Mbp1Msg, price),
+                    offset_of!(Mbp1Msg, size),
+                ),
+                rtype::CMBP_1 => (
+                    offset_of!(Cmbp1Msg, action),
+                    offset_of!(Cmbp1Msg, price),
+                    offset_of!(Cmbp1Msg, size),
+                ),
                 _ => continue,
             };
             if rec.get(action) != Some(&b'T') {
@@ -291,6 +302,13 @@ impl Hub {
             let id = u32_at(rec, offset_of!(RecordHeader, instrument_id)).unwrap_or(0);
             if let Some(symbol) = reference.symbol(id) {
                 self.series.push(&symbol, px as f64 / 1e9);
+                let ts = u64_at(rec, offset_of!(RecordHeader, ts_event)).unwrap_or(0);
+                self.bars.trade(
+                    &symbol,
+                    ts,
+                    px as f64 / 1e9,
+                    u64::from(u32_at(rec, size).unwrap_or(0)),
+                );
             }
         }
     }

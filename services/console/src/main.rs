@@ -159,6 +159,7 @@ async fn main() {
         .route("/api/topology", get(topology))
         .route("/api/state", get(state))
         .route("/api/events/{service}", get(events))
+        .route("/api/bars/{service}", get(bars))
         .route("/api/collections", get(list_collections))
         .route("/api/collections/{id}/{index}", get(collection_doc))
         .route("/api/jobs/{*rest}", get(jobs_proxy).post(jobs_proxy))
@@ -294,6 +295,30 @@ async fn events(
     let limit = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100);
     match app.poller.events_json(&service, after, limit).await {
         Ok(v) => no_store(axum::Json(v)),
+        Err(e @ EventsError::NotDeclared(_)) => {
+            (StatusCode::NOT_FOUND, e.to_string()).into_response()
+        }
+        Err(e @ EventsError::Unreachable(_)) => {
+            (StatusCode::BAD_GATEWAY, e.to_string()).into_response()
+        }
+    }
+}
+
+/// One symbol's one-minute bars from a relay (`symbol=SPY&days=2`).
+async fn bars(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(service): axum::extract::Path<String>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    match app
+        .poller
+        .bars_json(&service, query.as_deref().unwrap_or(""))
+        .await
+    {
+        Ok((code, v)) => no_store((
+            StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY),
+            axum::Json(v),
+        )),
         Err(e @ EventsError::NotDeclared(_)) => {
             (StatusCode::NOT_FOUND, e.to_string()).into_response()
         }
