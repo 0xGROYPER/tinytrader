@@ -33,6 +33,8 @@
 
       flake = {
         nixosModules.services = ./infra/modules/services.nix;
+        # The same service definitions as launchd agents on macOS (nix-darwin).
+        darwinModules.services = ./infra/modules/darwin-services.nix;
 
         # The example host's services as plain systemd unit files, for Linux
         # distributions other than NixOS that have Nix installed: copy the
