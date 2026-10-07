@@ -13,7 +13,7 @@ jobs:
   build:
     strategy:
       matrix:
-        service: [ticker, console, databento-jobs, store, alpaca-news, alpaca-account, econ-calendar, relay]
+        service: [ticker, console, databento-jobs, store, alpaca-news, alpaca-account, alpaca-data, econ-calendar, relay]
         platform:
           - { arch: amd64, runner: ubuntu-latest }
           - { arch: arm64, runner: ubuntu-24.04-arm }
@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [ticker, console, databento-jobs, store, alpaca-news, alpaca-account, econ-calendar, relay]
+        service: [ticker, console, databento-jobs, store, alpaca-news, alpaca-account, alpaca-data, econ-calendar, relay]
     steps:
       - name: Publish multi-architecture tags
         run: |

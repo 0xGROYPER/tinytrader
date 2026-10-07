@@ -41,6 +41,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "alpaca-data"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "reqwest 0.12.28",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tinytrader-observe",
+ "tinytrader-schedule",
+ "tokio",
+]
+
+[[package]]
 name = "alpaca-news"
 version = "0.1.0"
 dependencies = [

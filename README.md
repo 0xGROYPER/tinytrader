@@ -46,6 +46,7 @@ console the same way.
 | `services/store` | The data store: the one process that touches the disks; files provider downloads across approved drives, and catalogs datasets, coverage and disk space |
 | `services/databento-jobs` | Databento batch jobs: prices and submits requests (charges need an exact confirmation, every submission is written down first), and downloads finished jobs into the store |
 | `services/alpaca-account` | Alpaca accounts' balances and positions, read only, and the market calendar |
+| `services/alpaca-data` | Market data for any symbol on request: stock snapshots, bars and option chains with IV and greeks (Alpaca) |
 | `services/alpaca-news` | Market news from Alpaca (supplied by Benzinga) |
 | `services/econ-calendar` | Scheduled US economic releases and FOMC decisions, from the agencies' own schedules |
 | `infra/modules` | NixOS modules, such as `tinytrader.services.<name>` |

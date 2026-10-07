@@ -30,6 +30,7 @@
           ../services/alpaca-news
           ../services/econ-calendar
           ../services/alpaca-account
+          ../services/alpaca-data
           ../services/relay
           (lib.fileset.fileFilter (f: f.hasExt "rs" || f.name == "Cargo.toml") ../services/console)
           ../services/console/web
@@ -67,6 +68,7 @@
       store = service "store" "The data store: ingests provider downloads into the standard layout and catalogs the volumes";
       alpaca-news = service "alpaca-news" "Example service serving market news from Alpaca (Benzinga)";
       econ-calendar = service "econ-calendar" "Scheduled US economic releases and FOMC decisions";
+      alpaca-data = service "alpaca-data" "Market data for any symbol on request: stock snapshots, bars and option chains from Alpaca";
       alpaca-account = service "alpaca-account" "Example service serving an Alpaca account's balances and positions";
       relay = service "relay" "Market data relay: one provider connection served to local clients (tinytrader.relay/1)";
 
@@ -82,6 +84,7 @@
           alpaca-news
           econ-calendar
           alpaca-account
+          alpaca-data
           relay
           ;
       };

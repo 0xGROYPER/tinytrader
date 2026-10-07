@@ -1,0 +1,21 @@
+[package]
+name = "alpaca-data"
+description = "Market data for any symbol on request: stock snapshots, bars and option chains with IV and greeks, from Alpaca"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+reqwest.workspace = true
+rustls.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+tinytrader-observe.workspace = true
+tinytrader-schedule.workspace = true
+tokio.workspace = true

@@ -151,10 +151,25 @@ impl Poller {
     /// # Errors
     /// If the service serves no bars, or doesn't answer.
     pub async fn bars_json(&self, service: &str, query: &str) -> Result<(u16, Value), EventsError> {
+        self.stream_json(service, "bars", query).await
+    }
+
+    /// One answer from a service's on-demand stream (one of [`ON_DEMAND`]:
+    /// bars, stock snapshots, option chains), passed through as is.
+    ///
+    /// # Errors
+    /// If the service doesn't serve that stream, or doesn't answer.
+    pub async fn stream_json(
+        &self,
+        service: &str,
+        stream: &str,
+        query: &str,
+    ) -> Result<(u16, Value), EventsError> {
         let url = self.topology_json()["services"]
             .as_array()
             .and_then(|list| list.iter().find(|s| s["id"].as_str() == Some(service)))
-            .and_then(|s| s["bars"].as_str())
+            .filter(|_| ON_DEMAND.contains(&stream))
+            .and_then(|s| s[stream].as_str())
             .map(str::to_owned)
             .ok_or_else(|| EventsError::NotDeclared(service.to_owned()))?;
         let r = self
@@ -172,6 +187,9 @@ impl Poller {
         Ok((code, v))
     }
 }
+
+/// Streams a page asks a service for on demand, through the console.
+pub const ON_DEMAND: &[&str] = &["bars", "snapshots", "chain"];
 
 /// Why a service's events could not be fetched.
 #[derive(Debug)]
@@ -304,8 +322,11 @@ async fn observe_into(
         svc["events"] = json!(format!("{base}{path}"));
     }
     // On demand, never polled: one symbol's bars when a chart asks.
-    if let Some(path) = d["streams"]["bars"].as_str() {
-        svc["bars"] = json!(format!("{base}{path}"));
+    // Data a page asks for on demand, through the console (`stream_json`).
+    for stream in ON_DEMAND {
+        if let Some(path) = d["streams"][*stream].as_str() {
+            svc[*stream] = json!(format!("{base}{path}"));
+        }
     }
     if let Some(path) = d["streams"]["series"].as_str() {
         svc["recent"] = json!(format!("{base}{path}"));

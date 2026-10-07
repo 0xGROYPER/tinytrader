@@ -5,6 +5,7 @@ members = [
     "libs/observe",
     "services/alpaca-news",
     "services/alpaca-account",
+    "services/alpaca-data",
     "services/relay",
     "libs/dbn",
     "libs/tinytrader",

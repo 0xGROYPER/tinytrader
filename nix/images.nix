@@ -23,6 +23,7 @@
         "store"
         "alpaca-news"
         "alpaca-account"
+        "alpaca-data"
         "econ-calendar"
         "relay"
       ];

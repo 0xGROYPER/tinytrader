@@ -1,0 +1,460 @@
+//! Market data for any symbol from Alpaca's REST API: stock snapshots, bars
+//! and option chains. The relays carry a few symbols live; this answers for
+//! the rest, on request.
+//!
+//! - `/snapshots?symbols=USO,XLE`: last price, quote, previous close and the
+//!   day's change for each (at most 100).
+//! - `/bars?symbol=AAPL&days=5&interval=60`: bars as the relays serve them
+//!   (`[t, o, h, l, c, v]`, `t` in Unix seconds), one-minute (`60`, the
+//!   default) or daily (`86400`).
+//! - `/chain?underlying=AAPL&from=YYYY-MM-DD&to=YYYY-MM-DD`: option contracts
+//!   with quotes, IV and greeks, and per expiry the at-the-money IV and the
+//!   straddle as an implied move; by default the next 60 days.
+//!
+//! Answers are kept briefly (snapshots 2 s, chains 15 s, bars a minute) and
+//! requests to Alpaca are held under its free plan's 200 a minute, so many
+//! panels asking at once don't multiply the load.
+//!
+//! Credentials: a data-only key (`APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`,
+//! or `_FILE`), not one that trades. Feeds: `ALPACA_DATA_FEED` (`iex`, or
+//! `sip` with a subscription) and `ALPACA_OPTIONS_FEED` (`indicative`, or
+//! `opra` with a subscription).
+
+mod chain;
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use axum::extract::{Query, State as AxState};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use clap::Parser;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tinytrader_observe::{Observer, State, listen_address, lock, secret, unix_seconds};
+use tinytrader_schedule::ny_date_time;
+
+const BASE: &str = "https://data.alpaca.markets";
+/// Requests to Alpaca allowed in any minute (its free plan allows 200).
+const PER_MINUTE: usize = 180;
+const CACHE_ENTRIES: usize = 512;
+
+/// Serves stock snapshots, bars and option chains from Alpaca.
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Args {
+    /// Stock feed: iex (free) or sip (subscription).
+    #[arg(long, env = "ALPACA_DATA_FEED", default_value = "iex")]
+    feed: String,
+    /// Options feed: indicative (free) or opra (subscription).
+    #[arg(long, env = "ALPACA_OPTIONS_FEED", default_value = "indicative")]
+    options_feed: String,
+}
+
+struct App {
+    http: reqwest::Client,
+    key: String,
+    secret: String,
+    feed: String,
+    options_feed: String,
+    observer: Observer,
+    /// Recent requests to Alpaca, for the rate limit.
+    sent: Mutex<VecDeque<Instant>>,
+    /// Answers kept briefly, by request.
+    cache: Mutex<HashMap<String, (Instant, Value)>>,
+}
+
+impl App {
+    /// GET from Alpaca, within the rate limit.
+    async fn get(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<Value, (StatusCode, String)> {
+        {
+            let mut sent = lock(&self.sent);
+            while sent
+                .front()
+                .is_some_and(|t| t.elapsed() > Duration::from_secs(60))
+            {
+                sent.pop_front();
+            }
+            if sent.len() >= PER_MINUTE {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "busy: Alpaca's request limit for this minute is used up".into(),
+                ));
+            }
+            sent.push_back(Instant::now());
+        }
+        let r = self
+            .http
+            .get(format!("{BASE}{path}"))
+            .header("APCA-API-KEY-ID", &self.key)
+            .header("APCA-API-SECRET-KEY", &self.secret)
+            .query(query)
+            .send()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e.without_url().to_string()))?;
+        let status = r.status();
+        let v: Value = r
+            .json()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e.without_url().to_string()))?;
+        if !status.is_success() {
+            let why = v["message"]
+                .as_str()
+                .unwrap_or("no reason given")
+                .to_owned();
+            let e = format!("Alpaca answered {status}: {why}");
+            self.observer.record_error(&e);
+            // Credentials and entitlements are worth showing on the service itself.
+            if matches!(status.as_u16(), 401 | 403) {
+                self.observer.set_state(State::Degraded, &e);
+            }
+            return Err((StatusCode::BAD_GATEWAY, e));
+        }
+        self.observer.set_state(State::Ready, "answering");
+        Ok(v)
+    }
+
+    /// A kept answer for `key` if younger than `ttl`, else `make`'s.
+    async fn kept<F, Fut>(
+        &self,
+        key: String,
+        ttl: Duration,
+        make: F,
+    ) -> Result<Value, (StatusCode, String)>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Value, (StatusCode, String)>>,
+    {
+        if let Some((at, v)) = lock(&self.cache).get(&key)
+            && at.elapsed() < ttl
+        {
+            return Ok(v.clone());
+        }
+        let v = make().await?;
+        let mut cache = lock(&self.cache);
+        if cache.len() >= CACHE_ENTRIES {
+            // Drop the oldest half: simple, and rare.
+            let mut ages: Vec<(String, Instant)> =
+                cache.iter().map(|(k, (t, _))| (k.clone(), *t)).collect();
+            ages.sort_by_key(|(_, t)| *t);
+            for (k, _) in ages.into_iter().take(CACHE_ENTRIES / 2) {
+                cache.remove(&k);
+            }
+        }
+        cache.insert(key, (Instant::now(), v.clone()));
+        Ok(v)
+    }
+}
+
+/// A stock or ETF symbol: letters, digits and dots, at most 10.
+fn symbol_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 10
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'.')
+}
+
+fn refuse(code: StatusCode, why: impl Into<String>) -> Response {
+    (code, Json(json!({ "error": why.into() }))).into_response()
+}
+
+fn answer(r: Result<Value, (StatusCode, String)>) -> Response {
+    match r {
+        Ok(v) => Json(v).into_response(),
+        Err((code, e)) => refuse(code, e),
+    }
+}
+
+/// Seconds since the epoch of an RFC 3339 time such as `2026-10-07T19:04:00Z`.
+fn unix(t: &str) -> Option<i64> {
+    let p = |a: usize, b: usize| t.get(a..b)?.parse::<i64>().ok();
+    let (y, mo, d, h, mi, s) = (
+        p(0, 4)?,
+        p(5, 7)?,
+        p(8, 10)?,
+        p(11, 13)?,
+        p(14, 16)?,
+        p(17, 19)?,
+    );
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (mo + if mo > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) * 86_400 + h * 3600 + mi * 60 + s)
+}
+
+#[derive(Deserialize)]
+struct SnapAsk {
+    symbols: String,
+}
+
+async fn snapshots(AxState(app): AxState<Arc<App>>, Query(ask): Query<SnapAsk>) -> Response {
+    let mut list: Vec<String> = ask
+        .symbols
+        .split(',')
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    list.sort();
+    list.dedup();
+    if list.is_empty() || list.len() > 100 || !list.iter().all(|s| symbol_ok(s)) {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "symbols: 1 to 100 stock symbols, comma-separated",
+        );
+    }
+    let joined = list.join(",");
+    let a = app.clone();
+    answer(
+        app.kept(format!("snap|{joined}"), Duration::from_secs(2), || async move {
+            let v = a.get("/v2/stocks/snapshots", &[("symbols", joined), ("feed", a.feed.clone())]).await?;
+            let out: Vec<Value> = list
+                .iter()
+                .filter_map(|s| {
+                    let x = v.get(s)?;
+                    let price = x["latestTrade"]["p"].as_f64().or_else(|| x["dailyBar"]["c"].as_f64());
+                    let prev = x["prevDailyBar"]["c"].as_f64();
+                    let change = price.zip(prev).map(|(p, c)| p - c);
+                    Some(json!({
+                        "symbol": s, "price": price, "bid": x["latestQuote"]["bp"], "ask": x["latestQuote"]["ap"],
+                        "prev_close": prev, "change": change, "change_pct": change.zip(prev).map(|(d, c)| d / c),
+                        "day": { "o": x["dailyBar"]["o"], "h": x["dailyBar"]["h"], "l": x["dailyBar"]["l"], "c": x["dailyBar"]["c"], "v": x["dailyBar"]["v"] },
+                        "at": x["latestTrade"]["t"].as_str().and_then(unix),
+                    }))
+                })
+                .collect();
+            Ok(json!({ "snapshots": out, "feed": a.feed }))
+        })
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct BarAsk {
+    symbol: String,
+    days: Option<u64>,
+    interval: Option<u64>,
+}
+
+async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Response {
+    let symbol = ask.symbol.trim().to_uppercase();
+    if !symbol_ok(&symbol) {
+        return refuse(StatusCode::BAD_REQUEST, "symbol: a stock symbol");
+    }
+    let interval = ask.interval.unwrap_or(60);
+    let (timeframe, max_days) = match interval {
+        60 => ("1Min", 30),
+        86_400 => ("1Day", 3650),
+        _ => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "interval: 60 (one minute) or 86400 (one day)",
+            );
+        }
+    };
+    let days = ask.days.unwrap_or(1).clamp(1, max_days);
+    let a = app.clone();
+    answer(
+        app.kept(
+            format!("bars|{symbol}|{interval}|{days}"),
+            Duration::from_secs(60),
+            || async move {
+                let now = unix_seconds() as i64;
+                let start = ny_date_time(now - days as i64 * 86_400).0;
+                let mut out = Vec::new();
+                let mut token: Option<String> = None;
+                // At most 10 pages of 10,000: a month of minutes.
+                for _ in 0..10 {
+                    let mut q = vec![
+                        ("timeframe", timeframe.to_owned()),
+                        ("start", start.clone()),
+                        ("limit", "10000".to_owned()),
+                        ("adjustment", "split".to_owned()),
+                        ("feed", a.feed.clone()),
+                    ];
+                    if let Some(t) = &token {
+                        q.push(("page_token", t.clone()));
+                    }
+                    let v = a.get(&format!("/v2/stocks/{symbol}/bars"), &q).await?;
+                    for b in v["bars"].as_array().into_iter().flatten() {
+                        if let Some(t) = b["t"].as_str().and_then(unix) {
+                            out.push(json!([t, b["o"], b["h"], b["l"], b["c"], b["v"]]));
+                        }
+                    }
+                    token = v["next_page_token"].as_str().map(str::to_owned);
+                    if token.is_none() {
+                        break;
+                    }
+                }
+                Ok(json!({ "symbol": symbol, "interval": interval, "bars": out, "note": null }))
+            },
+        )
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct ChainAsk {
+    underlying: String,
+    from: Option<String>,
+    to: Option<String>,
+}
+
+async fn option_chain(AxState(app): AxState<Arc<App>>, Query(ask): Query<ChainAsk>) -> Response {
+    let underlying = ask.underlying.trim().to_uppercase();
+    if !symbol_ok(&underlying) {
+        return refuse(StatusCode::BAD_REQUEST, "underlying: a stock symbol");
+    }
+    let date_ok = |d: &str| {
+        d.len() == 10
+            && d.bytes().enumerate().all(|(i, b)| {
+                if i == 4 || i == 7 {
+                    b == b'-'
+                } else {
+                    b.is_ascii_digit()
+                }
+            })
+    };
+    let now = unix_seconds() as i64;
+    let from = ask.from.unwrap_or_else(|| ny_date_time(now).0);
+    let to = ask.to.unwrap_or_else(|| ny_date_time(now + 60 * 86_400).0);
+    if !date_ok(&from) || !date_ok(&to) {
+        return refuse(StatusCode::BAD_REQUEST, "from and to: YYYY-MM-DD");
+    }
+    let a = app.clone();
+    answer(
+        app.kept(format!("chain|{underlying}|{from}|{to}"), Duration::from_secs(15), || async move {
+            let spot = a
+                .get("/v2/stocks/snapshots", &[("symbols", underlying.clone()), ("feed", a.feed.clone())])
+                .await?
+                .get(&underlying)
+                .and_then(|x| x["latestTrade"]["p"].as_f64());
+            let mut contracts = Vec::new();
+            let mut token: Option<String> = None;
+            // At most 20 pages of 1,000 contracts.
+            let mut truncated = false;
+            for page in 0..20 {
+                let mut q = vec![
+                    ("feed", a.options_feed.clone()),
+                    ("limit", "1000".to_owned()),
+                    ("expiration_date_gte", from.clone()),
+                    ("expiration_date_lte", to.clone()),
+                ];
+                if let Some(t) = &token {
+                    q.push(("page_token", t.clone()));
+                }
+                let v = a.get(&format!("/v1beta1/options/snapshots/{underlying}"), &q).await?;
+                contracts.extend(chain::contracts(&v));
+                token = v["next_page_token"].as_str().map(str::to_owned);
+                if token.is_none() {
+                    break;
+                }
+                truncated = page == 19;
+            }
+            // By expiry, then strike, calls before puts.
+            contracts.sort_by(|a, b| a.expiry.cmp(&b.expiry).then(a.strike.total_cmp(&b.strike)).then(b.call.cmp(&a.call)));
+            Ok(json!({
+                "underlying": underlying, "spot": spot, "feed": a.options_feed, "from": from, "to": to,
+                "expiries": chain::expiries(&contracts, spot),
+                "contracts": contracts.iter().map(chain::Contract::to_json).collect::<Vec<_>>(),
+                "truncated": truncated,
+            }))
+        })
+        .await,
+    )
+}
+
+#[tokio::main]
+async fn main() {
+    let args = Args::parse();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (key, secret) = match (secret("APCA_API_KEY_ID"), secret("APCA_API_SECRET_KEY")) {
+        (Ok(k), Ok(s)) => (k, s),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("alpaca-data: {e}");
+            std::process::exit(2);
+        }
+    };
+    let observer = Observer::new("alpaca-data", env!("CARGO_PKG_VERSION"));
+    observer.set_state(State::Ready, "waiting for requests");
+    observer.describe(json!({
+        "role": "Market data for any symbol on request: stock snapshots, bars and option chains with IV and greeks, from Alpaca.",
+        "upstream": [{ "id": "alpaca-data-api", "label": "Alpaca", "sub": format!("{} stocks, {} options", args.feed, args.options_feed), "kind": "flow", "via": "https" }],
+        "streams": { "bars": "/bars", "snapshots": "/snapshots", "chain": "/chain" },
+    }));
+    let app = Arc::new(App {
+        http: reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .expect("an HTTP client"),
+        key,
+        secret,
+        feed: args.feed,
+        options_feed: args.options_feed,
+        observer: observer.clone(),
+        sent: Mutex::default(),
+        cache: Mutex::default(),
+    });
+    {
+        let a = app.clone();
+        observer.set_metrics(move |w| {
+            w.gauge(
+                "tinytrader_alpaca_data_requests_last_minute",
+                "Requests sent to Alpaca in the last minute.",
+                &[],
+                lock(&a.sent).len() as f64,
+            );
+            w.gauge(
+                "tinytrader_alpaca_data_cached",
+                "Answers kept.",
+                &[],
+                lock(&a.cache).len() as f64,
+            );
+        });
+    }
+    let router = Router::new()
+        .route("/snapshots", get(snapshots))
+        .route("/bars", get(bars))
+        .route("/chain", get(option_chain))
+        .with_state(app)
+        .merge(observer.router());
+    let listen = listen_address("ALPACA_DATA_LISTEN", "127.0.0.1:9123");
+    let listener = match tokio::net::TcpListener::bind(&listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("alpaca-data: cannot listen on {listen}: {e}");
+            std::process::exit(2);
+        }
+    };
+    eprintln!("alpaca-data: serving http://{listen}");
+    if let Err(e) = axum::serve(listener, router).await {
+        eprintln!("alpaca-data: http server stopped: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_alpaca_times() {
+        assert_eq!(unix("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(unix("2026-10-07T19:04:00Z"), Some(1_791_399_840));
+        assert_eq!(unix("2026-10"), None);
+    }
+
+    #[test]
+    fn symbols_are_checked() {
+        assert!(symbol_ok("BRK.B") && symbol_ok("XLE"));
+        assert!(!symbol_ok("aapl") && !symbol_ok("A/B") && !symbol_ok(""));
+    }
+}
