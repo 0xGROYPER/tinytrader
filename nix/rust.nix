@@ -28,6 +28,7 @@
           ../services/dbn-tcp
           ../services/store
           ../services/alpaca-news
+          ../services/econ-calendar
           ../services/alpaca-account
           ../services/relay
           (lib.fileset.fileFilter (f: f.hasExt "rs" || f.name == "Cargo.toml") ../services/console)
@@ -70,6 +71,7 @@
       tinytrader-tui = service "tinytrader-tui" "Terminal view of a tinytrader deployment";
       store = service "store" "The data store: ingests provider downloads into the standard layout and catalogs the volumes";
       alpaca-news = service "alpaca-news" "Example service serving market news from Alpaca (Benzinga)";
+      econ-calendar = service "econ-calendar" "Scheduled US economic releases and FOMC decisions";
       alpaca-account = service "alpaca-account" "Example service serving an Alpaca account's balances and positions";
       relay = service "relay" "Market data relay: one provider connection served to local clients (tinytrader.relay/1)";
 
@@ -86,6 +88,7 @@
           tinytrader-tui
           store
           alpaca-news
+          econ-calendar
           alpaca-account
           relay
           ;

@@ -181,6 +181,7 @@ interface ServiceState {
   metrics?: Record<string, Metric[]>;
   catalog?: Catalog;
   calendar?: { clock?: { is_open: boolean; next_open?: string; next_close?: string }; days: { date: string; open: string; close: string }[] };
+  econ?: { events: { at: number; date: string; time: string; title: string; source: string; importance: 'low' | 'medium' | 'high' }[]; sources?: Record<string, { events: number; error: string | null }> };
   news?: { items: { id: string; headline: string; summary?: string; url?: string; source?: string; author?: string; symbols?: string[]; created_at?: string }[] };
   accounts?: { accounts: Account[] };
   /** Series streams (such as `recent`): key → [[unix_ms, value], ...]. */

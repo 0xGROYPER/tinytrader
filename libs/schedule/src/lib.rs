@@ -158,6 +158,26 @@ fn civil(days: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Unix seconds of a New York wall-clock time (month and day from 1).
+#[must_use]
+pub fn ny_to_unix(year: i64, month: i64, day: i64, hour: i64, minute: i64) -> i64 {
+    let d = days_from_civil(year, month, day);
+    d * 86_400 + hour * 3600 + minute * 60 - ny_offset_secs(d)
+}
+
+/// A Unix time in New York as its date (`YYYY-MM-DD`), time (`HH:MM`) and
+/// weekday (0 = Sunday).
+#[must_use]
+pub fn ny_date_time(secs: i64) -> (String, String, u8) {
+    let local = secs + ny_offset_secs(secs.div_euclid(86_400));
+    let (day, min) = (local.div_euclid(86_400), local.rem_euclid(86_400) / 60);
+    (
+        civil(day),
+        format!("{:02}:{:02}", min / 60, min % 60),
+        (day + 4).rem_euclid(7) as u8,
+    )
+}
+
 /// A time as `Tue 09:25 ET`, for status messages.
 #[must_use]
 pub fn describe(ns: u64) -> String {
@@ -172,6 +192,23 @@ pub fn describe(ns: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_york_wall_clock_both_ways() {
+        // 08:30 in New York in summer (EDT) and winter (EST).
+        let summer = ny_to_unix(2026, 10, 13, 8, 30);
+        assert_eq!(summer, 1_791_894_600);
+        assert_eq!(
+            ny_date_time(summer),
+            ("2026-10-13".to_owned(), "08:30".to_owned(), 2)
+        );
+        let winter = ny_to_unix(2026, 12, 10, 8, 30);
+        assert_eq!(
+            ny_date_time(winter),
+            ("2026-12-10".to_owned(), "08:30".to_owned(), 4)
+        );
+        assert_eq!(winter - ny_to_unix(2026, 12, 10, 0, 0), 8 * 3600 + 1800);
+    }
 
     #[test]
     fn hours_print_as_they_were_given() {

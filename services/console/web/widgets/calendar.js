@@ -5,6 +5,18 @@ import { esc, duration } from '../lib/format.js';
 // The US market calendar, from the first service that serves one.
 // The market calendar as a month: one widget that reads well as a page or
 // in a narrow tile (it sizes itself to its container, not the window).
+// Short names for scheduled releases, for the month's small cells.
+const SHORT = [['Consumer Price Index', 'CPI'], ['Producer Price Index', 'PPI'], ['Employment Situation', 'Jobs'], ['Job Openings and Labor Turnover', 'JOLTS'], ['FOMC decision', 'FOMC'], ['FOMC minutes', 'Minutes'], ['GDP', 'GDP'], ['Gross Domestic Product', 'GDP'], ['Personal Income and Outlays', 'PCE'], ['Employment Cost Index', 'ECI'], ['Initial jobless claims', 'Claims'], ['U.S. International Trade', 'Trade'], ['U.S. Import and Export Price', 'Import px'], ['Productivity and Costs', 'Productivity']];
+const short = title => SHORT.find(([p]) => title.startsWith(p))?.[1] || title.split(/[,(]/)[0].trim();
+
+// Scheduled releases from a service serving an `econ` stream, by New York date.
+function releases() {
+  const econ = Object.values(fleet.snap?.services || {}).map(s => s.econ).find(e => Array.isArray(e?.events));
+  const by = new Map();
+  for (const e of econ?.events || []) (by.get(e.date) || by.set(e.date, []).get(e.date)).push(e);
+  return { by };
+}
+
 function draw(my) {
   const cal = (fleet.topo?.services || []).map(s => svcState(s.id).calendar).find(c => c?.days?.length);
   const head = '<div><h1>Calendar</h1><p class="muted" style="margin:0">US equity market sessions, in New York time.</p></div>';
@@ -37,11 +49,16 @@ function draw(my) {
   const lead = new Date(Date.UTC(y, m - 1, 1)).getUTCDay(), count = new Date(Date.UTC(y, m, 0)).getUTCDate();
   const cells = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => `<div class="mcal-dow">${d}</div>`);
   for (let i = 0; i < lead; i++) cells.push('<div class="cal-day blank"></div>');
+  const rel = releases();
+  my.day ||= today;
   for (let d = 1; d <= count; d++) {
     const date = `${month}-${String(d).padStart(2, '0')}`, wd = (lead + d - 1) % 7, k = kind(date, wd), sess = sessions.get(date);
-    const hrs = k === 'holiday' ? 'Closed' : k === 'early' ? `Closes ${sess.close}` : k === 'open' ? `${sess.open}–${sess.close}` : k === 'unknown' ? '—' : '';
-    const title = `${date}${hrs ? ' · ' + hrs : k === 'weekend' ? ' · weekend' : ''}`;
-    cells.push(`<div class="cal-day k-${k}${date === today ? ' is-today' : ''}${date < today ? ' past' : ''}" title="${esc(title)}"><span class="n">${d}</span><span class="hrs">${esc(hrs)}</span></div>`);
+    // Only what differs from a normal session is written: closed, or an early close.
+    const hrs = k === 'holiday' ? 'Closed' : k === 'early' ? `Closes ${sess.close}` : '';
+    const evs = rel.by.get(date) || [];
+    const title = [date, hrs || (k === 'weekend' ? 'weekend' : k === 'open' ? `${sess.open}–${sess.close} ET` : ''), ...evs.map(e => `${e.time} ${e.title}`)].filter(Boolean).join('\n');
+    const tags = evs.slice(0, 3).map(e => `<i class="evt ${esc(e.importance)}">${esc(short(e.title))}</i>`).join('') + (evs.length > 3 ? `<i class="evt more">+${evs.length - 3}</i>` : '');
+    cells.push(`<div class="cal-day k-${k}${date === today ? ' is-today' : ''}${date < today ? ' past' : ''}${date === my.day ? ' picked' : ''}" data-day="${date}" title="${esc(title)}"><span class="n">${d}</span>${hrs ? `<span class="hrs">${esc(hrs)}</span>` : ''}${tags ? `<span class="evts">${tags}</span>` : ''}</div>`);
   }
   while (cells.length % 7) cells.push('<div class="cal-day blank"></div>');
   const label = new Date(Date.UTC(y, m - 1, 15)).toLocaleDateString(undefined, { timeZone: 'UTC', month: 'long', year: 'numeric' });
@@ -51,15 +68,27 @@ function draw(my) {
       <div class="mcal-head"><h2>${esc(label)}</h2><span class="mcal-now">${now}</span><span class="mcal-nav">${nav(-1, 'Previous month', month <= months[0])}<button type="button" class="btn small" data-cal-nav="0"${month === today.slice(0, 7) ? ' disabled' : ''}>Today</button>${nav(1, 'Next month', month >= months[1])}</span></div>
       <div class="mcal-grid" style="--weeks:${weeks}">${cells.join('')}</div>
     </div>
+    ${dayList(my.day, rel.by.get(my.day) || [], !!rel.by.size)}
     ${`${month}-01` <= lastDay && lastDay < `${month}-31` ? `<p class="muted" style="margin:0;font-size:13px">The calendar is known through ${esc(lastDay)}.</p>` : ''}`;
+}
+
+// The picked day's releases in full.
+function dayList(day, evs, any) {
+  const label = new Date(day + 'T12:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' });
+  if (!any) return '<p class="muted" style="margin:0;font-size:13px">No economic calendar is being served.</p>';
+  return `<div class="cal-list"><h3>${esc(label)}</h3>${evs.length
+    ? `<ul>${evs.map(e => `<li class="${esc(e.importance)}"><span class="t">${esc(e.time)} ET</span><span class="w">${esc(e.title)}</span><span class="s">${esc(e.source)}</span></li>`).join('')}</ul>`
+    : '<p class="muted" style="margin:0;font-size:13px">No scheduled releases.</p>'}</div>`;
 }
 
 defineWidget('calendar', {
   title: 'Calendar',
   mount(el) {
-    const my = { month: null };
+    const my = { month: null, day: null };
     const update = () => { const top = el.scrollTop; el.innerHTML = draw(my); el.scrollTop = top; };
     const click = e => {
+      const day = e.target.closest('[data-day]');
+      if (day) { my.day = day.dataset.day; update(); return; }
       const b = e.target.closest('[data-cal-nav]'); if (!b) return;
       const dir = +b.dataset.calNav;
       if (!dir) my.month = null;
