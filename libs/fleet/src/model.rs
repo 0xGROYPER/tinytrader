@@ -63,6 +63,8 @@ pub struct ServiceInfo {
     pub schedule: Option<Value>,
     /// One symbol's one-minute bars, on demand (relays).
     pub bars: Option<String>,
+    /// A relay's protocol, listen address and symbols.
+    pub relay: Option<Value>,
 }
 
 impl ServiceInfo {

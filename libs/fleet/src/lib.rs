@@ -325,6 +325,11 @@ async fn observe_into(
     if let Some(path) = d["streams"]["calendar"].as_str() {
         svc["calendar"] = json!(format!("{base}{path}"));
     }
+    // A relay's own description (protocol, listen address, symbols), so a
+    // front end can join it.
+    if d["relay"].is_object() {
+        svc["relay"] = d["relay"].clone();
+    }
     if let Some(path) = d["streams"]["clients"].as_str() {
         svc["clients"] = json!(format!("{base}{path}"));
     }
