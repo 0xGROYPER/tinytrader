@@ -5,6 +5,13 @@
 - **Amends:** [0002](0002-data-store.md) (where files go) and
   [0005](0005-store-service-and-supervision.md) (what the store runs)
 
+
+> **Built so far (2026-10-07):** drive approval with a marker, discovery of
+> approved drives, per-file placement across them, the pool's room in the
+> catalog and console, and (from 0011) the jobs service yielding to live
+> capture. **Not yet built:** second copies by protection class, hash
+> re-checks, and the automations model with its widget.
+
 ## Context
 
 A deployment starts with whatever disks its owner has: often one spare

@@ -8,6 +8,14 @@
 - **See also:** [0005](0005-store-service-and-supervision.md), which makes
   the store a service reached over the network
 
+
+> **Built so far (2026-10-07):** provider roots and the standard layout,
+> filing provider batches (Databento) with SHA-256 checks against the
+> manifest, DBN header checks, provenance and migration ledgers, and the
+> catalog. **Not yet built:** raw capture, the intraday store, segments and
+> sealing, compaction, and reading data back through the store. Those parts
+> below are the design, not a description of the code.
+
 ## Context
 
 Every tinytrader deployment collects, keeps and replays data: live market data

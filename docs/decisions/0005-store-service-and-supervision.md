@@ -75,3 +75,11 @@ Its first version ingests provider batches (Databento) into the standard
 layout of decision 0002, with provenance and a migration ledger, and serves
 the catalog. Reading data back over the network and live recording come
 later.
+
+## Status, 2026-10-07
+
+Unchanged in substance: the store files provider batches and serves the
+catalog; per-file placement across approved drives (0007) is built.
+Reading data back, live recording and the store supervising other
+processes are not built. On macOS the store runs under launchd from a plist
+in the deployment's repository.

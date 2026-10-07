@@ -3,6 +3,13 @@
 - **Status:** Accepted
 - **Date:** 2026-10-05
 
+
+> **Built so far (2026-10-07):** the flake builds and checks every crate
+> (`nix flake check`), and the NixOS module and generated systemd units
+> exist. The one running deployment builds its images with
+> `services/Dockerfile` and the store with cargo; building the images with
+> Nix is on the roadmap.
+
 ## Context
 
 tinytrader's first host configurations target NixOS, and service discovery
