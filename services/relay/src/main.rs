@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use databento::Databento;
-use hub::{ClientGuard, Hub, Upstream};
+use hub::{Hub, Upstream};
 use serde_json::json;
 use tinytrader_observe::{Observer, State, listen_address};
 
@@ -194,7 +194,7 @@ async fn run(args: Args) -> Result<(), String> {
     observer.describe(json!({
         "role": format!("Relays {dataset} {schema_name} for {} to local clients ({}).", args.symbols.join(", "), protocol::PROTOCOL),
         "upstream": [{ "id": provider_id, "label": provider_id, "sub": dataset, "kind": "flow", "via": via }],
-        "streams": { "events": "/events", "series": "/recent", "bars": "/bars" },
+        "streams": { "events": "/events", "series": "/recent", "bars": "/bars", "clients": "/clients" },
         "panels": [{ "heading": format!("{dataset} {}", args.symbols.join(", ")), "note": "Trade prices of the most active instruments, sampled once per second", "decimals": 2 }],
         "relay": { "protocol": protocol::PROTOCOL, "listen": args.listen, "symbols": args.symbols },
         // Relays carrying the same feed on the same hours are one line on a schedule.
@@ -217,7 +217,16 @@ async fn run(args: Args) -> Result<(), String> {
         .router()
         .merge(hub.events.router())
         .merge(hub.series.router())
-        .merge(bars::router(hub.bars.clone(), bar_history));
+        .merge(bars::router(hub.bars.clone(), bar_history))
+        .merge({
+            let hub = hub.clone();
+            axum::Router::new().route(
+                "/clients",
+                axum::routing::get(move || async move {
+                    axum::Json(serde_json::json!({ "clients": hub.roster() }))
+                }),
+            )
+        });
     let observe = tokio::net::TcpListener::bind(&observe_at)
         .await
         .map_err(|e| format!("cannot listen on {observe_at}: {e}"))?;
@@ -275,8 +284,20 @@ async fn run(args: Args) -> Result<(), String> {
                         (Some(a), Some(start)) if start < now => (Some(a.catch_up(start, now, join.conditions)), now),
                         _ => (None, 0),
                     };
-                    hub.events.push(format!("client {peer} joined"), format!("client {peer} joined"));
-                    let _guard = ClientGuard::new(&hub.clients);
+                    let who = match (&join.client, &join.account) {
+                        (Some(c), Some(a)) => format!("{c} (trades {a})"),
+                        (Some(c), None) => c.clone(),
+                        _ => "an unnamed client".to_owned(),
+                    };
+                    hub.events.push(format!("{who} joined from {peer}"), format!("{who} joined from {peer}"));
+                    let _guard = hub.enter(hub::ClientInfo {
+                        client: join.client.clone(),
+                        account: join.account.clone(),
+                        peer: peer.to_string(),
+                        since: tinytrader_observe::unix_seconds(),
+                        replay: requested.is_some(),
+                        conditions: join.conditions,
+                    });
                     hub.serve(out, hub::Serve { start: requested.unwrap_or(now), conditions: join.conditions, history, cut }).await;
                 });
             }

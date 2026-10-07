@@ -16,7 +16,9 @@ export function metric(id, name, labels) {
 }
 
 export function statusOf(node) {
-  if (node.kind === 'ext') return null;
+  if (node.kind === 'ext' || node.kind === 'acct') return null;
+  // A relay's client is drawn only while it is connected.
+  if (node.kind === 'client') return 'ok';
   if (node.kind === 'store') {
     const writer = writerOf(node.id);
     return writer ? statusOf(writer) : 'idle';
@@ -63,6 +65,7 @@ export function uptimeOf(id) {
 
 export function subOf(node) {
   if (node.kind === 'ext') return node.sub || 'external';
+  if (node.kind === 'client' || node.kind === 'acct') return node.sub || '';
   if (node.kind === 'store') {
     const v = node.metric && metric(node.metric.service, node.metric.name);
     return v != null ? fmt(v, node.metric) : (node.sub || 'store');

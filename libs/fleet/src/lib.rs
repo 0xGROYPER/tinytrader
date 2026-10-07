@@ -325,6 +325,9 @@ async fn observe_into(
     if let Some(path) = d["streams"]["calendar"].as_str() {
         svc["calendar"] = json!(format!("{base}{path}"));
     }
+    if let Some(path) = d["streams"]["clients"].as_str() {
+        svc["clients"] = json!(format!("{base}{path}"));
+    }
     if let Some(path) = d["streams"]["econ"].as_str() {
         svc["econ"] = json!(format!("{base}{path}"));
     }
@@ -684,6 +687,15 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
             && let Ok(text) = r.text().await
         {
             entry.insert("metrics".into(), parse_metrics(&text));
+        }
+        // Who is connected to a relay, every poll: the graph draws them.
+        if let Some(url) = svc["clients"].as_str()
+            && let Ok(r) = app.http.get(url).send().await
+        {
+            entry.insert(
+                "clients".into(),
+                r.json::<Value>().await.unwrap_or(Value::Null),
+            );
         }
         if let Some(url) = svc["recent"].as_str()
             && let Ok(r) = app.http.get(url).send().await

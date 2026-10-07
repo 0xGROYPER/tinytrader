@@ -172,6 +172,9 @@ pub struct Hub {
     /// One-minute bars of the relay's own symbols, for charts.
     pub bars: Arc<crate::bars::Bars>,
     pub series: Series,
+    /// Who is connected, by connection.
+    roster: Mutex<BTreeMap<u64, ClientInfo>>,
+    next_client: AtomicU64,
     pub clients: AtomicU64,
     pub records: AtomicU64,
     pub bytes: AtomicU64,
@@ -202,6 +205,8 @@ impl Hub {
             bars: Arc::new(crate::bars::Bars::default()),
             events: Events::default(),
             clients: AtomicU64::new(0),
+            roster: Mutex::new(BTreeMap::new()),
+            next_client: AtomicU64::new(0),
             records: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             reconnects: AtomicU64::new(0),
@@ -571,19 +576,46 @@ pub async fn read_join(stream: TcpStream, hub: &Hub) -> Option<(Join, OwnedWrite
     None
 }
 
-/// Counts a connected client for as long as it lives.
-pub struct ClientGuard<'a>(&'a AtomicU64);
+/// A connected client, as the console shows it.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ClientInfo {
+    /// The name it gave, if any.
+    pub client: Option<String>,
+    /// The Alpaca account it said it trades, if any.
+    pub account: Option<String>,
+    pub peer: String,
+    /// When it joined, Unix seconds.
+    pub since: f64,
+    /// It asked to replay from an earlier time.
+    pub replay: bool,
+    pub conditions: bool,
+}
 
-impl<'a> ClientGuard<'a> {
-    pub fn new(counter: &'a AtomicU64) -> Self {
-        counter.fetch_add(1, Ordering::Relaxed);
-        Self(counter)
+/// Holds a client on the roster (and in the count) for as long as it lives.
+pub struct ClientGuard<'a> {
+    hub: &'a Hub,
+    id: u64,
+}
+
+impl Hub {
+    /// Put a client on the roster until the guard is dropped.
+    pub fn enter(&self, info: ClientInfo) -> ClientGuard<'_> {
+        let id = self.next_client.fetch_add(1, Ordering::Relaxed);
+        lock(&self.roster).insert(id, info);
+        self.clients.fetch_add(1, Ordering::Relaxed);
+        ClientGuard { hub: self, id }
+    }
+
+    /// Everyone connected, oldest first.
+    pub fn roster(&self) -> Vec<ClientInfo> {
+        lock(&self.roster).values().cloned().collect()
     }
 }
 
 impl Drop for ClientGuard<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
+        lock(&self.hub.roster).remove(&self.id);
+        self.hub.clients.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -779,6 +811,45 @@ mod tests {
         let points = recent["SPY 261016C00775000"].as_array().unwrap();
         assert_eq!(points.len(), 1);
         assert_eq!(points[0][1].as_f64(), Some(1.25));
+    }
+
+    #[test]
+    fn the_roster_holds_clients_while_connected() {
+        let hub = Hub::new(metadata(), 8, Duration::from_secs(30));
+        let join = protocol::parse_join(
+            r#"{"protocol":"tinytrader.relay/1","client":"xsp-strategy","account":"paper-1"}"#,
+        )
+        .unwrap();
+        let info = ClientInfo {
+            client: join.client,
+            account: join.account,
+            peer: "127.0.0.1:1".into(),
+            since: 0.0,
+            replay: false,
+            conditions: false,
+        };
+        {
+            let _a = hub.enter(info.clone());
+            let _b = hub.enter(ClientInfo {
+                client: None,
+                account: None,
+                ..info
+            });
+            let r = hub.roster();
+            assert_eq!(r.len(), 2);
+            assert_eq!(
+                (r[0].client.as_deref(), r[0].account.as_deref()),
+                (Some("xsp-strategy"), Some("paper-1"))
+            );
+            assert_eq!(hub.clients.load(Ordering::Relaxed), 2);
+        }
+        assert!(hub.roster().is_empty());
+        assert_eq!(hub.clients.load(Ordering::Relaxed), 0);
+        assert!(
+            protocol::parse_join(r#"{"protocol":"tinytrader.relay/1","client":"<script>"}"#)
+                .is_err()
+        );
+        assert!(protocol::parse_join(r#"{"protocol":"tinytrader.relay/1","account":""}"#).is_err());
     }
 
     #[tokio::test]

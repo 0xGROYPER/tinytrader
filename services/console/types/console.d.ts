@@ -64,6 +64,8 @@ interface Panel {
 
 /** A brokerage account as the accounts service serves it. */
 interface Account {
+  /** Its name in the deployment, such as `paper-1`. */
+  name?: string;
   label?: string;
   environment?: 'live' | 'paper' | string;
   updated_at?: number;
@@ -84,8 +86,23 @@ interface Topology {
 }
 
 /** A part of the deployment graph: an outside source, a service or a store. */
+/** A client connected to a relay, from its `/clients` roster. */
+interface RelayClient {
+  client?: string | null;
+  account?: string | null;
+  peer: string;
+  since: number;
+  replay: boolean;
+  conditions: boolean;
+}
+
 type GraphNode = TopoService & {
-  kind: 'ext' | 'svc' | 'store';
+  kind: 'ext' | 'svc' | 'store' | 'client' | 'acct';
+  /** A client's connections, one per relay. */
+  conns?: (RelayClient & { relay: string })[];
+  unnamed?: boolean;
+  /** An account node's account, when the deployment reads it. */
+  account?: Account | null;
   metric?: { service: string; name: string; label?: string; format?: string; decimals?: number };
 };
 
@@ -181,6 +198,7 @@ interface ServiceState {
   metrics?: Record<string, Metric[]>;
   catalog?: Catalog;
   calendar?: { clock?: { is_open: boolean; next_open?: string; next_close?: string }; days: { date: string; open: string; close: string }[] };
+  clients?: { clients: RelayClient[] };
   econ?: { events: { at: number; date: string; time: string; title: string; source: string; importance: 'low' | 'medium' | 'high' }[]; sources?: Record<string, { events: number; error: string | null }> };
   news?: { items: { id: string; headline: string; summary?: string; url?: string; source?: string; author?: string; symbols?: string[]; created_at?: string }[] };
   accounts?: { accounts: Account[] };

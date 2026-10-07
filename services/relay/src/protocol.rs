@@ -21,12 +21,34 @@ pub struct Join {
     /// Interleave trade condition records (sources that have them).
     #[serde(default)]
     pub conditions: bool,
+    /// Who is connecting, such as `xsp-strategy`: shown on the console.
+    #[serde(default)]
+    pub client: Option<String>,
+    /// The Alpaca account the client trades, by its name in the deployment
+    /// (such as `paper-1`): shown on the console beside the client.
+    #[serde(default)]
+    pub account: Option<String>,
+}
+
+/// A name a client gives: up to 64 letters, digits, `.`, `_`, `-` and spaces.
+fn name_ok(n: &str) -> bool {
+    !n.trim().is_empty()
+        && n.len() <= 64
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || " ._-".contains(c))
 }
 
 /// Parse a join line, refusing other protocol versions.
 pub fn parse_join(line: &str) -> Result<Join, String> {
     let join: Join =
         serde_json::from_str(line.trim()).map_err(|e| format!("unreadable join request: {e}"))?;
+    for (what, n) in [("client", &join.client), ("account", &join.account)] {
+        if n.as_deref().is_some_and(|n| !name_ok(n)) {
+            return Err(format!(
+                "{what} must be up to 64 letters, digits, '.', '_', '-' or spaces"
+            ));
+        }
+    }
     if join.protocol != PROTOCOL {
         return Err(format!(
             "unsupported protocol {:?}; this relay serves {PROTOCOL}",

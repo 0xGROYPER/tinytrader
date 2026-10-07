@@ -65,6 +65,10 @@ TCP, one port per relay. The client speaks first, with one line of JSON:
 | `protocol` | Required. A relay refuses versions it doesn't serve. |
 | `start` | Optional. Replay from this time, then continue live. Absent means live from now. |
 | `conditions` | Optional, IEX only. Interleave a trade conditions record after each trade. |
+| `client` | Optional. The client's name, such as `xsp-strategy` (up to 64 letters, digits, `.`, `_`, `-` or spaces). Added 2026-10-07. |
+| `account` | Optional. The Alpaca account the client trades, by its name in the deployment, such as `paper-1`. Added 2026-10-07. |
+
+Each relay lists who is connected at `/clients` (name, account, address, since when, live or replaying, with or without conditions), and the console draws named clients and the accounts they trade.
 
 Requiring the client to speak first removes Hyphae's 250 ms wait on every
 connection. A malformed or refused request gets an `ErrorMsg` and the

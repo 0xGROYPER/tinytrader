@@ -17,7 +17,41 @@ function activeGraph() {
   const kept = edges.filter(e => !off.has(e.from) && !off.has(e.to));
   const used = new Set(kept.flatMap(e => [e.from, e.to]));
   const byId = Object.fromEntries(Object.entries(all).filter(([id, n]) => !off.has(id) && (n.kind !== 'ext' || used.has(id))));
+  addClients(byId, kept);
   return { byId, edges: kept };
+}
+
+// The relays' clients, in a box of their own: each named client once, fed
+// by every relay it reads; unnamed ones counted per relay; and each Alpaca
+// account a client says it trades, beside it.
+function addClients(byId, edges) {
+  const accounts = Object.values(fleet.snap?.services || {}).flatMap(s => s.accounts?.accounts || []);
+  const link = (from, to, label) => { if (!edges.some(e => e.from === from && e.to === to)) edges.push({ from, to, kind: 'flow', ...(label ? { label } : {}) }); };
+  for (const relay of Object.values(byId).filter(n => n.kind === 'svc')) {
+    const list = svcState(relay.id).clients?.clients;
+    if (!Array.isArray(list) || !list.length) continue;
+    for (const c of list.filter(c => c.client)) {
+      const id = 'client:' + c.client;
+      const node = byId[id] ||= { id, kind: 'client', label: c.client, host: 'clients', conns: [] };
+      node.conns.push({ ...c, relay: relay.label || relay.id });
+      link(relay.id, id);
+      if (c.account) {
+        const a = accounts.find(x => x.name === c.account || x.label?.toLowerCase() === c.account.toLowerCase());
+        const aid = 'account:' + c.account;
+        byId[aid] ||= { id: aid, kind: 'acct', label: a ? `Alpaca ${a.label}` : c.account, host: 'clients', account: a || null, sub: a ? `${a.environment} account` : 'not an account this deployment reads' };
+        link(id, aid, 'trades');
+      }
+    }
+    const unnamed = list.filter(c => !c.client);
+    if (unnamed.length) {
+      const id = 'client:unnamed@' + relay.id;
+      byId[id] = { id, kind: 'client', label: `${unnamed.length} unnamed`, host: 'clients', conns: unnamed.map(c => ({ ...c, relay: relay.label || relay.id })), unnamed: true };
+      link(relay.id, id);
+    }
+  }
+  for (const n of Object.values(byId)) {
+    if (n.kind === 'client') n.sub = n.unnamed ? `no name given · ${n.conns[0].relay}` : `${n.conns.length} relay${n.conns.length === 1 ? '' : 's'}`;
+  }
 }
 function layout() {
   const { byId, edges } = activeGraph();
@@ -39,8 +73,9 @@ function layout() {
   };
   ids.forEach(colOf);
   const hosts = fleet.topo?.hosts || [{ id: 'local', label: 'local' }];
-  const hostOf = n => n.kind === 'ext' ? null : (n.host || hosts[0].id);
-  const maxCol = Math.max(1, ...Object.values(col));
+  const outside = id => byId[id].host === 'clients';
+  const hostOf = n => n.kind === 'ext' || n.host === 'clients' ? null : (n.host || hosts[0].id);
+  const maxCol = Math.max(1, ...ids.filter(id => !outside(id)).map(id => col[id]));
   const x = c => PAD + c * (NW + CG) + (c > 0 ? 16 : 0);
   const pos = {}, boxes = [];
   const ext = ids.filter(id => byId[id].kind === 'ext');
@@ -61,7 +96,27 @@ function layout() {
     boxes.push({ x: x(1) - 18, y, w: maxCol * (NW + CG) - CG + 36, h: height, label: h.label || h.id, sub: h.sub || '' });
     y += height + 28;
   }
-  const width = x(maxCol) + NW + PAD + 2;
+  // Clients of the relays, and the accounts they trade, in a box to the
+  // right: each client level with the relays feeding it.
+  let right = x(maxCol) + NW;
+  const cl = ids.filter(id => byId[id].kind === 'client'), ac = ids.filter(id => byId[id].kind === 'acct');
+  if (cl.length) {
+    const cx = right + CG, place = (list, px) => {
+      let next = PAD + HOST_TOP;
+      list.sort((a, b) => avgRow(a) - avgRow(b)).forEach(id => {
+        const want = Math.max(next, Math.min(avgRow(id), 1e8));
+        pos[id] = { x: px, y: want, w: NW, h: NH }; next = want + NH + RG;
+      });
+      return next;
+    };
+    const bottom = Math.max(place(cl, cx + 18), ac.length ? place(ac, cx + 18 + NW + CG / 2) : 0);
+    const w = (ac.length ? 2 * NW + CG / 2 : NW) + 36;
+    const top = Math.min(...[...cl, ...ac].map(id => pos[id].y)) - HOST_TOP;
+    boxes.push({ x: cx, y: top, w, h: bottom - top - RG + 18, label: 'clients', sub: 'of the relays' });
+    right = cx + w;
+    y = Math.max(y, bottom + 28);
+  }
+  const width = right + PAD + 2;
   return { byId, edges, pos, boxes, width, height: Math.max(y - 28 + PAD, PAD * 2 + HOST_TOP + ext.length * (NH + RG)) };
 
   function avgRow(id) {
@@ -114,6 +169,15 @@ function detail(node, g, preview) {
     if (h) facts.push(['Health', `${h.state}${h.detail ? ' · ' + h.detail : ''}`], ['Build', h.build || '—']);
     if (s.health?.error) facts.push(['Health', 'unreachable: ' + s.health.error]);
     if (h?.last_error) facts.push(['Last error' + (h.last_error_at ? ` (${duration(Date.now() / 1000 - h.last_error_at)} ago)` : ''), h.last_error]);
+  } else if (node.kind === 'client') {
+    for (const c of node.conns) facts.push([c.relay, `${c.replay ? 'replaying, then live' : 'live'}${c.conditions ? ', with trade conditions' : ''} · for ${duration(Date.now() / 1000 - c.since)} · from ${c.peer}`]);
+    const accts = [...new Set(node.conns.map(c => c.account).filter(Boolean))];
+    if (accts.length) facts.push(['Trades', accts.join(', ')]);
+    if (node.unnamed) facts.push(['Name', 'none given: a client names itself with "client" in its join request']);
+  } else if (node.kind === 'acct') {
+    const a = node.account?.account;
+    if (a) facts.push(['Equity', `$${Number(a.equity).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`], ['Buying power', `$${Number(a.buying_power).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`], ['Positions', String(node.account.positions?.length ?? 0)]);
+    else facts.push(['Account', node.sub]);
   } else if (node.kind === 'store') {
     const w = writerOf(node.id);
     facts.push(['Written by', w ? w.label || w.id : '—']);
@@ -121,7 +185,7 @@ function detail(node, g, preview) {
   }
   const metrics = s.metrics ? Object.entries(s.metrics).flatMap(([name, list]) => list.map(m => /** @type {[string, number]} */ ([name + labelText(m.labels), m.value]))) : [];
   return `<div class="detail">
-    <div class="d-head"><b>${esc(node.label || node.id)}</b>${st ? `<span class="pill ${statusText[st][1]}">${statusText[st][0]}</span>` : ''}<span class="muted" style="margin-left:auto">${esc(node.kind === 'ext' ? 'external' : (node.host || 'local'))}</span>${preview ? '' : '<button type="button" class="tile-btn" data-pop-close title="Close (Esc)" aria-label="Close">✕</button>'}</div>
+    <div class="d-head"><b>${esc(node.label || node.id)}</b>${st ? `<span class="pill ${statusText[st][1]}">${statusText[st][0]}</span>` : ''}<span class="muted" style="margin-left:auto">${esc(node.kind === 'ext' ? 'external' : node.kind === 'client' ? 'client' : node.kind === 'acct' ? 'account' : (node.host || 'local'))}</span>${preview ? '' : '<button type="button" class="tile-btn" data-pop-close title="Close (Esc)" aria-label="Close">✕</button>'}</div>
     ${preview && node.kind === 'svc' && node.events ? '<div class="muted" style="font-size:12px">Click for live events and every metric.</div>' : ''}
     ${node.role ? `<div class="muted">${esc(node.role)}</div>` : ''}
     ${facts.length ? `<div class="facts">${facts.map(([k, v]) => `<div><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('')}</div>` : ''}
@@ -190,7 +254,7 @@ defineWidget('overview', {
       g.pop.style.top = Math.max(8, Math.min(r.top, innerHeight - h - 8)) + 'px';
     }
     function card() {
-      const id = g.node || g.hover, node = id && nodesById()[id];
+      const id = g.node || g.hover, node = id && activeGraph().byId[id];
       if (!node) return close();
       if (!g.pop) { g.pop = document.createElement('div'); g.pop.className = 'node-pop'; document.body.appendChild(g.pop); wirePop(g.pop); }
       g.pop.classList.toggle('pinned', !!g.node);
@@ -218,7 +282,7 @@ defineWidget('overview', {
     function draw() {
       const top = el.scrollTop; el.innerHTML = topology(g); el.scrollTop = top;
     }
-    g.pin = id => { if (!nodesById()[id]) return; g.node = id; g.ev.fresh = new Set(); draw(); card(); };
+    g.pin = id => { if (!activeGraph().byId[id]) return; g.node = id; g.ev.fresh = new Set(); draw(); card(); };
     const over = e => {
       const n = e.target.closest('[data-node]'); if (!n) return;
       clearTimeout(g.hideT);
