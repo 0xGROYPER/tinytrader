@@ -12,7 +12,8 @@ schema below cost on your plan before starting.
 ```sh
 cd examples/databento
 export DATABENTO_API_KEY=...          # from your Databento account
-docker compose up --build -d
+../../nix/build-images.sh relay console   # builds the images with Nix inside Docker
+docker compose up -d
 open http://localhost:8080
 ```
 

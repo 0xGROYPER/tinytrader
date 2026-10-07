@@ -1,4 +1,4 @@
-# Builds each service's container image from services/Dockerfile on native
+# Builds each service's container image with Nix (nix/images.nix) on native
 # Linux runners and publishes a multi-architecture image to GitHub Container
 # Registry: ghcr.io/<owner>/tinytrader-<service>:<git sha> and :latest.
 name: images
@@ -20,12 +20,14 @@ jobs:
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
       - name: Build and push
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           ref="ghcr.io/$owner/tinytrader-${{ matrix.service }}:${GITHUB_SHA}-${{ matrix.platform.arch }}"
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker build -f services/Dockerfile --build-arg SERVICE=${{ matrix.service }} -t "$ref" .
+          "$(nix build --no-link --print-out-paths .#image-${{ matrix.service }})" | docker load
+          docker tag "tinytrader/${{ matrix.service }}:nix" "$ref"
           docker push "$ref"
   manifest:
     needs: build

@@ -80,8 +80,8 @@ capability is the exception ([decision 0004](docs/decisions/0004-nix-not-nixos.m
 ## Toolchain
 
 `rust-toolchain.toml` names the one Rust version for the repository. rustup
-reads it, Nix builds and dev shells use it, and `services/Dockerfile` must
-name the same version; `checks.<system>.toolchain` fails if they differ.
+reads it, and Nix builds (including the container images) and dev shells
+use it.
 
 ## Before you send a change
 

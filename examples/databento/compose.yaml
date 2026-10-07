@@ -1,6 +1,7 @@
 # tinytrader example: a Databento live subscription and the tinytrader console.
 #   export DATABENTO_API_KEY=...        # never commit it
-#   docker compose up --build -d
+#   ../../nix/build-images.sh relay console   # once, and after changes (needs only Docker)
+#   docker compose up -d
 #   open http://localhost:8080
 #
 # Live data can be billed by usage. Check what the subscription below costs on
@@ -19,11 +20,7 @@ services:
   # A market data relay (decision 0006): one Databento live session, served
   # to clients on this machine over tinytrader.relay/1 (port 7600).
   relay:
-    build:
-      context: ../..
-      dockerfile: services/Dockerfile
-      args: { SERVICE: relay }
-    image: tinytrader/relay:dev
+    image: tinytrader/relay:nix
     labels:
       tinytrader.observe: "9110"
     environment:
@@ -42,11 +39,7 @@ services:
     cpus: 1.0
 
   console:
-    build:
-      context: ../..
-      dockerfile: services/Dockerfile
-      args: { SERVICE: console }
-    image: tinytrader/console:dev
+    image: tinytrader/console:nix
     labels:
       tinytrader.observe: "8080"
     environment:

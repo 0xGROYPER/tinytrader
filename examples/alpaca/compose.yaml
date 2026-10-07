@@ -1,6 +1,7 @@
 # tinytrader example: Alpaca's free real-time IEX feed and the tinytrader console.
 #   export APCA_API_KEY_ID=... APCA_API_SECRET_KEY=...   # never commit them
-#   docker compose up --build -d
+#   ../../nix/build-images.sh relay alpaca-news alpaca-account console   # once, and after changes (needs only Docker)
+#   docker compose up -d
 #   open http://localhost:8080
 name: tinytrader-alpaca
 
@@ -16,11 +17,7 @@ services:
   # A market data relay (decision 0006): Alpaca's IEX feed, served to
   # clients on this machine over tinytrader.relay/1 (port 7610).
   relay:
-    build:
-      context: ../..
-      dockerfile: services/Dockerfile
-      args: { SERVICE: relay }
-    image: tinytrader/relay:dev
+    image: tinytrader/relay:nix
     labels:
       tinytrader.observe: "9110"
     environment:
@@ -38,11 +35,7 @@ services:
     cpus: 1.0
 
   alpaca-news:
-    build:
-      context: ../..
-      dockerfile: services/Dockerfile
-      args: { SERVICE: alpaca-news }
-    image: tinytrader/alpaca-news:dev
+    image: tinytrader/alpaca-news:nix
     labels:
       tinytrader.observe: "9106"
     environment:
@@ -58,11 +51,7 @@ services:
   # Balances and positions of the account the keys belong to (paper or
   # live, told apart by the key). Read only: it never places orders.
   alpaca-account:
-    build:
-      context: ../..
-      dockerfile: services/Dockerfile
-      args: { SERVICE: alpaca-account }
-    image: tinytrader/alpaca-account:dev
+    image: tinytrader/alpaca-account:nix
     labels:
       tinytrader.observe: "9107"
     environment:
@@ -75,11 +64,7 @@ services:
     cpus: 0.25
 
   console:
-    build:
-      context: ../..
-      dockerfile: services/Dockerfile
-      args: { SERVICE: console }
-    image: tinytrader/console:dev
+    image: tinytrader/console:nix
     labels:
       tinytrader.observe: "8080"
     environment:

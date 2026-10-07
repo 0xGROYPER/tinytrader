@@ -19,7 +19,9 @@ flake input. See [decision 0001](docs/decisions/0001-platform-and-deployment.md)
 live Coinbase prices and the tinytrader console, with only Docker:
 
 ```sh
-cd examples/quickstart && docker compose up --build -d
+cd examples/quickstart
+../../nix/build-images.sh ticker console   # builds the images with Nix, inside Docker
+docker compose up -d
 # then open http://localhost:8080
 ```
 
@@ -36,7 +38,7 @@ console the same way.
 | `libs/schedule` | Active hours on the market calendar, in New York time |
 | `libs/dbn` | tinytrader's DBN extension records (trade conditions) |
 | `libs/tinytrader` | The crates.io umbrella crate |
-| `services/Dockerfile` | Container image build for any service |
+| `nix/images.nix`, `nix/build-images.sh` | Container images of the services, built by Nix (inside Docker when Nix isn't installed) |
 | `apps/tui` | Terminal view of a deployment (Ratatui): overview, services, market chart, a live options book, data and hosts |
 | `services/console` | The operator console: workspaces of widgets (Dockview), docs and the roadmap |
 | `services/ticker` | Toy service used by the quickstart |

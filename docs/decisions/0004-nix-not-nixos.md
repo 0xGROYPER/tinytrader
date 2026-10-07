@@ -6,9 +6,11 @@
 
 > **Built so far (2026-10-07):** the flake builds and checks every crate
 > (`nix flake check`), and the NixOS module and generated systemd units
-> exist. The one running deployment builds its images with
-> `services/Dockerfile` and the store with cargo; building the images with
-> Nix is on the roadmap.
+> exist. Since 2026-10-07 container images are built by Nix too
+> (`nix/images.nix`); on a Mac, or with Docker alone, `nix/build-images.sh`
+> builds them inside Docker's Linux VM, so there is one build. The
+> nix-darwin module (`darwinModules.services`) runs the same service
+> definitions as launchd agents on macOS.
 
 ## Context
 

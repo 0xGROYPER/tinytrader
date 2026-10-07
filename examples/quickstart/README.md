@@ -8,7 +8,8 @@ You need Docker with Compose. No Nix, accounts or API keys.
 
 ```sh
 cd examples/quickstart
-docker compose up --build -d
+../../nix/build-images.sh ticker console   # builds the images with Nix inside Docker
+docker compose up -d
 open http://localhost:8080        # or visit it in any browser
 ```
 

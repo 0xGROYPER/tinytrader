@@ -1,5 +1,6 @@
 # tinytrader quickstart: a toy collector and the console, on one machine.
-#   docker compose up --build
+#   ../../nix/build-images.sh ticker console   # once, and after changes (needs only Docker)
+#   docker compose up
 #   open http://localhost:8080
 name: tinytrader-quickstart
 
@@ -13,11 +14,7 @@ x-service: &service
 
 services:
   ticker:
-    build:
-      context: ../..
-      dockerfile: services/Dockerfile
-      args: { SERVICE: ticker }
-    image: tinytrader/ticker:dev
+    image: tinytrader/ticker:nix
     labels:
       tinytrader.observe: "9105"
     environment:
@@ -31,11 +28,7 @@ services:
     cpus: 1.0
 
   console:
-    build:
-      context: ../..
-      dockerfile: services/Dockerfile
-      args: { SERVICE: console }
-    image: tinytrader/console:dev
+    image: tinytrader/console:nix
     labels:
       tinytrader.observe: "8080"
     environment:

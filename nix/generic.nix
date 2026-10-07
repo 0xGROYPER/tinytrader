@@ -21,16 +21,6 @@
       ];
     in
     {
-      # services/Dockerfile must build with the toolchain in rust-toolchain.toml.
-      checks.toolchain = pkgs.runCommand "tinytrader-toolchain-check" { } ''
-        want=$(sed -n 's/^channel = "\(.*\)"/\1/p' ${../rust-toolchain.toml})
-        if ! grep -q "^FROM rust:$want-" ${../services/Dockerfile}; then
-          echo "services/Dockerfile must use rust:$want (from rust-toolchain.toml)" >&2
-          exit 1
-        fi
-        touch $out
-      '';
-
       checks.generic =
         pkgs.runCommand "tinytrader-generic-check" { nativeBuildInputs = [ pkgs.gnugrep ]; }
           ''

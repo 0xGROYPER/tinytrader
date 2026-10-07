@@ -29,6 +29,7 @@
         ./nix/rust.nix
         ./nix/generic.nix
         ./nix/web.nix
+        ./nix/images.nix
       ];
 
       flake = {

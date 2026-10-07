@@ -13,7 +13,8 @@ account is enough). Create API keys in Alpaca's dashboard.
 ```sh
 cd examples/alpaca
 export APCA_API_KEY_ID=... APCA_API_SECRET_KEY=...
-docker compose up --build -d
+../../nix/build-images.sh relay alpaca-news alpaca-account console   # builds the images with Nix inside Docker
+docker compose up -d
 open http://localhost:8080
 ```
 
