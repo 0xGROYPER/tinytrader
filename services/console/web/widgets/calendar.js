@@ -58,7 +58,7 @@ function draw(my) {
   const cells = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => `<div class="mcal-dow">${d}</div>`);
   for (let i = 0; i < lead; i++) cells.push('<div class="cal-day blank"></div>');
   const rel = releases();
-  my.day ||= today;
+  my.cells = new Map();
   for (let d = 1; d <= count; d++) {
     const date = `${month}-${String(d).padStart(2, '0')}`, wd = (lead + d - 1) % 7, k = kind(date, wd), sess = sessions.get(date);
     // Only what differs from a normal session is written: closed, or an early close.
@@ -69,7 +69,8 @@ function draw(my) {
     // Releases first; earnings as one tag naming the largest company.
     const tags = evs.slice(0, 2).map(e => `<i class="evt ${esc(e.importance)}">${esc(short(e.title))}</i>`).join('') + (evs.length > 2 ? `<i class="evt more">+${evs.length - 2}</i>` : '')
       + (reps.length ? `<i class="evt earn">${esc(reps[0].symbol)}${reps.length > 1 ? ` +${reps.length - 1}` : ''}</i>` : '');
-    cells.push(`<div class="cal-day k-${k}${date === today ? ' is-today' : ''}${date < today ? ' past' : ''}${date === my.day ? ' picked' : ''}" data-day="${date}" title="${esc(title)}"><span class="n">${d}</span>${hrs ? `<span class="hrs">${esc(hrs)}</span>` : ''}${tags ? `<span class="evts">${tags}</span>` : ''}</div>`);
+    my.cells.set(date, { hours: hrs || (k === 'open' ? `${sess.open}–${sess.close} ET` : k === 'weekend' ? 'Weekend' : ''), evs, reps });
+    cells.push(`<div class="cal-day k-${k}${date === today ? ' is-today' : ''}${date < today ? ' past' : ''}${date === my.pin ? ' picked' : ''}" data-day="${date}" aria-label="${esc(title)}"><span class="n">${d}</span>${hrs ? `<span class="hrs">${esc(hrs)}</span>` : ''}${tags ? `<span class="evts">${tags}</span>` : ''}</div>`);
   }
   while (cells.length % 7) cells.push('<div class="cal-day blank"></div>');
   const label = new Date(Date.UTC(y, m - 1, 15)).toLocaleDateString(undefined, { timeZone: 'UTC', month: 'long', year: 'numeric' });
@@ -79,42 +80,63 @@ function draw(my) {
       <div class="mcal-head"><h2>${esc(label)}</h2><span class="mcal-now">${now}</span><span class="mcal-nav">${nav(-1, 'Previous month', month <= months[0])}<button type="button" class="btn small" data-cal-nav="0"${month === today.slice(0, 7) ? ' disabled' : ''}>Today</button>${nav(1, 'Next month', month >= months[1])}</span></div>
       <div class="mcal-grid" style="--weeks:${weeks}">${cells.join('')}</div>
     </div>
-    ${dayList(my.day, rel.by.get(my.day) || [], !!rel.by.size)}
-    ${rel.earnings ? earningsList(rel.reports.get(my.day) || []) : ''}
-    ${`${month}-01` <= lastDay && lastDay < `${month}-31` ? `<p class="muted" style="margin:0;font-size:13px">The calendar is known through ${esc(lastDay)}.</p>` : ''}`;
+`;
 }
 
-// The picked day's releases in full.
-function dayList(day, evs, any) {
-  const label = new Date(day + 'T12:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' });
-  if (!any) return '<p class="muted" style="margin:0;font-size:13px">No economic calendar is being served.</p>';
-  return `<div class="cal-list"><h3>${esc(label)}</h3>${evs.length
-    ? `<ul>${evs.map(e => `<li class="${esc(e.importance)}"><span class="t">${esc(e.time)} ET</span><span class="w">${esc(e.title)}</span><span class="s">${esc(e.source)}</span></li>`).join('')}</ul>`
-    : '<p class="muted" style="margin:0;font-size:13px">No scheduled releases.</p>'}</div>`;
-}
-
-// The picked day's earnings reports, with each source's date where they disagree.
-function earningsList(reps) {
-  if (!reps.length) return '<div class="cal-list"><h3>Earnings</h3><p class="muted" style="margin:0;font-size:13px">No reports from companies of $10B or more, or on the watch list.</p></div>';
-  const eps = r => r.eps_actual != null ? `EPS ${r.eps_actual} (est. ${r.eps_estimate ?? '?'})` : r.eps_estimate != null ? `est. EPS ${r.eps_estimate}` : '';
-  const row = r => {
-    const disputed = r.disputed ? Object.entries(r.dates).map(([s, d]) => `${s}: ${d}`).join(', ') : '';
-    return `<li class="${esc(r.importance)}"><span class="t">${esc(when[r.when] || r.when)}</span>`
-      + `<span class="w"><b>${esc(r.symbol)}</b> ${esc(r.name || '')}${disputed ? ` <span class="pill p-warn" title="${esc(disputed)}">dates differ</span>` : ''}</span>`
-      + `<span class="s">${esc([cap(r.market_cap), eps(r)].filter(Boolean).join(' · '))}</span></li>`;
-  };
-  return `<div class="cal-list"><h3>Earnings</h3><ul>${reps.map(row).join('')}</ul>
-    <p class="muted" style="margin:0;font-size:12px">Dates from Alpha Vantage, Finnhub and Nasdaq.com; most are the companies' expected dates until confirmed.</p></div>`;
+// A day in full, shown over the month while the day is hovered (or pinned
+// by a click): its session, scheduled releases and earnings reports.
+function dayCard(day, cell) {
+  const label = new Date(day + 'T12:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC', weekday: 'long', month: 'long', day: 'numeric' });
+  const { hours = '', evs = [], reps = [] } = cell || {};
+  const eps = r => r.eps_actual != null ? `EPS ${r.eps_actual} (est. ${r.eps_estimate ?? '?'})` : r.eps_estimate != null ? `est. ${r.eps_estimate}` : '';
+  const rel = evs.length
+    ? `<ul>${evs.map(e => `<li class="${esc(e.importance)}"><span class="t">${esc(e.time)}</span><span class="w">${esc(e.title)}</span><span class="s">${esc(e.source)}</span></li>`).join('')}</ul>`
+    : '';
+  const earn = reps.length
+    ? `<h4>Earnings</h4><ul>${reps.map(r => {
+      const differ = r.disputed ? Object.entries(r.dates).map(([s, d]) => `${s}: ${d}`).join(', ') : '';
+      return `<li class="${esc(r.importance)}"><span class="t">${esc(when[r.when] || r.when)}</span><span class="w"><b>${esc(r.symbol)}</b> ${esc(r.name || '')}${differ ? ` <span class="pill p-warn" title="${esc(differ)}">dates differ</span>` : ''}</span><span class="s">${esc([cap(r.market_cap), eps(r)].filter(Boolean).join(' · '))}</span></li>`;
+    }).join('')}</ul>`
+    : '';
+  return `<h3>${esc(label)}</h3>${hours ? `<p class="cp-hrs">${esc(hours)}</p>` : ''}${rel}${earn}${!rel && !earn ? '<p class="muted" style="margin:0">Nothing scheduled.</p>' : ''}`;
 }
 
 defineWidget('calendar', {
   title: 'Calendar',
   mount(el) {
-    const my = { month: null, day: null };
-    const update = () => { const top = el.scrollTop; el.innerHTML = draw(my); el.scrollTop = top; };
+    const my = { month: null, pin: null, hover: null, cells: new Map() };
+    el.style.position = 'relative';
+    // The card for the hovered (or pinned) day, beside its cell, inside the widget.
+    const card = () => {
+      el.querySelector('.cal-pop')?.remove();
+      const day = my.hover || my.pin, cellEl = day && el.querySelector(`[data-day="${day}"]`);
+      if (!cellEl) return;
+      // A card shown only while hovering lets the mouse through, so it never
+      // gets in the way of the days beneath; a pinned one can be read and scrolled.
+      el.insertAdjacentHTML('beforeend', `<div class="cal-pop${my.hover && my.hover !== my.pin ? ' hovering' : ''}" role="dialog" aria-label="Day details">${dayCard(day, my.cells.get(day))}</div>`);
+      const pop = /** @type {HTMLElement} */ (el.querySelector('.cal-pop')), c = cellEl.getBoundingClientRect(), h = el.getBoundingClientRect();
+      const w = pop.offsetWidth, room = el.clientWidth;
+      let left = c.right - h.left + el.scrollLeft + 6;
+      if (left + w > room) left = c.left - h.left + el.scrollLeft - w - 6;
+      pop.style.left = `${Math.max(4, Math.min(left, room - w - 4))}px`;
+      // Within the visible part of the widget: beside the cell, moved up if it would run off the bottom.
+      pop.style.maxHeight = `${Math.min(440, el.clientHeight - 8)}px`;
+      const lo = el.scrollTop + 4, hi = el.scrollTop + el.clientHeight - pop.offsetHeight - 4;
+      pop.style.top = `${Math.max(lo, Math.min(c.top - h.top + el.scrollTop, hi))}px`;
+    };
+    const update = () => { const top = el.scrollTop; el.innerHTML = draw(my); el.scrollTop = top; card(); };
+    const over = e => {
+      if (e.target.closest('.cal-pop')) return;
+      const day = e.target.closest('[data-day]')?.dataset.day || null;
+      if (day !== my.hover) { my.hover = day; card(); }
+    };
+    const leave = () => { if (my.hover) { my.hover = null; card(); } };
     const click = e => {
+      if (e.target.closest('.cal-pop')) return;
       const day = e.target.closest('[data-day]');
-      if (day) { my.day = day.dataset.day; update(); return; }
+      // A click pins the day's card (for touch, or to read it at length); again unpins.
+      if (day) { my.pin = my.pin === day.dataset.day ? null : day.dataset.day; update(); return; }
+      if (my.pin && !e.target.closest('[data-cal-nav]')) { my.pin = null; update(); return; }
       const b = e.target.closest('[data-cal-nav]'); if (!b) return;
       const dir = +b.dataset.calNav;
       if (!dir) my.month = null;
@@ -122,7 +144,9 @@ defineWidget('calendar', {
       update();
     };
     el.addEventListener('click', click);
+    el.addEventListener('mouseover', over);
+    el.addEventListener('mouseleave', leave);
     update();
-    return { update, dispose: () => el.removeEventListener('click', click) };
+    return { update, dispose: () => { el.removeEventListener('click', click); el.removeEventListener('mouseover', over); el.removeEventListener('mouseleave', leave); } };
   },
 });

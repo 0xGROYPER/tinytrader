@@ -26,11 +26,11 @@ function search(list, q) {
   return all(list).filter(({ d }) => words.every(w => `${d.title} ${d.path}`.toLowerCase().includes(w))).slice(0, 12);
 }
 
-const link = ({ c, d }) => `<a href="/docs/#${esc(c.id)}-${d.index}" data-open-doc="${esc(c.id)}:${d.index}"><b>${esc(d.title)}</b><span>${esc(d.path)}</span></a>`;
+const card = ({ c, d }) => `<a class="doc-card" href="/docs/#${esc(c.id)}-${d.index}" data-open-doc="${esc(c.id)}:${d.index}"><b>${esc(d.title)}</b><span>${esc(d.path)}</span></a>`;
 
 /** The search results, or nothing when there's no query. @param {Collection[]} list @param {string} q */
 const results = (list, q) => q.trim()
-  ? `<div class="dh-results">${search(list, q).map(link).join('') || '<p class="muted">No documents match.</p>'}</div>`
+  ? `<div class="dh-results doc-cards">${search(list, q).map(card).join('') || '<p class="muted">No documents match.</p>'}</div>`
   : '<div class="dh-results" hidden></div>';
 
 /** The header's pixel wordmark, cropped to "tinytrader" (without ".io") and drawn large. */
@@ -51,7 +51,7 @@ function home(list, q) {
       ${mark()}
       <input class="dh-search" type="search" placeholder="Search the docs" aria-label="Search the docs" value="${esc(q)}" autocomplete="off">
       ${results(list, q)}
-      ${s.length ? `<div class="dh-start"><h3>Start here</h3>${s.map(link).join('')}</div>` : ''}
+      ${s.length ? `<div class="dh-start"${q.trim() ? ' hidden' : ''}><h3>Start here</h3><div class="doc-cards">${s.map(card).join('')}</div></div>` : ''}
     </div>`;
 }
 
@@ -79,6 +79,8 @@ defineWidget('docs', {
       q = t.value;
       const box = el.querySelector('.dh-results');
       if (box) box.outerHTML = results(list, q);
+      const start = /** @type {HTMLElement | null} */ (el.querySelector('.dh-start'));
+      if (start) start.hidden = !!q.trim();
     };
     const open = (/** @type {string} */ ref) => {
       const [id, i] = ref.split(':');
