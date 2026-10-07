@@ -336,6 +336,69 @@ pub fn counters(s: &Snapshot, id: &str) -> Option<Counters> {
     })
 }
 
+/// An underlying the Book can show: its options relay's port, and the IEX
+/// relay's when it carries the underlying too.
+pub struct BookChoice {
+    pub key: String,
+    pub root: String,
+    pub port: u16,
+    pub stock_port: Option<u16>,
+}
+
+fn relay_port(svc: &ServiceInfo) -> Option<u16> {
+    svc.relay.as_ref()?["listen"]
+        .as_str()?
+        .rsplit(':')
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn relay_symbols(svc: &ServiceInfo) -> Vec<String> {
+    svc.relay
+        .as_ref()
+        .and_then(|r| r["symbols"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| s.as_str().map(str::to_owned))
+        .collect()
+}
+
+pub fn book_choices(t: &Topology) -> Vec<BookChoice> {
+    let stock = |root: &str| {
+        t.services
+            .iter()
+            .find(|s| relay_symbols(s).iter().any(|x| x == root))
+            .and_then(relay_port)
+    };
+    let mut out: Vec<BookChoice> = t
+        .services
+        .iter()
+        .filter_map(|s| {
+            let roots: Vec<String> = relay_symbols(s)
+                .iter()
+                .filter_map(|x| x.strip_suffix(".OPT").map(str::to_owned))
+                .collect();
+            let root = roots.first()?.clone();
+            Some(BookChoice {
+                key: s.id.clone(),
+                root: roots.join("/"),
+                port: relay_port(s)?,
+                stock_port: stock(&root),
+            })
+        })
+        .collect();
+    // The most traded first.
+    let rank = |r: &str| {
+        ["SPY", "QQQ", "XSP", "SPX"]
+            .iter()
+            .position(|x| r.starts_with(x))
+            .unwrap_or(9)
+    };
+    out.sort_by(|a, b| rank(&a.root).cmp(&rank(&b.root)).then(a.root.cmp(&b.root)));
+    out
+}
+
 /// Every (service, symbol) some relay serves bars for.
 pub fn chart_choices(t: &Topology) -> Vec<(String, String)> {
     t.services

@@ -6,6 +6,10 @@
 //!   one (and a relay's clients), and its live event tail, said plainly.
 //! - **Market:** accounts with their positions, prices with sparklines, and
 //!   the economic calendar.
+//! - **Book:** a live options chain for an underlying (nearest expiry,
+//!   strikes around the money, calls and puts with bid, ask and sizes that
+//!   flash as they change), the underlying's IEX quote, and a tape of trades,
+//!   read straight from the relays (`--relay-host`, default this machine).
 //! - **Data:** the store's drives as a pool, and what fills each.
 //! - **Hosts:** an htop-style view of one machine: CPU (with its recent
 //!   history), memory, swap, load and disks (from the host's node_exporter),
@@ -27,7 +31,7 @@
 //! `status` exits 0 when all is well, 1 when something needs attention and 2
 //! when something is down or the deployment can't be read.
 //!
-//! Keys: 1–5 or Tab/Shift-Tab screens · ↑/↓ or j/k select · p pause
+//! Keys: 1–6 or Tab/Shift-Tab screens · ↑/↓ or j/k select · p pause
 //! events · ←/→ or h/l switch host · c/m/n sort by CPU, memory, name · q quit.
 
 use std::collections::{HashMap, VecDeque};
@@ -41,6 +45,7 @@ use ratatui::text::{Line, Span};
 use ratatui::{DefaultTerminal, Frame};
 use tinytrader_fleet::{FleetEvent, Poller, PollerConfig, Snapshot, Source, Topology};
 
+mod book;
 mod candles;
 mod data;
 mod fmt;
@@ -74,6 +79,46 @@ struct View {
     /// Each relay's last counters and when they were read, and the rates since.
     counters: HashMap<String, (Instant, data::Counters)>,
     rates: HashMap<String, data::Rates>,
+    /// The Book screen: which underlying and expiry, and its relay connections
+    /// (the options relay, and the IEX relay for the underlying's quote).
+    book_pick: usize,
+    book_exp: usize,
+    feeds: Option<Feeds>,
+}
+
+/// The relay connections behind the Book screen, for one underlying.
+pub struct Feeds {
+    pub key: String,
+    pub root: String,
+    pub options: book::Feed,
+    pub stock: Option<book::Feed>,
+}
+
+/// Where relays are reached from this machine: their published ports on
+/// this host unless `--relay-host` says otherwise.
+static RELAY_HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Open the Book's connections for the picked underlying (or keep them).
+fn ensure_feeds(v: &mut View) {
+    let choices = data::book_choices(&v.topology);
+    if choices.is_empty() {
+        v.feeds = None;
+        return;
+    }
+    let c = &choices[v.book_pick % choices.len()];
+    if v.feeds.as_ref().is_some_and(|f| f.key == c.key) {
+        return;
+    }
+    let host = RELAY_HOST.get().map_or("127.0.0.1", String::as_str);
+    v.book_exp = 0;
+    v.feeds = Some(Feeds {
+        key: c.key.clone(),
+        root: c.root.clone(),
+        options: book::Feed::start(format!("{host}:{}", c.port)),
+        stock: c
+            .stock_port
+            .map(|p| book::Feed::start(format!("{host}:{p}"))),
+    });
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -82,14 +127,16 @@ enum Screen {
     Overview,
     Services,
     Market,
+    Book,
     Data,
     Hosts,
 }
 
-const SCREENS: [(Screen, &str); 5] = [
+const SCREENS: [(Screen, &str); 6] = [
     (Screen::Overview, "Overview"),
     (Screen::Services, "Services"),
     (Screen::Market, "Market"),
+    (Screen::Book, "Book"),
     (Screen::Data, "Data"),
     (Screen::Hosts, "Hosts"),
 ];
@@ -134,6 +181,9 @@ fn parse_args() -> Result<(Source, String), String> {
             .position(|a| a == flag)
             .and_then(|i| args.get(i + 1).cloned())
     };
+    if let Some(h) = value("--relay-host") {
+        let _ = RELAY_HOST.set(h);
+    }
     if let Some(url) = value("--console") {
         return Ok((Source::console(&url), format!("console {url}")));
     }
@@ -292,7 +342,7 @@ async fn refresh_forever(source: Source, view: Arc<Mutex<View>>) {
 
 fn run(terminal: &mut DefaultTerminal, view: &Mutex<View>, label: &str) -> std::io::Result<()> {
     loop {
-        terminal.draw(|f| draw(f, &lock(view), label))?;
+        terminal.draw(|f| draw(f, &mut lock(view), label))?;
         if event::poll(Duration::from_millis(200))?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
@@ -304,7 +354,13 @@ fn run(terminal: &mut DefaultTerminal, view: &Mutex<View>, label: &str) -> std::
                 .unwrap_or(0);
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                KeyCode::Char(c @ '1'..='5') => v.screen = SCREENS[usize::from(c as u8 - b'1')].0,
+                KeyCode::Char(c @ '1'..='6') => v.screen = SCREENS[usize::from(c as u8 - b'1')].0,
+                KeyCode::Char('u') if v.screen == Screen::Book => {
+                    v.book_pick = v.book_pick.wrapping_add(1)
+                }
+                KeyCode::Char('e') if v.screen == Screen::Book => {
+                    v.book_exp = v.book_exp.wrapping_add(1)
+                }
                 KeyCode::Tab => v.screen = SCREENS[(at + 1) % SCREENS.len()].0,
                 KeyCode::BackTab => v.screen = SCREENS[(at + SCREENS.len() - 1) % SCREENS.len()].0,
                 KeyCode::Char('p') => v.paused = !v.paused,
@@ -354,7 +410,11 @@ fn step(v: &mut View, by: isize) {
     }
 }
 
-fn draw(f: &mut Frame, v: &View, label: &str) {
+fn draw(f: &mut Frame, v: &mut View, label: &str) {
+    if v.screen == Screen::Book {
+        ensure_feeds(v);
+    }
+    let v = &*v;
     let [top, body, keys] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(5),
@@ -414,10 +474,11 @@ fn draw(f: &mut Frame, v: &View, label: &str) {
         Screen::Overview => screens::overview(f, body, v),
         Screen::Services => screens::services(f, body, v),
         Screen::Market => screens::market(f, body, v),
+        Screen::Book => screens::book(f, body, v),
         Screen::Data => screens::data_screen(f, body, v),
         Screen::Hosts => screens::hosts(f, body, v),
     }
-    let mut hints = theme::hints(&[("1–5", "screens"), ("Tab", "next")]);
+    let mut hints = theme::hints(&[("1–6", "screens"), ("Tab", "next")]);
     let more: &[(&str, &str)] = match v.screen {
         Screen::Services => &[
             ("↑↓", "service"),
@@ -432,6 +493,7 @@ fn draw(f: &mut Frame, v: &View, label: &str) {
         ],
         Screen::Market => &[("↑↓", "account"), ("s", "symbol"), ("d", "1/2/5 days")],
         Screen::Hosts => &[("←→", "host"), ("c m n", "sort by CPU, memory, name")],
+        Screen::Book => &[("u", "underlying"), ("e", "expiry")],
         _ => &[],
     };
     if !more.is_empty() {
