@@ -59,7 +59,7 @@ open twice and nothing is cleaned up when a panel closes. The page is one
 
 Widgets move one at a time, simplest first: Schedule and News, then the
 read-only ones (Prices, Services, Calendar, Accounts, System graph), then
-those with state (Data, Storage, Shell, Roadmap, Jobs). The page works after
+those with state (Data, Storage, Shell, Reminders, Jobs). The page works after
 every step. When the last one moves, `VIEWS`, `viewHtml`, `STEADY` and the
 page mode are deleted.
 
