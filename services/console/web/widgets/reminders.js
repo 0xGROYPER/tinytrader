@@ -1,4 +1,4 @@
-// Roadmap: the console's reminders, after iOS Reminders. Lists on the left
+// Reminders: the console's reminders, after iOS Reminders. Lists on the left
 // (with All, Flagged and Completed), the chosen list's items on the right:
 // tap the circle to complete, edit a title or notes in place, flag, add with
 // New Reminder. Saved by the console (/api/reminders); every panel shows the
@@ -70,8 +70,8 @@ function remHtml(ui) {
 const CLOSE = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>';
 const listId = v => /^\d+$/.test(v) ? +v : v;
 
-defineWidget('roadmap', {
-  title: 'Roadmap',
+defineWidget('reminders', {
+  title: 'Reminders',
   mount(el) {
     const ui = { list: 'all', showDone: false, adding: false };
     el.innerHTML = '<div class="rem"></div>';

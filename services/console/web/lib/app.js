@@ -19,7 +19,7 @@ import '../widgets/calendar.js';
 import '../widgets/data.js';
 import '../widgets/jobs.js';
 import '../widgets/storage.js';
-import '../widgets/roadmap.js';
+import '../widgets/reminders.js';
 import '../widgets/docs.js';
 const state = { openGroups: new Set(), navKey: '', tab: 'workspace', lastOk: 0, collections: [], doc: null };
 /** An element by ID, typed loosely enough for forms and buttons alike. @type {(id: string) => HTMLInputElement} */
@@ -88,7 +88,6 @@ function revealDoc(c, d) {
 }
 function updateCollectionsNav() {
   const key = [state.tab, state.doc, [...state.openGroups].join(','), state.collections.length].join('|');
-  if (state.tab === 'roadmap') state.navKey = '';
   if (key === state.navKey) return;
   state.navKey = key;
   if (!state.collections.length) { $('nav-collections').innerHTML = ''; return; }
@@ -115,10 +114,8 @@ function updateCollectionsNav() {
       return `<button type="button" data-tab="col:${esc(c.id)}" aria-expanded="${expanded}">${CHEV}<span class="lbl">${esc(c.name)}</span></button>` + (expanded ? rows(c, docTree(c), 1) : '');
     }).join('');
   }
-  // Roadmap and Docs are two sections of the docs pages, each headed by a link.
   const here = (on) => on ? ' aria-current="page"' : '';
-  $('nav-collections').innerHTML = `<div class="nav-sec"><button type="button" class="nav-label nav-home" data-docs-roadmap${here(state.tab === 'roadmap')}>Roadmap</button></div>
-    <div class="nav-sec"><button type="button" class="nav-label nav-home" data-docs-home${here(state.tab.startsWith('col:') && state.doc === null)}>Docs</button><div class="nav-items">${items}</div></div>`;
+  $('nav-collections').innerHTML = `<div class="nav-sec"><button type="button" class="nav-label nav-home" data-docs-home${here(state.tab.startsWith('col:') && state.doc === null)}>Docs</button><div class="nav-items">${items}</div></div>`;
 }
 const currentCollection = () => state.collections.find(c => 'col:' + c.id === state.tab);
 function collectionView() {
@@ -126,11 +123,8 @@ function collectionView() {
   if (!c) return '<div class="empty">Collection not found.</div>';
   if (!c.docs.length) return `<div><h1>${esc(c.name)}</h1><p class="muted">No documents yet. Add Markdown files to this collection's folders.</p></div>`;
   const groups = [...new Set(c.docs.map(d => d.group))];
-  if (state.doc === null) {
-    return `<div><h1>${esc(c.name)}</h1><p class="muted" style="margin:0">${c.docs.length} documents</p></div>` +
-      groups.map(g => `<section><div class="group-h">${esc(groupLabel(g))}</div><div class="doc-cards">${c.docs.filter(d => d.group === g).map(d =>
-        `<button type="button" class="doc-card" data-doc="${d.index}"><b>${esc(d.title)}</b><span>${esc(d.path)}</span></button>`).join('')}</div></section>`).join('');
-  }
+  // The docs home is the Docs widget: the mark, search, and where to start.
+  if (state.doc === null) return '<div class="page-widget docs-page-home"></div>';
   return `<div><button type="button" class="back mobile-only" data-doc="">← All ${esc(c.name.toLowerCase())}</button>
     <article class="prose" id="doc-body"><p class="muted">Loading…</p></article></div>`;
 }
@@ -186,7 +180,6 @@ const tileIcon = {
   close: '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>',
 };
 // Templates and new workspaces start from a simple tree of splits.
-const LAYOUT_NOTES = { Market: 'Prices, accounts, news, calendar', Operations: 'System graph, schedule, services, shell', Data: 'Jobs, coverage, storage' };
 const LAYOUTS = {
   Market: () => ({ dir: 'row', ratio: 0.68, a: { dir: 'col', ratio: 0.5, a: { view: 'prices' }, b: { view: 'accounts' } }, b: { dir: 'col', ratio: 0.6, a: { view: 'news' }, b: { view: 'calendar' } } }),
   Operations: () => ({ dir: 'row', ratio: 0.62, a: { dir: 'col', ratio: 0.5, a: { view: 'overview' }, b: { view: 'schedule' } }, b: { dir: 'col', ratio: 0.55, a: { view: 'services' }, b: { view: 'shell' } } }),
@@ -359,8 +352,8 @@ const lay = { list: [], current: null };
 (() => {
   try { lay.list = JSON.parse(localStorage.getItem(LS.list)) || []; lay.current = localStorage.getItem(LS.current); } catch (_) {}
   if (!lay.list.length) lay.list = Object.entries(LAYOUTS).map(([name, make]) => ({ name, tree: make() }));
-  // The Roadmap moved to the docs pages: drop a workspace that held only it.
-  lay.list = lay.list.filter(l => !(l.name === 'Roadmap' && l.tree?.view === 'roadmap'));
+  // The Roadmap widget is now Reminders: carry saved panels over.
+  try { lay.list = JSON.parse(JSON.stringify(lay.list).replaceAll('"view":"roadmap"', '"view":"reminders"')); } catch (_) {}
   if (!lay.list.some(l => l.name === lay.current)) lay.current = lay.list[0].name;
 })();
 function layStore() { try { localStorage.setItem(LS.list, JSON.stringify(lay.list)); localStorage.setItem(LS.current, lay.current ?? ''); } catch (_) {} updateLayoutNav(); }
@@ -388,7 +381,7 @@ const WS_MAX = 10;
 const wsNumber = i => i < 9 ? String(i + 1) : '0';
 // A new workspace, numbered next, with one panel to build on; it opens.
 /** @param {string} [name] @param {{ tree?: object, dock?: object }} [start] */
-function wsAdd(name, start = { tree: { view: 'overview' } }) {
+function wsAdd(name, start = { tree: { view: 'docs' } }) {
   if (lay.list.length >= WS_MAX) return false;
   const base = name || `Workspace ${wsNumber(lay.list.length)}`;
   let n = base; for (let k = 2; lay.list.some(l => l.name === n); k++) n = `${base} ${k}`;
@@ -433,67 +426,32 @@ document.addEventListener('click', e => {
 }, true);
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('wm')) wmClose(); });
 
-// The new-workspace menu (+, or ⌥ and the next number): start from a
-// template, a copy of the open workspace, or a single panel.
-const nw = { open: false, sel: 0 };
-function nwItems() {
-  const cur = lay.list.find(l => l.name === lay.current);
-  if (dock && state.tab === 'workspace') laySave();
-  return [
-    ...Object.keys(LAYOUTS).map(k => ({ label: k, sub: LAYOUT_NOTES[k], name: k, start: { tree: LAYOUTS[k]() } })),
-    ...(cur ? [{ label: 'Copy of this workspace', sub: cur.name, name: cur.name + ' copy', start: cur.dock ? { dock: cur.dock } : { tree: cur.tree } }] : []),
-    { label: 'Single panel', sub: 'System graph, to build on', name: null, start: { tree: { view: 'overview' } } },
-  ];
-}
-function nwOpen() {
-  if (lay.list.length >= WS_MAX) return;
-  nw.open = true; nw.sel = 0; nw.items = nwItems();
-  const btn = document.querySelector('[data-ws-add]'), r = btn?.getBoundingClientRect();
-  document.body.insertAdjacentHTML('beforeend', `<div class="nw-pop" id="nw" role="menu" aria-label="New workspace" style="top:${(r ? r.bottom : 60) + 6}px;left:${Math.max(16, Math.min(r ? r.left : 16, innerWidth - 336))}px"></div>`);
-  nwDraw();
-}
-function nwDraw() {
-  $('nw').innerHTML = `<h3>New workspace ${wsNumber(lay.list.length)}</h3>` + nw.items.map((it, i) => `<button type="button" class="nw-item" role="menuitem" data-nw="${i}"${i === nw.sel ? ' aria-selected="true"' : ''}><b>${esc(it.label)}</b><span>${esc(it.sub)}</span></button>`).join('');
-}
-function nwClose() { $('nw')?.remove(); nw.open = false; }
-function nwPick(i) { const it = nw.items[i]; nwClose(); if (it) wsAdd(it.name, it.start); }
-document.addEventListener('keydown', e => {
-  if (!nw.open) return;
-  e.preventDefault(); e.stopImmediatePropagation();
-  if (e.key === 'Escape') nwClose();
-  else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { nw.sel = (nw.sel + (e.key === 'ArrowDown' ? 1 : -1) + nw.items.length) % nw.items.length; nwDraw(); }
-  else if (e.key === 'Enter') nwPick(nw.sel);
-  else if (/^[1-9]$/.test(e.key) && !e.altKey) nwPick(+e.key - 1);
-}, true);
-document.addEventListener('click', e => {
-  if (!nw.open) return;
-  const b = near(e, '[data-nw]');
-  if (b) { nwPick(+b.dataset.nw); return; }
-  if (!(near(e, '#nw, [data-ws-add]'))) nwClose();
-}, true);
 function updateLayoutNav() {
   const box = $('wtabs'); if (!box) return;
-  const docs = state.tab.startsWith('col:') || state.tab === 'roadmap';
+  const docs = state.tab.startsWith('col:');
   const html = lay.list.map((l, i) => {
     const here = !docs && l.name === lay.current, n = wsNumber(i);
     return `<button type="button" class="wtab wtab-num" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 10 ? ` (⌥${n})` : ''}${here ? ' · click for all workspaces (⌥W)' : ''} · right-click to rename, duplicate or delete" aria-label="Workspace ${n}: ${esc(l.name)}"${here ? ' aria-current="page"' : ''}>${n}</button>`;
   }).join('')
-    + (lay.list.length < WS_MAX ? `<button type="button" class="wtab wtab-num" data-ws-add title="New workspace (⌥${wsNumber(lay.list.length)})" aria-label="New workspace" aria-haspopup="menu">+</button>` : '');
+    + (lay.list.length < WS_MAX ? `<button type="button" class="wtab wtab-num" data-ws-add title="New workspace, opening on Docs (⌥${wsNumber(lay.list.length)})" aria-label="New workspace">+</button>` : '');
   if (box.innerHTML !== html) box.innerHTML = html;
 }
+// A document picked on the docs home opens in the docs pages.
+document.addEventListener('tt-open-doc', e => {
+  if (!state.tab.startsWith('col:')) return;
+  const { id, index } = /** @type {CustomEvent} */ (e).detail;
+  e.preventDefault();
+  state.tab = 'col:' + id;
+  openDoc(index);
+});
 document.addEventListener('click', e => {
-  if (near(e, '[data-docs-roadmap]')) {
-    state.tab = 'roadmap'; state.doc = null; state.navigated = true;
-    try { history.replaceState(null, '', '/docs/#roadmap'); } catch (_) {}
-    render(); window.scrollTo(0, 0); return;
-  }
   if (near(e, '[data-switcher]')) { swOpen(); return; }
   if (near(e, '[data-docs-home]') && state.collections[0]) {
     state.tab = 'col:' + state.collections[0].id; state.doc = null; state.navigated = true;
     try { history.replaceState(null, '', '/docs/'); } catch (_) {}
     render(); window.scrollTo(0, 0); return;
   }
-  if (near(e, '[data-ws-add]')) { nw.open ? nwClose() : nwOpen(); return; }
+  if (near(e, '[data-ws-add]')) { wsAdd(); return; }
   const b = near(e, '[data-layout]');
   if (b) { if (b.getAttribute('aria-current') === 'page') swOpen(); else laySwitch(b.dataset.layout); }
 });
@@ -506,7 +464,7 @@ document.addEventListener('keydown', e => {
   if (e.altKey && /^Digit[0-9]$/.test(e.code)) {
     const d = +e.code.slice(5), i = d === 0 ? 9 : d - 1, l = lay.list[i];
     e.preventDefault();
-    if (l) laySwitch(l.name); else if (i === lay.list.length) nwOpen();
+    if (l) laySwitch(l.name); else if (i === lay.list.length) wsAdd();
     return;
   }
   if ((e.ctrlKey || e.altKey) && ['ArrowUp', 'ArrowDown'].includes(e.key)) {
@@ -667,20 +625,19 @@ function render() {
   const focusId = /** @type {HTMLElement | null} */ (document.activeElement)?.dataset?.node;
   // Collections only change on navigation, not on every refresh.
   if (state.tab.startsWith('col:') && !state.navigated) return status();
-  if (state.tab === 'roadmap' && !state.navigated) return status();
   if (state.tab === 'workspace' && !state.navigated && $('ws-root')) { refreshTiles(); drawCharts(); return status(); }
   state.navigated = false;
   document.body.classList.toggle('ws-full', state.tab === 'workspace');
-  document.body.classList.toggle('docs-mode', state.tab.startsWith('col:') || state.tab === 'roadmap');
+  document.body.classList.toggle('docs-mode', state.tab.startsWith('col:'));
   document.documentElement.style.setProperty('--top-h', one('.top').offsetHeight + 'px');
   for (const body of mounted.keys()) unmount(body);
   if (dock) { dock.dispose(); dock = null; panelBody.clear(); }
   if (state.tab === 'workspace') { $('view').innerHTML = workspaceView(); mountWorkspace(); }
-  else if (state.tab === 'roadmap') {
-    // The docs pages' Roadmap: the widget under a heading.
-    $('view').innerHTML = '<div><h1>Roadmap</h1><p class="muted" style="margin:0">What this deployment is working towards. Add, edit and check off items here.</p></div><div class="page-widget"></div>';
-    const host = one('.page-widget', $('view')); mounted.set(host, widget('roadmap').mount(host));
-  } else $('view').innerHTML = collectionView();
+  else {
+    $('view').innerHTML = collectionView();
+    const home = one('.docs-page-home', $('view'));
+    if (home) mounted.set(home, widget('docs').mount(home));
+  }
   if (focusId) { const n = one(`[data-node="${CSS.escape(focusId)}"]`); if (n) n.focus({ preventScroll: true }); }
   updateCollectionsNav();
   const docOpen = state.tab.startsWith('col:') && state.doc !== null;
@@ -819,8 +776,7 @@ $('theme-btn').addEventListener('click', () => {
 (async () => {
   await loadCollections();
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
-  if (location.pathname.startsWith('/docs') && h === 'roadmap') { state.tab = 'roadmap'; state.navigated = true; }
-  else if (location.pathname.startsWith('/docs') && !hc && state.collections[0]) { state.tab = 'col:' + state.collections[0].id; state.doc = null; state.navigated = true; }
+  if (location.pathname.startsWith('/docs') && !hc && state.collections[0]) { state.tab = 'col:' + state.collections[0].id; state.doc = null; state.navigated = true; }
   if (hc) {
     state.tab = 'col:' + hc.id; state.doc = h.length > hc.id.length ? +h.slice(hc.id.length + 1) : null; state.navigated = true;
     const d = hc.docs.find(x => x.index === state.doc); if (d) revealDoc(hc, d);

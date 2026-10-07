@@ -530,6 +530,18 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 .evt.high { background: var(--accent-mark); color: var(--bg); }
 .evt.medium { border: 1px solid var(--accent-2); color: var(--fg-2); line-height: 12px; }
 .evt.low, .evt.more { color: var(--muted); }
+/* The docs home (the Docs widget): the mark, search, where to start. */
+.docs-home { container-type: inline-size; display: flex; flex-direction: column; align-items: center; gap: 18px; padding: clamp(24px, 8cqi, 72px) 16px 32px; max-width: 640px; margin: 0 auto; }
+.dh-mark { width: min(100%, 444px); height: auto; aspect-ratio: 37 / 5; color: var(--fg); }
+.dh-search { width: 100%; font: 15px var(--ui); padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
+.dh-search:focus { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+.dh-results, .dh-start { width: 100%; display: flex; flex-direction: column; gap: 2px; }
+.dh-start h3 { margin: 6px 0 4px; font: 600 12px var(--ui); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.dh-results a, .dh-start a { display: flex; justify-content: space-between; gap: 12px; padding: 7px 10px; border-radius: 6px; color: var(--fg); text-decoration: none; min-width: 0; }
+.dh-results a:hover, .dh-start a:hover { background: var(--nav-hover); }
+.dh-results a span, .dh-start a span { color: var(--muted); font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dh-results a b, .dh-start a b { font-weight: 500; white-space: nowrap; }
+.docs-read { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
 .evt.earn { color: var(--fg-2); background: var(--surface); border: 1px dashed var(--line); line-height: 12px; }
 .cal-list h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .cal-list ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
