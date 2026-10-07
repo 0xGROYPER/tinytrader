@@ -535,6 +535,8 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 .cal-pop li .t { font: 12px var(--mono); color: var(--muted); }
 .cal-pop li .s { grid-column: 2; font: 11px var(--mono); color: var(--muted); }
 .cal-pop li.high .w { font-weight: 600; }
+.cal-pop .cp-earn li { grid-template-columns: minmax(0, 1fr); }
+.cal-pop .cp-earn li .s { grid-column: 1; }
 .evts { display: flex; flex-wrap: wrap; gap: 2px 3px; min-width: 0; overflow: hidden; }
 .evt { font: 600 10px/14px var(--mono); font-style: normal; padding: 0 4px; border-radius: 3px; white-space: nowrap; }
 .evt.high { background: var(--accent-mark); color: var(--bg); }
@@ -548,6 +550,20 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 .dh-results, .dh-start { width: 100%; }
 .dh-start h3 { margin: 6px 0 8px; font: 600 12px var(--ui); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 a.doc-card { text-decoration: none; }
+/* The Docs widget in a workspace: its own sidebar beside the home or a document; hidden when the tile is narrow. */
+.tile-body:has(> .dw) { padding: 0; }
+.dw { container-type: inline-size; display: flex; width: 100%; min-height: 100%; }
+.dw-side { flex: 0 0 220px; display: flex; flex-direction: column; gap: 1px; padding: 10px 8px; background: var(--nav-bg); border-right: 1px solid var(--line-soft); overflow-y: auto; }
+.dw-main { flex: 1 1 auto; min-width: 0; padding: 12px 16px; overflow: auto; }
+.dw-home, .dw-group, .dw-doc { all: unset; box-sizing: border-box; display: block; padding: 5px 8px; border-radius: 6px; font: 13px var(--ui); color: var(--fg-2); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dw-home { font-weight: 600; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.dw-group { font-weight: 500; color: var(--fg); }
+.dw-group::before { content: '›'; display: inline-block; width: 1em; color: var(--muted); transition: transform .12s; }
+.dw-group[aria-expanded="true"]::before { transform: rotate(90deg); }
+.dw-doc { padding-left: 24px; }
+.dw-home:hover, .dw-group:hover, .dw-doc:hover { background: var(--nav-hover); }
+.dw-home[aria-current], .dw-doc[aria-current] { background: var(--accent-soft); color: var(--fg); }
+@container (max-width: 560px) { .dw-side { display: none; } }
 .docs-read { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
 .evt.earn { color: var(--fg-2); background: var(--surface); border: 1px dashed var(--line); line-height: 12px; }
 @container (max-width: 460px) {

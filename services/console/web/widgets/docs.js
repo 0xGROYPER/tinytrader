@@ -4,7 +4,7 @@
 // first panel. A document picked here opens in the docs pages when the
 // widget is their home, and in place, with a way back, inside a workspace.
 import { defineWidget } from '../lib/widgets.js';
-import { collections } from '../lib/docs.js';
+import { collections, groupLabel } from '../lib/docs.js';
 import { esc } from '../lib/format.js';
 
 /** @typedef {{ index: number, title: string, path: string, group: string }} Doc */
@@ -55,6 +55,19 @@ function home(list, q) {
     </div>`;
 }
 
+/** The sidebar: Docs (home), then every folder with its documents; the open
+ * document's folder, and any the reader opened, expanded.
+ * @param {Collection[]} list @param {Set<string>} open @param {{ c: Collection, d: Doc } | null} reading */
+function side(list, open, reading) {
+  const rows = list.flatMap(c => [...new Set(c.docs.map(d => d.group))].map(g => {
+    const key = `${c.id}/${g}`, expanded = open.has(key) || (reading?.c === c && reading.d.group === g);
+    const docs = expanded ? c.docs.filter(d => d.group === g).map(d =>
+      `<a class="dw-doc" href="/docs/#${esc(c.id)}-${d.index}" data-open-doc="${esc(c.id)}:${d.index}"${reading?.d === d ? ' aria-current="page"' : ''}>${esc(d.title)}</a>`).join('') : '';
+    return `<button type="button" class="dw-group" data-dw-group="${esc(key)}" aria-expanded="${expanded}">${esc(groupLabel(g))}</button>${docs}`;
+  })).join('');
+  return `<nav class="dw-side" aria-label="Documents"><button type="button" class="dw-home" data-docs-back${reading ? '' : ' aria-current="page"'}>Docs</button>${rows}</nav>`;
+}
+
 defineWidget('docs', {
   title: 'Docs',
   mount(el) {
@@ -63,9 +76,17 @@ defineWidget('docs', {
     let q = '';
     /** @type {{ c: Collection, d: Doc } | null} */
     let reading = null;
+    /** Folders the reader expanded in the sidebar. @type {Set<string>} */
+    const folders = new Set();
+    // As the docs pages' home it has their sidebar already; in a workspace it brings its own.
+    const own = !el.classList.contains('docs-page-home');
     const draw = () => {
-      if (!reading) { el.innerHTML = list.length ? home(list, q) : '<p class="muted">No documents are configured.</p>'; return; }
-      el.innerHTML = '<div class="docs-read"><button type="button" class="btn small" data-docs-back>← Docs</button><article class="prose"><p class="muted">Loading…</p></article></div>';
+      if (!list.length) { el.innerHTML = '<p class="muted">No documents are configured.</p>'; return; }
+      const main = reading
+        ? '<div class="docs-read"><button type="button" class="btn small dw-back" data-docs-back>← Docs</button><article class="prose"><p class="muted">Loading…</p></article></div>'
+        : home(list, q);
+      el.innerHTML = own ? `<div class="dw">${side(list, folders, reading)}<div class="dw-main">${main}</div></div>` : main;
+      if (!reading) return;
       const { c, d } = reading;
       fetch(`/api/collections/${encodeURIComponent(c.id)}/${d.index}`, { cache: 'no-store' })
         .then(r => r.json())
@@ -93,6 +114,8 @@ defineWidget('docs', {
     const click = (/** @type {MouseEvent} */ e) => {
       const t = /** @type {HTMLElement} */ (e.target);
       if (t.closest('[data-docs-back]')) { reading = null; draw(); return; }
+      const g = /** @type {HTMLElement | null} */ (t.closest('[data-dw-group]'));
+      if (g) { const k = g.dataset.dwGroup || ''; if (g.getAttribute('aria-expanded') === 'true') folders.delete(k); else folders.add(k); draw(); return; }
       const a = /** @type {HTMLElement | null} */ (t.closest('[data-open-doc]'));
       if (a && !e.metaKey && !e.ctrlKey) { e.preventDefault(); open(a.dataset.openDoc || ''); }
     };

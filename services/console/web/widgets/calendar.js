@@ -92,12 +92,14 @@ function dayCard(day, cell) {
   const rel = evs.length
     ? `<ul>${evs.map(e => `<li class="${esc(e.importance)}"><span class="t">${esc(e.time)}</span><span class="w">${esc(e.title)}</span><span class="s">${esc(e.source)}</span></li>`).join('')}</ul>`
     : '';
-  const earn = reps.length
-    ? `<h4>Earnings</h4><ul>${reps.map(r => {
-      const differ = r.disputed ? Object.entries(r.dates).map(([s, d]) => `${s}: ${d}`).join(', ') : '';
-      return `<li class="${esc(r.importance)}"><span class="t">${esc(when[r.when] || r.when)}</span><span class="w"><b>${esc(r.symbol)}</b> ${esc(r.name || '')}${differ ? ` <span class="pill p-warn" title="${esc(differ)}">dates differ</span>` : ''}</span><span class="s">${esc([cap(r.market_cap), eps(r)].filter(Boolean).join(' · '))}</span></li>`;
-    }).join('')}</ul>`
-    : '';
+  // Earnings by when they report: before the open, after the close, or not said.
+  const row = r => {
+    const differ = r.disputed ? Object.entries(r.dates).map(([s, d]) => `${s}: ${d}`).join(', ') : '';
+    return `<li class="${esc(r.importance)}"><span class="w"><b>${esc(r.symbol)}</b> ${esc(r.name || '')}${differ ? ` <span class="pill p-warn" title="${esc(differ)}">dates differ</span>` : ''}</span><span class="s">${esc([cap(r.market_cap), eps(r)].filter(Boolean).join(' · '))}</span></li>`;
+  };
+  const earn = [['before-open', 'Earnings before the open (AM)'], ['after-close', 'Earnings after the close (PM)'], ['unknown', 'Earnings, time not disclosed']]
+    .map(([w, title]) => { const list = reps.filter(r => (r.when in when ? r.when : 'unknown') === w); return list.length ? `<h4>${title}</h4><ul class="cp-earn">${list.map(row).join('')}</ul>` : ''; })
+    .join('');
   return `<h3>${esc(label)}</h3>${hours ? `<p class="cp-hrs">${esc(hours)}</p>` : ''}${rel}${earn}${!rel && !earn ? '<p class="muted" style="margin:0">Nothing scheduled.</p>' : ''}`;
 }
 
