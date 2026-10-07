@@ -884,7 +884,16 @@ function mountWorkspace() {
     theme: { name: 'light', className: 'dockview-theme-light', colorScheme: 'light' },
     createComponent: () => {
       const body = document.createElement('div'); body.className = 'tile-body';
-      return { element: body, init(p) { panelBody.set(p.api.id, body); renderPanel(body, p.params.view); } };
+      return {
+        element: body,
+        init(p) {
+          panelBody.set(p.api.id, body); renderPanel(body, p.params.view);
+          // A tab brought into view shows the latest at once, not at the next
+          // poll. (Not on becoming active: a click inside a panel does that,
+          // and redrawing then would swallow the click.)
+          p.api.onDidVisibilityChange(v => { if (v.isVisible) mounted.get(body)?.update?.(); });
+        },
+      };
     },
     createRightHeaderActionComponent: group => {
       const el = document.createElement('div'); el.className = 'dv-acts';
@@ -918,11 +927,7 @@ function mountWorkspace() {
   }
   if (state.focusView) { dock.panels.find(p => p.params?.view === state.focusView)?.api.setActive(); state.focusView = null; }
   dock.onDidRemovePanel(p => { const body = panelBody.get(p.id); if (body) unmount(body); panelBody.delete(p.id); });
-  dock.onDidActivePanelChange(e => {
-    const p = e?.panel || e; wsFocus = p?.id ?? null;
-    // A panel brought to the front (a tab) shows the latest at once, not at the next poll.
-    const body = p && panelBody.get(p.id); if (body) mounted.get(body)?.update?.();
-  });
+  dock.onDidActivePanelChange(e => { wsFocus = (e?.panel || e)?.id ?? null; });
   dock.onDidLayoutChange(() => { clearTimeout(mountWorkspace.t); mountWorkspace.t = setTimeout(laySave, 300); drawCharts(); });
   laySave();
   // Charts measure their panels, so draw them once the layout has settled.

@@ -14,7 +14,7 @@ function tipAt(el, html, px, py) {
 }
 
 export function drawCharts() {
-  document.querySelectorAll('[data-chart]').forEach(el => {
+  document.querySelectorAll('[data-chart]').forEach((/** @type {HTMLElement} */ el) => {
     const [id, source, key] = el.dataset.chart.split('|');
     const decimals = +el.dataset.decimals;
     const pts = (svcState(id)[source] || {})[key] || [];
@@ -36,12 +36,12 @@ export function drawCharts() {
       const r = svg.getBoundingClientRect(), xv = x0 + (e.clientX - r.left) / W * (x1 - x0);
       let best = pts[0]; for (const p of pts) if (Math.abs(p[0] - xv) < Math.abs(best[0] - xv)) best = p;
       const cx = X(best[0]), cy = Y(best[1]);
-      cross.setAttribute('x1', cx); cross.setAttribute('x2', cx); dot.setAttribute('cx', cx); dot.setAttribute('cy', cy);
+      cross.setAttribute('x1', String(cx)); cross.setAttribute('x2', String(cx)); dot.setAttribute('cx', String(cx)); dot.setAttribute('cy', String(cy));
       hov.setAttribute('visibility', 'visible');
       tipAt(el, `${fmt(best[1], { decimals })}<span class="muted">${new Date(best[0]).toISOString().slice(11, 19)} UTC</span>`, cx, cy);
     };
     const hit = svg.querySelector('.c-hit');
     hit.addEventListener('pointermove', move); hit.addEventListener('pointerdown', move);
-    hit.addEventListener('pointerleave', () => { hov.setAttribute('visibility', 'hidden'); const t = el.querySelector('.tip'); if (t) t.hidden = true; });
+    hit.addEventListener('pointerleave', () => { hov.setAttribute('visibility', 'hidden'); const t = /** @type {HTMLElement | null} */ (el.querySelector('.tip')); if (t) t.hidden = true; });
   });
 }

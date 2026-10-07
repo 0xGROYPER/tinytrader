@@ -75,45 +75,49 @@ defineWidget('roadmap', {
   mount(el) {
     const ui = { list: 'all', showDone: false, adding: false };
     el.innerHTML = '<div class="rem"></div>';
-    const box = el.firstChild;
+    const box = /** @type {HTMLElement} */ (el.firstElementChild);
     const P = {
       typing: () => box.contains(document.activeElement),
       draw() {
-        const f = document.activeElement, keep = f && box.contains(f) ? { nw: f.matches('[data-rem-new]'), nl: f.matches('[data-rem-newlist]'), item: f.closest('[data-rem-item]')?.dataset.remItem, field: f.dataset.remField, pos: f.selectionStart } : null;
+        const f = /** @type {HTMLInputElement | null} */ (document.activeElement), keep = f && box.contains(f) ? { nw: f.matches('[data-rem-new]'), nl: f.matches('[data-rem-newlist]'), item: /** @type {HTMLElement | null} */ (f.closest('[data-rem-item]'))?.dataset.remItem, field: f.dataset.remField, pos: f.selectionStart } : null;
         box.innerHTML = remHtml(ui);
         if (keep) {
-          const t = keep.nw ? box.querySelector('[data-rem-new]') : keep.nl ? box.querySelector('[data-rem-newlist]') : box.querySelector(`[data-rem-item="${keep.item}"] [data-rem-field="${keep.field}"]`);
+          const t = /** @type {HTMLInputElement | null} */ (keep.nw ? box.querySelector('[data-rem-new]') : keep.nl ? box.querySelector('[data-rem-newlist]') : box.querySelector(`[data-rem-item="${keep.item}"] [data-rem-field="${keep.field}"]`));
           if (t) { t.focus(); try { t.setSelectionRange(keep.pos, keep.pos); } catch (_) {} }
         }
       },
     };
     box.addEventListener('click', e => {
-      const t = e.target.closest('[data-rem-list],[data-rem-check],[data-rem-flag],[data-rem-del],[data-rem-addlist],[data-rem-showdone]');
+      const et = /** @type {HTMLInputElement} */ (e.target);
+      const t = /** @type {HTMLElement | null} */ (et.closest('[data-rem-list],[data-rem-check],[data-rem-flag],[data-rem-del],[data-rem-addlist],[data-rem-showdone]'));
       if (!t) return;
       if (t.dataset.remList) { ui.list = listId(t.dataset.remList); P.draw(); return; }
       if (t.dataset.remCheck) { const i = rem.doc.items.find(x => x.id === +t.dataset.remCheck); remChange({ op: 'update_item', id: i.id, done: !i.done }); return; }
       if (t.dataset.remFlag) { const i = rem.doc.items.find(x => x.id === +t.dataset.remFlag); remChange({ op: 'update_item', id: i.id, flagged: !i.flagged }); return; }
       if (t.dataset.remDel) { remChange({ op: 'delete_item', id: +t.dataset.remDel }); return; }
-      if ('remAddlist' in t.dataset) { ui.adding = true; P.draw(); box.querySelector('[data-rem-newlist]')?.focus(); return; }
+      if ('remAddlist' in t.dataset) { ui.adding = true; P.draw(); /** @type {HTMLInputElement | null} */ (box.querySelector('[data-rem-newlist]'))?.focus(); return; }
       if ('remShowdone' in t.dataset) { ui.showDone = !ui.showDone; P.draw(); }
     });
     box.addEventListener('change', e => {
-      if (e.target.dataset.remPick !== undefined) { ui.list = listId(e.target.value); P.draw(); return; }
-      const f = e.target.dataset.remField; if (!f) return;
-      const id = +e.target.closest('[data-rem-item]').dataset.remItem, item = rem.doc.items.find(x => x.id === id);
-      if ((item[f] || '') !== e.target.value) remChange({ op: 'update_item', id, [f]: e.target.value });
+      const et = /** @type {HTMLInputElement} */ (e.target);
+      if (et.dataset.remPick !== undefined) { ui.list = listId(et.value); P.draw(); return; }
+      const f = et.dataset.remField; if (!f) return;
+      const id = +/** @type {HTMLElement} */ (et.closest('[data-rem-item]')).dataset.remItem, item = rem.doc.items.find(x => x.id === id);
+      if ((item[f] || '') !== et.value) remChange({ op: 'update_item', id, [f]: et.value });
     });
     box.addEventListener('keydown', e => {
+      const et = /** @type {HTMLInputElement} */ (e.target);
       if (e.key !== 'Enter') return;
-      if (e.target.matches('[data-rem-new]') && e.target.value.trim()) {
-        const title = e.target.value; e.target.value = '';
+      if (et.matches('[data-rem-new]') && et.value.trim()) {
+        const title = et.value; et.value = '';
         const list = typeof ui.list === 'number' ? ui.list : rem.doc.lists[0]?.id;
         remChange({ op: 'add_item', list, title }); return;
       }
-      if (e.target.matches('[data-rem-newlist]')) { const name = e.target.value.trim(); ui.adding = false; if (name) remChange({ op: 'add_list', name }); else P.draw(); return; }
-      if (e.target.dataset.remField) e.target.blur();
+      if (et.matches('[data-rem-newlist]')) { const name = et.value.trim(); ui.adding = false; if (name) remChange({ op: 'add_list', name }); else P.draw(); return; }
+      if (et.dataset.remField) et.blur();
     });
-    box.addEventListener('focusout', e => { if (e.target.matches('[data-rem-newlist]') && !e.target.value.trim()) { ui.adding = false; setTimeout(P.draw); } });
+    box.addEventListener('focusout', e => {
+      const et = /** @type {HTMLInputElement} */ (e.target); if (et.matches('[data-rem-newlist]') && !et.value.trim()) { ui.adding = false; setTimeout(P.draw); } });
     panels.add(P); P.draw(); remLoad();
     return { dispose() { panels.delete(P); } };
   },

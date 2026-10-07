@@ -1,0 +1,18 @@
+{
+  // Type checking for the console's page (no build step: the JavaScript is
+  // served as written). `tsc -p services/console` checks it; so does
+  // `nix flake check` (checks.console-types).
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true
+  },
+  "include": ["types/*.d.ts", "web/lib/*.js", "web/widgets/*.js"]
+}

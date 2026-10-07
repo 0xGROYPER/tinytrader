@@ -108,9 +108,9 @@ defineWidget('data', {
     // Redrawn when the catalog changes or on a pick, never under typing.
     const draw = () => {
       const typing = el.contains(document.activeElement) && document.activeElement.matches('[data-ds-filter]');
-      const pos = typing ? document.activeElement.selectionStart : 0, top = el.scrollTop;
+      const pos = typing ? /** @type {HTMLInputElement} */ (document.activeElement).selectionStart : 0, top = el.scrollTop;
       my.stamp = catalogStamp(); el.innerHTML = dataView(my); el.scrollTop = top;
-      if (typing) { const i = el.querySelector('[data-ds-filter]'); i.focus(); i.setSelectionRange(pos, pos); }
+      if (typing) { const i = /** @type {HTMLInputElement} */ (el.querySelector('[data-ds-filter]')); i.focus(); i.setSelectionRange(pos, pos); }
     };
     const click = e => {
       const t = e.target.closest('[data-toggle]');

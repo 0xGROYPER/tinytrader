@@ -119,7 +119,7 @@ function detail(node, g, preview) {
     facts.push(['Written by', w ? w.label || w.id : '—']);
     if (node.metric) facts.push([node.metric.label || node.metric.name, fmt(metric(node.metric.service, node.metric.name), { ...node.metric, prefix: '', suffix: '' })]);
   }
-  const metrics = s.metrics ? Object.entries(s.metrics).flatMap(([name, list]) => list.map(m => [name + labelText(m.labels), m.value])) : [];
+  const metrics = s.metrics ? Object.entries(s.metrics).flatMap(([name, list]) => list.map(m => /** @type {[string, number]} */ ([name + labelText(m.labels), m.value]))) : [];
   return `<div class="detail">
     <div class="d-head"><b>${esc(node.label || node.id)}</b>${st ? `<span class="pill ${statusText[st][1]}">${statusText[st][0]}</span>` : ''}<span class="muted" style="margin-left:auto">${esc(node.kind === 'ext' ? 'external' : (node.host || 'local'))}</span>${preview ? '' : '<button type="button" class="tile-btn" data-pop-close title="Close (Esc)" aria-label="Close">✕</button>'}</div>
     ${preview && node.kind === 'svc' && node.events ? '<div class="muted" style="font-size:12px">Click for live events and every metric.</div>' : ''}

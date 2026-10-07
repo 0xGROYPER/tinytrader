@@ -19,7 +19,7 @@ function contents(r) {
 }
 
 function fill(r) {
-  const v = r.volume || {}, total = v.total_bytes;
+  const v = /** @type {Partial<Volume>} */ (r.volume || {}), total = v.total_bytes;
   if (!total) return '';
   const items = contents(r).filter(x => x.bytes > 0);
   const known = items.reduce((a, x) => a + x.bytes, 0), used = total - (v.available_bytes ?? 0);
@@ -39,14 +39,14 @@ const candidates = () => Object.values(fleet.snap?.services || {}).flatMap(s => 
 
 function storageView(my) {
   const roots = catalogRoots();
-  const t = roots[0]?.thresholds || {};
+  const t = /** @type {Partial<Thresholds>} */ (roots[0]?.thresholds || {});
   // The pool: what new data can still use, below the critical threshold, on writable drives present.
   const live = roots.filter(r => r.present && r.writable && r.volume?.total_bytes);
   const room = live.reduce((a, r) => a + Math.max(0, r.volume.available_bytes - r.volume.total_bytes * (1 - (t.critical ?? 90) / 100)), 0);
   const total = live.reduce((a, r) => a + r.volume.total_bytes, 0), free = live.reduce((a, r) => a + r.volume.available_bytes, 0);
   const pool = live.length ? `<div class="pool"><b>${bytes(room)}</b><span>room for new data across ${live.length} drive${live.length === 1 ? '' : 's'}</span><span class="muted">${bytes(free)} free of ${bytes(total)}; each drive fills to ${t.critical ?? 90}%</span></div>` : '';
   const cards = roots.map(r => {
-    const v = r.volume || {}, used = (v.used_fraction ?? 0) * 100, st = statusPill[v.status] || ['Missing', 'p-crit'];
+    const v = /** @type {Partial<Volume>} */ (r.volume || {}), used = (v.used_fraction ?? 0) * 100, st = statusPill[v.status] || ['Missing', 'p-crit'];
     const marks = [t.warning, t.critical, t.floor].filter(Boolean).map(x => `<em style="left:${x}%" title="${x}%"></em>`).join('');
     return `<article class="panel">
       <div class="d-head"><b>${esc(r.name)}</b><span class="pill ${r.present ? st[1] : 'p-crit'}">${r.present ? st[0] : 'Missing'}</span>${r.writable === false ? '<span class="muted" style="font-size:12px">read-only</span>' : ''}<span class="muted mono" style="margin-left:auto;font-size:12px">${esc(r.path)}</span></div>

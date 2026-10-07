@@ -3,16 +3,23 @@
 // instance: update() after each poll, dispose() when its panel goes.
 const registry = new Map();
 
+/** @param {string} name @param {WidgetDef} def */
 export function defineWidget(name, def) {
   if (registry.has(name)) throw new Error(`widget ${name} is defined twice`);
   registry.set(name, def);
 }
+/** @type {(name: string) => WidgetDef | undefined} */
 export const widget = name => registry.get(name);
 export const widgetNames = () => [...registry.keys()];
 
 // Mounts for a widget that redraws its HTML on every update, keeping its
 // scroll position. `draw` returns the HTML; `wire(el)`, if given, attaches
 // listeners once, to the element only.
+/**
+ * @param {() => string} draw
+ * @param {(el: HTMLElement, update: () => void) => (() => void) | undefined} [wire]
+ * @returns {(el: HTMLElement) => WidgetInstance}
+ */
 export function redrawing(draw, wire) {
   return el => {
     const update = () => { const top = el.scrollTop; el.innerHTML = draw(); el.scrollTop = top; };

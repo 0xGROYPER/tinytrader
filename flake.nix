@@ -28,6 +28,7 @@
       imports = [
         ./nix/rust.nix
         ./nix/generic.nix
+        ./nix/web.nix
       ];
 
       flake = {
@@ -122,6 +123,7 @@
               age
               toolchain
               rust-analyzer
+              typescript
             ];
           };
         };

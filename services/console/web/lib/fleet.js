@@ -3,8 +3,10 @@
 // fills these in; widgets read them (decision 0010).
 import { fmt } from './format.js';
 
+/** @type {{ topo: Topology | null, snap: Snapshot | null }} */
 export const fleet = { topo: null, snap: null };
 
+/** @type {(id: string) => ServiceState} */
 export const svcState = id => fleet.snap?.services?.[id] || {};
 
 export function metric(id, name, labels) {
@@ -39,12 +41,15 @@ export function writerOf(storeId) {
   return e && nodesById()[e.from];
 }
 
+/** Every part of the deployment graph, by ID.
+ * @returns {Record<string, GraphNode>} */
 export function nodesById() {
-  const t = fleet.topo || {};
+  const t = /** @type {Partial<Topology>} */ (fleet.topo || {});
+  /** @type {GraphNode[]} */
   const all = [
-    ...(t.external || []).map(n => ({ ...n, kind: 'ext' })),
-    ...(t.services || []).map(n => ({ ...n, kind: 'svc' })),
-    ...(t.stores || []).map(n => ({ ...n, kind: 'store' }))
+    ...(t.external || []).map(n => ({ ...n, kind: /** @type {const} */ ('ext') })),
+    ...(t.services || []).map(n => ({ ...n, kind: /** @type {const} */ ('svc') })),
+    ...(t.stores || []).map(n => ({ ...n, kind: /** @type {const} */ ('store') }))
   ];
   return Object.fromEntries(all.map(n => [n.id, n]));
 }
@@ -80,6 +85,8 @@ export function newsItems() {
 // ---------- store: data and storage ----------
 // Catalogs come from services that describe a `catalog` stream. Every root of
 // every catalog is shown; nothing here knows about particular datasets.
+/** Every root of every catalog, with the service and thresholds it came from.
+ * @returns {CatalogRoot[]} */
 export function catalogRoots() {
   const out = [];
   for (const [svc, st] of Object.entries(fleet.snap?.services || {})) {

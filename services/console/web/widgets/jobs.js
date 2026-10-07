@@ -70,7 +70,7 @@ function jobsTable(J) {
   if (!shared.list || shared.list.updated_at == null) return '<div class="box empty">Loading jobs…</div>';
   // Jobs that need something (or are moving) first, then the rest; newest first within each.
   const settled = j => !!j.held && !j.transfer || j.state === 'expired';
-  const all = (shared.list.jobs || []).slice().sort((a, b) => settled(a) - settled(b) || b.received - a.received);
+  const all = (shared.list.jobs || []).slice().sort((a, b) => Number(settled(a)) - Number(settled(b)) || b.received - a.received);
   // Jobs already on disk are history; they're shown only on request.
   const onDisk = all.filter(j => j.held && !j.transfer).length;
   const list = J.showHeld ? all : all.filter(j => !(j.held && !j.transfer));
@@ -96,7 +96,8 @@ defineWidget('jobs', {
   title: 'Jobs',
   mount(el) {
     const J = { uid: 'jobs' + seq++, form: { dataset: 'OPRA.PILLAR', schema: 'cmbp-1', symbols: '', stype_in: 'parent', start: '', end: '' },
-      quote: null, quoteFor: '', msg: null, busy: false, showHeld: false, rowErr: {} };
+      quote: null, quoteFor: '', msg: null, busy: /** @type {false | 'price' | 'submit'} */ (false), showHeld: false, rowErr: {} };
+    /** @type {(id: string) => HTMLInputElement | null} */
     const $$ = id => el.querySelector('#' + J.uid + '-' + id);
     const redrawQuote = () => { const q = $$('job-quote'); if (q) q.innerHTML = quoteLine(J); };
     J.redrawList = () => { const l = $$('jobs-list'); if (l) l.innerHTML = jobsTable(J); };
@@ -119,7 +120,7 @@ defineWidget('jobs', {
       redrawQuote();
     };
     const change = e => {
-      if (e.target.matches('[data-jf-confirm]')) { const b = el.querySelector('[data-jf-submit]'); if (b) b.disabled = !e.target.checked || !!J.busy; return; }
+      if (e.target.matches('[data-jf-confirm]')) { const b = /** @type {HTMLButtonElement | null} */ (el.querySelector('[data-jf-submit]')); if (b) b.disabled = !e.target.checked || !!J.busy; return; }
       if (e.target.closest('form')) { J.form[e.target.name] = e.target.value; redrawQuote(); }
     };
     const click = async e => {
@@ -132,7 +133,7 @@ defineWidget('jobs', {
       }
       if (e.target.closest('[data-jf-submit]')) {
         const q = J.quote; if (!q) return;
-        if (q.cost_usd > 0 && !el.querySelector('[data-jf-confirm]')?.checked) return;
+        if (q.cost_usd > 0 && !/** @type {HTMLInputElement | null} */ (el.querySelector('[data-jf-confirm]'))?.checked) return;
         J.busy = 'submit'; redrawQuote();
         try {
           const r = await jobsApi('submit', { quote: q.quote, confirm_usd: q.cost_usd > 0 ? q.cost_usd : null });
