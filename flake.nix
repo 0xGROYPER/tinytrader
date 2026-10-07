@@ -79,6 +79,16 @@
                   observe.port = 9105;
                   environment.TICKER_DATA_DIR = "/var/lib/tinytrader/ticker";
                 };
+                # The data store on Linux: drives mounted under /mnt that carry
+                # an approval marker are used as they appear (decision 0007);
+                # others are offered for approval in the console's Storage.
+                tinytrader.services.store = {
+                  enable = true;
+                  package = packages.store;
+                  observe.port = 9120;
+                  environment.STORE_DISCOVER = "/mnt";
+                  writablePaths = [ "/mnt" ];
+                };
                 tinytrader.services.console = {
                   enable = true;
                   package = packages.console;
