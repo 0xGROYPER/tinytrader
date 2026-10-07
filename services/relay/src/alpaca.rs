@@ -9,20 +9,23 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::future::BoxFuture;
 use futures_util::{SinkExt as _, StreamExt as _};
 use relay::iex::{self, Encoder, RawQuote, RawTrade, Row};
 use serde::Deserialize;
 use serde_json::json;
 use serde_json::value::RawValue;
 use tinytrader_dbn::TradeConditions;
-use tinytrader_dbn::dbn::{FlagSet, Mbp1Msg, RecordRef};
+use tinytrader_dbn::dbn::{FlagSet, Mbp1Msg, RecordRef, SType};
 use tinytrader_observe::{Observer, State};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::bars::Bar;
 use crate::hours::{self, Hours};
 use crate::hub::Hub;
 use crate::protocol;
+use crate::source::{Feed, History, Source};
 
 const LIVE_URL: &str = "wss://stream.data.alpaca.markets/v2/iex";
 const TEST_URL: &str = "wss://stream.data.alpaca.markets/v2/test";
@@ -103,44 +106,6 @@ impl Alpaca {
             out.extend_from_slice(RecordRef::from(&d).as_ref());
         }
         out
-    }
-
-    /// Keep the stream up, publishing its records to the hub.
-    pub async fn run(self: Arc<Self>, hub: Arc<Hub>, observer: Observer, hours: Arc<Hours>) {
-        hub.publish(self.definitions(), self.symbols.len() as u64);
-        let mut encoders: HashMap<String, Encoder> = self
-            .symbols
-            .iter()
-            .map(|s| (s.clone(), Encoder::new(s)))
-            .collect();
-        let mut backoff = Duration::from_secs(1);
-        loop {
-            let end = hours.wait_until_active(&hub, &observer).await;
-            let began = Instant::now();
-            // At the end of the active window the stream is dropped, which
-            // disconnects it.
-            let outcome = tokio::select! {
-                r = self.stream(&hub, &observer, &mut encoders) => Some(r),
-                () = hours::until(end) => None,
-            };
-            let Some(outcome) = outcome else {
-                continue;
-            };
-            hub.upstream_down();
-            let why = match outcome {
-                Ok(()) => "Alpaca closed the stream".to_owned(),
-                Err(e) => e,
-            };
-            eprintln!("relay: {why}; reconnecting in {}s", backoff.as_secs());
-            observer.record_error(&why);
-            observer.set_state(State::Degraded, &format!("{why}; reconnecting"));
-            if began.elapsed() > Duration::from_secs(60) {
-                backoff = Duration::from_secs(1);
-            }
-            tokio::time::sleep(backoff).await;
-            // Alpaca refuses a second connection for a while after a drop.
-            backoff = (backoff * 2).min(Duration::from_secs(60));
-        }
     }
 
     async fn stream(
@@ -247,36 +212,6 @@ impl Alpaca {
         Ok(())
     }
 
-    /// Fetch history for every symbol from `start` to `cut` (both in ns since
-    /// the epoch) and send it as chunks of records, as the relay encodes it.
-    pub fn catch_up(
-        self: &Arc<Self>,
-        start: u64,
-        cut: u64,
-        conditions: bool,
-    ) -> mpsc::Receiver<Result<Vec<u8>, String>> {
-        let (tx, rx) = mpsc::channel(4);
-        let me = self.clone();
-        tokio::spawn(async move {
-            match me.history(start, cut).await {
-                Ok(encoded) => {
-                    let bytes = encoded.bytes(conditions);
-                    for chunk in bytes.chunks(CHUNK) {
-                        if tx.send(Ok(chunk.to_vec())).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(Err(format!("cannot catch up from Alpaca: {e}")))
-                        .await;
-                }
-            }
-        });
-        rx
-    }
-
     async fn history(&self, start: u64, cut: u64) -> Result<Encoded, String> {
         let mut per_symbol: Vec<Encoded> = Vec::new();
         for symbol in &self.symbols {
@@ -336,12 +271,7 @@ impl Alpaca {
     }
 
     /// One-minute bars for a symbol from Alpaca's IEX history, oldest first.
-    pub async fn bars(
-        &self,
-        symbol: &str,
-        start: u64,
-        end: u64,
-    ) -> Result<Vec<crate::bars::Bar>, String> {
+    async fn minute_bars(&self, symbol: &str, start: u64, end: u64) -> Result<Vec<Bar>, String> {
         #[derive(Deserialize)]
         struct Raw<'a> {
             t: &'a str,
@@ -395,7 +325,7 @@ impl Alpaca {
                     &time::format_description::well_known::Rfc3339,
                 )
                 .map_err(|e| format!("bars: {e}"))?;
-                out.push(crate::bars::Bar {
+                out.push(Bar {
                     t: t.unix_timestamp() as u64,
                     o: b.o,
                     h: b.h,
@@ -456,6 +386,105 @@ impl Alpaca {
                 return Ok(pages);
             }
         }
+    }
+}
+
+impl Source for Alpaca {
+    fn feed(&self) -> Feed {
+        Feed {
+            dataset: iex::DATASET.to_owned(),
+            schema: "mbp-1".to_owned(),
+            stype_in: SType::RawSymbol,
+            provider: "alpaca",
+            name: "Alpaca",
+            via: "websocket",
+        }
+    }
+
+    /// Keep the stream up, publishing its records to the hub.
+    fn run(
+        self: Arc<Self>,
+        hub: Arc<Hub>,
+        observer: Observer,
+        hours: Arc<Hours>,
+    ) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            hub.publish(self.definitions(), self.symbols.len() as u64);
+            let mut encoders: HashMap<String, Encoder> = self
+                .symbols
+                .iter()
+                .map(|s| (s.clone(), Encoder::new(s)))
+                .collect();
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                let end = hours.wait_until_active(&hub, &observer).await;
+                let began = Instant::now();
+                // At the end of the active window the stream is dropped, which
+                // disconnects it.
+                let outcome = tokio::select! {
+                    r = self.stream(&hub, &observer, &mut encoders) => Some(r),
+                    () = hours::until(end) => None,
+                };
+                let Some(outcome) = outcome else {
+                    continue;
+                };
+                hub.upstream_down();
+                let why = match outcome {
+                    Ok(()) => "Alpaca closed the stream".to_owned(),
+                    Err(e) => e,
+                };
+                eprintln!("relay: {why}; reconnecting in {}s", backoff.as_secs());
+                observer.record_error(&why);
+                observer.set_state(State::Degraded, &format!("{why}; reconnecting"));
+                if began.elapsed() > Duration::from_secs(60) {
+                    backoff = Duration::from_secs(1);
+                }
+                tokio::time::sleep(backoff).await;
+                // Alpaca refuses a second connection for a while after a drop.
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+            }
+        })
+    }
+
+    /// Fetch history for every symbol from `start` to `cut` (both in ns since
+    /// the epoch) and send it as chunks of records, as the relay encodes it.
+    fn catch_up(self: Arc<Self>, start: u64, cut: u64, conditions: bool) -> Option<History> {
+        let (tx, rx) = mpsc::channel(4);
+        tokio::spawn(async move {
+            match self.history(start, cut).await {
+                Ok(encoded) => {
+                    let bytes = encoded.bytes(conditions);
+                    for chunk in bytes.chunks(CHUNK) {
+                        if tx.send(Ok(chunk.to_vec())).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(format!("cannot catch up from Alpaca: {e}")))
+                        .await;
+                }
+            }
+        });
+        Some(rx)
+    }
+
+    fn conditions(&self) -> bool {
+        true
+    }
+
+    /// One-minute bars from Alpaca's IEX history.
+    fn bars(
+        &self,
+        symbol: &str,
+        start: u64,
+        end: u64,
+    ) -> Option<BoxFuture<'_, Result<Vec<Bar>, String>>> {
+        let symbol = symbol.to_owned();
+        Some(Box::pin(async move {
+            self.minute_bars(&symbol, start, end).await
+        }))
     }
 }
 

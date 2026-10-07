@@ -1,7 +1,7 @@
 //! One-minute OHLCV bars of the relay's own symbols (such as SPY and QQQ on
 //! the IEX relay), built from the trades it relays and served at
 //! `/bars?symbol=SPY&days=2` for the console's candlestick widget. A source
-//! with bar history (Alpaca) fills in the minutes before the relay saw them;
+//! with bar history (Alpaca's) fills in the minutes before the relay saw them;
 //! its bars stand for every minute they cover, and the relay's own for the
 //! minutes after.
 
@@ -16,7 +16,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::alpaca::Alpaca;
+use crate::source::Source;
 
 /// One minute: its start (Unix seconds), open, high, low, close and volume.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -119,14 +119,14 @@ struct Ask {
 
 struct Ctx {
     bars: Arc<Bars>,
-    history: Option<Arc<Alpaca>>,
+    source: Arc<dyn Source>,
 }
 
 /// `/bars?symbol=SPY&days=2`.
-pub fn router(bars: Arc<Bars>, history: Option<Arc<Alpaca>>) -> Router {
+pub fn router(bars: Arc<Bars>, source: Arc<dyn Source>) -> Router {
     Router::new()
         .route("/bars", get(serve))
-        .with_state(Arc::new(Ctx { bars, history }))
+        .with_state(Arc::new(Ctx { bars, source }))
 }
 
 async fn serve(State(ctx): State<Arc<Ctx>>, Query(ask): Query<Ask>) -> (StatusCode, Json<Value>) {
@@ -138,43 +138,37 @@ async fn serve(State(ctx): State<Arc<Ctx>>, Query(ask): Query<Ask>) -> (StatusCo
     }
     let days = ask.days.unwrap_or(1).clamp(1, MAX_DAYS);
     let mut note = None;
-    let history = match &ctx.history {
-        None => Vec::new(),
-        Some(source) => {
-            let cached = ctx
-                .bars
-                .lock()
-                .history
-                .get(&ask.symbol)
-                .filter(|(at, d, _)| at.elapsed() < HISTORY_FOR && *d >= days)
-                .map(|(_, _, b)| b.clone());
-            match cached {
-                Some(b) => b,
-                None => {
-                    let now = tinytrader_observe::unix_seconds() as u64;
-                    match source
-                        .bars(
-                            &ask.symbol,
-                            (now - days * 86_400) * 1_000_000_000,
-                            now * 1_000_000_000,
-                        )
-                        .await
-                    {
-                        Ok(b) => {
-                            ctx.bars
-                                .lock()
-                                .history
-                                .insert(ask.symbol.clone(), (Instant::now(), days, b.clone()));
-                            b
-                        }
-                        Err(e) => {
-                            note = Some(format!("history unavailable: {e}"));
-                            Vec::new()
-                        }
-                    }
+    // Only a source with bar history ever fills the cache.
+    let cached = ctx
+        .bars
+        .lock()
+        .history
+        .get(&ask.symbol)
+        .filter(|(at, d, _)| at.elapsed() < HISTORY_FOR && *d >= days)
+        .map(|(_, _, b)| b.clone());
+    let now = tinytrader_observe::unix_seconds() as u64;
+    let history = match cached {
+        Some(b) => b,
+        None => match ctx.source.bars(
+            &ask.symbol,
+            (now - days * 86_400) * 1_000_000_000,
+            now * 1_000_000_000,
+        ) {
+            None => Vec::new(),
+            Some(f) => match f.await {
+                Ok(b) => {
+                    ctx.bars
+                        .lock()
+                        .history
+                        .insert(ask.symbol.clone(), (Instant::now(), days, b.clone()));
+                    b
                 }
-            }
-        }
+                Err(e) => {
+                    note = Some(format!("history unavailable: {e}"));
+                    Vec::new()
+                }
+            },
+        },
     };
     let since = tinytrader_observe::unix_seconds() as u64 - days * 86_400;
     let bars: Vec<Value> = merge(&history, &ctx.bars.live(&ask.symbol))

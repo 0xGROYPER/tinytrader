@@ -14,11 +14,13 @@ use databento::dbn::{
     ErrorCode, ErrorMsg, RecordRef, SType, Schema, SystemCode, SystemMsg, VersionUpgradePolicy,
 };
 use databento::live::Subscription;
+use futures_util::future::BoxFuture;
 use time::OffsetDateTime;
 use tinytrader_observe::{Observer, State};
 
 use crate::hours::{self, Hours};
 use crate::hub::Hub;
+use crate::source::{Feed, Source};
 
 /// Records are passed to clients in chunks of about this many bytes.
 const CHUNK: usize = 64 * 1024;
@@ -74,37 +76,6 @@ impl Databento {
         Ok(client)
     }
 
-    /// Keep the standing session up, publishing its records to the hub.
-    pub async fn run(self: Arc<Self>, hub: Arc<Hub>, observer: Observer, hours: Arc<Hours>) {
-        let mut backoff = Duration::from_secs(1);
-        loop {
-            let end = hours.wait_until_active(&hub, &observer).await;
-            let began = Instant::now();
-            // At the end of the active window the session is dropped, which
-            // disconnects it.
-            let outcome = tokio::select! {
-                r = self.stream(&hub, &observer) => Some(r),
-                () = hours::until(end) => None,
-            };
-            let Some(outcome) = outcome else {
-                continue;
-            };
-            hub.upstream_down();
-            let why = match outcome {
-                Ok(()) => "Databento closed the session".to_owned(),
-                Err(e) => e,
-            };
-            eprintln!("relay: {why}; reconnecting in {}s", backoff.as_secs());
-            observer.record_error(&why);
-            observer.set_state(State::Degraded, &format!("{why}; reconnecting"));
-            if began.elapsed() > Duration::from_secs(60) {
-                backoff = Duration::from_secs(1);
-            }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(Duration::from_secs(30));
-        }
-    }
-
     async fn stream(&self, hub: &Hub, observer: &Observer) -> Result<(), String> {
         let mut client = self.session(hub.heartbeat()).await?;
         hub.upstream_up();
@@ -134,6 +105,57 @@ impl Databento {
                 hub.publish(chunk, n);
             }
         }
+    }
+}
+
+impl Source for Databento {
+    fn feed(&self) -> Feed {
+        Feed {
+            dataset: self.dataset.clone(),
+            schema: self.schema.to_string(),
+            stype_in: self.stype_in,
+            provider: "databento",
+            name: "Databento",
+            via: "live API",
+        }
+    }
+
+    /// Keep the standing session up, publishing its records to the hub.
+    fn run(
+        self: Arc<Self>,
+        hub: Arc<Hub>,
+        observer: Observer,
+        hours: Arc<Hours>,
+    ) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                let end = hours.wait_until_active(&hub, &observer).await;
+                let began = Instant::now();
+                // At the end of the active window the session is dropped, which
+                // disconnects it.
+                let outcome = tokio::select! {
+                    r = self.stream(&hub, &observer) => Some(r),
+                    () = hours::until(end) => None,
+                };
+                let Some(outcome) = outcome else {
+                    continue;
+                };
+                hub.upstream_down();
+                let why = match outcome {
+                    Ok(()) => "Databento closed the session".to_owned(),
+                    Err(e) => e,
+                };
+                eprintln!("relay: {why}; reconnecting in {}s", backoff.as_secs());
+                observer.record_error(&why);
+                observer.set_state(State::Degraded, &format!("{why}; reconnecting"));
+                if began.elapsed() > Duration::from_secs(60) {
+                    backoff = Duration::from_secs(1);
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+            }
+        })
     }
 }
 
