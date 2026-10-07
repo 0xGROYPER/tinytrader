@@ -272,7 +272,18 @@ function mountWorkspace() {
     catch (e) { dock.clear(); buildTree(cur?.tree || LAYOUTS.Market()); }
   }
   if (state.focusView) { dock.panels.find(p => p.params?.view === state.focusView)?.api.setActive(); state.focusView = null; }
-  dock.onDidRemovePanel(p => { const body = panelBody.get(p.id); if (body) unmount(body); panelBody.delete(p.id); });
+  const mine = dock;
+  dock.onDidRemovePanel(p => {
+    const body = panelBody.get(p.id); if (body) unmount(body); panelBody.delete(p.id);
+    // Closing a workspace's last panel deletes the workspace (the only one left
+    // gets the Docs panel back instead). Checked after the event, so a layout
+    // being cleared and rebuilt, or the dock being replaced, isn't mistaken for it.
+    setTimeout(() => {
+      if (dock !== mine || dock.panels.length || state.tab !== 'workspace') return;
+      if (lay.list.length > 1) layDelete(lay.current);
+      else dock.addPanel({ id: panelId(), component: 'view', params: { view: 'docs' }, title: VIEWS.docs });
+    });
+  });
   dock.onDidActivePanelChange(e => { wsFocus = (e?.panel || e)?.id ?? null; });
   dock.onDidLayoutChange(() => { clearTimeout(layoutSaveTimer); layoutSaveTimer = setTimeout(laySave, 300); drawCharts(); });
   laySave();
@@ -496,7 +507,16 @@ function layDelete(name) {
   if (lay.list.length < 2) return;
   const i = lay.list.findIndex(l => l.name === name); if (i < 0) return;
   lay.list.splice(i, 1);
-  if (lay.current === name) { lay.current = lay.list[Math.max(0, i - 1)].name; layStore(); state.navigated = true; render(); } else layStore();
+  const wasCurrent = lay.current === name;
+  // Workspaces still under their default name ("Workspace 5") take their new number.
+  const renamed = new Map();
+  lay.list.forEach((l, k) => { if (/^Workspace \d+$/.test(l.name) && l.name !== `Workspace ${wsNumber(k)}`) renamed.set(l, `Workspace ${wsNumber(k)}`); });
+  for (const [l, n] of renamed) {
+    if (lay.list.some(o => o !== l && o.name === n && !renamed.has(o))) continue;
+    if (lay.current === l.name) lay.current = n;
+    l.name = n;
+  }
+  if (wasCurrent) { lay.current = lay.list[Math.max(0, i - 1)].name; layStore(); state.navigated = true; render(); } else layStore();
 }
 
 // The switcher (⌥W): every workspace as a tree of groups. ↑↓ move, →/Tab
