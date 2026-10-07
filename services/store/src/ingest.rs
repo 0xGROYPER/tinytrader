@@ -73,9 +73,18 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
     }
 }
 
-fn sync_dir(dir: &Path) {
-    if let Ok(d) = fs::File::open(dir) {
-        let _ = d.sync_all();
+/// Flush a directory's entries (a new or removed name) to disk. A file
+/// system that doesn't support it (some report EINVAL or ENOTSUP) isn't an
+/// error; any other failure is.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    match fs::File::open(dir)?.sync_all() {
+        Err(e)
+            if matches!(e.raw_os_error(), Some(22 | 45 | 102))
+                || e.kind() == std::io::ErrorKind::Unsupported =>
+        {
+            Ok(())
+        }
+        r => r,
     }
 }
 
@@ -136,7 +145,7 @@ impl Upload {
         }
         let final_path = self.dir.join(&self.name);
         fs::rename(&self.partial, &final_path).map_err(|e| e.to_string())?;
-        sync_dir(&self.dir);
+        sync_dir(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
         Ok((self.size, got))
     }
 }
@@ -164,12 +173,16 @@ impl Ledger {
         }
         Ok(Self { files })
     }
-    fn record(&mut self, mut event: Value) {
+    /// Append a step to every copy of the ledger, flushed. A filing whose
+    /// record can't be written stops: what moved must always be on record.
+    fn record(&mut self, mut event: Value) -> Result<(), String> {
         event["at"] = json!(tinytrader_observe::unix_seconds());
         for file in &mut self.files {
-            let _ = writeln!(file, "{event}");
-            let _ = file.sync_all();
+            writeln!(file, "{event}").map_err(|e| format!("migration ledger: {e}"))?;
+            file.sync_all()
+                .map_err(|e| format!("migration ledger: {e}"))?;
         }
+        Ok(())
     }
 }
 
@@ -243,10 +256,10 @@ fn place_new(from: &Path, to: &Path) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::other("no parent directory"))?;
     fs::create_dir_all(dir)?;
     fs::hard_link(from, to)?;
-    sync_dir(dir);
+    sync_dir(dir)?;
     fs::remove_file(from)?;
     if let Some(d) = from.parent() {
-        sync_dir(d);
+        sync_dir(d)?;
     }
     Ok(())
 }
@@ -263,7 +276,7 @@ fn write_new(to: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.write_all(bytes)?;
     f.sync_all()?;
     if let Some(dir) = to.parent() {
-        sync_dir(dir);
+        sync_dir(dir)?;
     }
     Ok(())
 }
@@ -446,7 +459,7 @@ fn file_databento(
             })
             .collect::<Vec<_>>(),
     )?;
-    ledger.record(json!({ "step": "begin", "batch": batch, "dataset": dataset, "schema": schema, "symbols": symbols, "parts": parts.iter().map(|p| &p.inc).collect::<Vec<_>>() }));
+    ledger.record(json!({ "step": "begin", "batch": batch, "dataset": dataset, "schema": schema, "symbols": symbols, "parts": parts.iter().map(|p| &p.inc).collect::<Vec<_>>() }))?;
 
     // The manifest as kept: without its download URLs.
     let mut kept_manifest = manifest.clone();
@@ -555,7 +568,7 @@ fn file_databento(
         }
         ledger.record(
             json!({ "step": "verified", "file": path, "bytes": meta.len(), "sha256": got }),
-        );
+        )?;
         match (rel, existing.into_iter().next()) {
             (None, _) => receipts.push((name.to_owned(), path, part.root.clone())),
             (Some(_), Some((p, _))) => plans.push(Plan::Duplicate {
@@ -586,7 +599,7 @@ fn file_databento(
         }
     }
     if !problems.is_empty() {
-        ledger.record(json!({ "step": "refused", "problems": problems }));
+        ledger.record(json!({ "step": "refused", "problems": problems }))?;
         return Err(problems.join("; "));
     }
 
@@ -604,10 +617,11 @@ fn file_databento(
                     } else {
                         format!("{} -> {}: {e}", from.display(), to.display())
                     };
-                    ledger.record(json!({ "step": "stopped", "error": why }));
+                    ledger.record(json!({ "step": "stopped", "error": why }))?;
                     return Err(why);
                 }
-                ledger.record(json!({ "step": "moved", "from": from, "to": to, "sha256": sha256 }));
+                ledger
+                    .record(json!({ "step": "moved", "from": from, "to": to, "sha256": sha256 }))?;
                 placed.push(json!({ "path": to, "sha256": sha256 }));
             }
             Plan::Duplicate {
@@ -616,7 +630,7 @@ fn file_databento(
                 sha256,
             } => {
                 fs::remove_file(&from).map_err(|e| e.to_string())?;
-                ledger.record(json!({ "step": "duplicate-dropped", "file": from, "identical_to": existing, "sha256": sha256 }));
+                ledger.record(json!({ "step": "duplicate-dropped", "file": from, "identical_to": existing, "sha256": sha256 }))?;
                 placed.push(json!({ "path": existing, "sha256": sha256, "already_present": true }));
             }
         }
@@ -627,7 +641,7 @@ fn file_databento(
     let receipt_names: Vec<String> = receipts.iter().map(|(n, _, _)| n.clone()).collect();
     for (name, from, own) in receipts.iter().filter(|(n, _, _)| n != "manifest.json") {
         for to in keep_receipt(from, own, &roots, batch, name)? {
-            ledger.record(json!({ "step": "receipt", "file": to }));
+            ledger.record(json!({ "step": "receipt", "file": to }))?;
         }
     }
     // Other receipts left in a folder (such as a downloader's own listing)
@@ -646,7 +660,7 @@ fn file_databento(
                 continue;
             }
             for to in keep_receipt(&e.path(), &part.root, &roots, batch, &name)? {
-                ledger.record(json!({ "step": "receipt", "file": to }));
+                ledger.record(json!({ "step": "receipt", "file": to }))?;
             }
         }
     }
@@ -657,7 +671,7 @@ fn file_databento(
             write_new(&kept, kept_manifest.as_bytes())
                 .map_err(|e| format!("{}: {e}", kept.display()))?;
         }
-        ledger.record(json!({ "step": "receipt", "file": kept }));
+        ledger.record(json!({ "step": "receipt", "file": kept }))?;
     }
     // The folders are empty now; remove them (never recursively). Anything
     // the store didn't recognise keeps its folder there, and is reported.
@@ -694,7 +708,7 @@ fn file_databento(
         }
         write_new(&out, text.as_bytes()).map_err(|e| format!("{}: {e}", out.display()))?;
     }
-    ledger.record(json!({ "step": "complete" }));
+    ledger.record(json!({ "step": "complete" }))?;
     Ok(summary)
 }
 

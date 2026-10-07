@@ -201,6 +201,10 @@ async fn main() {
         .route("/batches/{provider}", get(batches))
         .route("/adopt/{provider}", post(adopt))
         .route("/volumes/approve", post(approve))
+        // Filing and drive approval can't be triggered by a web page.
+        .layer(axum::middleware::from_fn(
+            tinytrader_observe::guard::same_origin_writes,
+        ))
         .with_state(store.clone())
         .merge(observer.router())
         .merge(store.events.router());

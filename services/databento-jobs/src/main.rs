@@ -17,6 +17,8 @@
 //!
 //! The API key comes from `DATABENTO_API_KEY` or `DATABENTO_API_KEY_FILE`.
 
+mod ledger;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -67,6 +69,11 @@ struct Args {
     /// trading day.
     #[arg(long, env = "JOBS_CALENDAR")]
     calendar: Option<String>,
+
+    /// The submissions ledger (JSON lines): each submission is written down
+    /// before it is sent. Without one, nothing is submitted.
+    #[arg(long, env = "JOBS_LEDGER")]
+    ledger: Option<std::path::PathBuf>,
 }
 
 /// How long a price stays good for submitting.
@@ -169,6 +176,8 @@ struct Jobs {
     transfers: Mutex<HashMap<String, Transfer>>,
     /// Jobs submitted here, downloaded once done.
     follow: Mutex<HashSet<String>>,
+    /// Submissions, written down before they are sent (see `ledger`).
+    ledger: Mutex<Option<ledger::Ledger>>,
     /// Full job details, kept once a job is done (they no longer change).
     details: Mutex<HashMap<String, BatchJob>>,
     /// Bytes to download (compressed, as delivered) of done jobs.
@@ -228,6 +237,16 @@ async fn main() {
         quotes: Mutex::default(),
         transfers: Mutex::default(),
         follow: Mutex::default(),
+        ledger: Mutex::new(match &args.ledger {
+            Some(path) => match ledger::Ledger::open(path) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    eprintln!("databento-jobs: cannot read the submissions ledger: {e}");
+                    std::process::exit(2);
+                }
+            },
+            None => None,
+        }),
         details: Mutex::default(),
         delivered: Mutex::default(),
         listed: Mutex::new(json!({ "jobs": [], "updated_at": null })),
@@ -353,6 +372,65 @@ async fn main() {
 
 /// Read the jobs list and the store's holdings, and start downloads of
 /// followed jobs that are done.
+/// A job's fingerprint, as its submission was written down.
+fn job_fingerprint(j: &BatchJob) -> String {
+    let symbols: Vec<String> = match &j.symbols {
+        databento::Symbols::All => vec!["ALL_SYMBOLS".into()],
+        databento::Symbols::Ids(ids) => ids.iter().map(u32::to_string).collect(),
+        databento::Symbols::Symbols(s) => s.clone(),
+    };
+    ledger::fingerprint(
+        &j.dataset,
+        j.schema.as_str(),
+        &symbols,
+        &j.start.date().to_string(),
+        &j.end.date().to_string(),
+    )
+}
+
+/// Resolve the ledger's unresolved submissions against the job list, and
+/// follow (download when done) every job submitted here.
+fn reconcile(jobs: &Shared, out: &[BatchJob]) {
+    let mut guard = lock(&jobs.ledger);
+    let Some(l) = guard.as_mut() else { return };
+    let now = tinytrader_observe::unix_seconds();
+    for e in l.unresolved() {
+        let found = out.iter().find(|j| {
+            job_fingerprint(j) == e.request && j.ts_received.unix_timestamp() as f64 >= e.at - 120.0
+        });
+        let step = match found {
+            Some(j) => Some(ledger::Entry {
+                at: now,
+                request: e.request.clone(),
+                state: "submitted".into(),
+                job: Some(j.id.clone()),
+                cost_usd: e.cost_usd,
+                note: Some("found in Databento's job list".into()),
+            }),
+            None if now - e.at > ledger::SETTLE_SECONDS => Some(ledger::Entry {
+                at: now,
+                request: e.request.clone(),
+                state: "not-submitted".into(),
+                job: None,
+                cost_usd: None,
+                note: Some("no such job appeared in Databento's job list".into()),
+            }),
+            None => None,
+        };
+        if let Some(step) = step {
+            let text = match &step.job {
+                Some(id) => format!("reconciled a submission: {id}"),
+                None => format!("reconciled a submission: not made ({})", e.request),
+            };
+            match l.append(step) {
+                Ok(()) => jobs.events.push(text.clone(), text),
+                Err(err) => eprintln!("databento-jobs: cannot write the ledger: {err}"),
+            }
+        }
+    }
+    lock(&jobs.follow).extend(l.submitted());
+}
+
 /// The first line of an API error, without an HTML error page.
 fn brief(e: &str) -> String {
     e.split('<')
@@ -440,6 +518,10 @@ async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
         .map(|j| row(j, &held, delivered.get(&j.id).copied()))
         .collect();
     *lock(&jobs.listed) = json!({ "jobs": rows, "store_reachable": !held.is_null(), "updated_at": tinytrader_observe::unix_seconds() });
+
+    // Submissions whose outcome was unknown: match each to the job it
+    // created, or, once it would have appeared, record it as never made.
+    reconcile(jobs, &out);
 
     let ready: Vec<String> = out
         .iter()
@@ -712,6 +794,46 @@ async fn submit(AxState(jobs): AxState<Shared>, Json(s): Json<Submit>) -> Reply 
             format!("this request costs ${now:.2}; confirm that amount to submit it"),
         );
     }
+    // Written down before it is sent; refused if the same request may
+    // already have gone through and isn't reconciled yet.
+    let request = ledger::fingerprint(
+        &checked.dataset,
+        checked.schema.as_str(),
+        &checked.symbols,
+        &checked.start.to_string(),
+        &checked.end.to_string(),
+    );
+    {
+        let mut guard = lock(&jobs.ledger);
+        let Some(l) = guard.as_mut() else {
+            return refused(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no submissions ledger is configured (JOBS_LEDGER), so nothing is submitted",
+            );
+        };
+        if let Some(b) = l.blocking(&request) {
+            return refused(
+                StatusCode::CONFLICT,
+                format!(
+                    "this exact request was submitted at {} and its outcome isn't known yet; it is being checked against Databento's job list (up to 10 minutes), so it isn't submitted again",
+                    tinytrader_schedule::describe((b.at * 1e9) as u64)
+                ),
+            );
+        }
+        if let Err(e) = l.append(ledger::Entry {
+            at: tinytrader_observe::unix_seconds(),
+            request: request.clone(),
+            state: "sending".into(),
+            job: None,
+            cost_usd: Some(now),
+            note: None,
+        }) {
+            return refused(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not write the submissions ledger, so nothing was submitted: {e}"),
+            );
+        }
+    }
     let params = SubmitJobParams::builder()
         .dataset(&checked.dataset)
         .schema(checked.schema)
@@ -725,6 +847,22 @@ async fn submit(AxState(jobs): AxState<Shared>, Json(s): Json<Submit>) -> Reply 
     };
     match submitted {
         Ok(job) => {
+            if let Some(l) = lock(&jobs.ledger).as_mut()
+                && let Err(e) = l.append(ledger::Entry {
+                    at: tinytrader_observe::unix_seconds(),
+                    request: request.clone(),
+                    state: "submitted".into(),
+                    job: Some(job.id.clone()),
+                    cost_usd: Some(now),
+                    note: None,
+                })
+            {
+                // The job exists; reconciliation will record it from the job list.
+                eprintln!(
+                    "databento-jobs: cannot write the ledger after submitting {}: {e}",
+                    job.id
+                );
+            }
             lock(&jobs.follow).insert(job.id.clone());
             let text = format!(
                 "submitted {} ({} {} {}, ${now:.2})",
@@ -741,6 +879,19 @@ async fn submit(AxState(jobs): AxState<Shared>, Json(s): Json<Submit>) -> Reply 
             )
         }
         Err(e) => {
+            if let Some(l) = lock(&jobs.ledger).as_mut() {
+                // Unwritten, the "sending" step still blocks a resubmission.
+                if let Err(w) = l.append(ledger::Entry {
+                    at: tinytrader_observe::unix_seconds(),
+                    request: request.clone(),
+                    state: "uncertain".into(),
+                    job: None,
+                    cost_usd: Some(now),
+                    note: Some(brief(&e.to_string())),
+                }) {
+                    eprintln!("databento-jobs: cannot write the ledger: {w}");
+                }
+            }
             jobs.events
                 .push(format!("submission failed: {e}"), e.to_string());
             refused(

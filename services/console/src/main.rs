@@ -168,6 +168,11 @@ async fn main() {
             axum::routing::post(store_approve),
         )
         .route("/api/reminders", get(reminders_get).post(reminders_post))
+        // The console's writes (jobs, drive approval, reminders) can't be
+        // forged by another page open in the browser.
+        .layer(axum::middleware::from_fn(
+            tinytrader_observe::guard::json_writes,
+        ))
         .with_state(app)
         .merge(observer.router());
     let listener = match tokio::net::TcpListener::bind(&listen).await {

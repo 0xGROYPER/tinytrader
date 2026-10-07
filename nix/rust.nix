@@ -20,6 +20,9 @@
           ../Cargo.lock
           ../libs/observe
           ../libs/fleet
+          ../libs/schedule
+          ../libs/dbn
+          ../libs/tinytrader
           ../apps/tui
           ../services/ticker
           ../services/databento-jobs

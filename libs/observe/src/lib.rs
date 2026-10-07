@@ -12,6 +12,8 @@
 //! (`tinytrader.observe/1`): changes are additive only. Labels stay low
 //! cardinality: service, venue, product; never per-order or per-instrument ids.
 
+pub mod guard;
+
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
