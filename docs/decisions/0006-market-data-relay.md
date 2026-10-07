@@ -31,21 +31,15 @@ First version: **Alpaca IEX** (US equities trades and quotes) and **Databento
 OPRA** (`OPRA.PILLAR`, CMBP-1 and definitions). Crypto venues come later, with
 their capture work.
 
-Each relay instance serves one port and holds one provider connection. The
-first deployment runs:
-
-| Relay | Symbols | Provider sessions |
-|---|---|---|
-| IEX | `SPY`, `QQQ` | Alpaca's single stream |
-| OPRA SPY | `SPY.OPT` | 1 Databento session |
-| OPRA QQQ | `QQQ.OPT` | 1 |
-| OPRA XSP | `XSP.OPT` | 1 |
-| OPRA index | `SPX.OPT`, `SPXW.OPT` | 1 |
-
-Splitting OPRA by root lets a client take only the roots it wants without the
-relay filtering anything. That is four Databento sessions in all, however
-many clients connect, within Databento's 10 per dataset on Standard plans.
-Symbols are configuration, so adding more is a deployment change.
+Each relay instance serves one port and holds one provider connection, so
+a deployment runs one relay per feed it wants to share: one for Alpaca IEX
+(Alpaca allows a single stream per account), and OPRA split by root, such as
+one relay per ETF's options and one for the index options. Splitting OPRA by
+root lets a client take only the roots it wants without the relay filtering
+anything, and the number of Databento sessions is the number of relays,
+however many clients connect (Standard plans allow 10 per dataset). Symbols
+are configuration, so adding more is a deployment change; which relays a
+deployment runs is recorded in that deployment's repository.
 
 Out of scope for now: recording, caching market data, filtering by
 instrument or expiry, and quote conditions.
