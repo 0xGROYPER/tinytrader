@@ -21,6 +21,8 @@ import '../widgets/jobs.js';
 import '../widgets/storage.js';
 import '../widgets/reminders.js';
 import '../widgets/docs.js';
+import '../widgets/watchlist.js';
+import { setTheme, PRESETS, parseSymbols, parseKeywords } from './theme.js';
 const state = { openGroups: new Set(), navKey: '', tab: 'workspace', lastOk: 0, collections: [], doc: null };
 /** An element by ID, typed loosely enough for forms and buttons alike. @type {(id: string) => HTMLInputElement} */
 const $ = id => /** @type {HTMLInputElement} */ (document.getElementById(id));
@@ -185,6 +187,8 @@ const LAYOUTS = {
   Operations: () => ({ dir: 'row', ratio: 0.62, a: { dir: 'col', ratio: 0.5, a: { view: 'overview' }, b: { view: 'schedule' } }, b: { dir: 'col', ratio: 0.55, a: { view: 'services' }, b: { view: 'shell' } } }),
   Data: () => ({ dir: 'row', ratio: 0.55, a: { view: 'jobs' }, b: { dir: 'col', ratio: 0.55, a: { view: 'data' }, b: { view: 'storage' } } }),
 };
+// A themed workspace's first layout: its watchlist and chart beside its news.
+const THEMED = () => ({ dir: 'row', ratio: 0.55, a: { dir: 'col', ratio: 0.42, a: { view: 'watchlist' }, b: { view: 'candles' } }, b: { view: 'news' } });
 const DV = globalThis['dockview-core'];
 let dock = null, wsFocus = null, panelSeq = 0;
 const panelBody = new Map(); // panel id → its content element
@@ -220,6 +224,8 @@ function buildTree(tree) {
 /** A pending save of the layout after it changes. */
 let layoutSaveTimer = 0;
 function mountWorkspace() {
+  // Its widgets follow the workspace's theme, if it has one.
+  setTheme(lay.list.find(l => l.name === lay.current)?.theme || null);
   for (const body of mounted.keys()) unmount(body);
   dock?.dispose(); dock = null; panelBody.clear();
   const el = $('ws-root'); if (!el) return;
@@ -327,6 +333,7 @@ function wsCommands() {
   out.push({ label: activePanel()?.api.isMaximized() ? 'Restore all panels' : 'Maximise this panel', run: wsMaximise });
   if ((dock?.panels.length || 0) > 1) out.push({ label: 'Close this panel', run: () => activePanel()?.api.close() });
   for (const [name, make] of Object.entries(LAYOUTS)) out.push({ label: `Apply template: ${name}`, run: () => { dock.clear(); buildTree(make()); } });
+  for (const [name, t] of Object.entries(PRESETS)) out.push({ label: `New themed workspace: ${name}`, run: () => wsAdd(name, { tree: THEMED(), theme: t }) });
   return out;
 }
 const matching = q => { const words = q.toLowerCase().split(/\s+/).filter(Boolean); return [...layoutCommands(q), ...wsCommands()].filter(c => c.always || words.every(w => c.label.toLowerCase().includes(w))); };
@@ -391,7 +398,7 @@ const layViews = l => l.dock ? Object.values(l.dock.panels || {}).map(p => p.par
 const WS_MAX = 10;
 const wsNumber = i => i < 9 ? String(i + 1) : '0';
 // A new workspace, numbered next, with one panel to build on; it opens.
-/** @param {string} [name] @param {{ tree?: object, dock?: object }} [start] */
+/** @param {string} [name] @param {{ tree?: object, dock?: object, theme?: object }} [start] */
 function wsAdd(name, start = { tree: { view: 'docs' } }) {
   if (lay.list.length >= WS_MAX) return false;
   const base = name || `Workspace ${wsNumber(lay.list.length)}`;
@@ -414,8 +421,21 @@ function wmDraw(l, confirm) {
     ? `<h3>Delete “${esc(l.name)}”?</h3><div class="wm-confirm"><button type="button" class="btn" data-wm="keep">Keep</button><button type="button" class="btn danger" data-wm="delete-yes">Delete</button></div>`
     : `<h3>${esc(l.name)}</h3>
       <button type="button" class="nw-item" role="menuitem" data-wm="rename"><b>Rename…</b></button>
+      <button type="button" class="nw-item" role="menuitem" data-wm="theme"><b>Theme…</b><span>${l.theme ? esc(`${l.theme.symbols.length} symbols, ${l.theme.keywords.length} keywords`) : 'Symbols and news keywords its widgets follow'}</span></button>
       ${lay.list.length < WS_MAX ? '<button type="button" class="nw-item" role="menuitem" data-wm="duplicate"><b>Duplicate</b></button>' : ''}
       ${lay.list.length > 1 ? '<button type="button" class="nw-item" role="menuitem" data-wm="delete"><b>Delete</b></button>' : ''}`;
+}
+// A workspace's theme, edited in its menu: symbols and news keywords, or a preset.
+function wmTheme(l) {
+  const m = $('wm'); if (!m) return;
+  const t = l.theme || { symbols: [], keywords: [] };
+  m.classList.add('wm-wide');
+  m.innerHTML = `<h3>Theme for “${esc(l.name)}”</h3>
+    <label class="wm-field">Symbols <input id="wm-sym" class="input" value="${esc(t.symbols.join(', '))}" placeholder="USO, XLE, GLD"></label>
+    <label class="wm-field">News keywords <input id="wm-kw" class="input" value="${esc(t.keywords.join(', '))}" placeholder="Iran, OPEC, crude"></label>
+    <div class="wm-presets">${Object.keys(PRESETS).map(p => `<button type="button" class="btn small" data-wm="preset:${esc(p)}">${esc(p)}</button>`).join('')}</div>
+    <div class="wm-confirm">${l.theme ? '<button type="button" class="btn" data-wm="theme-clear">Remove theme</button>' : ''}<button type="button" class="btn primary" data-wm="theme-save">Save</button></div>`;
+  $('wm-sym').focus();
 }
 function wmClose() { $('wm')?.remove(); }
 document.addEventListener('contextmenu', e => {
@@ -429,6 +449,19 @@ document.addEventListener('click', e => {
   const l = lay.list.find(w => w.name === m.dataset.ws); if (!l) return wmClose();
   const act = a.dataset.wm;
   if (act === 'delete') return wmDraw(l, true);
+  if (act === 'theme') return wmTheme(l);
+  if (act.startsWith('preset:')) {
+    const t = PRESETS[act.slice(7)];
+    if (t) { $('wm-sym').value = t.symbols.join(', '); $('wm-kw').value = t.keywords.join(', '); }
+    return;
+  }
+  if (act === 'theme-save' || act === 'theme-clear') {
+    const t = act === 'theme-clear' ? null : { symbols: parseSymbols($('wm-sym').value), keywords: parseKeywords($('wm-kw').value) };
+    if (t && (t.symbols.length || t.keywords.length)) l.theme = t; else delete l.theme;
+    layStore(); wmClose();
+    if (l.name === lay.current) { setTheme(l.theme || null); document.dispatchEvent(new CustomEvent('tt-theme')); refreshTiles(); }
+    return;
+  }
   if (act === 'keep') return wmDraw(l, false);
   wmClose();
   if (act === 'delete-yes') { layDelete(l.name); updateLayoutNav(); }

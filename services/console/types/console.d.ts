@@ -32,6 +32,8 @@ interface TopoService extends TopoNode {
   snapshots?: string;
   /** On-demand option chains (`/api/stream/{id}/chain?underlying=`). */
   chain?: string;
+  /** On-demand news for given symbols (`/api/stream/{id}/news_search?symbols=`). */
+  news_search?: string;
   /** A relay's description: protocol, listen address, symbols. */
   relay?: { protocol: string; listen: string; symbols: string[] };
   /** A market calendar it serves. */

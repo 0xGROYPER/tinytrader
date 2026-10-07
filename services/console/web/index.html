@@ -341,6 +341,18 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 @container (max-width: 380px) { .mcal-now .muted { display: none; } }
 /* Header status: the worst state of any service; opens Operations. */
 .nw-pop { position: fixed; z-index: 60; width: min(320px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 8px; background: var(--bg); box-shadow: 0 10px 30px rgba(0, 0, 0, .18); padding: 6px; }
+.nw-pop.wm-wide { width: min(420px, calc(100vw - 32px)); }
+.wm-field { display: flex; flex-direction: column; gap: 4px; margin: 6px 10px; font: 12px var(--ui); color: var(--muted); }
+.wm-field .input { font: 13px var(--mono); padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
+.wm-presets { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 10px; }
+/* Watchlist */
+.wl { width: 100%; border-collapse: collapse; font: 13px var(--mono); font-variant-numeric: tabular-nums; }
+.wl th { text-align: left; font: 600 11px var(--ui); letter-spacing: .04em; color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.wl td { padding: 6px 8px; border-bottom: 1px solid var(--line-soft); }
+.wl .num { text-align: right; } .wl .up { color: var(--ok, #1a7f37); } .wl .down { color: var(--crit, #c62828); }
+.wl tbody tr { cursor: pointer; } .wl tbody tr:hover { background: var(--nav-hover); }
+.wl tr[aria-current] { background: var(--accent-soft); } .wl .wl-sym { font-weight: 600; }
+.wl-foot { font-size: 12px; margin: 8px 0 0; }
 .nw-pop h3 { margin: 6px 10px 8px; font: 600 13px var(--ui); color: var(--muted); }
 .nw-item { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); font: 14px var(--ui); text-align: left; cursor: pointer; }
 .wm-confirm { display: flex; gap: 8px; justify-content: flex-end; padding: 4px 10px 8px; }

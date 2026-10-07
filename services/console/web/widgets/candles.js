@@ -1,11 +1,14 @@
 // Candles: one-minute candlesticks and volume for a symbol, from a relay's
 // bars (the relay builds them from the trades it relays, and fills earlier
-// minutes from its source's history where it keeps one, as Alpaca does).
+// minutes from its source's history where it keeps one, as Alpaca does), or
+// in a themed workspace for the theme's symbols, from a service with bars
+// for any symbol (alpaca-data) where no relay carries them.
 // Times are New York time. Drawn with TradingView's Lightweight Charts
 // (Apache-2.0), loaded the first time a chart opens.
 import { defineWidget } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
+import { theme, focused } from '../lib/theme.js';
 
 const LIB = '/vendor/lightweight-charts-5.2.1.min.js';
 /** @type {Promise<any> | null} */
@@ -20,11 +23,21 @@ function library() {
 }
 
 /** Every symbol some relay serves bars for: [{ service, symbol }]. */
-function choices() {
+function relayed() {
   return (fleet.topo?.services || []).filter(s => s.bars).flatMap(s => {
     const symbols = [...new Set((s.schedule || []).flatMap(x => x.symbols || []))];
     return symbols.map(symbol => ({ service: s.id, symbol }));
   });
+}
+
+/** What to offer: the workspace theme's symbols when it has one (from a relay
+ * that carries the symbol, else a service with bars for any symbol), or else
+ * every relayed symbol. */
+function choices() {
+  const t = theme(), live = relayed();
+  if (!t?.symbols.length) return live;
+  const any = (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id;
+  return t.symbols.map(symbol => live.find(c => c.symbol === symbol) || (any ? { service: any, symbol } : null)).filter(Boolean);
 }
 
 // Lightweight Charts shows times as UTC; shift each bar by New York's offset
@@ -54,13 +67,13 @@ defineWidget('candles', {
     const bar = el.querySelector('.cd-bar'), box = /** @type {HTMLElement} */ (el.querySelector('.cd-chart')), msg = el.querySelector('.cd-msg');
     const head = () => {
       const list = choices();
-      if (!my.pick || !list.some(c => c.service === my.pick.service && c.symbol === my.pick.symbol)) my.pick = list[0] || null;
+      if (!my.pick || !list.some(c => c.service === my.pick.service && c.symbol === my.pick.symbol)) my.pick = list.find(c => c.symbol === focused()) || list[0] || null;
       bar.innerHTML = list.length
         ? `<span class="chips">${list.map(c => `<button type="button" class="chip-btn" data-cd-pick="${esc(c.service)}|${esc(c.symbol)}" aria-pressed="${my.pick?.service === c.service && my.pick?.symbol === c.symbol}">${esc(c.symbol)}</button>`).join('')}</span>
            <span class="chips">${RANGES.map(([l, d]) => `<button type="button" class="chip-btn" data-cd-days="${d}" aria-pressed="${my.days === d}">${l}</button>`).join('')}</span>
            <span class="cd-last mono">${esc(my.last)}</span>`
         : '';
-      msg.textContent = !list.length ? 'No relay serves bars yet.' : my.err ? my.err : my.note || '';
+      msg.textContent = !list.length ? (theme() ? 'No service serves bars for the theme’s symbols.' : 'No relay serves bars yet.') : my.err ? my.err : my.note || '';
     };
     const colours = () => ({
       layout: { background: { color: 'transparent' }, textColor: css('--muted'), fontFamily: css('--mono') || 'monospace', fontSize: 11 },
@@ -99,13 +112,20 @@ defineWidget('candles', {
       if (d) { my.days = +d.dataset.cdDays; fresh(); }
     };
     el.addEventListener('click', click);
+    // The symbol picked in a watchlist, or a new theme.
+    const follow = (/** @type {Event} */ e) => {
+      const sym = /** @type {CustomEvent} */ (e).detail, c = typeof sym === 'string' && choices().find(x => x.symbol === sym);
+      if (c) { my.pick = c; fresh(); } else if (e.type === 'tt-theme') { my.pick = null; fresh(); }
+    };
+    document.addEventListener('tt-focus', follow);
+    document.addEventListener('tt-theme', follow);
     head(); load();
     // The relay's bars change once a minute; a 5 s refresh keeps the last one current.
     my.timer = setInterval(load, 5000);
     return {
       // The fleet's polls only matter for which symbols are offered.
       update() { if (!my.pick) { head(); load(); } },
-      dispose() { my.alive = false; clearInterval(my.timer); my.chart?.remove(); el.removeEventListener('click', click); },
+      dispose() { my.alive = false; clearInterval(my.timer); my.chart?.remove(); el.removeEventListener('click', click); document.removeEventListener('tt-focus', follow); document.removeEventListener('tt-theme', follow); },
     };
   },
 });

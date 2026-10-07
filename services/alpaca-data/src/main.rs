@@ -11,6 +11,9 @@
 //!   with quotes, IV and greeks, and per expiry the at-the-money IV and the
 //!   straddle as an implied move; by default the next 60 days.
 //!
+//! - `/news?symbols=USO,XLE&limit=50`: recent stories on those symbols
+//!   (Benzinga, through Alpaca), in the news service's shape, newest first.
+//!
 //! Answers are kept briefly (snapshots 2 s, chains 15 s, bars a minute) and
 //! requests to Alpaca are held under its free plan's 200 a minute, so many
 //! panels asking at once don't multiply the load.
@@ -239,6 +242,46 @@ async fn snapshots(AxState(app): AxState<Arc<App>>, Query(ask): Query<SnapAsk>) 
 }
 
 #[derive(Deserialize)]
+struct NewsAsk {
+    symbols: String,
+    limit: Option<u32>,
+}
+
+async fn news(AxState(app): AxState<Arc<App>>, Query(ask): Query<NewsAsk>) -> Response {
+    let mut list: Vec<String> = ask
+        .symbols
+        .split(',')
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    list.sort();
+    list.dedup();
+    if list.is_empty() || list.len() > 50 || !list.iter().all(|s| symbol_ok(s)) {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "symbols: 1 to 50 stock symbols, comma-separated",
+        );
+    }
+    let limit = ask.limit.unwrap_or(50).clamp(1, 50);
+    let joined = list.join(",");
+    let a = app.clone();
+    answer(
+        app.kept(format!("news|{joined}|{limit}"), Duration::from_secs(60), || async move {
+            let v = a.get("/v1beta1/news", &[("symbols", joined), ("limit", limit.to_string()), ("sort", "desc".into())]).await?;
+            // As the news service serves them, without the full text.
+            let items: Vec<Value> = v["news"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|n| json!({ "id": n["id"], "headline": n["headline"], "summary": n["summary"], "author": n["author"], "source": n["source"], "url": n["url"], "symbols": n["symbols"], "created_at": n["created_at"], "updated_at": n["updated_at"] }))
+                .collect();
+            Ok(json!({ "items": items }))
+        })
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
 struct BarAsk {
     symbol: String,
     days: Option<u64>,
@@ -389,7 +432,7 @@ async fn main() {
     observer.describe(json!({
         "role": "Market data for any symbol on request: stock snapshots, bars and option chains with IV and greeks, from Alpaca.",
         "upstream": [{ "id": "alpaca-data-api", "label": "Alpaca", "sub": format!("{} stocks, {} options", args.feed, args.options_feed), "kind": "flow", "via": "https" }],
-        "streams": { "bars": "/bars", "snapshots": "/snapshots", "chain": "/chain" },
+        "streams": { "bars": "/bars", "snapshots": "/snapshots", "chain": "/chain", "news_search": "/news" },
     }));
     let app = Arc::new(App {
         http: reqwest::Client::builder()
@@ -425,6 +468,7 @@ async fn main() {
         .route("/snapshots", get(snapshots))
         .route("/bars", get(bars))
         .route("/chain", get(option_chain))
+        .route("/news", get(news))
         .with_state(app)
         .merge(observer.router());
     let listen = listen_address("ALPACA_DATA_LISTEN", "127.0.0.1:9123");
