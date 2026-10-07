@@ -535,8 +535,9 @@ pub struct Serve {
 }
 
 /// The records of a live chunk that history doesn't already cover: market
-/// records (MBP-1 and trade conditions) timed before `cut` are dropped until
-/// one at or after it is seen, after which `cut` is cleared.
+/// records (every kind but reference and system records: definitions, symbol
+/// mappings, status, system and error messages) timed before `cut` are
+/// dropped until one at or after it is seen, after which `cut` is cleared.
 fn after_cut(chunk: &[u8], cut: &mut u64) -> Vec<u8> {
     if *cut == 0 {
         return chunk.to_vec();
@@ -549,7 +550,14 @@ fn after_cut(chunk: &[u8], cut: &mut u64) -> Vec<u8> {
             break;
         };
         at += len;
-        let market = rec[1] == rtype::MBP_1 || rec[1] == tinytrader_dbn::trade_conditions::RTYPE;
+        let market = !matches!(
+            rec[1],
+            rtype::INSTRUMENT_DEF
+                | rtype::SYMBOL_MAPPING
+                | rtype::STATUS
+                | rtype::SYSTEM
+                | rtype::ERROR
+        );
         let ts = u64_at(rec, 8).unwrap_or(0);
         if market && *cut != 0 {
             if ts < *cut {
@@ -785,6 +793,37 @@ mod tests {
             }
         }
         assert_eq!(seen, [9]);
+    }
+
+    #[test]
+    fn the_catch_up_cut_drops_every_market_record_history_covered() {
+        use databento::dbn::{RecordRef, TradeMsg};
+        let at = |ts: u64| RecordHeader::new::<TradeMsg>(rtype::MBP_0, 1, 7, ts);
+        let trade = |ts| {
+            RecordRef::from(&TradeMsg {
+                hd: at(ts),
+                ..Default::default()
+            })
+            .as_ref()
+            .to_vec()
+        };
+        let def = InstrumentDefMsg {
+            hd: RecordHeader::new::<InstrumentDefMsg>(rtype::INSTRUMENT_DEF, 1, 7, 5),
+            ..Default::default()
+        };
+        // A trade before the cut is dropped; a definition never is; from the
+        // first record at the cut on, everything passes.
+        let mut chunk = trade(10);
+        chunk.extend(RecordRef::from(&def).as_ref());
+        chunk.extend(trade(20));
+        chunk.extend(trade(15));
+        let mut cut = 20;
+        let out = after_cut(&chunk, &mut cut);
+        let mut expect = RecordRef::from(&def).as_ref().to_vec();
+        expect.extend(trade(20));
+        expect.extend(trade(15));
+        assert_eq!(out, expect);
+        assert_eq!(cut, 0);
     }
 
     #[test]

@@ -312,13 +312,18 @@ async fn accept(clients: TcpListener, hub: Arc<Hub>, source: Arc<dyn Source>, ma
                 account: join.account.clone(),
                 peer: peer.to_string(),
                 since: tinytrader_observe::unix_seconds(),
-                replay: requested.is_some(),
+                replay: history.is_some(),
                 conditions: join.conditions,
             });
             hub.serve(
                 out,
                 hub::Serve {
-                    start: requested.unwrap_or(now),
+                    // The effective start: live from now unless history is sent.
+                    start: if history.is_some() {
+                        requested.unwrap_or(now)
+                    } else {
+                        now
+                    },
                     conditions: join.conditions,
                     history,
                     cut,

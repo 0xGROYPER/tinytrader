@@ -58,7 +58,7 @@ TCP, one port per relay. The client speaks first, with one line of JSON:
 |---|---|
 | `protocol` | Required. A relay refuses versions it doesn't serve. |
 | `start` | Optional. Replay from this time, then continue live. Absent means live from now. |
-| `conditions` | Optional, IEX only. Interleave a trade conditions record after each trade. |
+| `conditions` | Optional, for sources with trade conditions (IEX today). Interleave a trade conditions record after each trade. |
 | `client` | Optional. The client's name, such as `xsp-strategy` (up to 64 letters, digits, `.`, `_`, `-` or spaces). Added 2026-10-07. |
 | `account` | Optional. The Alpaca account the client trades, by its name in the deployment, such as `paper-1`. Added 2026-10-07. |
 
@@ -103,7 +103,12 @@ The relay answers with a DBN v3 stream: a metadata header (dataset, schema,
     `cbbo-1s`, `cbbo-1m`, `definition` and `statistics`), so missed quotes
     come from the next day's historical data. If that becomes a problem, this
     decision is reopened: replaying `tcbbo` and `cbbo-1s` for the missed
-    stretch is the first option.
+    stretch is the first option. The client is served live from joining,
+    and its stream header's `start` says so (the effective start, not the
+    requested one).
+  - After history, live records that history already covered are dropped:
+    every market record (anything but definitions, symbol mappings, status,
+    system and error records) timed before the switch, whatever its schema.
 - **Reference data.** The relay keeps the latest instrument definitions and
   statistics (open interest and the like, some published before the open) in
   memory: it replays them from Databento when its own session starts, keeps
@@ -150,11 +155,18 @@ is disconnected rather than slowing the provider connection or other clients.
   08:00–17:00). Trading days and early closes come from the market calendar
   the accounts service serves. Outside the window the relay disconnects from
   its provider, reports itself idle ("off schedule until …"), and is left
-  out of the console's graph.
+  out of the console's graph. A relay for a venue that trades around the
+  clock (crypto) leaves its hours unset and is always active.
 - Configuration by flags and environment, with credentials from files
   (`*_FILE`), like tinytrader's other services.
 - Implementation: tokio, the official `databento` and `dbn` crates (including
   their reconnect handling), and `apca` for Alpaca's stream and history.
+- **A provider is a `Source`** (`services/relay/src/source.rs`): it must
+  describe its feed and run its session into the hub; catch-up, trade
+  conditions and minute-bar history are optional, and a client asking for
+  one a source lacks gets the same refusal or live-only service as above.
+  Adding a provider (such as Kraken Futures) is a new `Source` and one line
+  choosing it from `RELAY_SOURCE`.
 
 ## Migration
 
