@@ -43,7 +43,7 @@ struct Args {
     contact: Option<String>,
 
     /// Hours between reads of each source.
-    #[arg(long, env = "ECON_REFRESH_HOURS", default_value_t = 6)]
+    #[arg(long, env = "ECON_REFRESH_HOURS", default_value_t = 24)]
     refresh_hours: u64,
 }
 
