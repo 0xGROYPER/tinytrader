@@ -28,6 +28,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use axum::extract::{Query, State as AxState};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use clap::Parser;
@@ -202,6 +204,9 @@ async fn main() {
         .expect("an HTTP client");
     loop {
         read_all(&http, &shared, args.contact.is_some()).await;
+        if shared.earnings().sources.is_empty() {
+            observer.set_state(State::Ready, "reading the earnings calendars");
+        }
         read_earnings(&plain, &shared, &keys, args.earnings_days).await;
         let (mut failing, held) = {
             let sources = shared.lock();
@@ -286,7 +291,17 @@ struct Ask {
     min: Option<String>,
 }
 
-async fn events(AxState(shared): AxState<Arc<Shared>>, Query(ask): Query<Ask>) -> Json<Value> {
+/// Before the first read, a 503 rather than an empty list, so a caller that
+/// keeps what it gets (the console keeps it for minutes) asks again.
+fn not_yet() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "still reading the sources" })),
+    )
+        .into_response()
+}
+
+async fn events(AxState(shared): AxState<Arc<Shared>>, Query(ask): Query<Ask>) -> Response {
     let now = unix_seconds() as i64;
     let day = |s: i64| ny_date_time(s).0;
     let from = ask.from.unwrap_or_else(|| day(now - 31 * 86_400));
@@ -297,6 +312,9 @@ async fn events(AxState(shared): AxState<Arc<Shared>>, Query(ask): Query<Ask>) -
         .and_then(Importance::parse)
         .unwrap_or(Importance::Medium);
     let sources = shared.lock();
+    if sources.is_empty() {
+        return not_yet();
+    }
     let mut list: Vec<&Event> = sources
         .values()
         .flat_map(|src| &src.events)
@@ -332,6 +350,7 @@ async fn events(AxState(shared): AxState<Arc<Shared>>, Query(ask): Query<Ask>) -
     Json(
         json!({ "events": events, "sources": status, "from": from, "to": to, "min": min.as_str() }),
     )
+    .into_response()
 }
 
 /// Keys for the earnings calendars that need one.
@@ -441,10 +460,7 @@ fn report_importance(r: &earnings::Report, watch: &[String]) -> Importance {
     }
 }
 
-async fn earnings_list(
-    AxState(shared): AxState<Arc<Shared>>,
-    Query(ask): Query<Ask>,
-) -> Json<Value> {
+async fn earnings_list(AxState(shared): AxState<Arc<Shared>>, Query(ask): Query<Ask>) -> Response {
     let now = unix_seconds() as i64;
     let day = |s: i64| ny_date_time(s).0;
     let from = ask.from.unwrap_or_else(|| day(now - 7 * 86_400));
@@ -455,6 +471,9 @@ async fn earnings_list(
         .and_then(Importance::parse)
         .unwrap_or(Importance::Medium);
     let e = shared.earnings();
+    if e.sources.is_empty() {
+        return not_yet();
+    }
     let reports: Vec<Value> = e
         .reports
         .iter()
@@ -483,4 +502,5 @@ async fn earnings_list(
     Json(
         json!({ "reports": reports, "sources": sources, "from": from, "to": to, "min": min.as_str() }),
     )
+    .into_response()
 }
