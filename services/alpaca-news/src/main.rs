@@ -19,6 +19,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tinytrader_observe::{lock, secret};
 
 use axum::Router;
 use axum::routing::get;
@@ -315,20 +316,6 @@ fn merge(shared: &Shared, fresh: Vec<Value>, keep: usize) {
     all.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
     all.truncate(keep);
     items.extend(all);
-}
-
-/// A credential from `NAME`, or from the file named by `NAME_FILE`.
-fn secret(name: &str) -> Result<String, String> {
-    if let Ok(path) = std::env::var(format!("{name}_FILE")) {
-        return std::fs::read_to_string(&path)
-            .map(|s| s.trim().to_owned())
-            .map_err(|e| format!("cannot read {name}_FILE {path}: {e}"));
-    }
-    std::env::var(name).map_err(|_| format!("set {name} or {name}_FILE"))
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

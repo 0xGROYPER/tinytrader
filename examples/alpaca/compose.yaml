@@ -13,20 +13,25 @@ x-service: &service
     options: { max-size: "10m", max-file: "3" }
 
 services:
-  alpaca-live:
+  # A market data relay (decision 0006): Alpaca's IEX feed, served to
+  # clients on this machine over tinytrader.relay/1 (port 7610).
+  relay:
     build:
       context: ../..
       dockerfile: services/Dockerfile
-      args: { SERVICE: alpaca-live }
-    image: tinytrader/alpaca-live:dev
+      args: { SERVICE: relay }
+    image: tinytrader/relay:dev
     labels:
-      tinytrader.observe: "9102"
+      tinytrader.observe: "9110"
     environment:
       APCA_API_KEY_ID_FILE: /run/secrets/apca_api_key_id
       APCA_API_SECRET_KEY_FILE: /run/secrets/apca_api_secret_key
-      ALPACA_SYMBOLS: ${ALPACA_SYMBOLS:-SPY,QQQ,AAPL}
-      ALPACA_CHANNELS: ${ALPACA_CHANNELS:-trades,quotes}
-      ALPACA_LISTEN: 0.0.0.0:9102   # reachable only on the Compose network
+      RELAY_SOURCE: alpaca-iex
+      RELAY_SYMBOLS: ${ALPACA_SYMBOLS:-SPY,QQQ,AAPL}
+      RELAY_LISTEN: 0.0.0.0:7610
+      RELAY_OBSERVE_LISTEN: 0.0.0.0:9110   # reachable only on the Compose network
+    ports:
+      - "127.0.0.1:7610:7610"   # clients on this machine
     secrets: [apca_api_key_id, apca_api_secret_key]
     <<: *service
     mem_limit: 256m
@@ -86,7 +91,7 @@ services:
       - ./topology.json:/etc/tinytrader/topology.json:ro
     ports:
       - "127.0.0.1:8080:8080"   # this machine only
-    depends_on: [alpaca-live, docker-proxy]
+    depends_on: [relay, docker-proxy]
     <<: *service
     mem_limit: 256m
     cpus: 1.0

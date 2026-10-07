@@ -547,8 +547,24 @@ pub fn unix_seconds() -> f64 {
         .map_or(0.0, |d| d.as_secs_f64())
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+/// A mutex's guard, even after a panic elsewhere poisoned it: services keep
+/// serving with the last good state rather than crash.
+pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A secret from the environment: `NAME`, or the contents of the file that
+/// `NAME_FILE` names (as Docker and systemd credentials provide), trimmed.
+///
+/// # Errors
+/// If neither is set, or the file can't be read.
+pub fn secret(name: &str) -> Result<String, String> {
+    if let Ok(path) = std::env::var(format!("{name}_FILE")) {
+        return std::fs::read_to_string(&path)
+            .map(|s| s.trim().to_owned())
+            .map_err(|e| format!("cannot read {name}_FILE {path}: {e}"));
+    }
+    std::env::var(name).map_err(|_| format!("set {name} or {name}_FILE"))
 }
 
 #[cfg(test)]

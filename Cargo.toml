@@ -3,7 +3,6 @@ members = [
     "apps/tui",
     "libs/fleet",
     "libs/observe",
-    "services/alpaca-live",
     "services/alpaca-news",
     "services/alpaca-account",
     "services/relay",
@@ -13,9 +12,7 @@ members = [
     "services/store",
     "services/console",
     "services/databento-jobs",
-    "services/databento-live",
     "services/econ-calendar",
-    "services/dbn-tcp",
     "services/ticker",
 ]
 resolver = "3"

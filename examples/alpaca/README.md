@@ -3,8 +3,9 @@
 Alpaca's free real-time IEX trades and quotes streamed into the tinytrader
 console, with market news (supplied by Benzinga through Alpaca) and the
 balances and positions of your account. The home page shows the account,
-charts and news; select `alpaca-live` under **Overview** to watch trades
-arrive.
+charts and news; select `relay` in the System graph to watch its events. Your
+own programs can read the feed from the relay at `127.0.0.1:7610`
+(`tinytrader.relay/1`: one line of JSON, then DBN).
 
 You need Docker with Compose and an Alpaca account (a free paper-trading
 account is enough). Create API keys in Alpaca's dashboard.

@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tinytrader_observe::{lock, secret};
 
 use axum::extract::{Path as UrlPath, Query, State as AxState};
 use axum::http::StatusCode;
@@ -199,10 +200,6 @@ type Reply = (StatusCode, Json<Value>);
 
 fn refused(code: StatusCode, why: impl Into<String>) -> Reply {
     (code, Json(json!({ "error": why.into() })))
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[tokio::main]
@@ -1236,16 +1233,6 @@ async fn copy(
             body["error"].as_str().unwrap_or("unknown error")
         ))
     }
-}
-
-/// A credential from `NAME`, or from the file named by `NAME_FILE`.
-fn secret(name: &str) -> Result<String, String> {
-    if let Ok(path) = std::env::var(format!("{name}_FILE")) {
-        return std::fs::read_to_string(&path)
-            .map(|s| s.trim().to_owned())
-            .map_err(|e| format!("cannot read {name}_FILE {path}: {e}"));
-    }
-    std::env::var(name).map_err(|_| format!("set {name} or {name}_FILE"))
 }
 
 #[cfg(test)]

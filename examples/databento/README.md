@@ -1,7 +1,9 @@
 # Databento example
 
-A Databento live subscription streamed into the tinytrader console. Select
-`databento-live` in the deployment graph to watch records arrive.
+A Databento live subscription held by a tinytrader relay, which serves it to
+programs on this machine at `127.0.0.1:7600` (`tinytrader.relay/1`: one line
+of JSON, then DBN), with the tinytrader console beside it. Select `relay` in
+the System graph to watch its events and rates.
 
 You need Docker with Compose and a Databento API key whose plan covers the
 subscription. **Live data can be billed by usage:** check what the dataset and
@@ -27,13 +29,13 @@ environment. It is never written to disk or into the image.
 | `DATABENTO_STYPE_IN` | `parent` | How symbols are interpreted |
 
 For example, `DATABENTO_DATASET=GLBX.MDP3 DATABENTO_SYMBOLS=ES.FUT docker compose up -d`.
-Prefer low-volume schemas such as `trades` while trying things out.
+Prefer low-volume schemas such as `trades` while trying things out (`DATABENTO_SCHEMA=trades`; the default is `cmbp-1`).
 
 ## What runs
 
 | Service | Does |
 |---|---|
-| `databento-live` | Holds one live session, reconnects with backoff, and serves `/health`, `/metrics` and `/events` on the Compose network. It does not record data. |
+| `relay` | Holds one live session, reconnects with backoff, and serves it to clients on port 7600, with `/health`, `/metrics`, `/events` and minute bars on the Compose network. It does not record data. |
 | `console` | The tinytrader console at `http://localhost:8080`, reachable from this machine only. |
 | `docker-proxy` | Read-only Docker API for container state. |
 

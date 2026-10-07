@@ -9,8 +9,9 @@ tinytrader is the platform, not anyone's deployment. Your hosts, data, secrets,
 strategies and research live in your own repository, which uses tinytrader as a
 flake input. See [decision 0001](docs/decisions/0001-platform-and-deployment.md).
 
-> **Status:** early. The deployment and observation layer comes first,
-> exercised by a toy service.
+> **Status:** early, in daily use by one deployment: live market data relays,
+> a data store, provider batch jobs, accounts, news, an economic calendar, a
+> console and a terminal view. Trading (decision 0009) is next.
 
 ## Try it
 
@@ -30,20 +31,21 @@ console the same way.
 
 | Path | Holds |
 |---|---|
-| `libs/observe` | What every service serves: `/health`, `/metrics`, `/describe`, `/events`, `/recent` (`tinytrader.observe/1`) |
+| `libs/observe` | What every service serves: `/health`, `/metrics`, `/describe`, `/events`, `/recent` (`tinytrader.observe/1`), plus shared helpers (credentials, the write guard) |
 | `libs/fleet` | Discovers and polls a deployment; the data layer behind every front end |
+| `libs/schedule` | Active hours on the market calendar, in New York time |
+| `libs/dbn` | tinytrader's DBN extension records (trade conditions) |
+| `libs/tinytrader` | The crates.io umbrella crate |
 | `services/Dockerfile` | Container image build for any service |
-| `apps/tui` | Terminal view of a deployment (Ratatui) |
-| `services/console` | The operator console: deployment graph, services, market charts and news, data, storage and docs, in one sidebar |
+| `apps/tui` | Terminal view of a deployment (Ratatui): overview, services, market chart, a live options book, data and hosts |
+| `services/console` | The operator console: workspaces of widgets (Dockview), docs and the roadmap |
 | `services/ticker` | Toy service used by the quickstart |
-| `services/databento-live` | Example service streaming a Databento live subscription |
-| `services/alpaca-live` | Example service streaming Alpaca's free real-time IEX data |
-| `services/dbn-tcp` | Example service reading any live DBN stream served over TCP |
-| `services/store` | The data store: the one process that touches the disks; ingests provider downloads into the standard layout, and catalogs datasets, coverage and disk space |
-| `services/databento-jobs` | Databento batch jobs: prices and submits requests (charges need an exact confirmation), and downloads finished jobs into the store |
-| `services/alpaca-news` | Example service serving market news from Alpaca (supplied by Benzinga) |
-| `services/alpaca-account` | Example service serving an Alpaca account's balances and positions, read only |
-| `services/relay` | Market data relay: holds one provider connection and serves it to local clients ([decision 0006](docs/decisions/0006-market-data-relay.md)) |
+| `services/relay` | Market data relay: holds one provider connection (Databento, or Alpaca IEX) and serves it to local clients, with minute bars ([decision 0006](docs/decisions/0006-market-data-relay.md)) |
+| `services/store` | The data store: the one process that touches the disks; files provider downloads across approved drives, and catalogs datasets, coverage and disk space |
+| `services/databento-jobs` | Databento batch jobs: prices and submits requests (charges need an exact confirmation, every submission is written down first), and downloads finished jobs into the store |
+| `services/alpaca-account` | Alpaca accounts' balances and positions, read only, and the market calendar |
+| `services/alpaca-news` | Market news from Alpaca (supplied by Benzinga) |
+| `services/econ-calendar` | Scheduled US economic releases and FOMC decisions, from the agencies' own schedules |
 | `infra/modules` | NixOS modules, such as `tinytrader.services.<name>` |
 | `nix/` | Flake modules: Rust builds and checks |
 | `examples/` | Complete deployments you can run or copy |

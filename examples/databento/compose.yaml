@@ -16,21 +16,26 @@ x-service: &service
     options: { max-size: "10m", max-file: "3" }
 
 services:
-  databento-live:
+  # A market data relay (decision 0006): one Databento live session, served
+  # to clients on this machine over tinytrader.relay/1 (port 7600).
+  relay:
     build:
       context: ../..
       dockerfile: services/Dockerfile
-      args: { SERVICE: databento-live }
-    image: tinytrader/databento-live:dev
+      args: { SERVICE: relay }
+    image: tinytrader/relay:dev
     labels:
-      tinytrader.observe: "9101"
+      tinytrader.observe: "9110"
     environment:
       DATABENTO_API_KEY_FILE: /run/secrets/databento_api_key
-      DATABENTO_DATASET: ${DATABENTO_DATASET:-OPRA.PILLAR}
-      DATABENTO_SYMBOLS: ${DATABENTO_SYMBOLS:-SPY.OPT}
-      DATABENTO_SCHEMA: ${DATABENTO_SCHEMA:-trades}
-      DATABENTO_STYPE_IN: ${DATABENTO_STYPE_IN:-parent}
-      DATABENTO_LISTEN: 0.0.0.0:9101   # reachable only on the Compose network
+      RELAY_DATASET: ${DATABENTO_DATASET:-OPRA.PILLAR}
+      RELAY_SYMBOLS: ${DATABENTO_SYMBOLS:-SPY.OPT}
+      RELAY_SCHEMA: ${DATABENTO_SCHEMA:-cmbp-1}
+      RELAY_STYPE_IN: ${DATABENTO_STYPE_IN:-parent}
+      RELAY_LISTEN: 0.0.0.0:7600
+      RELAY_OBSERVE_LISTEN: 0.0.0.0:9110   # reachable only on the Compose network
+    ports:
+      - "127.0.0.1:7600:7600"   # clients on this machine
     secrets: [databento_api_key]
     <<: *service
     mem_limit: 512m
@@ -53,7 +58,7 @@ services:
       - ./topology.json:/etc/tinytrader/topology.json:ro
     ports:
       - "127.0.0.1:8080:8080"   # this machine only
-    depends_on: [databento-live, docker-proxy]
+    depends_on: [relay, docker-proxy]
     <<: *service
     mem_limit: 256m
     cpus: 1.0

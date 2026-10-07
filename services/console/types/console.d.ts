@@ -28,6 +28,10 @@ interface TopoService extends TopoNode {
   schedule?: ScheduleEntry[];
   /** One symbol's one-minute bars, on demand (`?symbol=SPY&days=2`). */
   bars?: string;
+  /** A relay's description: protocol, listen address, symbols. */
+  relay?: { protocol: string; listen: string; symbols: string[] };
+  /** A market calendar it serves. */
+  calendar?: string;
   events?: string;
   accounts?: unknown;
   observe?: string;

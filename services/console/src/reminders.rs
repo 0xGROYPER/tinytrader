@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tinytrader_observe::lock;
 
 use serde_json::{Value, json};
 
@@ -90,6 +91,12 @@ impl Reminders {
         };
         match change["op"].as_str().unwrap_or_default() {
             "add_item" => {
+                // A roadmap, not a database: a bound keeps the file small.
+                if next["items"].as_array().is_some_and(|i| i.len() >= 5000) {
+                    return Err(
+                        "the roadmap holds at most 5000 reminders; delete some first".into(),
+                    );
+                }
                 let list = change["list"].as_u64().ok_or("which list?")?;
                 find(&mut next, "lists", Some(list))?;
                 let title = text(&change["title"], 300)
@@ -287,10 +294,6 @@ pub fn from_markdown(md: &str) -> Value {
         lists.push(json!({ "id": 1, "name": "Reminders", "color": COLORS[4] }));
     }
     json!({ "lists": lists, "items": items })
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

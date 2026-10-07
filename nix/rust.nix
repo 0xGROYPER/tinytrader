@@ -26,9 +26,6 @@
           ../apps/tui
           ../services/ticker
           ../services/databento-jobs
-          ../services/databento-live
-          ../services/alpaca-live
-          ../services/dbn-tcp
           ../services/store
           ../services/alpaca-news
           ../services/econ-calendar
@@ -42,8 +39,6 @@
       commonArgs = {
         inherit src;
         strictDeps = true;
-        # alpaca-live builds OpenSSL from source (vendored), which needs perl.
-        nativeBuildInputs = [ pkgs.perl ];
         pname = "tinytrader-workspace";
         version = "0.1.0";
       };
@@ -68,9 +63,6 @@
       ticker = service "ticker" "Toy service streaming Coinbase public tickers to disk";
       console = service "console" "tinytrader console";
       databento-jobs = service "databento-jobs" "Databento batch jobs: price, submit, and download into the store";
-      databento-live = service "databento-live" "Example service streaming a Databento live subscription";
-      alpaca-live = service "alpaca-live" "Example service streaming Alpaca real-time IEX data";
-      dbn-tcp = service "dbn-tcp" "Example service reading a live DBN stream over TCP";
       tinytrader-tui = service "tinytrader-tui" "Terminal view of a tinytrader deployment";
       store = service "store" "The data store: ingests provider downloads into the standard layout and catalogs the volumes";
       alpaca-news = service "alpaca-news" "Example service serving market news from Alpaca (Benzinga)";
@@ -85,9 +77,6 @@
           ticker
           console
           databento-jobs
-          databento-live
-          alpaca-live
-          dbn-tcp
           tinytrader-tui
           store
           alpaca-news

@@ -20,7 +20,7 @@ function releases() {
 function draw(my) {
   const cal = (fleet.topo?.services || []).map(s => svcState(s.id).calendar).find(c => c?.days?.length);
   const head = '<div><h1>Calendar</h1><p class="muted" style="margin:0">US equity market sessions, in New York time.</p></div>';
-  if (!cal) return head + `<p class="muted">${(fleet.topo?.services || []).some(s => s.id === 'accounts') ? 'Loading the market calendar…' : 'No service is serving a market calendar.'}</p>`;
+  if (!cal) return head + `<p class="muted">${(fleet.topo?.services || []).some(s => s.calendar) ? 'Loading the market calendar…' : 'No service is serving a market calendar.'}</p>`;
   const ny = iso => new Date(iso).toLocaleString(undefined, { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   const until = iso => duration((Date.parse(iso) - Date.now()) / 1000);
   // The clock is a reading from when the calendar was fetched; carry it

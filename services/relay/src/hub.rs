@@ -15,6 +15,7 @@ use std::mem::{offset_of, size_of};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+pub use tinytrader_observe::lock;
 
 use databento::dbn::{
     Cmbp1Msg, ErrorCode, InstrumentDefMsg, Mbp1Msg, Metadata, RecordHeader, StatMsg, SystemCode,
@@ -622,10 +623,6 @@ impl Drop for ClientGuard<'_> {
         lock(&self.hub.roster).remove(&self.id);
         self.hub.clients.fetch_sub(1, Ordering::Relaxed);
     }
-}
-
-pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

@@ -30,6 +30,7 @@ use std::str::FromStr as _;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tinytrader_observe::secret;
 
 use clap::{Parser, ValueEnum};
 use databento::Databento;
@@ -82,6 +83,10 @@ struct Args {
     /// Address clients connect to.
     #[arg(long, env = "RELAY_LISTEN", default_value = "127.0.0.1:7600")]
     listen: String,
+
+    /// The most clients served at once; more are refused with an error.
+    #[arg(long, env = "RELAY_MAX_CLIENTS", default_value_t = 64)]
+    max_clients: u64,
 
     /// Chunks of up to 64 KiB queued per client before it is disconnected.
     #[arg(long, env = "RELAY_CLIENT_QUEUE", default_value_t = 1024)]
@@ -268,9 +273,14 @@ async fn run(args: Args) -> Result<(), String> {
             accepted = clients.accept() => {
                 let Ok((stream, peer)) = accepted else { continue };
                 let _ = stream.set_nodelay(true);
-                let (hub, alpaca) = (hub.clone(), alpaca.clone());
+                let (hub, alpaca, max_clients) = (hub.clone(), alpaca.clone(), args.max_clients);
                 tokio::spawn(async move {
                     let Some((join, out)) = hub::read_join(stream, &hub).await else { return };
+                    if hub.clients.load(Ordering::Relaxed) >= max_clients {
+                        hub.refuse(out, ::databento::dbn::ErrorCode::InternalError,
+                            &format!("this relay serves at most {max_clients} clients at once")).await;
+                        return;
+                    }
                     if join.conditions && alpaca.is_none() {
                         hub.refuse(out, ::databento::dbn::ErrorCode::InvalidSubscription,
                             "this source has no trade conditions").await;
@@ -392,14 +402,4 @@ async fn shutdown() {
     }
     #[cfg(not(unix))]
     let _ = ctrl_c.await;
-}
-
-/// A credential from `NAME`, or from the file named by `NAME_FILE`.
-fn secret(name: &str) -> Result<String, String> {
-    if let Ok(path) = std::env::var(format!("{name}_FILE")) {
-        return std::fs::read_to_string(&path)
-            .map(|s| s.trim().to_owned())
-            .map_err(|e| format!("cannot read {name}_FILE {path}: {e}"));
-    }
-    std::env::var(name).map_err(|_| format!("set {name} or {name}_FILE"))
 }
