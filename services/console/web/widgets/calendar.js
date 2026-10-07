@@ -46,20 +46,12 @@ function draw(my) {
   while (cells.length % 7) cells.push('<div class="cal-day blank"></div>');
   const label = new Date(Date.UTC(y, m - 1, 15)).toLocaleDateString(undefined, { timeZone: 'UTC', month: 'long', year: 'numeric' });
   const nav = (dir, text, off) => `<button type="button" class="tile-btn" data-cal-nav="${dir}"${off ? ' disabled' : ''} aria-label="${text}" title="${text}">${dir < 0 ? '‹' : '›'}</button>`;
-  // The next days that aren't a normal session.
-  const coming = [];
-  for (let t = Date.parse(today + 'T12:00:00Z'); coming.length < 4; t += 86400000) {
-    const date = new Date(t).toISOString().slice(0, 10); if (date > lastDay) break;
-    const k = kind(date, new Date(t).getUTCDay());
-    if (k === 'holiday' || k === 'early') coming.push(`<li><span>${esc(new Date(t).toLocaleDateString(undefined, { timeZone: 'UTC', weekday: 'short', month: 'short', day: 'numeric' }))}</span><span class="${k === 'holiday' ? 'warn' : ''}">${k === 'holiday' ? 'Closed' : 'Closes ' + esc(sessions.get(date).close)}</span></li>`);
-  }
   const weeks = cells.length / 7 - 1;
   return head + `<div class="mcal">
       <div class="mcal-head"><h2>${esc(label)}</h2><span class="mcal-now">${now}</span><span class="mcal-nav">${nav(-1, 'Previous month', month <= months[0])}<button type="button" class="btn small" data-cal-nav="0"${month === today.slice(0, 7) ? ' disabled' : ''}>Today</button>${nav(1, 'Next month', month >= months[1])}</span></div>
       <div class="mcal-grid" style="--weeks:${weeks}">${cells.join('')}</div>
     </div>
-    ${`${month}-01` <= lastDay && lastDay < `${month}-31` ? `<p class="muted" style="margin:0;font-size:13px">The calendar is known through ${esc(lastDay)}.</p>` : ''}
-    <div class="cal-coming"><h3>Coming up</h3>${coming.length ? `<ul>${coming.join('')}</ul>` : `<p class="muted" style="margin:0;font-size:13px">No holidays or early closes through ${esc(lastDay)}.</p>`}</div>`;
+    ${`${month}-01` <= lastDay && lastDay < `${month}-31` ? `<p class="muted" style="margin:0;font-size:13px">The calendar is known through ${esc(lastDay)}.</p>` : ''}`;
 }
 
 defineWidget('calendar', {

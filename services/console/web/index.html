@@ -337,7 +337,6 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 .ws .tile-body > .mcal { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 220px; }
 .ws .mcal-grid { flex: 1; grid-template-rows: auto repeat(var(--weeks), minmax(0, 1fr)); }
 .ws .cal-day { min-height: 0; }
-@container tile (max-height: 560px) { .cal-coming { display: none; } }
 .mcal-now { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin-right: auto; margin-left: 8px; white-space: nowrap; }
 @container (max-width: 380px) { .mcal-now .muted { display: none; } }
 /* Header status: the worst state of any service; opens Operations. */
@@ -531,10 +530,6 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
   .cal-day .n { margin: 0; }
   .mcal-dow { padding: 6px 0; text-align: center; }
 }
-.cal-coming h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
-.cal-coming ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font: 13px var(--mono); }
-.cal-coming li { display: flex; justify-content: space-between; gap: 16px; max-width: 360px; }
-.cal-coming .warn { color: var(--warn); }
 .chip-btn { min-height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg-2); font: 500 13px var(--mono); cursor: pointer; }
 .chip-btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent-2); color: var(--accent); }
 .cal-wrap { overflow-x: auto; padding-bottom: 4px; }
