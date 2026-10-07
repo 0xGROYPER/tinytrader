@@ -1,7 +1,7 @@
 // IV heatmap: an underlying's implied volatility by strike (rows) and expiry
 // (columns), from a service serving option chains (alpaca-data). Each cell is
-// the out-of-the-money contract's IV (puts below spot, calls above), shaded
-// in one hue from low to high; the first rows are the term structure:
+// the out-of-the-money contract's IV (puts below spot, calls above), coloured
+// on the usual heatmap scale, blue (low) through green and yellow to red (high); the first rows are the term structure:
 // at-the-money IV and the straddle's implied move per expiry. The
 // underlying is the one picked in a watchlist, else the workspace theme's
 // first symbol, else one typed in; refreshed every 30 seconds.
@@ -16,6 +16,14 @@ const SIDE = 14;
 
 const source = () => (fleet.topo?.services || []).find(s => s.chain)?.id || null;
 const pct = x => x == null ? '' : `${(x * 100).toFixed(1)}`;
+// The heatmap scale: blue, cyan, green, yellow, orange, red.
+const STOPS = [[49, 92, 196], [41, 166, 214], [72, 183, 116], [240, 210, 70], [242, 140, 48], [212, 52, 44]];
+/** A colour for f in [0, 1], and whether dark text reads on it. @param {number} f */
+function heat(f) {
+  const x = Math.min(1, Math.max(0, f)) * (STOPS.length - 1), i = Math.min(STOPS.length - 2, Math.floor(x)), t = x - i;
+  const [r, g, b] = STOPS[i].map((v, k) => Math.round(v + (STOPS[i + 1][k] - v) * t));
+  return { rgb: `rgb(${r} ${g} ${b})`, dark: 0.299 * r + 0.587 * g + 0.114 * b > 150 };
+}
 const short = d => new Date(d + 'T12:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short', day: 'numeric' });
 
 /** @param {any} c the chain answer */
@@ -34,7 +42,7 @@ function grid(c) {
   const ivs = [...cell.values()].filter(x => strikes.includes(x.strike)).map(x => x.iv).sort((a, b) => a - b);
   // Shade between the 5th and 95th percentiles, so one far strike doesn't wash out the rest.
   const lo = ivs[Math.floor(ivs.length * 0.05)] ?? 0, hi = ivs[Math.ceil(ivs.length * 0.95) - 1] ?? 1;
-  const shade = iv => Math.round(8 + 72 * Math.min(1, Math.max(0, (iv - lo) / Math.max(1e-9, hi - lo))));
+  const shade = iv => heat((iv - lo) / Math.max(1e-9, hi - lo));
   const head = `<tr><th class="iv-k">Strike</th>${expiries.map(e => `<th>${esc(short(e))}</th>`).join('')}</tr>`;
   const term = `<tr class="iv-term"><th class="iv-k">ATM IV</th>${c.expiries.map(e => `<td>${esc(pct(e.atm_iv))}</td>`).join('')}</tr>
     <tr class="iv-term"><th class="iv-k">Move ±</th>${c.expiries.map(e => `<td>${e.implied_move == null ? '' : esc(`${(e.implied_move * 100).toFixed(1)}%`)}</td>`).join('')}</tr>`;
@@ -44,11 +52,11 @@ function grid(c) {
       const x = cell.get(`${e}|${k}`);
       if (!x) return '<td class="iv-none"></td>';
       const tip = `${x.symbol}\nIV ${pct(x.iv)}%  delta ${x.delta?.toFixed(2) ?? '?'}\nbid ${x.bid ?? '?'}  ask ${x.ask ?? '?'}`;
-      const v = shade(x.iv);
-      return `<td style="--iv:${v}%"${v > 48 ? ' class="hot"' : ''} title="${esc(tip)}">${esc(pct(x.iv))}</td>`;
+      const h = shade(x.iv);
+      return `<td style="background:${h.rgb};color:${h.dark ? '#111' : '#fff'}" title="${esc(tip)}">${esc(pct(x.iv))}</td>`;
     }).join('')}</tr>`;
   }).join('');
-  const legend = `<span class="iv-legend"><i style="--iv:8%"></i>${esc(pct(lo))}% <i style="--iv:80%"></i>${esc(pct(hi))}%</span>`;
+  const legend = `<span class="iv-legend">${esc(pct(lo))}% <i style="background:linear-gradient(90deg, ${STOPS.map(c => `rgb(${c.join(' ')})`).join(', ')})"></i> ${esc(pct(hi))}%</span>`;
   return { table: `<table class="ivm"><thead>${head}</thead><tbody>${term}${rows}</tbody></table>`, legend };
 }
 

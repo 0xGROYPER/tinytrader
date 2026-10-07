@@ -345,25 +345,24 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 .wm-field { display: flex; flex-direction: column; gap: 4px; margin: 6px 10px; font: 12px var(--ui); color: var(--muted); }
 .wm-field .input { font: 13px var(--mono); padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
 .wm-presets { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 10px; }
-/* IV heatmap: one hue from the accent, light to dark by IV. */
+/* IV heatmap: the usual heatmap scale, blue (low IV) to red (high). */
 .iv-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
 .iv-input { width: 7em; font: 13px var(--mono); padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); text-transform: uppercase; }
 .iv-meta { font-size: 12px; margin: 0 0 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .iv-legend { display: inline-flex; gap: 4px; align-items: center; }
-.iv-legend i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; background: color-mix(in oklab, var(--accent-mark) var(--iv), var(--bg)); }
+.iv-legend i { display: inline-block; width: 90px; height: 10px; border-radius: 2px; }
 .iv-wrap { overflow: auto; max-height: calc(100% - 70px); border: 1px solid var(--line-soft); border-radius: 6px; }
 .ivm { border-collapse: separate; border-spacing: 0; font: 11px var(--mono); font-variant-numeric: tabular-nums; }
 .ivm th, .ivm td { padding: 3px 6px; text-align: right; white-space: nowrap; }
 .ivm thead th { position: sticky; top: 0; background: var(--bg); color: var(--muted); font-weight: 600; z-index: 2; border-bottom: 1px solid var(--line); }
 .ivm .iv-k { position: sticky; left: 0; background: var(--bg); color: var(--fg-2); z-index: 1; border-right: 1px solid var(--line); }
 .ivm thead .iv-k { z-index: 3; }
-.ivm td { background: color-mix(in oklab, var(--accent-mark) var(--iv, 0%), var(--bg)); color: var(--fg); border-right: 1px solid var(--bg); border-bottom: 1px solid var(--bg); }
+.ivm td { color: var(--fg); border-right: 1px solid var(--bg); border-bottom: 1px solid var(--bg); }
 .ivm .iv-term td { background: var(--surface); color: var(--fg-2); }
 .ivm .iv-term:last-of-type td, .ivm .iv-term:last-of-type th { border-bottom: 1px solid var(--line); }
 .ivm .iv-atm .iv-k { color: var(--accent); font-weight: 700; }
 .ivm .iv-atm td { box-shadow: inset 0 1px 0 var(--fg-2), inset 0 -1px 0 var(--fg-2); }
 .ivm td.iv-none { background: var(--bg); }
-.ivm td.hot { color: var(--bg); }
 /* Watchlist */
 .wl { width: 100%; border-collapse: collapse; font: 13px var(--mono); font-variant-numeric: tabular-nums; }
 .wl th { text-align: left; font: 600 11px var(--ui); letter-spacing: .04em; color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--line); }
