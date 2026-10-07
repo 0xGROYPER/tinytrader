@@ -62,7 +62,7 @@ const RANGES = [['1D', 1], ['2D', 2], ['5D', 5]];
 defineWidget('candles', {
   title: 'Candles',
   mount(el) {
-    const my = { pick: null, days: 1, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true };
+    const my = { pick: null, days: 1, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true, fit: true };
     el.innerHTML = '<div class="cd"><div class="cd-bar"></div><div class="cd-chart"></div><p class="cd-msg muted"></p></div>';
     const bar = el.querySelector('.cd-bar'), box = /** @type {HTMLElement} */ (el.querySelector('.cd-chart')), msg = el.querySelector('.cd-msg');
     const head = () => {
@@ -98,13 +98,15 @@ defineWidget('candles', {
         const bars = v.bars || [];
         my.candles.setData(bars.map(([t, o, h, l, c]) => ({ time: t + nyOffset(t), open: o, high: h, low: l, close: c })));
         my.volume.setData(bars.map(([t, o, , , c, vol]) => ({ time: t + nyOffset(t), value: vol, color: faded(c >= o ? css('--ok') : css('--crit')) })));
+        // Show the whole range when one is picked; later refreshes keep the reader's zoom.
+        if (my.fit) { my.chart.timeScale().fitContent(); my.fit = false; }
         const lastBar = bars[bars.length - 1];
         my.last = lastBar ? `${lastBar[4].toFixed(2)} · ${new Date(lastBar[0] * 1000).toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' })} ET` : 'no trades yet';
         my.err = null; my.note = v.note || (bars.length ? '' : `No bars for ${symbol} in this range yet.`);
       } catch (e) { my.err = e.message; }
       head();
     }
-    const fresh = () => { my.chart?.remove(); my.chart = my.candles = my.volume = null; my.last = ''; head(); load(); };
+    const fresh = () => { my.chart?.remove(); my.chart = my.candles = my.volume = null; my.last = ''; my.fit = true; head(); load(); };
     const click = e => {
       const p = e.target.closest('[data-cd-pick]');
       if (p) { const [service, symbol] = p.dataset.cdPick.split('|'); my.pick = { service, symbol }; fresh(); return; }

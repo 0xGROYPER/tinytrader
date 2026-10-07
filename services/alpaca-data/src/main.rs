@@ -312,7 +312,9 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
             Duration::from_secs(60),
             || async move {
                 let now = unix_seconds() as i64;
-                let start = ny_date_time(now - days as i64 * 86_400).0;
+                // `days` counts trading days (sessions with bars): reach back far
+                // enough for weekends and holidays, then keep the last ones.
+                let start = ny_date_time(now - (days as i64 * 7 / 5 + 4) * 86_400).0;
                 let mut out = Vec::new();
                 let mut token: Option<String> = None;
                 // At most 10 pages of 10,000: a month of minutes.
@@ -338,11 +340,33 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
                         break;
                     }
                 }
-                Ok(json!({ "symbol": symbol, "interval": interval, "bars": out, "note": null }))
+                let keep = last_days(&out, days as usize, interval == 86_400);
+                Ok(json!({ "symbol": symbol, "interval": interval, "bars": &out[out.len() - keep..], "note": null }))
             },
         )
         .await,
     )
+}
+
+/// How many of `bars` (in time order) make up the last `days` trading days:
+/// that many daily bars, or the minute bars of the last `days` New York dates.
+fn last_days(bars: &[Value], days: usize, daily: bool) -> usize {
+    if daily {
+        return bars.len().min(days);
+    }
+    let mut dates = 0;
+    let mut last: Option<String> = None;
+    for (i, b) in bars.iter().enumerate().rev() {
+        let d = ny_date_time(b[0].as_i64().unwrap_or(0)).0;
+        if last.as_ref() != Some(&d) {
+            dates += 1;
+            if dates > days {
+                return bars.len() - i - 1;
+            }
+            last = Some(d);
+        }
+    }
+    bars.len()
 }
 
 #[derive(Deserialize)]
@@ -494,6 +518,17 @@ mod tests {
         assert_eq!(unix("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(unix("2026-10-07T19:04:00Z"), Some(1_791_399_840));
         assert_eq!(unix("2026-10"), None);
+    }
+
+    #[test]
+    fn keeps_the_last_trading_days() {
+        // Two minute bars on each of three New York dates (13:30 UTC is 09:30 ET).
+        let at = |d: i64, n: i64| json!([1_791_034_200 + d * 86_400 + n * 60, 1, 1, 1, 1, 1]);
+        let bars: Vec<Value> = (0..3).flat_map(|d| (0..2).map(move |n| at(d, n))).collect();
+        assert_eq!(last_days(&bars, 1, false), 2);
+        assert_eq!(last_days(&bars, 2, false), 4);
+        assert_eq!(last_days(&bars, 9, false), 6);
+        assert_eq!(last_days(&bars, 2, true), 2);
     }
 
     #[test]

@@ -22,6 +22,7 @@ import '../widgets/storage.js';
 import '../widgets/reminders.js';
 import '../widgets/docs.js';
 import '../widgets/watchlist.js';
+import '../widgets/ivmap.js';
 import { setTheme, PRESETS, parseSymbols, parseKeywords } from './theme.js';
 const state = { openGroups: new Set(), navKey: '', tab: 'workspace', lastOk: 0, collections: [], doc: null };
 /** An element by ID, typed loosely enough for forms and buttons alike. @type {(id: string) => HTMLInputElement} */
