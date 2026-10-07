@@ -35,6 +35,9 @@
 //! - `CONSOLE_COMPOSE_PROJECT`: only show containers from this Compose project (optional)
 //! - `CONSOLE_COLLECTIONS`: document collections shown in the sidebar, e.g.
 //!   `Docs=/srv/docs;Research=/srv/research` (optional; see `collections.rs`)
+//! - `CONSOLE_NOTIFY`: a URL to POST a notice to when a service goes down or
+//!   comes back (ntfy-style: the body is the message, with `Title`, `Priority`
+//!   and `Tags` headers). Optional.
 //! - `CONSOLE_STORE`: the store, e.g. `http://host.docker.internal:9120`, so
 //!   the Storage widget can approve a new drive (decision 0007). Only that
 //!   one call is passed through.
@@ -50,6 +53,7 @@
 //!   roadmap to start it from (optional).
 
 mod collections;
+mod notify;
 mod reminders;
 
 use std::collections::HashMap;
@@ -195,10 +199,22 @@ async fn main() {
 
 async fn poll_forever(app: Arc<App>, observer: Observer) {
     let mut tick = tokio::time::interval(Duration::from_secs(2));
+    // Push notifications when a service goes down or comes back (CONSOLE_NOTIFY).
+    let notify = std::env::var("CONSOLE_NOTIFY")
+        .ok()
+        .filter(|u| !u.is_empty());
+    let (mut watch, http) = (notify::Watch::default(), reqwest::Client::new());
     loop {
         tick.tick().await;
         let problem = app.poller.poll().await;
         app.polls.fetch_add(1, Ordering::Relaxed);
+        if let Some(url) = &notify {
+            for n in watch.observe(&app.poller.topology(), &app.poller.snapshot()) {
+                if let Err(e) = notify::send(&http, url, &n).await {
+                    observer.record_error(&e);
+                }
+            }
+        }
         match problem {
             None => observer.set_state(State::Ready, "polling"),
             Some(p) => {
