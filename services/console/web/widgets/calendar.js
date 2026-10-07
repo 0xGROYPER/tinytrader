@@ -1,25 +1,32 @@
 import { defineWidget } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
+import { theme, LAYERS, DEFAULT_LAYERS } from '../lib/theme.js';
 
 // The US market calendar, from the first service that serves one.
 // The market calendar as a month: one widget that reads well as a page or
 // in a narrow tile (it sizes itself to its container, not the window).
 // Short names for scheduled releases, for the month's small cells.
-const SHORT = [['Consumer Price Index', 'CPI'], ['Producer Price Index', 'PPI'], ['Employment Situation', 'Jobs'], ['Job Openings and Labor Turnover', 'JOLTS'], ['FOMC decision', 'FOMC'], ['FOMC minutes', 'Minutes'], ['GDP', 'GDP'], ['Gross Domestic Product', 'GDP'], ['Personal Income and Outlays', 'PCE'], ['Employment Cost Index', 'ECI'], ['Initial jobless claims', 'Claims'], ['U.S. International Trade', 'Trade'], ['U.S. Import and Export Price', 'Import px'], ['Productivity and Costs', 'Productivity']];
+const SHORT = [['Consumer Price Index', 'CPI'], ['Producer Price Index', 'PPI'], ['Employment Situation', 'Jobs'], ['Job Openings and Labor Turnover', 'JOLTS'], ['FOMC decision', 'FOMC'], ['FOMC minutes', 'Minutes'], ['GDP', 'GDP'], ['Gross Domestic Product', 'GDP'], ['Personal Income and Outlays', 'PCE'], ['Employment Cost Index', 'ECI'], ['Initial jobless claims', 'Claims'], ['U.S. International Trade', 'Trade'], ['U.S. Import and Export Price', 'Import px'], ['Productivity and Costs', 'Productivity'], ['EIA Weekly Petroleum', 'EIA crude'], ['EIA Weekly Natural Gas', 'EIA gas'], ['API weekly', 'API'], ['Baker Hughes', 'Rigs']];
 const short = title => SHORT.find(([p]) => title.startsWith(p))?.[1] || title.split(/[,(]/)[0].trim();
 
 // Scheduled releases from a service serving an `econ` stream, and earnings
 // reports from one serving `earnings` (largest companies first), by New York date.
-function releases() {
+// Layers over the market sessions: each event's category ("econ", "oil"),
+// and earnings; only those in `on` are shown.
+function releases(on) {
   const svcs = Object.values(fleet.snap?.services || {});
   const econ = svcs.map(s => s.econ).find(e => Array.isArray(e?.events));
   const earn = svcs.map(s => s.earnings).find(e => Array.isArray(e?.reports));
-  const by = new Map(), reports = new Map();
-  for (const e of econ?.events || []) (by.get(e.date) || by.set(e.date, []).get(e.date)).push(e);
-  for (const r of earn?.reports || []) (reports.get(r.date) || reports.set(r.date, []).get(r.date)).push(r);
+  const by = new Map(), reports = new Map(), present = new Set();
+  for (const e of econ?.events || []) {
+    const layer = e.category || 'econ'; present.add(layer);
+    if (on.has(layer)) (by.get(e.date) || by.set(e.date, []).get(e.date)).push(e);
+  }
+  if (earn) present.add('earnings');
+  if (on.has('earnings')) for (const r of earn?.reports || []) (reports.get(r.date) || reports.set(r.date, []).get(r.date)).push(r);
   for (const list of reports.values()) list.sort((a, b) => (b.market_cap || 0) - (a.market_cap || 0));
-  return { by, reports, earnings: !!earn };
+  return { by, reports, present };
 }
 
 const cap = n => n == null ? '' : n >= 1e12 ? `$${(n / 1e12).toFixed(1)}T` : `$${Math.round(n / 1e9)}B`;
@@ -57,7 +64,8 @@ function draw(my) {
   const lead = new Date(Date.UTC(y, m - 1, 1)).getUTCDay(), count = new Date(Date.UTC(y, m, 0)).getUTCDate();
   const cells = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => `<div class="mcal-dow">${d}</div>`);
   for (let i = 0; i < lead; i++) cells.push('<div class="cal-day blank"></div>');
-  const rel = releases();
+  my.layers ||= new Set(theme()?.layers || DEFAULT_LAYERS);
+  const rel = releases(my.layers);
   my.cells = new Map();
   for (let d = 1; d <= count; d++) {
     const date = `${month}-${String(d).padStart(2, '0')}`, wd = (lead + d - 1) % 7, k = kind(date, wd), sess = sessions.get(date);
@@ -78,6 +86,7 @@ function draw(my) {
   const weeks = cells.length / 7 - 1;
   return head + `<div class="mcal">
       <div class="mcal-head"><h2>${esc(label)}</h2><span class="mcal-now">${now}</span><span class="mcal-nav">${nav(-1, 'Previous month', month <= months[0])}<button type="button" class="btn small" data-cal-nav="0"${month === today.slice(0, 7) ? ' disabled' : ''}>Today</button>${nav(1, 'Next month', month >= months[1])}</span></div>
+      ${rel.present.size ? `<div class="mcal-layers chips">${LAYERS.filter(([id]) => rel.present.has(id)).map(([id, label]) => `<button type="button" class="chip-btn" data-cal-layer="${id}" aria-pressed="${my.layers.has(id)}">${label}</button>`).join('')}</div>` : ''}
       <div class="mcal-grid" style="--weeks:${weeks}">${cells.join('')}</div>
     </div>
 `;
@@ -106,7 +115,10 @@ function dayCard(day, cell) {
 defineWidget('calendar', {
   title: 'Calendar',
   mount(el) {
-    const my = { month: null, pin: null, hover: null, cells: new Map() };
+    const my = { month: null, pin: null, hover: null, cells: new Map(), layers: null };
+    // A new theme brings its own layers.
+    const themed = () => { my.layers = null; update(); };
+    document.addEventListener('tt-theme', themed);
     el.style.position = 'relative';
     // The card for the hovered (or pinned) day, beside its cell, inside the widget.
     const card = () => {
@@ -135,6 +147,8 @@ defineWidget('calendar', {
     const leave = () => { if (my.hover) { my.hover = null; card(); } };
     const click = e => {
       if (e.target.closest('.cal-pop')) return;
+      const layer = e.target.closest('[data-cal-layer]');
+      if (layer) { const id = layer.dataset.calLayer; if (my.layers.has(id)) my.layers.delete(id); else my.layers.add(id); update(); return; }
       const day = e.target.closest('[data-day]');
       // A click pins the day's card (for touch, or to read it at length); again unpins.
       if (day) { my.pin = my.pin === day.dataset.day ? null : day.dataset.day; update(); return; }
@@ -149,6 +163,6 @@ defineWidget('calendar', {
     el.addEventListener('mouseover', over);
     el.addEventListener('mouseleave', leave);
     update();
-    return { update, dispose: () => { el.removeEventListener('click', click); el.removeEventListener('mouseover', over); el.removeEventListener('mouseleave', leave); } };
+    return { update, dispose: () => { el.removeEventListener('click', click); el.removeEventListener('mouseover', over); el.removeEventListener('mouseleave', leave); document.removeEventListener('tt-theme', themed); } };
   },
 });

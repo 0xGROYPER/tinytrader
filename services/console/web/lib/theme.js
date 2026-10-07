@@ -3,7 +3,11 @@
 // leaves widgets as they are. Also the symbol picked last (in the
 // watchlist), which charts follow.
 
-/** @typedef {{ symbols: string[], keywords: string[] }} Theme */
+/** @typedef {{ symbols: string[], keywords: string[], layers?: string[] }} Theme */
+
+/** The calendar's layers over its market sessions, and those shown without a theme. */
+export const LAYERS = [['econ', 'Econ'], ['earnings', 'Earnings'], ['oil', 'Oil']];
+export const DEFAULT_LAYERS = ['econ', 'earnings'];
 
 /** @type {Theme | null} */
 let current = null;
@@ -34,6 +38,7 @@ export const PRESETS = {
   'Oil & Iran': {
     symbols: ['USO', 'BNO', 'XLE', 'XOP', 'OXY', 'XOM', 'CVX', 'ITA', 'LMT', 'NOC', 'RTX', 'GLD'],
     keywords: ['Iran', 'Israel', 'Hormuz', 'OPEC', 'crude', 'oil', 'tanker', 'Brent', 'Red Sea', 'sanctions'],
+    layers: ['econ', 'oil'],
   },
 };
 

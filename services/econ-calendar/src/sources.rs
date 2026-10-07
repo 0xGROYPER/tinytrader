@@ -11,6 +11,8 @@ pub struct Event {
     pub title: String,
     pub source: &'static str,
     pub importance: Importance,
+    /// Which calendar layer it belongs to: "econ" or "oil".
+    pub category: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -101,6 +103,7 @@ pub fn ics(text: &str, source: &'static str) -> Vec<Event> {
                         title,
                         source,
                         importance,
+                        category: "econ",
                     });
                 }
                 inside = false;
@@ -221,6 +224,7 @@ pub fn fomc(html: &str) -> Vec<Event> {
                     },
                     source: "Fed",
                     importance: Importance::High,
+                    category: "econ",
                 });
             }
             month = None;
@@ -275,6 +279,7 @@ pub fn claims(from: i64, to: i64) -> Vec<Event> {
                 title: "Initial jobless claims".into(),
                 source: "DOL",
                 importance: Importance::Medium,
+                category: "econ",
             });
         }
         day += 1;

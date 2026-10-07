@@ -7,6 +7,9 @@
 //! - BEA (GDP, PCE and personal income, trade): its iCalendar feed.
 //! - The Federal Reserve: FOMC decisions from its meeting calendar page.
 //! - Weekly jobless claims (Labor Department): Thursdays at 08:30 ET, by rule.
+//! - Oil and gas (category "oil", `oil.rs`): API and EIA weekly inventories,
+//!   EIA gas storage and the Baker Hughes rig count, by their weekly rules.
+//!   Every other event is category "econ".
 //!
 //! - Earnings report dates (`earnings.rs`): Alpha Vantage, Finnhub and
 //!   Nasdaq.com compared, each used when configured (its key set; Nasdaq
@@ -21,6 +24,7 @@
 //! ahead, medium and high), and the usual `/health`, `/metrics` and `/describe`.
 
 mod earnings;
+mod oil;
 mod sources;
 
 use std::collections::HashMap;
@@ -282,6 +286,7 @@ async fn read_all(http: &reqwest::Client, shared: &Shared, bls: bool) {
         "DOL",
         Ok(sources::claims(t - 40 * 86_400, t + 200 * 86_400)),
     );
+    set("Oil", Ok(oil::events(t - 40 * 86_400, t + 200 * 86_400)));
 }
 
 #[derive(Deserialize)]
@@ -325,7 +330,7 @@ async fn events(AxState(shared): AxState<Arc<Shared>>, Query(ask): Query<Ask>) -
         .into_iter()
         .filter_map(|e| {
             let (date, time, _) = ny_date_time(e.at);
-            (date >= from && date <= to).then(|| json!({ "at": e.at, "date": date, "time": time, "title": e.title, "source": e.source, "importance": e.importance.as_str() }))
+            (date >= from && date <= to).then(|| json!({ "at": e.at, "date": date, "time": time, "title": e.title, "source": e.source, "importance": e.importance.as_str(), "category": e.category }))
         })
         .collect();
     let status: Value = sources

@@ -23,7 +23,7 @@ import '../widgets/reminders.js';
 import '../widgets/docs.js';
 import '../widgets/watchlist.js';
 import '../widgets/ivmap.js';
-import { setTheme, PRESETS, parseSymbols, parseKeywords } from './theme.js';
+import { setTheme, PRESETS, parseSymbols, parseKeywords, LAYERS, DEFAULT_LAYERS } from './theme.js';
 const state = { openGroups: new Set(), navKey: '', tab: 'workspace', lastOk: 0, collections: [], doc: null };
 /** An element by ID, typed loosely enough for forms and buttons alike. @type {(id: string) => HTMLInputElement} */
 const $ = id => /** @type {HTMLInputElement} */ (document.getElementById(id));
@@ -434,6 +434,7 @@ function wmTheme(l) {
   m.innerHTML = `<h3>Theme for “${esc(l.name)}”</h3>
     <label class="wm-field">Symbols <input id="wm-sym" class="input" value="${esc(t.symbols.join(', '))}" placeholder="USO, XLE, GLD"></label>
     <label class="wm-field">News keywords <input id="wm-kw" class="input" value="${esc(t.keywords.join(', '))}" placeholder="Iran, OPEC, crude"></label>
+    <div class="wm-field">Calendar layers <span class="wm-layers">${LAYERS.map(([id, label]) => `<label><input type="checkbox" data-wm-layer="${id}"${(t.layers || DEFAULT_LAYERS).includes(id) ? ' checked' : ''}> ${label}</label>`).join('')}</span></div>
     <div class="wm-presets">${Object.keys(PRESETS).map(p => `<button type="button" class="btn small" data-wm="preset:${esc(p)}">${esc(p)}</button>`).join('')}</div>
     <div class="wm-confirm">${l.theme ? '<button type="button" class="btn" data-wm="theme-clear">Remove theme</button>' : ''}<button type="button" class="btn primary" data-wm="theme-save">Save</button></div>`;
   $('wm-sym').focus();
@@ -453,11 +454,15 @@ document.addEventListener('click', e => {
   if (act === 'theme') return wmTheme(l);
   if (act.startsWith('preset:')) {
     const t = PRESETS[act.slice(7)];
-    if (t) { $('wm-sym').value = t.symbols.join(', '); $('wm-kw').value = t.keywords.join(', '); }
+    if (t) {
+      $('wm-sym').value = t.symbols.join(', '); $('wm-kw').value = t.keywords.join(', ');
+      document.querySelectorAll('#wm [data-wm-layer]').forEach((/** @type {HTMLInputElement} */ c) => { c.checked = (t.layers || DEFAULT_LAYERS).includes(c.dataset.wmLayer || ''); });
+    }
     return;
   }
   if (act === 'theme-save' || act === 'theme-clear') {
-    const t = act === 'theme-clear' ? null : { symbols: parseSymbols($('wm-sym').value), keywords: parseKeywords($('wm-kw').value) };
+    const layers = [...document.querySelectorAll('#wm [data-wm-layer]')].filter((/** @type {HTMLInputElement} */ c) => c.checked).map((/** @type {HTMLElement} */ c) => c.dataset.wmLayer || '');
+    const t = act === 'theme-clear' ? null : { symbols: parseSymbols($('wm-sym').value), keywords: parseKeywords($('wm-kw').value), layers };
     if (t && (t.symbols.length || t.keywords.length)) l.theme = t; else delete l.theme;
     layStore(); wmClose();
     if (l.name === lay.current) { setTheme(l.theme || null); document.dispatchEvent(new CustomEvent('tt-theme')); refreshTiles(); }
