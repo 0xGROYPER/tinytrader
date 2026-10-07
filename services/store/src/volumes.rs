@@ -25,10 +25,13 @@ pub struct Found {
 /// `dir` (not a link, such as macOS's link to the system disk) on a device
 /// other than the system disk's.
 fn eligible(path: &Path) -> bool {
-    let (Ok(meta), Ok(system)) = (fs::symlink_metadata(path), fs::metadata("/")) else {
-        return false;
-    };
-    meta.is_dir() && !meta.file_type().is_symlink() && meta.dev() != system.dev()
+    fs::metadata("/").is_ok_and(|system| eligible_beside(path, system.dev()))
+}
+
+/// As [`eligible`], with the system disk's device given.
+fn eligible_beside(path: &Path, system: u64) -> bool {
+    fs::symlink_metadata(path)
+        .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink() && meta.dev() != system)
 }
 
 /// The drives mounted in `dir` (such as `/Volumes`): those with a marker,
@@ -81,7 +84,19 @@ pub fn discover(dir: &Path) -> Found {
 /// If the path isn't an eligible drive in `dir`, already carries a marker,
 /// or the name is unsafe or taken.
 pub fn approve(dir: &Path, path: &Path, name: &str, taken: &[String]) -> Result<Volume, String> {
-    if path.parent() != Some(dir) || !eligible(path) {
+    let system = fs::metadata("/").map_err(|e| format!("/: {e}"))?.dev();
+    approve_beside(dir, path, name, taken, system)
+}
+
+/// As [`approve`], with the system disk's device given.
+fn approve_beside(
+    dir: &Path,
+    path: &Path,
+    name: &str,
+    taken: &[String],
+    system: u64,
+) -> Result<Volume, String> {
+    if path.parent() != Some(dir) || !eligible_beside(path, system) {
         return Err(format!(
             "{} is not a drive mounted in {}",
             path.display(),
@@ -117,19 +132,35 @@ pub fn approve(dir: &Path, path: &Path, name: &str, taken: &[String]) -> Result<
 mod tests {
     use super::*;
 
-    // Test directories sit on the system disk, so `eligible` rejects them;
-    // these tests cover what doesn't depend on a second device.
+    // Which device counts as the system disk is given, so the tests don't
+    // depend on where the temporary directory happens to live.
     #[test]
-    fn refuses_the_system_disk_and_paths_outside_the_mount_directory() {
+    fn approves_a_drive_once_and_never_the_system_disk() {
         let d = std::env::temp_dir().join(format!("tinytrader-volumes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
         let drive = d.join("Drive");
         fs::create_dir_all(&drive).unwrap();
-        let err = approve(&d, &drive, "drive", &[]).unwrap_err();
+        let here = fs::metadata(&drive).unwrap().dev();
+        // On the system disk: refused, nothing written.
+        let err = approve_beside(&d, &drive, "drive", &[], here).unwrap_err();
         assert!(err.contains("not a drive"), "{err}");
         assert!(!drive.join(MARKER).exists());
-        let err = approve(&d, Path::new("/tmp"), "drive", &[]).unwrap_err();
-        assert!(err.contains("not a drive"), "{err}");
-        assert!(discover(&d).marked.is_empty() && discover(&d).candidates.is_empty());
+        // Outside the mount directory: refused.
+        assert!(approve_beside(&d, Path::new("/tmp"), "drive", &[], here.wrapping_add(1)).is_err());
+        // A drive of its own: a bad or taken name is refused, then it is approved once.
+        let other = here.wrapping_add(1);
+        assert!(approve_beside(&d, &drive, "../x", &[], other).is_err());
+        assert!(approve_beside(&d, &drive, "data", &["data".into()], other).is_err());
+        let v = approve_beside(&d, &drive, "archive8", &[], other).unwrap();
+        assert_eq!((v.name.as_str(), v.writable), ("archive8", true));
+        let marker: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(drive.join(MARKER)).unwrap()).unwrap();
+        assert_eq!(marker["name"], "archive8");
+        let again = approve_beside(&d, &drive, "archive8b", &[], other).unwrap_err();
+        assert!(
+            again.contains("exists") || again.contains("File exists"),
+            "never over a marker: {again}"
+        );
         let _ = fs::remove_dir_all(&d);
     }
 }
