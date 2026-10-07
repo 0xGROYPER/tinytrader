@@ -13,6 +13,7 @@
 //!
 //! ```text
 //! tinytrader-tui --console http://localhost:8080          # read a running console
+//! tinytrader-tui status --console http://localhost:8080   # one line per service, then exit
 //! tinytrader-tui --topology FILE                           # poll the services it lists
 //!             [--docker URL --project NAME]             # ...and a Compose project
 //! ```
@@ -22,6 +23,9 @@
 //! containers (reachable only from inside that project's network).
 //! `--console` works from anywhere the console is reachable, including over
 //! SSH.
+//!
+//! `status` exits 0 when all is well, 1 when something needs attention and 2
+//! when something is down or the deployment can't be read.
 //!
 //! Keys: 1–5 or Tab/Shift-Tab screens · ↑/↓ or j/k select · p pause
 //! events · ←/→ or h/l switch host · c/m/n sort by CPU, memory, name · q quit.
@@ -103,13 +107,16 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "tinytrader-tui: {e}\n\nusage: tinytrader-tui --console URL\n       tinytrader-tui --topology FILE [--docker URL --project NAME]"
+                "tinytrader-tui: {e}\n\nusage: tinytrader-tui [status] --console URL\n       tinytrader-tui [status] --topology FILE [--docker URL --project NAME]"
             );
             std::process::exit(2);
         }
     };
-    let view = Arc::new(Mutex::new(View::default()));
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    if std::env::args().nth(1).as_deref() == Some("status") {
+        std::process::exit(runtime.block_on(status(&source)));
+    }
+    let view = Arc::new(Mutex::new(View::default()));
     runtime.spawn(refresh_forever(source, view.clone()));
 
     let mut terminal = ratatui::init();
@@ -121,7 +128,7 @@ fn main() {
 }
 
 fn parse_args() -> Result<(Source, String), String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = std::env::args().skip(1).filter(|a| a != "status").collect();
     let value = |flag: &str| {
         args.iter()
             .position(|a| a == flag)
@@ -219,7 +226,10 @@ async fn refresh_forever(source: Source, view: Arc<Mutex<View>>) {
                         };
                         if let Some((at, before)) = v.counters.get(&svc.id).copied() {
                             let dt = now.duration_since(at).as_secs_f64();
-                            if dt >= 0.5 {
+                            // The console refreshes every couple of seconds: measure across a
+                            // change in the counters, and call a feed still only after 5 s.
+                            let moved = c.records != before.records || c.skips != before.skips;
+                            if moved || dt >= 5.0 {
                                 let per = |a: f64, b: f64| ((a - b) / dt).max(0.0);
                                 v.rates.insert(
                                     svc.id.clone(),
@@ -440,6 +450,42 @@ fn draw(f: &mut Frame, v: &View, label: &str) {
         footer.push(Span::styled(format!("   {label}"), theme::dim()));
     }
     f.render_widget(Line::from(footer), keys);
+}
+
+/// `tinytrader-tui status`: one line per service, then exit 0 when all is
+/// well, 1 when something needs attention, 2 when something is down (or the
+/// deployment can't be read), for scripts and checks over SSH.
+async fn status(source: &Source) -> i32 {
+    let _ = source.refresh().await;
+    let (t, s) = match (source.topology().await, source.snapshot().await) {
+        (Ok(t), Ok(s)) => (t, s),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("tinytrader-tui: cannot read the deployment: {e}");
+            return 2;
+        }
+    };
+    let mut worst = 0;
+    for svc in &t.services {
+        let st = s.services.get(&svc.id);
+        let status = st.map_or(
+            tinytrader_fleet::Status::Idle,
+            tinytrader_fleet::ServiceState::status,
+        );
+        let (mark, code) = match status {
+            tinytrader_fleet::Status::Ok => ("ok  ", 0),
+            tinytrader_fleet::Status::Idle => ("idle", 0),
+            tinytrader_fleet::Status::Warn => ("WARN", 1),
+            tinytrader_fleet::Status::Crit => ("DOWN", 2),
+        };
+        worst = worst.max(code);
+        println!(
+            "{mark}  {:<20} {}",
+            svc.name(),
+            st.map(tinytrader_fleet::ServiceState::detail)
+                .unwrap_or_default()
+        );
+    }
+    worst
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
