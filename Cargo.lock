@@ -3423,7 +3423,9 @@ name = "tinytrader-tui"
 version = "0.1.0"
 dependencies = [
  "ratatui",
+ "serde_json",
  "tinytrader-fleet",
+ "tinytrader-schedule",
  "tokio",
 ]
 

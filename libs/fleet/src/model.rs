@@ -19,6 +19,8 @@ pub struct Topology {
     pub stores: Vec<Node>,
     pub edges: Vec<Edge>,
     pub panels: Vec<Value>,
+    /// Bundles (decision 0011): services sharing hours, with a work class.
+    pub bundles: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -134,6 +136,10 @@ pub struct ServiceState {
     pub accounts: Option<Value>,
     /// The market calendar it serves, if any.
     pub calendar: Option<Value>,
+    /// Scheduled economic releases it serves, if any (`{ "events": [...] }`).
+    pub econ: Option<Value>,
+    /// A relay's connected clients (`{ "clients": [...] }`).
+    pub clients: Option<Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
