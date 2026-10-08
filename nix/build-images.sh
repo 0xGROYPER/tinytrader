@@ -18,7 +18,8 @@ for s in "$@"; do
     "$(nix build --no-link --print-out-paths --cores "$cores" "$src#image-$s")" | docker load
   else
     # Only the stream reaches stdout; the build's log goes to stderr.
-    docker run --rm --name "tinytrader-image-build-$s" \
+    # A low CPU share: the build yields to live feeds in the same VM (0011).
+    docker run --rm --name "tinytrader-image-build-$s" --cpu-shares 128 --cpus "$cores" \
       -v tinytrader-nix:/nix \
       -v "$src:/src:ro" \
       nixos/nix:2.35.2 sh -ec '
