@@ -17,8 +17,11 @@
 //!   back to three months ahead, medium and high: a company of $10 billion
 //!   or more is medium, $200 billion or more high, and `EARNINGS_WATCH`
 //!   symbols always high). Only BLS is sent the contact address.
-//! - Past earnings per company (`history.rs`): `/history?symbol=`, from
-//!   Alpha Vantage, kept a week (on disk with `ECON_CACHE`).
+//! - Past earnings per company (`history.rs`): `/history?symbol=`, report
+//!   dates and times from SEC EDGAR (with `SEC_CONTACT`, the address the SEC
+//!   requires in requests; sent to sec.gov only), EPS and estimates from
+//!   Alpha Vantage, all kept on disk (`ECON_CACHE`) and fetched only when
+//!   missing or a new report is due.
 //!
 //! Each source is read once a day; when a read fails, its last good copy
 //! is kept and the failure reported. Serves `/events` (`?from=YYYY-MM-DD&
@@ -179,6 +182,7 @@ async fn main() {
             get({
                 let h = Arc::new(history::History::new(
                     keys.alpha_vantage.clone(),
+                    tinytrader_observe::secret("SEC_CONTACT").ok(),
                     args.cache.clone(),
                 ));
                 move |Query(ask): Query<HistoryAsk>| async move {
