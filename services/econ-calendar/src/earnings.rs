@@ -120,10 +120,14 @@ pub fn alpha_vantage(text: &str) -> Result<Vec<Row>, String> {
         col("estimate"),
         col("timeOfTheDay"),
     ) else {
-        return Err(format!(
-            "not the earnings CSV: {}",
-            text.chars().take(120).collect::<String>()
-        ));
+        // Not Alpha Vantage's own words: its limit message quotes the key.
+        return Err(
+            if text.contains("per day") || text.contains("detected your API key") {
+                "Alpha Vantage's 25 requests for today are used up".to_owned()
+            } else {
+                "Alpha Vantage's answer wasn't the earnings CSV".to_owned()
+            },
+        );
     };
     Ok(lines
         .map(csv_fields)
@@ -304,6 +308,8 @@ mod tests {
         assert_eq!(av[0].name.as_deref(), Some("BANK OF AMERICA, CORP"));
         assert_eq!((av[0].when, av[0].eps_estimate), (When::Before, Some(1.16)));
         assert!(alpha_vantage("{\"Information\": \"rate limit\"}").is_err());
+        let why = alpha_vantage("{\"Information\": \"We have detected your API key as SECRETKEY ... 25 requests per day\"}").unwrap_err();
+        assert!(!why.contains("SECRETKEY"), "{why}");
 
         let fh = finnhub(&json!({ "earningsCalendar": [{ "symbol": "MS", "date": "2026-10-14", "hour": "bmo", "epsEstimate": 3.17, "epsActual": null }] })).unwrap();
         assert_eq!((fh[0].when, fh[0].eps_actual), (When::Before, None));

@@ -57,11 +57,20 @@ fn still_good(fetched_at: f64, latest: Option<&str>, now: f64) -> bool {
 /// When the answer has no reports (Alpha Vantage says why in a note).
 pub fn alpha_vantage(v: &Value) -> Result<Vec<Value>, String> {
     let list = v["quarterlyEarnings"].as_array().ok_or_else(|| {
-        let why = v["Note"]
-            .as_str()
-            .or(v["Information"].as_str())
-            .or(v["Error Message"].as_str());
-        why.map_or_else(|| "no earnings history".to_owned(), str::to_owned)
+        // Never pass Alpha Vantage's own words on: its limit message quotes the key.
+        let why = [&v["Note"], &v["Information"], &v["Error Message"]]
+            .into_iter()
+            .find_map(Value::as_str)
+            .unwrap_or("");
+        if why.contains("per day") || why.contains("detected your API key") {
+            "Alpha Vantage's 25 requests for today are used up".to_owned()
+        } else if why.contains("per second") || why.contains("sparingly") {
+            "Alpha Vantage asked for requests to be spaced out".to_owned()
+        } else if why.contains("Invalid API call") {
+            "Alpha Vantage has no earnings for this symbol".to_owned()
+        } else {
+            "Alpha Vantage gave no earnings history".to_owned()
+        }
     })?;
     let num = |x: &Value| {
         x.as_str()
@@ -254,7 +263,10 @@ impl History {
     /// fetched only when nothing is kept or a report is due.
     async fn alpha_vantage(&self, symbol: &str, now: f64) -> Result<Vec<Value>, String> {
         let name = format!("alphavantage/{symbol}.json");
-        let kept = self.load(&name);
+        // Histories saved before this layout (`history/`) count as kept too.
+        let kept = self
+            .load(&name)
+            .or_else(|| self.load(&format!("history/{symbol}.json")));
         let reports = |v: &Value| v["reports"].as_array().cloned().unwrap_or_default();
         if let Some(v) = &kept
             && still_good(
@@ -450,9 +462,11 @@ mod tests {
             (Some("after-close"), Some(2.02))
         );
         assert!(r[1]["estimate"].is_null() && r[1]["when"] == "before-open");
-        assert_eq!(
-            alpha_vantage(&json!({ "Note": "limit reached" })).unwrap_err(),
-            "limit reached"
+        let limit = json!({ "Information": "We have detected your API key as SECRETKEY and our standard API rate limit is 25 requests per day." });
+        let why = alpha_vantage(&limit).unwrap_err();
+        assert!(
+            !why.contains("SECRETKEY") && why.contains("used up"),
+            "{why}"
         );
     }
 
