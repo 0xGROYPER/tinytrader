@@ -107,8 +107,8 @@ function draw(my) {
     const open = my.open === r.symbol;
     const main = `<tr class="er-row${open ? ' open' : ''}" data-er="${esc(r.symbol)}"><td>${esc(r.date.slice(5))}</td><td class="muted">${WHEN[r.when] || '—'}</td><td><b>${esc(r.symbol)}</b> <span class="muted">${esc((r.name || '').slice(0, 28))}</span></td>
       <td class="num">${cap(r.market_cap)}</td><td class="num">${r.eps_estimate ?? '—'}</td>
-      <td class="num">${o ? (o.err ? '<span class="muted" title="' + esc(o.err) + '">n/a</span>' : pct(j)) : '…'}</td><td class="num">${o && !o.err ? pct(o.straddle) : ''}</td>
-      <td class="num">${h ? (h.err ? '<span class="muted" title="' + esc(h.err) + '">n/a</span>' : pct(s.avg)) : '<span class="muted">open</span>'}</td>
+      <td class="num">${o ? (o.err ? '<span class="muted" title="' + esc(o.err) + '">n/a</span>' : j ? pct(j) : '<span class="muted" title="The quotes show no extra volatility in the first expiry after the report">—</span>') : '…'}</td><td class="num">${o && !o.err ? pct(o.straddle) : ''}</td>
+      <td class="num">${h ? (h.err ? '<span class="muted" title="' + esc(h.err) + '">n/a</span>' : pct(s.avg)) : '<span class="muted" title="Click the row to load its past reports">load ▸</span>'}</td>
       <td class="num${cls}">${ratio == null ? '—' : ratio.toFixed(2)}</td><td class="num">${s?.beat == null ? '—' : `${Math.round(s.beat * 8)}/8`}</td></tr>`;
     return main + (open ? `<tr class="er-detail"><td colspan="10">${detail(r, o, h)}</td></tr>` : '');
   }).join('');
