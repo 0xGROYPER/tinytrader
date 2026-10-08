@@ -1,0 +1,8 @@
+{
+  "stream": "trade_updates",
+  "data": {
+    "event": "{{EVENT}}",
+    "timestamp": "{{TS}}",
+    "order": {{ORDER}}
+  }
+}

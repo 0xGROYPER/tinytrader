@@ -1,0 +1,14 @@
+{
+  "stream": "trade_updates",
+  "data": {
+    "at": "{{TS}}",
+    "event_id": "01JJ3WE73W5PG672TC4XACXH5R",
+    "event": "{{EVENT}}",
+    "timestamp": "{{TS}}",
+    "order": {{ORDER}},
+    "price": "{{PRICE}}",
+    "qty": "{{QTY}}",
+    "position_qtys": {{POSITIONS}},
+    "legs": {{LEG_FILLS}}
+  }
+}

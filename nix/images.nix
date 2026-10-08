@@ -26,6 +26,7 @@
         "alpaca-data"
         "econ-calendar"
         "relay"
+        "order-gateway"
       ];
       image =
         name:

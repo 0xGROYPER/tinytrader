@@ -1,0 +1,8 @@
+{
+  "execution_id": "{{EXEC}}",
+  "qty": "{{QTY}}",
+  "price": "{{PRICE}}",
+  "order_id": "{{ID}}",
+  "symbol": "{{SYMBOL}}",
+  "timestamp": "{{TS}}"
+}

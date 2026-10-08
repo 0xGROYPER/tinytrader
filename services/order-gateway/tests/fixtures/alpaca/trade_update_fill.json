@@ -1,0 +1,12 @@
+{
+  "stream": "trade_updates",
+  "data": {
+    "event": "{{EVENT}}",
+    "execution_id": "{{EXEC}}",
+    "order": {{ORDER}},
+    "position_qty": "{{POSITION}}",
+    "price": "{{PRICE}}",
+    "qty": "{{QTY}}",
+    "timestamp": "{{TS}}"
+  }
+}

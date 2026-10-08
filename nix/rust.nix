@@ -32,6 +32,7 @@
           ../services/alpaca-account
           ../services/alpaca-data
           ../services/relay
+          ../services/order-gateway
           (lib.fileset.fileFilter (f: f.hasExt "rs" || f.name == "Cargo.toml") ../services/console)
           ../services/console/web
         ];
@@ -71,6 +72,7 @@
       alpaca-data = service "alpaca-data" "Market data for any symbol on request: stock snapshots, bars and option chains from Alpaca";
       alpaca-account = service "alpaca-account" "Example service serving an Alpaca account's balances and positions";
       relay = service "relay" "Market data relay: one provider connection served to local clients (tinytrader.relay/1)";
+      order-gateway = service "order-gateway" "Order gateway: one broker account behind a loopback protocol (tinytrader.gateway/1)";
 
     in
     {
@@ -86,6 +88,7 @@
           alpaca-account
           alpaca-data
           relay
+          order-gateway
           ;
       };
 

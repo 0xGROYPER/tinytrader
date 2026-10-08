@@ -1,0 +1,26 @@
+[package]
+name = "order-gateway"
+description = "Order gateway: one broker account behind a loopback NDJSON protocol (tinytrader.gateway/1), with an Alpaca paper broker and a simulated broker"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+name = "order_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "order-gateway"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+dbn = { version = "0.71", default-features = false }
+serde_json.workspace = true
+sha2 = "0.10.9"
+signal-hook = { version = "=0.3.18", default-features = false, features = ["iterator"] }
+tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+ureq = { version = "=2.12.1", default-features = false, features = ["tls"] }

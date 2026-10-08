@@ -1,0 +1,26 @@
+[
+  {
+    "id": "20261005100000000::00000000-0000-0000-0000-0000000000f1",
+    "activity_type": "FILL",
+    "transaction_time": "2026-10-05T14:00:00.123Z",
+    "type": "fill",
+    "price": "1.24",
+    "qty": "1",
+    "side": "buy",
+    "symbol": "SPY261005C00580000",
+    "leaves_qty": "0",
+    "order_id": "00000000-0000-4000-8000-000000000001",
+    "cum_qty": "1",
+    "order_status": "filled"
+  },
+  {
+    "id": "20261005000000000::00000000-0000-0000-0000-0000000000f2",
+    "activity_type": "OPEXP",
+    "date": "2026-10-05",
+    "net_amount": "0",
+    "description": "Option Expiry",
+    "symbol": "SPY261002C00590000",
+    "qty": "-1",
+    "status": "executed"
+  }
+]

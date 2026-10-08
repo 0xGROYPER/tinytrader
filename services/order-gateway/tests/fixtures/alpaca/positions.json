@@ -1,0 +1,14 @@
+[
+  {
+    "asset_id": "00000000-0000-0000-0000-000000000000",
+    "symbol": "SPY261016P00560000",
+    "exchange": "",
+    "asset_class": "us_option",
+    "avg_entry_price": "1.05",
+    "qty": "-2",
+    "side": "short",
+    "market_value": "-180",
+    "cost_basis": "-210",
+    "qty_available": "-2"
+  }
+]

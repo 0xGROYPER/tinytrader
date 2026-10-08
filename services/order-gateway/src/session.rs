@@ -1,0 +1,1484 @@
+//! The account session: one thread owning the broker and the journal. It admits,
+//! forwards and correlates requests, never resends, resolves unknown outcomes by
+//! lookup, reconciles after restarts and stream drops, and fans out journaled events.
+use crate::broker::{
+    Broker, BrokerError, BrokerOrder, CancelResult, OrderRef, OrderUpdate, SubmitResult, Update,
+    normalize_event, status_event, terminal,
+};
+use crate::intent::{Intent, hex, occ};
+use crate::journal::Journal;
+use crate::protocol::{
+    Invalid, KillLevel, Obj, Op, arr, error_line, invalid_detail, quote, request_error, response,
+};
+use crate::safety::{Budget, cutoff, hhmm};
+use crate::server::{Config, Outbox, Role};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const EVENTS: &str = r#"["new","accepted","pending_new","partial_fill","fill","pending_cancel","canceled","expired","done_for_day","replaced","rejected","stopped","suspended","calculated","cancel_rejected","replace_rejected","other"]"#;
+
+/// Wall-clock nanoseconds since the Unix epoch.
+#[must_use]
+pub fn wall_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}
+
+type Parsed = Result<(String, Op), (Option<String>, String, Invalid)>;
+
+pub(crate) enum Input {
+    Hello {
+        id: u64,
+        client: usize,
+        outbox: Arc<Outbox>,
+        resume: Option<u64>,
+        cancel_on_disconnect: bool,
+    },
+    Request {
+        id: u64,
+        request: Parsed,
+    },
+    Closed(u64),
+    Shutdown,
+}
+
+struct Conn {
+    id: u64,
+    client: usize,
+    outbox: Arc<Outbox>,
+    rids: HashSet<String>,
+    cod: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Phase {
+    Admitted,
+    Sent,
+    Unknown,
+    Done,
+    Absent,
+}
+
+struct OrderState {
+    client: String,
+    request_id: String,
+    sha: Option<String>,
+    broker_id: Option<String>,
+    status: String,
+    filled: u64,
+    avg: Option<String>,
+    legs: Option<String>,
+    raw: Option<String>,
+    phase: Phase,
+}
+
+fn utc_day(ts: u64) -> i64 {
+    i64::try_from(ts / 86_400_000_000_000).unwrap_or(0)
+}
+
+impl OrderState {
+    fn admitted(client: String, request_id: String, sha: Option<String>) -> Self {
+        let (status, phase) = (String::new(), Phase::Admitted);
+        let (broker_id, avg, legs, raw) = (None, None, None, None);
+        Self {
+            client,
+            request_id,
+            sha,
+            broker_id,
+            status,
+            filled: 0,
+            avg,
+            legs,
+            raw,
+            phase,
+        }
+    }
+    fn open(&self) -> bool {
+        match self.phase {
+            Phase::Admitted | Phase::Sent | Phase::Unknown => true,
+            Phase::Absent => false,
+            Phase::Done => !terminal(&self.status) && self.status != "not_sent",
+        }
+    }
+    fn json(&self, cid: &str) -> String {
+        order_obj(
+            cid,
+            self.broker_id.as_deref(),
+            &self.status,
+            self.filled,
+            self.avg.as_deref(),
+            self.legs.as_deref(),
+            self.sha.as_deref(),
+            self.raw.as_deref(),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn order_obj(
+    cid: &str,
+    bid: Option<&str>,
+    status: &str,
+    filled: u64,
+    avg: Option<&str>,
+    legs: Option<&str>,
+    sha: Option<&str>,
+    raw: Option<&str>,
+) -> String {
+    let mut o = Obj::new()
+        .s("client_order_id", cid)
+        .opt_s("broker_order_id", bid)
+        .s("status", status)
+        .n("filled_qty", filled)
+        .opt_s("avg_price", avg);
+    if let Some(l) = legs {
+        o = o.raw("legs", l);
+    }
+    o.opt_s("intent_sha256", sha)
+        .raw("broker_raw", raw.unwrap_or("null"))
+        .done()
+}
+
+enum Aud {
+    All,
+    Client(String),
+    Prefix(String),
+}
+
+struct Pending {
+    cid: String,
+    start: Instant,
+    next: usize,
+}
+
+fn outcome(kind: &str) -> Obj {
+    Obj::new().s("outcome", kind)
+}
+
+fn not_sent(reason: &str, detail: &str) -> String {
+    outcome("not_sent")
+        .s("reason", reason)
+        .raw("detail", detail)
+        .done()
+}
+
+fn cap(name: &str) -> String {
+    not_sent("cap", &Obj::new().s("cap", name).done())
+}
+
+fn broker_error_obj(kind: &str, e: &BrokerError) -> Obj {
+    outcome(kind)
+        .n("http_status", e.http_status)
+        .s("code", &e.code)
+        .s("message", &e.message)
+        .raw("broker_raw", &e.raw)
+}
+
+fn op_name(op: &Op) -> &'static str {
+    match op {
+        Op::Submit(_) => "submit",
+        Op::Cancel(_) => "cancel",
+        Op::Order(_) => "order",
+        Op::OpenOrders => "open_orders",
+        Op::Account => "account",
+        Op::Positions => "positions",
+        Op::Activities { .. } => "activities",
+        Op::Clock => "clock",
+        Op::Calendar { .. } => "calendar",
+        Op::Kill { .. } => "kill",
+        Op::Unkill => "unkill",
+        Op::Advance(_) => "advance",
+    }
+}
+
+pub(crate) struct Session<B: Broker> {
+    b: B,
+    j: Journal,
+    cfg: Config,
+    orders: HashMap<String, OrderState>,
+    by_broker: HashMap<String, String>,
+    foreign: HashSet<String>,
+    conns: Vec<Conn>,
+    hold: Option<Vec<(String, Aud)>>,
+    gate_ok: bool,
+    killed: Option<(KillLevel, String)>,
+    stream_down: Option<(Instant, u64)>,
+    degraded: bool,
+    last_state: &'static str,
+    budget: Budget,
+    minute: VecDeque<Instant>,
+    day: (i64, usize),
+    rejects: u32,
+    pending: Vec<Pending>,
+    cod_timers: Vec<(String, Instant)>,
+    last_poll: Instant,
+    last_seq: Arc<AtomicU64>,
+}
+
+impl<B: Broker> Session<B> {
+    pub(crate) fn new(
+        cfg: Config,
+        b: B,
+        j: Journal,
+        recovered: &[Value],
+        last_seq: Arc<AtomicU64>,
+    ) -> Self {
+        let mut s = Self {
+            budget: Budget::new(cfg.profile.budget_per_min),
+            b,
+            j,
+            cfg,
+            orders: HashMap::new(),
+            by_broker: HashMap::new(),
+            foreign: HashSet::new(),
+            conns: Vec::new(),
+            hold: None,
+            gate_ok: false,
+            killed: None,
+            stream_down: None,
+            degraded: false,
+            last_state: "",
+            minute: VecDeque::new(),
+            day: (0, 0),
+            rejects: 0,
+            pending: Vec::new(),
+            cod_timers: Vec::new(),
+            last_poll: Instant::now(),
+            last_seq,
+        };
+        let today = utc_day(s.ts());
+        for r in recovered {
+            s.rebuild(r, today);
+        }
+        s
+    }
+
+    fn rebuild(&mut self, v: &Value, today: i64) {
+        let text = |k: &str| v[k].as_str().map(String::from);
+        let cid = text("client_order_id").unwrap_or_default();
+        match v["kind"].as_str().unwrap_or("") {
+            "submit" => match v["phase"].as_str().unwrap_or("") {
+                "admitted" => {
+                    if utc_day(v["ts_gateway"].as_u64().unwrap_or(0)) == today {
+                        self.day = (today, self.day.1 + 1);
+                    }
+                    let (c, r) = (text("client").unwrap_or_default(), text("request_id"));
+                    let st = OrderState::admitted(c, r.unwrap_or_default(), text("intent_sha256"));
+                    self.orders.insert(cid, st);
+                }
+                phase => {
+                    let Some(st) = self.orders.get_mut(&cid) else {
+                        return;
+                    };
+                    if text("request_id").as_deref() != Some(&st.request_id) {
+                        return;
+                    }
+                    let o = &v["outcome"];
+                    match (phase, o["outcome"].as_str().unwrap_or("")) {
+                        ("sent", _) => st.phase = Phase::Sent,
+                        (_, "accepted") => {
+                            st.phase = Phase::Done;
+                            st.broker_id = o["broker_order_id"].as_str().map(String::from);
+                            st.status = o["status"].as_str().unwrap_or("new").into();
+                            st.raw = Some(o["broker_raw"].to_string());
+                        }
+                        (_, "unknown") => st.phase = Phase::Unknown,
+                        (_, kind @ ("rejected" | "not_sent")) => {
+                            st.phase = Phase::Done;
+                            kind.clone_into(&mut st.status);
+                        }
+                        _ => {}
+                    }
+                    if let Some(b) = st.broker_id.clone() {
+                        self.by_broker.insert(b, cid);
+                    }
+                }
+            },
+            "order" => {
+                let Some(st) = self.orders.get_mut(&cid) else {
+                    return;
+                };
+                st.phase = Phase::Done;
+                st.broker_id = text("broker_order_id");
+                st.status = text("status").unwrap_or_default();
+                st.filled = v["filled_qty"].as_u64().unwrap_or(0);
+                st.avg = text("avg_price");
+                st.legs = v.get("legs").map(Value::to_string);
+                st.raw = Some(v["broker_raw"].to_string());
+                if let Some(b) = st.broker_id.clone() {
+                    self.by_broker.insert(b, cid);
+                }
+            }
+            "resolution" if v["outcome"] == "absent_after" => {
+                if let Some(st) = self.orders.get_mut(&cid) {
+                    st.phase = Phase::Absent;
+                }
+            }
+            "status" => {
+                if let Some(k) = v.get("kill") {
+                    self.killed = KillLevel::parse(k["level"].as_str().unwrap_or(""))
+                        .map(|l| (l, k["reason"].as_str().unwrap_or("").to_string()));
+                }
+            }
+            "foreign" => {
+                self.foreign.extend(text("broker_order_id"));
+                self.foreign
+                    .extend(text("symbol").map(|s| format!("position:{s}")));
+            }
+            _ => {}
+        }
+    }
+
+    fn ts(&self) -> u64 {
+        self.b.now().unwrap_or_else(wall_ns)
+    }
+
+    fn state(&self) -> &'static str {
+        if !self.gate_ok {
+            "reconciling"
+        } else if self.killed.is_some() {
+            "killed"
+        } else if self.degraded {
+            "degraded"
+        } else {
+            "ready"
+        }
+    }
+
+    fn emit(&mut self, ts: u64, kind: &str, body: &str, aud: Aud) -> Result<(), String> {
+        let (seq, line) = self.j.append(ts, kind, body)?;
+        self.last_seq.store(seq, SeqCst);
+        match &mut self.hold {
+            Some(h) => h.push((line, aud)),
+            None => self.fan(&line, &aud),
+        }
+        Ok(())
+    }
+
+    fn visible(&self, client: usize, aud: &Aud) -> bool {
+        let c = &self.cfg.clients[client];
+        c.role != Role::Trade
+            || match aud {
+                Aud::All => true,
+                Aud::Client(n) => *n == c.name,
+                Aud::Prefix(cid) => cid.starts_with(&c.prefix),
+            }
+    }
+
+    fn fan(&self, line: &str, aud: &Aud) {
+        for c in &self.conns {
+            if self.visible(c.client, aud) {
+                c.outbox.push(line.to_owned());
+            }
+        }
+    }
+
+    /// Delivers a response, then the events held while producing it.
+    fn release(&mut self, conn: usize, line: String) {
+        self.conns[conn].outbox.push(line);
+        for (l, a) in self.hold.take().unwrap_or_default() {
+            self.fan(&l, &a);
+        }
+    }
+
+    fn reply(&self, conn: usize, line: String) {
+        self.conns[conn].outbox.push(line);
+    }
+
+    fn status(&mut self, extra: &str) -> Result<(), String> {
+        let stream = match self.stream_down {
+            Some((_, since)) => Obj::new()
+                .raw("down", &Obj::new().n("since", since).done())
+                .done(),
+            None => quote("up"),
+        };
+        self.last_state = self.state();
+        let body = Obj::new()
+            .s("state", self.last_state)
+            .raw("broker_stream", &stream)
+            .merge(extra)
+            .done();
+        self.emit(self.ts(), "status", &body, Aud::All)
+    }
+
+    fn sync_state(&mut self) -> Result<(), String> {
+        if self.state() == self.last_state {
+            Ok(())
+        } else {
+            self.status("{}")
+        }
+    }
+
+    pub(crate) fn run(mut self, rx: &Receiver<Input>) -> Result<(), String> {
+        let result = self.run_inner(rx);
+        let msg = match &result {
+            Ok(()) => "the process is stopping".to_string(),
+            Err(e) => format!("fatal: {e}"),
+        };
+        for c in &self.conns {
+            c.outbox.close(Some(error_line("shutting_down", &msg)));
+        }
+        result
+    }
+
+    fn run_inner(&mut self, rx: &Receiver<Input>) -> Result<(), String> {
+        self.reconcile(true)?;
+        loop {
+            match rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(Input::Shutdown) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                Ok(Input::Hello {
+                    id,
+                    client,
+                    outbox,
+                    resume,
+                    cancel_on_disconnect,
+                }) => {
+                    self.hello(id, client, outbox, resume, cancel_on_disconnect)?;
+                }
+                Ok(Input::Request { id, request }) => self.request(id, request)?,
+                Ok(Input::Closed(id)) => self.closed(id)?,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            self.tick()?;
+        }
+    }
+
+    fn hello(
+        &mut self,
+        id: u64,
+        client: usize,
+        outbox: Arc<Outbox>,
+        resume: Option<u64>,
+        cod: bool,
+    ) -> Result<(), String> {
+        let (resume_obj, lines) = match resume {
+            None => (Obj::new().s("resume", "none").done(), Vec::new()),
+            Some(n) => {
+                let (first, lines) = self.j.window()?;
+                let o = if n + 1 < first {
+                    Obj::new()
+                        .s("resume", "truncated")
+                        .n("first_available_seq", first)
+                        .done()
+                } else {
+                    Obj::new().s("resume", "full").done()
+                };
+                (o, lines)
+            }
+        };
+        let caps = self.b.capabilities();
+        let p = &self.cfg.profile;
+        let profile = p.json();
+        let capabilities = Obj::new()
+            .raw(
+                "shapes",
+                if caps.combo {
+                    r#"["single","combo"]"#
+                } else {
+                    r#"["single"]"#
+                },
+            )
+            .n("max_legs", caps.max_legs.min(p.max_legs))
+            .s("tick", "0.01")
+            .n("client_order_id_max", caps.client_order_id_max.min(128))
+            .s("idempotency", caps.idempotency)
+            .raw("events", EVENTS)
+            .done();
+        let pins = Obj::new()
+            .s(
+                "gateway",
+                concat!("order-gateway ", env!("CARGO_PKG_VERSION")),
+            )
+            .s("profile_sha256", &hex(&Sha256::digest(profile.as_bytes())))
+            .raw("broker", &self.b.pins())
+            .done();
+        let welcome = Obj::msg("welcome")
+            .s("account", &self.cfg.account)
+            .s("broker", self.b.kind())
+            .s("environment", &self.cfg.environment)
+            .s("state", self.state())
+            .n("last_seq", self.j.last_seq)
+            .merge(&resume_obj)
+            .raw("capabilities", &capabilities)
+            .raw("pins", &pins)
+            .raw("limits", &profile)
+            .done();
+        let after = resume.unwrap_or(u64::MAX);
+        let mut batch = vec![welcome];
+        batch.extend(lines.into_iter().filter(|line| {
+            let v: Value = serde_json::from_str(line).unwrap_or_default();
+            v["seq"].as_u64().is_some_and(|s| s > after) && self.visible(client, &line_aud(&v))
+        }));
+        outbox.push_all(batch);
+        let name = self.cfg.clients[client].name.clone();
+        self.cod_timers.retain(|(n, _)| *n != name);
+        self.conns.push(Conn {
+            id,
+            client,
+            outbox,
+            rids: HashSet::new(),
+            cod,
+        });
+        let body = Obj::new()
+            .s("client", &name)
+            .s("phase", "connected")
+            .raw(
+                "resume_after_seq",
+                &resume.map_or("null".into(), |n| n.to_string()),
+            )
+            .done();
+        self.emit(self.ts(), "client", &body, Aud::Client(name))
+    }
+
+    fn closed(&mut self, id: u64) -> Result<(), String> {
+        let Some(i) = self.conns.iter().position(|c| c.id == id) else {
+            return Ok(());
+        };
+        let c = self.conns.remove(i);
+        let name = self.cfg.clients[c.client].name.clone();
+        if c.cod {
+            self.cod_timers.push((
+                name.clone(),
+                Instant::now() + self.cfg.timing.disconnect_grace,
+            ));
+        }
+        let body = Obj::new()
+            .s("client", &name)
+            .s("phase", "disconnected")
+            .raw("resume_after_seq", "null")
+            .done();
+        self.emit(self.ts(), "client", &body, Aud::Client(name))
+    }
+
+    fn request(&mut self, id: u64, request: Parsed) -> Result<(), String> {
+        let Some(ci) = self.conns.iter().position(|c| c.id == id) else {
+            return Ok(());
+        };
+        let (rid, op) = match request {
+            Ok(x) => x,
+            Err((rid, op, e)) => {
+                let line = request_error(
+                    rid.as_deref().unwrap_or(""),
+                    &op,
+                    "invalid_request",
+                    &invalid_detail(&e),
+                );
+                self.reply(ci, line);
+                return Ok(());
+            }
+        };
+        let name = op_name(&op);
+        if !self.conns[ci].rids.insert(rid.clone()) {
+            self.reply(
+                ci,
+                request_error(&rid, name, "duplicate_request_id", "null"),
+            );
+            return Ok(());
+        }
+        let spec = self.cfg.clients[self.conns[ci].client].clone();
+        let allowed = match &op {
+            Op::Submit(_) | Op::Advance(_) => spec.role == Role::Trade,
+            Op::Cancel(_) => spec.role != Role::Observe,
+            Op::Kill { .. } | Op::Unkill => spec.role == Role::Admin,
+            _ => true,
+        };
+        if !allowed {
+            self.reply(ci, request_error(&rid, name, "forbidden", "null"));
+            return Ok(());
+        }
+        match op {
+            Op::Submit(v) => {
+                self.hold = Some(Vec::new());
+                let result = self.submit(&spec.name, &spec.prefix, &rid, v);
+                self.release(ci, response(&rid, "submit", &result?));
+            }
+            Op::Cancel(target) => {
+                self.hold = Some(Vec::new());
+                let result =
+                    self.cancel_request(&spec.name, spec.role, &spec.prefix, &rid, &target);
+                let line = match result? {
+                    Ok(o) => response(&rid, "cancel", &o),
+                    Err(code) => request_error(&rid, "cancel", code, "null"),
+                };
+                self.release(ci, line);
+            }
+            Op::Kill { level, reason } => {
+                self.kill(level, &reason, &spec.name, &rid)?;
+                let o = outcome("ok").s("state", self.state()).done();
+                self.reply(ci, response(&rid, name, &o));
+            }
+            Op::Unkill => {
+                self.killed = None;
+                self.status(r#"{"kill":null}"#)?;
+                let o = outcome("ok").s("state", self.state()).done();
+                self.reply(ci, response(&rid, name, &o));
+            }
+            Op::Advance(to) => {
+                let line = match self.b.advance(to) {
+                    Ok(m) => {
+                        self.drain()?;
+                        let o = outcome("ok")
+                            .n("market_ts", m)
+                            .n("ts_gateway", self.ts())
+                            .raw("broker_raw", "null");
+                        response(&rid, name, &o.done())
+                    }
+                    Err(e) => request_error(&rid, name, &e.code, "null"),
+                };
+                self.reply(ci, line);
+            }
+            query => {
+                let line = self.query(&rid, query);
+                self.reply(ci, line);
+            }
+        }
+        Ok(())
+    }
+
+    #[expect(clippy::too_many_lines, reason = "one flat table of query mappings")]
+    fn query(&mut self, rid: &str, op: Op) -> String {
+        let name = op_name(&op);
+        if !self.budget.take(false) {
+            return request_error(rid, name, "throttled", "null");
+        }
+        let order = |o: &BrokerOrder, orders: &HashMap<String, OrderState>| {
+            let sha = orders
+                .get(&o.client_order_id)
+                .and_then(|s| s.sha.as_deref());
+            order_obj(
+                &o.client_order_id,
+                Some(&o.broker_order_id),
+                &o.status,
+                o.filled_qty,
+                o.avg_price.as_deref(),
+                o.legs.as_deref(),
+                sha,
+                Some(&o.raw),
+            )
+        };
+        let result: Result<(String, String), BrokerError> = match op {
+            Op::Order(t) => self.b.order(&t).map(|r| {
+                let o = r
+                    .value
+                    .as_ref()
+                    .map_or("null".into(), |o| order(o, &self.orders));
+                (Obj::new().raw("order", &o).done(), r.raw)
+            }),
+            Op::OpenOrders => self.b.open_orders().map(|r| {
+                let list = arr(r.value.iter().map(|o| order(o, &self.orders)));
+                (Obj::new().raw("orders", &list).done(), r.raw)
+            }),
+            Op::Account => self.b.account().map(|r| {
+                let a = &r.value;
+                let o = Obj::new()
+                    .s("status", &a.status)
+                    .s("cash", &a.cash)
+                    .s("buying_power", &a.buying_power)
+                    .n("options_trading_level", a.options_trading_level)
+                    .b("blocked", a.blocked)
+                    .done();
+                (Obj::new().raw("account", &o).done(), r.raw)
+            }),
+            Op::Positions => self.b.positions().map(|r| {
+                let list = arr(r.value.iter().map(|p| {
+                    Obj::new()
+                        .s("symbol", &p.symbol)
+                        .n("qty", p.qty)
+                        .s("avg_entry_price", &p.avg_entry_price)
+                        .done()
+                }));
+                (Obj::new().raw("positions", &list).done(), r.raw)
+            }),
+            Op::Activities {
+                types,
+                after,
+                page_token,
+            } => self
+                .b
+                .activities(&types, after.as_deref(), page_token.as_deref())
+                .map(|r| {
+                    let o = Obj::new()
+                        .raw("items", &arr(r.value.0))
+                        .opt_s("next_page_token", r.value.1.as_deref());
+                    (o.done(), r.raw)
+                }),
+            Op::Clock => self.b.clock().map(|r| {
+                let c = r.value;
+                let o = Obj::new()
+                    .n("ts", c.ts)
+                    .b("is_open", c.is_open)
+                    .n("next_open", c.next_open)
+                    .n("next_close", c.next_close);
+                (Obj::new().raw("clock", &o.done()).done(), r.raw)
+            }),
+            Op::Calendar { start, end } => self.b.calendar(&start, &end).map(|r| {
+                let days = arr(r.value.iter().map(|d| {
+                    Obj::new()
+                        .s("date", &d.date)
+                        .s("open", &d.open)
+                        .s("close", &d.close)
+                        .done()
+                }));
+                (Obj::new().raw("days", &days).done(), r.raw)
+            }),
+            _ => Err(BrokerError::local("unsupported", "")),
+        };
+        match result {
+            Ok((fields, raw)) => {
+                let o = outcome("ok")
+                    .merge(&fields)
+                    .n("ts_gateway", self.ts())
+                    .raw("broker_raw", &raw);
+                response(rid, name, &o.done())
+            }
+            Err(e) => {
+                if e.http_status == 429 {
+                    self.budget.block(e.retry_after_ms);
+                }
+                let detail = Obj::new()
+                    .n("http_status", e.http_status)
+                    .s("code", &e.code)
+                    .s("message", &e.message)
+                    .done();
+                let code = if e.http_status == 0 {
+                    &e.code
+                } else {
+                    "broker_error"
+                };
+                request_error(rid, name, code, &detail)
+            }
+        }
+    }
+
+    fn submit_event(
+        &mut self,
+        client: &str,
+        rid: &str,
+        cid: Option<&str>,
+        phase: &str,
+        extra: &str,
+    ) -> Result<(), String> {
+        let body = Obj::new()
+            .s("client", client)
+            .s("request_id", rid)
+            .opt_s("client_order_id", cid)
+            .s("phase", phase)
+            .merge(extra)
+            .done();
+        self.emit(self.ts(), "submit", &body, Aud::Client(client.to_owned()))
+    }
+
+    fn outcome_event(
+        &mut self,
+        client: &str,
+        rid: &str,
+        cid: Option<&str>,
+        o: String,
+    ) -> Result<String, String> {
+        let extra = Obj::new().raw("outcome", &o).done();
+        self.submit_event(client, rid, cid, "outcome", &extra)?;
+        Ok(o)
+    }
+
+    /// Returns the outcome object; the response and the outcome event share it.
+    fn submit(
+        &mut self,
+        client: &str,
+        prefix: &str,
+        rid: &str,
+        v: Value,
+    ) -> Result<String, String> {
+        let raw_cid = v
+            .get("client_order_id")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let intent = match Intent::parse(v) {
+            Ok(i) => i,
+            Err(e) => {
+                let o = not_sent("validation", &invalid_detail(&e));
+                return self.outcome_event(client, rid, raw_cid.as_deref(), o);
+            }
+        };
+        if let Some(o) = self.refusal(prefix, &intent) {
+            return self.outcome_event(client, rid, Some(&intent.client_order_id), o);
+        }
+        self.forward(client, rid, &intent)
+    }
+
+    /// Every check that runs before any I/O, in contract order.
+    fn refusal(&mut self, prefix: &str, intent: &Intent) -> Option<String> {
+        let cid = &intent.client_order_id;
+        if !cid.starts_with(prefix) {
+            return Some(not_sent("prefix", &Obj::new().s("prefix", prefix).done()));
+        }
+        if let Some(st) = self.orders.get(cid) {
+            return Some(if st.sha.as_deref() == Some(&intent.sha256()) {
+                outcome("duplicate").raw("current", &st.json(cid)).done()
+            } else {
+                not_sent("duplicate_conflict", "null")
+            });
+        }
+        let caps = self.b.capabilities();
+        for l in &intent.legs {
+            let p = &self.cfg.profile;
+            if l.equity {
+                if !p.equities.contains(&l.symbol) {
+                    let detail = Obj::new().s("equity", &l.symbol).done();
+                    return Some(not_sent("unsupported", &detail));
+                }
+                if l.open && !l.buy && !p.allow_short {
+                    let detail = Obj::new().s("short_sale", &l.symbol).done();
+                    return Some(not_sent("unsupported", &detail));
+                }
+                continue;
+            }
+            let root = occ(&l.symbol).map_or("", |(r, _)| r);
+            if !p.underlyings.iter().any(|u| u == root) {
+                return Some(not_sent(
+                    "unsupported",
+                    &Obj::new().s("underlying", root).done(),
+                ));
+            }
+        }
+        if (intent.combo && !caps.combo)
+            || intent.legs.len() > caps.max_legs
+            || cid.len() > caps.client_order_id_max
+        {
+            return Some(not_sent(
+                "unsupported",
+                &Obj::new().s("broker", self.b.kind()).done(),
+            ));
+        }
+        if !self.gate_ok || self.degraded {
+            return Some(not_sent(
+                "not_ready",
+                &Obj::new().s("state", self.state()).done(),
+            ));
+        }
+        if let Some((level, _)) = self.killed
+            && (level == KillLevel::HaltAll || intent.has_open())
+        {
+            let detail = Obj::new().s("level", level.name()).done();
+            return Some(not_sent("killed", &detail));
+        }
+        if intent.has_open() {
+            let now = self.b.clock().ok().map(|r| r.value.ts);
+            let b = &mut self.b;
+            let mut close = |day: i64| -> Option<i64> {
+                let date = crate::safety::date_string(day);
+                let days = b.calendar(&date, &date).ok()?.value;
+                days.iter()
+                    .find(|d| d.date == date)
+                    .and_then(|d| hhmm(&d.close))
+            };
+            if let Err(detail) = cutoff(intent, now, &mut close) {
+                return Some(not_sent("cutoff", &detail));
+            }
+        }
+        let p = &self.cfg.profile;
+        let notional =
+            intent.limit_cents.unsigned_abs() * u64::from(intent.qty) * intent.multiplier();
+        let max_qty = if intent.is_equity() {
+            p.max_shares
+        } else {
+            p.max_qty
+        };
+        let open = self.orders.values().filter(|o| o.open()).count();
+        let minute_ago = Instant::now().checked_sub(Duration::from_mins(1));
+        self.minute.retain(|t| minute_ago.is_none_or(|m| *t > m));
+        let today = utc_day(self.ts());
+        if self.day.0 != today {
+            self.day = (today, 0);
+        }
+        let hit = [
+            (intent.qty > max_qty, "qty"),
+            (intent.legs.len() > p.max_legs, "legs"),
+            (notional > p.max_notional_cents.unsigned_abs(), "notional"),
+            (open >= p.max_open, "open_orders"),
+            (self.minute.len() >= p.submits_per_min, "submits_per_minute"),
+            (self.day.1 >= p.submits_per_day, "submits_per_day"),
+        ];
+        if let Some((_, name)) = hit.iter().find(|(h, _)| *h) {
+            return Some(cap(name));
+        }
+        if !self.budget.take(true) {
+            return Some(not_sent("throttled", "null"));
+        }
+        None
+    }
+
+    /// Admits, journals `sent`, makes the one send and journals the outcome.
+    fn forward(&mut self, client: &str, rid: &str, intent: &Intent) -> Result<String, String> {
+        let cid = intent.client_order_id.clone();
+        let sha = intent.sha256();
+        let st = OrderState::admitted(client.into(), rid.into(), Some(sha.clone()));
+        self.orders.insert(cid.clone(), st);
+        self.minute.push_back(Instant::now());
+        self.day.1 += 1;
+        let extra = Obj::new()
+            .raw("intent", &intent.canonical())
+            .s("intent_sha256", &sha)
+            .done();
+        self.submit_event(client, rid, Some(&cid), "admitted", &extra)?;
+        if self.cfg.stall_after_admitted {
+            loop {
+                std::thread::sleep(Duration::from_hours(1));
+            }
+        }
+        self.submit_event(client, rid, Some(&cid), "sent", "{}")?;
+        let result = self.b.submit(intent);
+        let st = self.orders.get_mut(&cid).ok_or("admitted order")?;
+        let o = match result {
+            SubmitResult::Accepted(bo) => {
+                self.rejects = 0;
+                st.phase = Phase::Done;
+                st.broker_id = Some(bo.broker_order_id.clone());
+                st.status.clone_from(&bo.status);
+                st.raw = Some(bo.raw.clone());
+                self.by_broker
+                    .insert(bo.broker_order_id.clone(), cid.clone());
+                outcome("accepted")
+                    .s("client_order_id", &cid)
+                    .s("broker_order_id", &bo.broker_order_id)
+                    .s("status", &bo.status)
+                    .raw("broker_raw", &bo.raw)
+                    .done()
+            }
+            SubmitResult::Rejected(e) => {
+                self.rejects += 1;
+                st.phase = Phase::Done;
+                "rejected".clone_into(&mut st.status);
+                if e.http_status == 429 {
+                    self.budget.block(e.retry_after_ms);
+                }
+                broker_error_obj("rejected", &e).done()
+            }
+            SubmitResult::Unknown {
+                reason,
+                retry_after_ms,
+            } => {
+                st.phase = Phase::Unknown;
+                if reason == "http_429_after_send" {
+                    self.budget.block(retry_after_ms);
+                }
+                self.pending.push(Pending {
+                    cid: cid.clone(),
+                    start: Instant::now(),
+                    next: 0,
+                });
+                outcome("unknown")
+                    .s("reason", reason)
+                    .s("client_order_id", &cid)
+                    .done()
+            }
+        };
+        let o = self.outcome_event(client, rid, Some(&cid), o)?;
+        if self.rejects >= self.cfg.profile.max_rejects && self.killed.is_none() {
+            self.killed = Some((KillLevel::HaltOpens, "cap:consecutive_rejects".into()));
+            let k = Obj::new()
+                .s("level", "halt_opens")
+                .s("reason", "cap:consecutive_rejects")
+                .done();
+            let c = Obj::new().s("name", "consecutive_rejects").done();
+            self.status(&Obj::new().raw("kill", &k).raw("cap", &c).done())?;
+        }
+        Ok(o)
+    }
+
+    /// `Ok(Ok(outcome))`, or `Ok(Err(code))` for a request error.
+    fn cancel_request(
+        &mut self,
+        client: &str,
+        role: Role,
+        prefix: &str,
+        rid: &str,
+        target: &OrderRef,
+    ) -> Result<Result<String, &'static str>, String> {
+        let known = match target {
+            OrderRef::Client(c) => self
+                .orders
+                .get(c)
+                .and_then(|s| s.broker_id.clone())
+                .map(|b| (c.clone(), b)),
+            OrderRef::Broker(b) => self.by_broker.get(b).map(|c| (c.clone(), b.clone())),
+        };
+        let (cid, bid) = if let Some(k) = known {
+            k
+        } else {
+            if !self.budget.take(false) {
+                return Ok(Err("throttled"));
+            }
+            match self.b.order(target).map(|r| r.value) {
+                Ok(Some(o)) => (o.client_order_id, o.broker_order_id),
+                Ok(None) => return Ok(Err("not_found")),
+                Err(_) => return Ok(Err("broker_error")),
+            }
+        };
+        if role == Role::Trade && !cid.starts_with(prefix) {
+            return Ok(Err("forbidden"));
+        }
+        if !self.gate_ok {
+            let o = not_sent("not_ready", &Obj::new().s("state", self.state()).done());
+            self.cancel_event(
+                client,
+                rid,
+                &cid,
+                "outcome",
+                &Obj::new().raw("outcome", &o).done(),
+            )?;
+            return Ok(Ok(o));
+        }
+        self.do_cancel(client, rid, &cid, &bid).map(Ok)
+    }
+
+    fn cancel_event(
+        &mut self,
+        client: &str,
+        rid: &str,
+        target: &str,
+        phase: &str,
+        extra: &str,
+    ) -> Result<(), String> {
+        let body = Obj::new()
+            .s("client", client)
+            .s("request_id", rid)
+            .s("target", target)
+            .s("phase", phase)
+            .merge(extra)
+            .done();
+        self.emit(self.ts(), "cancel", &body, Aud::Client(client.to_owned()))
+    }
+
+    fn cancel_outcome(&mut self, r: CancelResult) -> String {
+        match r {
+            CancelResult::Accepted(raw) => outcome("accepted").raw("broker_raw", &raw).done(),
+            CancelResult::Rejected(e) => {
+                if e.http_status == 429 {
+                    self.budget.block(e.retry_after_ms);
+                }
+                broker_error_obj("rejected", &e).done()
+            }
+            CancelResult::Unknown {
+                reason,
+                retry_after_ms,
+            } => {
+                if reason == "http_429_after_send" {
+                    self.budget.block(retry_after_ms);
+                }
+                outcome("unknown").s("reason", reason).done()
+            }
+        }
+    }
+
+    fn do_cancel(
+        &mut self,
+        client: &str,
+        rid: &str,
+        cid: &str,
+        bid: &str,
+    ) -> Result<String, String> {
+        let o = if self.budget.take(true) {
+            self.cancel_event(client, rid, cid, "sent", "{}")?;
+            let r = self.b.cancel(bid);
+            self.cancel_outcome(r)
+        } else {
+            not_sent("throttled", "null")
+        };
+        self.cancel_event(
+            client,
+            rid,
+            cid,
+            "outcome",
+            &Obj::new().raw("outcome", &o).done(),
+        )?;
+        Ok(o)
+    }
+
+    fn kill(
+        &mut self,
+        level: KillLevel,
+        reason: &str,
+        client: &str,
+        rid: &str,
+    ) -> Result<(), String> {
+        self.killed = Some((level, reason.into()));
+        let k = Obj::new()
+            .s("level", level.name())
+            .s("reason", reason)
+            .done();
+        self.status(&Obj::new().raw("kill", &k).done())?;
+        if level == KillLevel::HaltAll {
+            self.budget.charge();
+            self.cancel_event(client, rid, "*", "sent", "{}")?;
+            let r = self.b.cancel_all();
+            let o = self.cancel_outcome(r);
+            self.cancel_event(
+                client,
+                rid,
+                "*",
+                "outcome",
+                &Obj::new().raw("outcome", &o).done(),
+            )?;
+            self.drain()?;
+            self.budget.charge();
+            if let Ok(r) = self.b.open_orders() {
+                for bo in r.value {
+                    self.do_cancel(client, rid, &bo.client_order_id, &bo.broker_order_id)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn drain(&mut self) -> Result<(), String> {
+        let mut updates = Vec::new();
+        self.b.poll_updates(&mut updates);
+        for u in updates {
+            match u {
+                Update::Order(o) => self.on_order(*o)?,
+                Update::StreamDown => {
+                    if self.stream_down.is_none() {
+                        self.stream_down = Some((Instant::now(), self.ts()));
+                    }
+                }
+                Update::StreamUp => {
+                    self.stream_down = None;
+                    self.degraded = false;
+                    self.reconcile(false)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn foreign(&mut self, key: &str, fields: &str) -> Result<(), String> {
+        if self.foreign.insert(key.to_owned()) {
+            self.emit(self.ts(), "foreign", fields, Aud::All)?;
+        }
+        Ok(())
+    }
+
+    fn resolution(&mut self, cid: &str, kind: &str, window: Duration) -> Result<(), String> {
+        let body = Obj::new()
+            .s("client_order_id", cid)
+            .s("outcome", kind)
+            .n("window_ms", window.as_millis())
+            .done();
+        self.emit(self.ts(), "resolution", &body, Aud::Prefix(cid.to_owned()))
+    }
+
+    fn on_order(&mut self, up: OrderUpdate) -> Result<(), String> {
+        let bo = up.order;
+        let cid = bo.client_order_id.clone();
+        if !self.orders.contains_key(&cid) {
+            let f = Obj::new()
+                .s("broker_order_id", &bo.broker_order_id)
+                .raw("broker_raw", &bo.raw)
+                .done();
+            return self.foreign(&bo.broker_order_id, &f);
+        }
+        if let Some(i) = self.pending.iter().position(|p| p.cid == cid) {
+            let p = self.pending.remove(i);
+            let w = p
+                .next
+                .checked_sub(1)
+                .map_or(Duration::ZERO, |k| self.cfg.timing.resolve[k]);
+            self.resolution(&cid, "found", w)?;
+        }
+        let event = if up.source == "rest_reconcile" {
+            status_event(&up.event)
+        } else {
+            normalize_event(&up.event)
+        };
+        let mut o = Obj::new()
+            .s("client_order_id", &cid)
+            .s("broker_order_id", &bo.broker_order_id)
+            .s("event", event)
+            .s("status", &bo.status)
+            .n("ts_broker", up.ts_broker);
+        if let Some(f) = &up.fill {
+            o = o.raw("fill", f);
+        }
+        o = o
+            .n("filled_qty", bo.filled_qty)
+            .opt_s("avg_price", bo.avg_price.as_deref());
+        if let Some(l) = up.legs.as_ref().or(bo.legs.as_ref()) {
+            o = o.raw("legs", l);
+        }
+        if let Some(p) = up.position_qty {
+            o = o.n("position_qty", p);
+        }
+        if let Some(r) = &up.reason {
+            o = o.raw("reason", r);
+        }
+        let body = o
+            .s("source", up.source)
+            .s("broker_event", &up.event)
+            .raw("broker_raw", &up.raw)
+            .done();
+        let ts = if self.b.now().is_some() {
+            up.ts_broker
+        } else {
+            wall_ns()
+        };
+        self.by_broker
+            .insert(bo.broker_order_id.clone(), cid.clone());
+        let st = self.orders.get_mut(&cid).ok_or("order state")?;
+        st.phase = Phase::Done;
+        st.broker_id = Some(bo.broker_order_id);
+        st.status = bo.status;
+        st.filled = bo.filled_qty;
+        st.avg = bo.avg_price;
+        st.legs = bo.legs;
+        st.raw = Some(bo.raw);
+        self.emit(ts, "order", &body, Aud::Prefix(cid))
+    }
+
+    fn reconcile_order(&mut self, bo: BrokerOrder) -> Result<(), String> {
+        let same = self.orders.get(&bo.client_order_id).map(|st| {
+            st.phase == Phase::Done && st.status == bo.status && st.filled == bo.filled_qty
+        });
+        if same == Some(true) {
+            return Ok(());
+        }
+        self.on_order(OrderUpdate {
+            event: bo.status.clone(),
+            ts_broker: bo.updated_ts,
+            fill: None,
+            legs: None,
+            position_qty: None,
+            reason: None,
+            source: "rest_reconcile",
+            raw: bo.raw.clone(),
+            order: bo,
+        })
+    }
+
+    /// Start gate, then journaled-order lookups, recent orders and positions (section 11).
+    fn reconcile(&mut self, startup: bool) -> Result<(), String> {
+        if startup {
+            self.status("{}")?;
+        }
+        self.budget.charge();
+        let min = self.cfg.profile.min_options_level;
+        let gate = match self.b.account() {
+            Ok(r) if r.value.status != "ACTIVE" => Some("account not active"),
+            Ok(r) if r.value.blocked => Some("account blocked"),
+            Ok(r) if r.value.options_trading_level < min => {
+                Some("options level below the profile minimum")
+            }
+            Ok(_) => None,
+            Err(_) => Some("account query failed"),
+        };
+        if let Some(why) = gate {
+            if startup {
+                self.status(&Obj::new().s("gate", why).done())?;
+            }
+            return Ok(());
+        }
+        let from_ts = self.j.last_ts.saturating_sub(60_000_000_000);
+        let mut checked = 0_u64;
+        let mut cids: Vec<String> = self
+            .orders
+            .iter()
+            .filter(|(_, s)| s.open())
+            .map(|(c, _)| c.clone())
+            .collect();
+        cids.sort();
+        for cid in cids {
+            let Some(st) = self.orders.get_mut(&cid) else {
+                continue;
+            };
+            let (client, rid) = (st.client.clone(), st.request_id.clone());
+            match st.phase {
+                Phase::Admitted => {
+                    st.phase = Phase::Done;
+                    "not_sent".clone_into(&mut st.status);
+                    let o = not_sent("not_ready", &Obj::new().s("interrupted", "admitted").done());
+                    self.outcome_event(&client, &rid, Some(&cid), o)?;
+                }
+                Phase::Sent => {
+                    st.phase = Phase::Unknown;
+                    let o = outcome("unknown")
+                        .s("reason", "connection")
+                        .s("client_order_id", &cid)
+                        .done();
+                    self.outcome_event(&client, &rid, Some(&cid), o)?;
+                    self.pending.push(Pending {
+                        cid,
+                        start: Instant::now(),
+                        next: 0,
+                    });
+                }
+                Phase::Unknown => {
+                    if !self.pending.iter().any(|p| p.cid == cid) {
+                        self.pending.push(Pending {
+                            cid,
+                            start: Instant::now(),
+                            next: 0,
+                        });
+                    }
+                }
+                Phase::Done | Phase::Absent => {
+                    checked += 1;
+                    self.budget.charge();
+                    if let Ok(Some(bo)) = self.b.order(&OrderRef::Client(cid)).map(|r| r.value) {
+                        self.reconcile_order(bo)?;
+                    }
+                }
+            }
+        }
+        self.budget.charge();
+        if let Ok(r) = self.b.orders_since(from_ts) {
+            for bo in r.value {
+                checked += 1;
+                self.reconcile_order(bo)?;
+            }
+        }
+        self.budget.charge();
+        if let Ok(r) = self.b.positions() {
+            // Positions outside the allowlist: options are the account's own business,
+            // and so are allowlisted stocks.
+            let equities = &self.cfg.profile.equities;
+            let theirs: Vec<(String, String)> = r
+                .value
+                .iter()
+                .filter(|p| occ(&p.symbol).is_none() && !equities.contains(&p.symbol))
+                .map(|p| {
+                    let f = Obj::new()
+                        .s("symbol", &p.symbol)
+                        .n("qty", p.qty)
+                        .raw("broker_raw", &r.raw)
+                        .done();
+                    (format!("position:{}", p.symbol), f)
+                })
+                .collect();
+            for (key, f) in theirs {
+                self.foreign(&key, &f)?;
+            }
+        }
+        self.gate_ok = true;
+        let resync = Obj::new()
+            .n("from_ts", from_ts)
+            .n("to_ts", self.ts())
+            .n("orders_checked", checked)
+            .done();
+        self.status(&Obj::new().raw("resync", &resync).done())
+    }
+
+    fn resolve(&mut self, now: Instant) -> Result<(), String> {
+        let offsets = self.cfg.timing.resolve.clone();
+        let mut i = 0;
+        while i < self.pending.len() {
+            let k = self.pending[i].next;
+            if self.pending[i].start + offsets[k] > now {
+                i += 1;
+                continue;
+            }
+            let cid = self.pending[i].cid.clone();
+            let found = if self.budget.take(true) {
+                match self.b.order(&OrderRef::Client(cid.clone())) {
+                    Ok(r) => r.value,
+                    Err(e) => {
+                        if e.http_status == 429 {
+                            self.budget.block(e.retry_after_ms);
+                        }
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(bo) = found {
+                self.pending.remove(i);
+                self.resolution(&cid, "found", offsets[k])?;
+                self.reconcile_order(bo)?;
+            } else if k + 1 >= offsets.len() {
+                self.pending.remove(i);
+                if let Some(st) = self.orders.get_mut(&cid) {
+                    st.phase = Phase::Absent;
+                }
+                self.resolution(&cid, "absent_after", offsets[k])?;
+            } else {
+                self.pending[i].next += 1;
+                i += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn tick(&mut self) -> Result<(), String> {
+        self.drain()?;
+        let now = Instant::now();
+        if let Some((since, _)) = self.stream_down
+            && !self.degraded
+            && now.duration_since(since) > self.cfg.timing.stream_grace
+        {
+            self.degraded = true;
+            self.sync_state()?;
+        }
+        if now.duration_since(self.last_poll) >= self.cfg.timing.poll {
+            self.last_poll = now;
+            if !self.gate_ok {
+                self.reconcile(false)?;
+            } else if self.degraded {
+                self.budget.charge();
+                if let Ok(r) = self.b.open_orders() {
+                    for bo in r.value {
+                        self.reconcile_order(bo)?;
+                    }
+                }
+            }
+            let halted = matches!(self.killed, Some((KillLevel::HaltAll, _)));
+            if !halted && self.cfg.state.join("KILL").exists() {
+                self.kill(KillLevel::HaltAll, "sentinel", "operator", "sentinel")?;
+            }
+        }
+        self.resolve(now)?;
+        let due: Vec<String> = self
+            .cod_timers
+            .iter()
+            .filter(|(_, t)| *t <= now)
+            .map(|(n, _)| n.clone())
+            .collect();
+        self.cod_timers.retain(|(_, t)| *t > now);
+        for name in due {
+            let Some(spec) = self.cfg.clients.iter().find(|c| c.name == name).cloned() else {
+                continue;
+            };
+            if self
+                .conns
+                .iter()
+                .any(|c| self.cfg.clients[c.client].name == name)
+            {
+                continue;
+            }
+            let mut targets: Vec<(String, String)> = self
+                .orders
+                .iter()
+                .filter(|(c, s)| c.starts_with(&spec.prefix) && s.open())
+                .filter_map(|(c, s)| s.broker_id.clone().map(|b| (c.clone(), b)))
+                .collect();
+            targets.sort();
+            for (cid, bid) in targets {
+                self.do_cancel(&name, "cancel_on_disconnect", &cid, &bid)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn line_aud(v: &Value) -> Aud {
+    let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
+    match v["kind"].as_str().unwrap_or("") {
+        "submit" | "cancel" | "client" => Aud::Client(s("client")),
+        "order" | "resolution" => Aud::Prefix(s("client_order_id")),
+        _ => Aud::All,
+    }
+}

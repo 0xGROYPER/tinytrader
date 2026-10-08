@@ -14,6 +14,7 @@ members = [
     "services/console",
     "services/databento-jobs",
     "services/econ-calendar",
+    "services/order-gateway",
     "services/ticker",
 ]
 resolver = "3"

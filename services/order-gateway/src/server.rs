@@ -1,0 +1,456 @@
+//! Loopback listener, token authentication, one reader and one writer thread per
+//! connection, and the bounded outbound queue (`slow_consumer` on overflow).
+use crate::broker::Broker;
+use crate::journal::Journal;
+use crate::protocol::{Line, LineError, MAX_LINE, Obj, error_line, parse_line};
+use crate::session::{Input, Session};
+use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+/// Client role (section 4).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Role {
+    /// Submit and cancel within its prefix, plus queries.
+    Trade,
+    /// Queries and every event.
+    Observe,
+    /// Observe plus kill, unkill and any cancel.
+    Admin,
+}
+
+impl Role {
+    /// Parses `trade`, `observe` or `admin`.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "trade" => Some(Self::Trade),
+            "observe" => Some(Self::Observe),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+}
+
+/// One operator-configured client bound to this account.
+#[derive(Clone, Debug)]
+pub struct ClientSpec {
+    /// Client name sent in `hello`.
+    pub name: String,
+    /// Role.
+    pub role: Role,
+    /// Required `client_order_id` prefix.
+    pub prefix: String,
+    /// Token text (never logged).
+    pub token: String,
+}
+
+/// Protocol and recovery timings. Defaults are the contract values.
+#[derive(Clone, Debug)]
+pub struct Timing {
+    /// `hello` deadline.
+    pub hello: Duration,
+    /// A silent peer is closed after this.
+    pub idle: Duration,
+    /// Server heartbeat after this long without sending.
+    pub heartbeat: Duration,
+    /// Outbound queue bound per connection.
+    pub queue_bytes: usize,
+    /// Unknown-outcome lookups, as offsets from the outcome.
+    pub resolve: Vec<Duration>,
+    /// Stream down for longer than this degrades the account.
+    pub stream_grace: Duration,
+    /// Degraded polling and start-gate retry interval.
+    pub poll: Duration,
+    /// `cancel_on_disconnect` grace.
+    pub disconnect_grace: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        let s = Duration::from_secs;
+        Self {
+            hello: s(5),
+            idle: s(30),
+            heartbeat: s(10),
+            queue_bytes: 4 << 20,
+            resolve: vec![s(1), s(2), s(4)],
+            stream_grace: s(5),
+            poll: s(1),
+            disconnect_grace: s(2),
+        }
+    }
+}
+
+/// One account process.
+#[derive(Clone, Debug)]
+pub struct Config {
+    /// Gateway-local account name.
+    pub account: String,
+    /// `paper` (live is out of scope for v1).
+    pub environment: String,
+    /// Loopback listen address.
+    pub listen: SocketAddr,
+    /// Durable state root (journal, lock, `KILL`).
+    pub state: PathBuf,
+    /// Clients bound to this account.
+    pub clients: Vec<ClientSpec>,
+    /// Allowlist and caps.
+    pub profile: crate::safety::Profile,
+    /// Timings.
+    pub timing: Timing,
+    /// Test hook: stop forever between the `admitted` and `sent` journal lines.
+    pub stall_after_admitted: bool,
+}
+
+/// Refuses a non-loopback listen address and a state root under `/tmp` or
+/// `/Volumes/Data`.
+///
+/// # Errors
+/// The refusal reason.
+pub fn check_paths(listen: SocketAddr, state: &Path) -> Result<(), String> {
+    if !listen.ip().is_loopback() {
+        return Err(format!("--listen {listen} is not a loopback address"));
+    }
+    check_state(state)
+}
+
+/// The state root must not be under `/tmp` or `/Volumes/Data`.
+///
+/// # Errors
+/// Names the forbidden root.
+pub fn check_state(state: &Path) -> Result<(), String> {
+    let mut probe = state.to_path_buf();
+    while !probe.exists() {
+        if !probe.pop() {
+            break;
+        }
+    }
+    let real = probe.canonicalize().unwrap_or(probe);
+    let full = real.join(state.strip_prefix(&real).unwrap_or(Path::new("")));
+    for bad in ["/tmp", "/private/tmp", "/Volumes/Data"] {
+        if full.starts_with(bad) || state.starts_with(bad) {
+            return Err(format!("--state must not be under {bad}"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) struct Outbox {
+    st: Mutex<(VecDeque<String>, usize, bool)>,
+    cv: Condvar,
+    limit: usize,
+}
+
+enum Pop {
+    Line(String),
+    Idle,
+    Closed,
+}
+
+impl Outbox {
+    fn new(limit: usize) -> Self {
+        Self {
+            st: Mutex::new((VecDeque::new(), 0, false)),
+            cv: Condvar::new(),
+            limit,
+        }
+    }
+    /// Queues a line; on overflow the queue is replaced by `slow_consumer` and closed.
+    pub(crate) fn push(&self, line: String) -> bool {
+        self.push_all(vec![line])
+    }
+    /// Queues lines as one batch (a resume replay overflows as a whole).
+    pub(crate) fn push_all(&self, lines: Vec<String>) -> bool {
+        let mut g = self.st.lock().unwrap_or_else(PoisonError::into_inner);
+        if g.2 {
+            return false;
+        }
+        let size: usize = lines.iter().map(String::len).sum();
+        if g.1 + size > self.limit {
+            g.0.clear();
+            g.0.push_back(error_line(
+                "slow_consumer",
+                "outbound queue overflow; resume to recover",
+            ));
+            g.2 = true;
+            self.cv.notify_all();
+            return false;
+        }
+        g.1 += size;
+        g.0.extend(lines);
+        self.cv.notify_all();
+        true
+    }
+    /// Queues a final line (if any) after the pending ones and closes.
+    pub(crate) fn close(&self, last: Option<String>) {
+        let mut g = self.st.lock().unwrap_or_else(PoisonError::into_inner);
+        if !g.2 {
+            g.0.extend(last);
+            g.2 = true;
+        }
+        self.cv.notify_all();
+    }
+    fn pop(&self, wait: Duration) -> Pop {
+        let mut g = self.st.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(l) = g.0.pop_front() {
+                g.1 = g.1.saturating_sub(l.len());
+                return Pop::Line(l);
+            }
+            if g.2 {
+                return Pop::Closed;
+            }
+            let (next, timeout) = self
+                .cv
+                .wait_timeout(g, wait)
+                .unwrap_or_else(PoisonError::into_inner);
+            g = next;
+            if timeout.timed_out() && g.0.is_empty() && !g.2 {
+                return Pop::Idle;
+            }
+        }
+    }
+}
+
+fn writer(mut s: TcpStream, ob: &Outbox, last_seq: &AtomicU64, heartbeat: Duration) {
+    let _ = s.set_write_timeout(Some(Duration::from_secs(10)));
+    loop {
+        let line = match ob.pop(heartbeat) {
+            Pop::Line(l) => l,
+            Pop::Idle => Obj::msg("heartbeat")
+                .n("ts", crate::session::wall_ns())
+                .n("last_seq", last_seq.load(SeqCst))
+                .done(),
+            Pop::Closed => break,
+        };
+        if s.write_all(line.as_bytes())
+            .and_then(|()| s.write_all(b"\n"))
+            .is_err()
+        {
+            ob.close(None);
+            break;
+        }
+    }
+    let _ = s.flush();
+    let _ = s.shutdown(Shutdown::Both);
+}
+
+enum ReadErr {
+    TooLong,
+    Timeout,
+    Io,
+}
+
+fn read_line(r: &mut BufReader<TcpStream>, buf: &mut Vec<u8>) -> Result<bool, ReadErr> {
+    buf.clear();
+    loop {
+        let avail = match r.fill_buf() {
+            Ok(b) => b,
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Err(ReadErr::Timeout);
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return Err(ReadErr::Io),
+        };
+        if avail.is_empty() {
+            return Ok(false);
+        }
+        let (take, done) = avail
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or((avail.len(), false), |p| (p, true));
+        buf.extend_from_slice(&avail[..take]);
+        r.consume(take + usize::from(done));
+        if buf.len() >= MAX_LINE {
+            return Err(ReadErr::TooLong);
+        }
+        if done {
+            return Ok(true);
+        }
+    }
+}
+
+fn digest(s: &str) -> [u8; 32] {
+    Sha256::digest(s.as_bytes()).into()
+}
+
+struct Shared {
+    clients: Vec<ClientSpec>,
+    timing: Timing,
+    last_seq: Arc<AtomicU64>,
+    tx: Mutex<Sender<Input>>,
+}
+
+impl Shared {
+    fn send(&self, input: Input) {
+        let _ = self
+            .tx
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .send(input);
+    }
+}
+
+fn connection(stream: &TcpStream, id: u64, sh: &Shared) {
+    let ob = Arc::new(Outbox::new(sh.timing.queue_bytes));
+    let Ok(ws) = stream.try_clone() else { return };
+    let (wob, seq, hb) = (
+        Arc::clone(&ob),
+        Arc::clone(&sh.last_seq),
+        sh.timing.heartbeat,
+    );
+    thread::spawn(move || writer(ws, &wob, &seq, hb));
+    let fatal = |code: &str, msg: &str| ob.close(Some(error_line(code, msg)));
+    let _ = stream.set_read_timeout(Some(sh.timing.hello));
+    let Ok(rs) = stream.try_clone() else { return };
+    let mut r = BufReader::new(rs);
+    let mut buf = Vec::new();
+    match read_line(&mut r, &mut buf) {
+        Ok(true) => {}
+        Ok(false) | Err(ReadErr::Io) => return ob.close(None),
+        Err(ReadErr::Timeout) => return fatal("hello_timeout", "no hello within the deadline"),
+        Err(ReadErr::TooLong) => return fatal("line_too_long", "line exceeds 65536 bytes"),
+    }
+    let hello = match parse_line(&buf) {
+        Ok(Line::Hello(h)) => h,
+        Err(LineError::Fatal(code, msg)) => return fatal(code, &msg),
+        _ => return fatal("hello_required", "the first line must be hello"),
+    };
+    let presented = digest(&hello.token);
+    let client = sh.clients.iter().position(|c| {
+        let want = digest(&c.token);
+        c.name == hello.client && presented.iter().zip(want).fold(0, |a, (x, y)| a | (x ^ y)) == 0
+    });
+    let Some(client) = client else {
+        return fatal("unauthorized", "unknown client or bad token");
+    };
+    sh.send(Input::Hello {
+        id,
+        client,
+        outbox: Arc::clone(&ob),
+        resume: hello.resume_after,
+        cancel_on_disconnect: hello.cancel_on_disconnect,
+    });
+    let _ = stream.set_read_timeout(Some(sh.timing.idle));
+    loop {
+        match read_line(&mut r, &mut buf) {
+            Ok(true) => {}
+            Ok(false) | Err(ReadErr::Io) => break,
+            Err(ReadErr::Timeout) => {
+                fatal("idle_timeout", "peer silent");
+                break;
+            }
+            Err(ReadErr::TooLong) => {
+                fatal("line_too_long", "line exceeds 65536 bytes");
+                break;
+            }
+        }
+        match parse_line(&buf) {
+            Ok(Line::Heartbeat) => {}
+            Ok(Line::Request { request_id, op }) => sh.send(Input::Request {
+                id,
+                request: Ok((request_id, op)),
+            }),
+            Ok(Line::Hello(_)) => {
+                fatal("hello_required", "hello only once");
+                break;
+            }
+            Err(LineError::Fatal(code, msg)) => {
+                fatal(code, &msg);
+                break;
+            }
+            Err(LineError::Invalid {
+                request_id,
+                op,
+                invalid,
+            }) => sh.send(Input::Request {
+                id,
+                request: Err((request_id, op, invalid)),
+            }),
+        }
+    }
+    sh.send(Input::Closed(id));
+}
+
+/// A running account process.
+pub struct Gateway {
+    addr: SocketAddr,
+    tx: Sender<Input>,
+    stop: Arc<AtomicBool>,
+    session: JoinHandle<Result<(), String>>,
+}
+
+impl Gateway {
+    /// The bound listen address.
+    #[must_use]
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+    /// Whether the account session has ended (fatal journal error).
+    #[must_use]
+    pub fn finished(&self) -> bool {
+        self.session.is_finished()
+    }
+    /// Stops the session (`shutting_down` to every client) and the listener.
+    ///
+    /// # Errors
+    /// The session's fatal error, if it ended with one.
+    pub fn stop(self) -> Result<(), String> {
+        self.stop.store(true, SeqCst);
+        let _ = self.tx.send(Input::Shutdown);
+        let _ = TcpStream::connect(self.addr);
+        self.session
+            .join()
+            .unwrap_or_else(|_| Err("session panicked".into()))
+    }
+}
+
+/// Recovers the journal, binds the loopback listener and starts the account session.
+///
+/// # Errors
+/// Path refusal, lock contention, journal corruption or bind failure.
+pub fn start<B: Broker + Send + 'static>(cfg: Config, broker: B) -> Result<Gateway, String> {
+    check_paths(cfg.listen, &cfg.state)?;
+    let (journal, recovered) = Journal::open(&cfg.state, &cfg.account)?;
+    let listener =
+        TcpListener::bind(cfg.listen).map_err(|e| format!("bind {}: {e}", cfg.listen))?;
+    let addr = listener.local_addr().map_err(|e| e.to_string())?;
+    let last_seq = Arc::new(AtomicU64::new(journal.last_seq));
+    let (tx, rx) = channel();
+    let shared = Arc::new(Shared {
+        clients: cfg.clients.clone(),
+        timing: cfg.timing.clone(),
+        last_seq: Arc::clone(&last_seq),
+        tx: Mutex::new(tx.clone()),
+    });
+    let session = Session::new(cfg, broker, journal, &recovered, last_seq);
+    let session = thread::spawn(move || session.run(&rx));
+    let stop = Arc::new(AtomicBool::new(false));
+    let accept_stop = Arc::clone(&stop);
+    thread::spawn(move || {
+        let mut next = 0;
+        for stream in listener.incoming() {
+            if accept_stop.load(SeqCst) {
+                break;
+            }
+            let Ok(stream) = stream else { continue };
+            next += 1;
+            let (sh, id) = (Arc::clone(&shared), next);
+            thread::spawn(move || connection(&stream, id, &sh));
+        }
+    });
+    Ok(Gateway {
+        addr,
+        tx,
+        stop,
+        session,
+    })
+}

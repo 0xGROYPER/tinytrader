@@ -1,0 +1,18 @@
+{
+  "id": "00000000-0000-0000-0000-00000000acc7",
+  "account_number": "PA0000000000",
+  "status": "ACTIVE",
+  "currency": "USD",
+  "buying_power": "200000",
+  "cash": "100000",
+  "portfolio_value": "100000",
+  "pattern_day_trader": false,
+  "trading_blocked": false,
+  "transfers_blocked": false,
+  "account_blocked": false,
+  "trade_suspended_by_user": false,
+  "multiplier": "2",
+  "options_buying_power": "100000",
+  "options_approved_level": 3,
+  "options_trading_level": 3
+}
