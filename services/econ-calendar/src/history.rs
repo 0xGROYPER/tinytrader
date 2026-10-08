@@ -150,7 +150,7 @@ pub fn merge(edgar: &[Value], av: &[Value]) -> Vec<Value> {
     if edgar.is_empty() {
         return av.iter().take(QUARTERS).cloned().collect();
     }
-    edgar
+    let mut out: Vec<Value> = edgar
         .iter()
         .take(QUARTERS)
         .map(|e| {
@@ -172,7 +172,22 @@ pub fn merge(edgar: &[Value], av: &[Value]) -> Vec<Value> {
                 "surprise_pct": m.map_or(Value::Null, |a| a["surprise_pct"].clone()),
             })
         })
-        .collect()
+        .collect();
+    // EDGAR can stop short (a new parent company, or a busy filer's older
+    // pages): Alpha Vantage's earlier reports carry the history on.
+    let oldest = out
+        .last()
+        .and_then(|e| e["date"].as_str())
+        .and_then(noon)
+        .unwrap_or(f64::MAX);
+    let earlier = av.iter().filter(|a| {
+        a["date"]
+            .as_str()
+            .and_then(noon)
+            .is_some_and(|u| u < oldest - 3.0 * 86_400.0)
+    });
+    out.extend(earlier.take(QUARTERS.saturating_sub(out.len())).cloned());
+    out
 }
 
 /// Ticker to company number from EDGAR's ticker list. The list is keyed
@@ -526,6 +541,16 @@ mod tests {
         assert_eq!(m[0]["eps"], 2.02);
         assert!(m[1]["eps"].is_null());
         assert_eq!(merge(&[], &av).len(), 1);
+        // EDGAR stopping short: Alpha Vantage carries on further back.
+        let older = [
+            json!({ "date": "2026-07-31", "eps": 2.0 }),
+            json!({ "date": "2026-05-01", "eps": 1.8, "when": "before-open" }),
+        ];
+        let m = merge(
+            &[json!({ "date": "2026-07-31", "when": "before-open" })],
+            &older,
+        );
+        assert_eq!((m.len(), m[1]["date"].as_str()), (2, Some("2026-05-01")));
     }
 
     #[test]
