@@ -531,16 +531,20 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
                 } else {
                     vec![(a.feed.clone(), None, None)]
                 };
+                // Newest first, so if a long range is cut short it's the oldest
+                // part that's missing (Alpaca sends about 200 bars a page for
+                // full-market history, whatever the limit asked).
+                let mut truncated = false;
                 for (feed, from, until) in parts {
                     let mut token: Option<String> = None;
-                    // At most 10 pages of 10,000: a month of minutes.
-                    for _ in 0..10 {
+                    for page in 0..60 {
                         let mut q = vec![
                             ("timeframe", timeframe.to_owned()),
                             ("start", from.map_or_else(|| start.clone(), rfc3339)),
                             ("limit", "10000".to_owned()),
                             ("adjustment", adjustment.clone()),
                             ("feed", feed.clone()),
+                            ("sort", "desc".to_owned()),
                         ];
                         if let Some(u) = until {
                             q.push(("end", rfc3339(u)));
@@ -551,10 +555,6 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
                         let v = a.get(&format!("/v2/stocks/{symbol}/bars"), &q).await?;
                         for b in v["bars"].as_array().into_iter().flatten() {
                             if let Some(t) = b["t"].as_str().and_then(unix) {
-                                // A bar already given by the history feed isn't repeated.
-                                if out.last().and_then(|l: &Value| l[0].as_i64()).is_some_and(|lt| t <= lt) {
-                                    continue;
-                                }
                                 out.push(json!([t, b["o"], b["h"], b["l"], b["c"], b["v"]]));
                             }
                         }
@@ -562,10 +562,15 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
                         if token.is_none() {
                             break;
                         }
+                        truncated |= page == 59;
                     }
                 }
+                // In time order; where the two feeds meet, the full market's bar wins.
+                out.sort_by_key(|b| b[0].as_i64().unwrap_or(0));
+                out.dedup_by_key(|b| b[0].as_i64().unwrap_or(0));
                 let keep = last_days(&out, days as usize, interval == 86_400);
-                Ok(json!({ "symbol": symbol, "interval": interval, "bars": &out[out.len() - keep..], "note": null }))
+                let note = truncated.then(|| "only the most recent part of this range (too many bars)".to_owned());
+                Ok(json!({ "symbol": symbol, "interval": interval, "bars": &out[out.len() - keep..], "note": note }))
             },
         )
         .await,
