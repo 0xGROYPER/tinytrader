@@ -56,6 +56,10 @@ struct Args {
     /// Options feed: indicative (free) or opra (subscription).
     #[arg(long, env = "ALPACA_OPTIONS_FEED", default_value = "indicative")]
     options_feed: String,
+    /// Feed for bars older than 15 minutes: sip (every exchange, free for
+    /// history on every plan) by default; the stock feed serves the rest.
+    #[arg(long, env = "ALPACA_HISTORY_FEED", default_value = "sip")]
+    history_feed: String,
 }
 
 struct App {
@@ -64,6 +68,7 @@ struct App {
     secret: String,
     feed: String,
     options_feed: String,
+    history_feed: String,
     observer: Observer,
     /// Recent requests to Alpaca, for the rate limit.
     sent: Mutex<VecDeque<Instant>>,
@@ -174,6 +179,27 @@ fn answer(r: Result<Value, (StatusCode, String)>) -> Response {
         Ok(v) => Json(v).into_response(),
         Err((code, e)) => refuse(code, e),
     }
+}
+
+/// Unix seconds as an RFC 3339 time in UTC, such as `2026-10-07T19:04:00Z`.
+fn rfc3339(t: i64) -> String {
+    let (days, secs) = (t.div_euclid(86_400), t.rem_euclid(86_400));
+    // Civil date from days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        secs / 3600,
+        secs % 3600 / 60,
+        secs % 60
+    )
 }
 
 /// Seconds since the epoch of an RFC 3339 time such as `2026-10-07T19:04:00Z`.
@@ -319,29 +345,49 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
                 // `days` counts trading days (sessions with bars): reach back far
                 // enough for weekends and holidays, then keep the last ones.
                 let start = ny_date_time(now - (days as i64 * 7 / 5 + 4) * 86_400).0;
+                // History from the full market (SIP) up to 15 minutes ago, where
+                // the free plan allows it; the stock feed (IEX) after that. IEX
+                // alone is a small slice of trading: a thin ETF can go hours
+                // without an IEX trade, leaving stale closes.
+                let cutoff = now - 16 * 60;
+                let split = a.history_feed != a.feed;
                 let mut out = Vec::new();
-                let mut token: Option<String> = None;
-                // At most 10 pages of 10,000: a month of minutes.
-                for _ in 0..10 {
-                    let mut q = vec![
-                        ("timeframe", timeframe.to_owned()),
-                        ("start", start.clone()),
-                        ("limit", "10000".to_owned()),
-                        ("adjustment", "split".to_owned()),
-                        ("feed", a.feed.clone()),
-                    ];
-                    if let Some(t) = &token {
-                        q.push(("page_token", t.clone()));
-                    }
-                    let v = a.get(&format!("/v2/stocks/{symbol}/bars"), &q).await?;
-                    for b in v["bars"].as_array().into_iter().flatten() {
-                        if let Some(t) = b["t"].as_str().and_then(unix) {
-                            out.push(json!([t, b["o"], b["h"], b["l"], b["c"], b["v"]]));
+                let parts: Vec<(String, Option<i64>, Option<i64>)> = if split {
+                    vec![(a.history_feed.clone(), None, Some(cutoff)), (a.feed.clone(), Some(cutoff), None)]
+                } else {
+                    vec![(a.feed.clone(), None, None)]
+                };
+                for (feed, from, until) in parts {
+                    let mut token: Option<String> = None;
+                    // At most 10 pages of 10,000: a month of minutes.
+                    for _ in 0..10 {
+                        let mut q = vec![
+                            ("timeframe", timeframe.to_owned()),
+                            ("start", from.map_or_else(|| start.clone(), rfc3339)),
+                            ("limit", "10000".to_owned()),
+                            ("adjustment", "split".to_owned()),
+                            ("feed", feed.clone()),
+                        ];
+                        if let Some(u) = until {
+                            q.push(("end", rfc3339(u)));
                         }
-                    }
-                    token = v["next_page_token"].as_str().map(str::to_owned);
-                    if token.is_none() {
-                        break;
+                        if let Some(t) = &token {
+                            q.push(("page_token", t.clone()));
+                        }
+                        let v = a.get(&format!("/v2/stocks/{symbol}/bars"), &q).await?;
+                        for b in v["bars"].as_array().into_iter().flatten() {
+                            if let Some(t) = b["t"].as_str().and_then(unix) {
+                                // A bar already given by the history feed isn't repeated.
+                                if out.last().and_then(|l: &Value| l[0].as_i64()).is_some_and(|lt| t <= lt) {
+                                    continue;
+                                }
+                                out.push(json!([t, b["o"], b["h"], b["l"], b["c"], b["v"]]));
+                            }
+                        }
+                        token = v["next_page_token"].as_str().map(str::to_owned);
+                        if token.is_none() {
+                            break;
+                        }
                     }
                 }
                 let keep = last_days(&out, days as usize, interval == 86_400);
@@ -471,6 +517,7 @@ async fn main() {
         secret,
         feed: args.feed,
         options_feed: args.options_feed,
+        history_feed: args.history_feed,
         observer: observer.clone(),
         sent: Mutex::default(),
         cache: Mutex::default(),
@@ -533,6 +580,13 @@ mod tests {
         assert_eq!(last_days(&bars, 2, false), 4);
         assert_eq!(last_days(&bars, 9, false), 6);
         assert_eq!(last_days(&bars, 2, true), 2);
+    }
+
+    #[test]
+    fn writes_rfc3339_times() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(1_791_399_840), "2026-10-07T19:04:00Z");
+        assert_eq!(unix(&rfc3339(1_709_164_800)), Some(1_709_164_800)); // 29 February 2024
     }
 
     #[test]
