@@ -288,6 +288,10 @@ tr:last-child td { border-bottom: 0; }
 .jobs-tbl td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .jobs-tbl tr.sub td { padding-top: 0; color: var(--muted); font-size: 13px; }
 .jobs-tbl tr.has-sub td { border-bottom: 0; }
+.q-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 12px 16px; }
+.q-edit { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 6px 0; color: var(--fg); }
+.q-edit label { display: inline-flex; align-items: center; gap: 8px; }
+.q-log { max-height: 320px; overflow: auto; margin: 6px 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font-size: 12px; white-space: pre-wrap; color: var(--fg); }
 .bar { height: 4px; border-radius: 2px; background: var(--line-soft); margin-top: 6px; max-width: 320px; overflow: hidden; }
 .bar b { display: block; height: 100%; background: var(--accent-mark); }
 /* Workspace: tiles, each showing one console view; split right or down, resized by dragging. */

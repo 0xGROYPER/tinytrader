@@ -1,0 +1,32 @@
+[package]
+name = "queue"
+description = "The job queue: deployment-defined job templates run when their conditions hold, as one-off containers or on the host (decision 0012)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+default-run = "queue"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "queue"
+path = "src/main.rs"
+
+[[bin]]
+name = "tt"
+path = "src/bin/tt.rs"
+
+[dependencies]
+axum.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+regex = "1"
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+tinytrader-observe.workspace = true
+tinytrader-schedule.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
