@@ -8,8 +8,8 @@ pub mod trading;
 
 use crate::broker::{
     AccountInfo, Broker, BrokerError, BrokerOrder, CancelResult, Capabilities, Closing,
-    FlattenResult, MarketClock,
-    OrderRef, OrderUpdate, Position, Query, Reply, SessionDay, SubmitResult, Update,
+    FlattenResult, MarketClock, OrderRef, OrderUpdate, Position, Query, Reply, SessionDay,
+    SubmitResult, Update,
 };
 use crate::intent::{Intent, fmt_cents};
 use crate::protocol::{Obj, arr, quote};
@@ -360,7 +360,10 @@ impl Broker for AlpacaPaper {
     /// cancels open orders and sends a market order closing each position.
     /// Its answer (207) lists each position's `{symbol, status, body}`.
     fn flatten(&mut self) -> FlattenResult {
-        match self.http.call("DELETE", "/v2/positions?cancel_orders=true", None) {
+        match self
+            .http
+            .call("DELETE", "/v2/positions?cancel_orders=true", None)
+        {
             Err(f) => FlattenResult::Unknown { reason: f.reason() },
             Ok(r) => match unsent(&r) {
                 Some((reason, _)) => FlattenResult::Unknown { reason },

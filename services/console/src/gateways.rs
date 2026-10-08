@@ -29,26 +29,47 @@ impl Gateways {
     #[must_use]
     pub fn from_env() -> Self {
         let addrs = parse(&std::env::var("CONSOLE_GATEWAYS").unwrap_or_default());
-        let token = tinytrader_observe::secret("CONSOLE_GATEWAY_TOKEN").ok().filter(|t| !t.is_empty());
+        let token = tinytrader_observe::secret("CONSOLE_GATEWAY_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
         Self { addrs, token }
     }
 
     /// Connect and authenticate; then, with a request, send it and read its
     /// response. Returns (welcome, response).
-    pub async fn call(&self, account: &str, request: Option<Value>, wait: Duration) -> Result<(Value, Option<Value>), String> {
-        let addr = self.addrs.get(account).ok_or("no gateway for this account")?;
-        let token = self.token.as_deref().ok_or("no gateway token configured (CONSOLE_GATEWAY_TOKEN)")?;
+    pub async fn call(
+        &self,
+        account: &str,
+        request: Option<Value>,
+        wait: Duration,
+    ) -> Result<(Value, Option<Value>), String> {
+        let addr = self
+            .addrs
+            .get(account)
+            .ok_or("no gateway for this account")?;
+        let token = self
+            .token
+            .as_deref()
+            .ok_or("no gateway token configured (CONSOLE_GATEWAY_TOKEN)")?;
         let run = async {
-            let stream = TcpStream::connect(addr).await.map_err(|e| format!("gateway {account}: {e}"))?;
+            let stream = TcpStream::connect(addr)
+                .await
+                .map_err(|e| format!("gateway {account}: {e}"))?;
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
             let mut send = async |v: Value| {
                 let mut line = v.to_string();
                 line.push('\n');
-                write.write_all(line.as_bytes()).await.map_err(|e| format!("gateway {account}: {e}"))
+                write
+                    .write_all(line.as_bytes())
+                    .await
+                    .map_err(|e| format!("gateway {account}: {e}"))
             };
             send(json!({ "schema": SCHEMA, "type": "hello", "client": CLIENT, "token": token, "resume_after_seq": null })).await?;
-            let next = async |lines: &mut tokio::io::Lines<BufReader<tokio::net::tcp::OwnedReadHalf>>| -> Result<Value, String> {
+            let next = async |lines: &mut tokio::io::Lines<
+                BufReader<tokio::net::tcp::OwnedReadHalf>,
+            >|
+                   -> Result<Value, String> {
                 let line = lines
                     .next_line()
                     .await
@@ -60,7 +81,12 @@ impl Gateways {
                 let v = next(&mut lines).await?;
                 match v["type"].as_str() {
                     Some("welcome") => break v,
-                    Some("error") => return Err(format!("gateway {account}: {}", v["code"].as_str().unwrap_or("error"))),
+                    Some("error") => {
+                        return Err(format!(
+                            "gateway {account}: {}",
+                            v["code"].as_str().unwrap_or("error")
+                        ));
+                    }
                     _ => {}
                 }
             };
@@ -69,7 +95,9 @@ impl Gateways {
             };
             let rid = format!(
                 "console-{}",
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
             );
             req["schema"] = json!(SCHEMA);
             req["request_id"] = json!(rid);
@@ -80,11 +108,16 @@ impl Gateways {
                     return Ok((welcome, Some(v)));
                 }
                 if v["type"] == "error" {
-                    return Err(format!("gateway {account}: {}", v["code"].as_str().unwrap_or("error")));
+                    return Err(format!(
+                        "gateway {account}: {}",
+                        v["code"].as_str().unwrap_or("error")
+                    ));
                 }
             }
         };
-        tokio::time::timeout(wait, run).await.map_err(|_| format!("gateway {account}: no answer in {} s", wait.as_secs()))?
+        tokio::time::timeout(wait, run)
+            .await
+            .map_err(|_| format!("gateway {account}: no answer in {} s", wait.as_secs()))?
     }
 }
 

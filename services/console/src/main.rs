@@ -196,8 +196,14 @@ async fn main() {
         )
         .route("/api/reminders", get(reminders_get).post(reminders_post))
         .route("/api/accounts/gateways", get(gateways_list))
-        .route("/api/accounts/{account}/flatten", axum::routing::post(account_flatten))
-        .route("/api/accounts/{account}/resume", axum::routing::post(account_resume))
+        .route(
+            "/api/accounts/{account}/flatten",
+            axum::routing::post(account_flatten),
+        )
+        .route(
+            "/api/accounts/{account}/resume",
+            axum::routing::post(account_resume),
+        )
         // The console's writes (jobs, the queue, drive approval, reminders, flatten) can't be
         // forged by another page open in the browser.
         .layer(axum::middleware::from_fn(
@@ -538,8 +544,14 @@ async fn store_approve(AxumState(app): AxumState<Arc<App>>, body: axum::body::By
 async fn gateways_list(AxumState(app): AxumState<Arc<App>>) -> Response {
     let mut out = Vec::new();
     for account in app.gateways.addrs.keys() {
-        let state = match app.gateways.call(account, None, Duration::from_secs(5)).await {
-            Ok((w, _)) => json!({ "account": account, "state": w["state"], "environment": w["environment"] }),
+        let state = match app
+            .gateways
+            .call(account, None, Duration::from_secs(5))
+            .await
+        {
+            Ok((w, _)) => {
+                json!({ "account": account, "state": w["state"], "environment": w["environment"] })
+            }
             Err(e) => json!({ "account": account, "error": e }),
         };
         out.push(state);
@@ -563,8 +575,17 @@ async fn account_flatten(
         )
             .into_response();
     }
-    let reason = ask["reason"].as_str().filter(|r| !r.is_empty()).unwrap_or("flatten from the console");
-    gateway_request(&app, &account, json!({ "type": "flatten", "reason": reason }), 60).await
+    let reason = ask["reason"]
+        .as_str()
+        .filter(|r| !r.is_empty())
+        .unwrap_or("flatten from the console");
+    gateway_request(
+        &app,
+        &account,
+        json!({ "type": "flatten", "reason": reason }),
+        60,
+    )
+    .await
 }
 
 /// Allow opening orders again on a paper account (the gateway's `unkill`).
@@ -574,11 +595,25 @@ async fn account_resume(
     body: axum::body::Bytes,
 ) -> Response {
     let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-    let reason = ask["reason"].as_str().filter(|r| !r.is_empty()).unwrap_or("resumed from the console");
-    gateway_request(&app, &account, json!({ "type": "unkill", "reason": reason }), 15).await
+    let reason = ask["reason"]
+        .as_str()
+        .filter(|r| !r.is_empty())
+        .unwrap_or("resumed from the console");
+    gateway_request(
+        &app,
+        &account,
+        json!({ "type": "unkill", "reason": reason }),
+        15,
+    )
+    .await
 }
 
-async fn gateway_request(app: &App, account: &str, request: serde_json::Value, wait: u64) -> Response {
+async fn gateway_request(
+    app: &App,
+    account: &str,
+    request: serde_json::Value,
+    wait: u64,
+) -> Response {
     if !app.gateways.addrs.contains_key(account) {
         return (
             StatusCode::NOT_FOUND,
@@ -586,9 +621,17 @@ async fn gateway_request(app: &App, account: &str, request: serde_json::Value, w
         )
             .into_response();
     }
-    match app.gateways.call(account, Some(request), Duration::from_secs(wait)).await {
+    match app
+        .gateways
+        .call(account, Some(request), Duration::from_secs(wait))
+        .await
+    {
         Ok((_, Some(r))) => no_store(axum::Json(r)),
-        Ok((_, None)) => (StatusCode::BAD_GATEWAY, axum::Json(json!({ "error": "no response" }))).into_response(),
+        Ok((_, None)) => (
+            StatusCode::BAD_GATEWAY,
+            axum::Json(json!({ "error": "no response" })),
+        )
+            .into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, axum::Json(json!({ "error": e }))).into_response(),
     }
 }

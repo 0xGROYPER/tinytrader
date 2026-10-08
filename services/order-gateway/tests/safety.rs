@@ -291,10 +291,16 @@ fn flatten_closes_every_position_and_halts_opens() {
     let mut c = Conn::open(&gw, "reactor", None);
     assert_eq!(c.submit("r1", &buy("wse-1"))["outcome"], "accepted");
     // Only an admin may flatten.
-    assert_eq!(c.req("flatten", "f0", r#""reason":"test""#).0["code"], "forbidden");
+    assert_eq!(
+        c.req("flatten", "f0", r#""reason":"test""#).0["code"],
+        "forbidden"
+    );
     let mut ops = Conn::open(&gw, "ops", None);
     let (r, _) = ops.req("flatten", "f1", r#""reason":"test""#);
-    assert_eq!((r["outcome"].as_str(), r["state"].as_str()), (Some("ok"), Some("killed")));
+    assert_eq!(
+        (r["outcome"].as_str(), r["state"].as_str()),
+        (Some("ok"), Some("killed"))
+    );
     let mut closed: Vec<String> = r["positions"]
         .as_array()
         .unwrap()
@@ -303,14 +309,19 @@ fn flatten_closes_every_position_and_halts_opens() {
         .collect();
     closed.sort();
     assert_eq!(closed, [CALL, PUT_A]);
-    let (p, _) = ops.req("positions", "p1", "");
+    // The flatten events follow its response, so the next request reads past them.
+    let (p, skipped) = ops.req("positions", "p1", "");
+    let ev = skipped
+        .iter()
+        .find(|v| v["kind"] == "flatten" && v["phase"] == "outcome")
+        .expect("a flatten outcome event")
+        .clone();
     assert_eq!(p["positions"].as_array().unwrap().len(), 0, "{p}");
     // The resting open order was cancelled; opens stay refused, closes pass.
     c.order_event("wse-1", "canceled");
     assert_eq!(c.submit("r2", &buy("wse-2"))["reason"], "killed");
     let close = single("wse-3", CALL, "sell", "close", 1, "1.00");
     assert_eq!(c.submit("r3", &close)["outcome"], "accepted");
-    let ev = ops.event("flatten", |v| v["phase"] == "outcome");
     assert_eq!(ev["outcome"]["outcome"], "ok");
     gw.stop().unwrap();
 }

@@ -433,9 +433,15 @@ fn flatten_sends_alpacas_liquidate_all_once() {
     let r = rig("alpaca-flatten");
     let mut c = ready(&r.gw, "reactor");
     let mut ops = ready(&r.gw, "ops");
-    assert_eq!(c.req("flatten", "f0", r#""reason":"test""#).0["code"], "forbidden");
+    assert_eq!(
+        c.req("flatten", "f0", r#""reason":"test""#).0["code"],
+        "forbidden"
+    );
     let (v, _) = ops.req("flatten", "f1", r#""reason":"test""#);
-    assert_eq!((v["outcome"].as_str(), v["state"].as_str()), (Some("ok"), Some("killed")));
+    assert_eq!(
+        (v["outcome"].as_str(), v["state"].as_str()),
+        (Some("ok"), Some("killed"))
+    );
     assert_eq!(v["positions"][0]["symbol"], "SPY261016P00560000");
     assert_eq!(v["positions"][0]["status"], 200);
     assert_eq!(v["positions"][0]["broker_raw"]["type"], "market");

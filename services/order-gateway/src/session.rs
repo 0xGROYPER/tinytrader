@@ -3,8 +3,7 @@
 //! lookup, reconciles after restarts and stream drops, and fans out journaled events.
 use crate::broker::{
     Broker, BrokerError, BrokerOrder, CancelResult, FlattenResult, OrderRef, OrderUpdate,
-    SubmitResult, Update,
-    normalize_event, status_event, terminal,
+    SubmitResult, Update, normalize_event, status_event, terminal,
 };
 use crate::intent::{Intent, hex, occ};
 use crate::journal::Journal;
@@ -1155,7 +1154,12 @@ impl<B: Broker> Session<B> {
                 .s("phase", phase)
         };
         let aud = || Aud::Client(client.to_owned());
-        self.emit(self.ts(), "flatten", &event("requested").s("reason", reason).done(), aud())?;
+        self.emit(
+            self.ts(),
+            "flatten",
+            &event("requested").s("reason", reason).done(),
+            aud(),
+        )?;
         if !matches!(self.killed, Some((KillLevel::HaltAll, _))) {
             self.kill(KillLevel::HaltOpens, reason, client, rid)?;
         }
@@ -1163,7 +1167,13 @@ impl<B: Broker> Session<B> {
         self.cancel_event(client, rid, "*", "sent", "{}")?;
         let r = self.b.cancel_all();
         let o = self.cancel_outcome(r);
-        self.cancel_event(client, rid, "*", "outcome", &Obj::new().raw("outcome", &o).done())?;
+        self.cancel_event(
+            client,
+            rid,
+            "*",
+            "outcome",
+            &Obj::new().raw("outcome", &o).done(),
+        )?;
         self.drain()?;
         self.budget.charge();
         let o = match self.b.flatten() {
