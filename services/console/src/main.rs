@@ -48,6 +48,11 @@
 //! - `CONSOLE_QUEUE`: the job queue, e.g. `http://queue:9123` (optional;
 //!   decision 0012). `/api/queue/...` is passed to it, so the Queue widget
 //!   can add, edit and cancel jobs; the queue runs only its templates.
+//! - `CONSOLE_GATEWAYS`: order gateways by account, e.g.
+//!   `paper-1=host.docker.internal:7701;paper-3=host.docker.internal:7700`, and
+//!   `CONSOLE_GATEWAY_TOKEN` (or `_FILE`), the operator's admin token for them
+//!   (optional). `/api/accounts/{account}/flatten` and `.../resume` act through
+//!   the account's gateway; an account without one (live) can't be flattened.
 //! - `CONSOLE_PAGE`: serve the page from this file, and its modules and
 //!   libraries from beside it, read on each request, instead of the copies
 //!   built in (optional; lets the page change without a rebuild).
@@ -56,6 +61,7 @@
 //!   roadmap to start it from (optional).
 
 mod collections;
+mod gateways;
 mod notify;
 mod reminders;
 
@@ -88,6 +94,8 @@ struct App {
     store: Option<String>,
     /// The roadmap's reminders, if configured.
     reminders: Option<reminders::Reminders>,
+    /// Order gateways by account, for Flatten and Resume.
+    gateways: gateways::Gateways,
     polls: AtomicU64,
     collections: Vec<collections::Collection>,
 }
@@ -128,6 +136,7 @@ async fn main() {
             .ok()
             .filter(|s| !s.is_empty())
             .map(|u| (u.trim_end_matches('/').to_owned(), reqwest::Client::new())),
+        gateways: gateways::Gateways::from_env(),
         reminders: std::env::var("CONSOLE_REMINDERS")
             .ok()
             .filter(|s| !s.is_empty())
@@ -186,7 +195,10 @@ async fn main() {
             axum::routing::post(store_approve),
         )
         .route("/api/reminders", get(reminders_get).post(reminders_post))
-        // The console's writes (jobs, the queue, drive approval, reminders) can't be
+        .route("/api/accounts/gateways", get(gateways_list))
+        .route("/api/accounts/{account}/flatten", axum::routing::post(account_flatten))
+        .route("/api/accounts/{account}/resume", axum::routing::post(account_resume))
+        // The console's writes (jobs, the queue, drive approval, reminders, flatten) can't be
         // forged by another page open in the browser.
         .layer(axum::middleware::from_fn(
             tinytrader_observe::guard::json_writes,
@@ -519,6 +531,65 @@ async fn store_approve(AxumState(app): AxumState<Arc<App>>, body: axum::body::By
             axum::Json(json!({ "error": format!("store: {e}") })),
         )
             .into_response(),
+    }
+}
+
+/// Which accounts have a gateway, and each gateway's state (from its welcome).
+async fn gateways_list(AxumState(app): AxumState<Arc<App>>) -> Response {
+    let mut out = Vec::new();
+    for account in app.gateways.addrs.keys() {
+        let state = match app.gateways.call(account, None, Duration::from_secs(5)).await {
+            Ok((w, _)) => json!({ "account": account, "state": w["state"], "environment": w["environment"] }),
+            Err(e) => json!({ "account": account, "error": e }),
+        };
+        out.push(state);
+    }
+    no_store(axum::Json(json!({ "gateways": out })))
+}
+
+/// Close every position of a paper account at market through its gateway:
+/// halts opens, cancels open orders, liquidates. The body must name the
+/// account in `confirm`.
+async fn account_flatten(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(account): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    if ask["confirm"].as_str() != Some(account.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "type the account's name to confirm" })),
+        )
+            .into_response();
+    }
+    let reason = ask["reason"].as_str().filter(|r| !r.is_empty()).unwrap_or("flatten from the console");
+    gateway_request(&app, &account, json!({ "type": "flatten", "reason": reason }), 60).await
+}
+
+/// Allow opening orders again on a paper account (the gateway's `unkill`).
+async fn account_resume(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(account): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    let reason = ask["reason"].as_str().filter(|r| !r.is_empty()).unwrap_or("resumed from the console");
+    gateway_request(&app, &account, json!({ "type": "unkill", "reason": reason }), 15).await
+}
+
+async fn gateway_request(app: &App, account: &str, request: serde_json::Value, wait: u64) -> Response {
+    if !app.gateways.addrs.contains_key(account) {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({ "error": "this account has no order gateway" })),
+        )
+            .into_response();
+    }
+    match app.gateways.call(account, Some(request), Duration::from_secs(wait)).await {
+        Ok((_, Some(r))) => no_store(axum::Json(r)),
+        Ok((_, None)) => (StatusCode::BAD_GATEWAY, axum::Json(json!({ "error": "no response" }))).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, axum::Json(json!({ "error": e }))).into_response(),
     }
 }
 

@@ -1,8 +1,64 @@
 // Accounts: a card per brokerage account (live first) with equity, the day's
-// change, balances, an equity chart and the largest positions. Read only.
-import { defineWidget, redrawing } from '../lib/widgets.js';
+// change, balances, an equity chart and the largest positions. A paper
+// account with an order gateway also gets Flatten (close every position at
+// market, through the gateway, after typing the account's name) and, while
+// its gateway halts opens, Resume opening.
+import { defineWidget } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
+
+// Order gateways by account name ({state} or {error}), read every 15 s while shown.
+let gateways = {};
+let gwAt = 0;
+async function readGateways(update) {
+  if (Date.now() - gwAt < 15000) return;
+  gwAt = Date.now();
+  try {
+    const r = await fetch('/api/accounts/gateways', { cache: 'no-store' });
+    const v = await r.json();
+    gateways = Object.fromEntries((v.gateways || []).map(g => [g.account, g]));
+  } catch (_) { gateways = {}; }
+  update();
+}
+// Flatten in progress per account: {stage: 'confirm' | 'busy' | 'done', typed, result, error}.
+const flat = {};
+async function post(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  let v = null; try { v = await r.json(); } catch (_) {}
+  if (!r.ok) throw new Error(v?.error || `${r.status} ${r.statusText}`);
+  return v;
+}
+
+function flattenPanel(a) {
+  const name = a?.name, g = name && gateways[name];
+  if (!g) return a?.environment === 'live' ? '<p class="muted" style="margin:0;font-size:12px">No gateway: flatten not available.</p>' : '';
+  if (g.error) return `<p class="muted" style="margin:0;font-size:12px">Gateway unreachable: ${esc(g.error)}</p>`;
+  const f = flat[name] || {};
+  const halted = g.state === 'killed';
+  const buttons = `<div class="acct-actions">
+    <button type="button" class="btn small danger" data-flat-open="${esc(name)}"${f.stage === 'busy' ? ' disabled' : ''}>Flatten</button>
+    ${halted ? `<button type="button" class="btn small" data-flat-resume="${esc(name)}">Resume opening</button><span class="pill p-warn">opens halted</span>` : ''}</div>`;
+  if (f.stage === 'confirm') {
+    const pos = a.positions || [];
+    return `<div class="acct-flat">
+      <b>Close every position in ${esc(a.label || name)} at market?</b>
+      <p class="muted" style="margin:0;font-size:12px">${pos.length ? pos.map(p => `${esc(p.symbol)} ${esc(String(p.qty))}`).join(', ') : 'No positions now; open orders are cancelled.'}</p>
+      <p class="muted" style="margin:0;font-size:12px">Open orders are cancelled first. Options close at whatever the spread is. New opening orders stay refused until Resume opening.</p>
+      <label style="font-size:12px">Type <b>${esc(name)}</b> to confirm <input class="acct-flat-input" data-flat-typed="${esc(name)}" value="${esc(f.typed || '')}" autocomplete="off" spellcheck="false"></label>
+      <div class="acct-actions"><button type="button" class="btn small danger" data-flat-go="${esc(name)}"${f.typed === name ? '' : ' disabled'}>Flatten now</button>
+      <button type="button" class="btn small" data-flat-cancel="${esc(name)}">Cancel</button></div></div>`;
+  }
+  if (f.stage === 'busy') return `<div class="acct-flat"><b>Flattening ${esc(name)}…</b></div>`;
+  if (f.stage === 'done') {
+    const rows = (f.result?.positions || []).map(p => `<tr><td style="color:var(--fg)">${esc(p.symbol)}</td><td>${p.status === 200 ? 'closing order placed' : esc(String(p.broker_raw?.message || p.status))}</td></tr>`).join('');
+    const head = f.error ? `<b class="neg">Flatten failed: ${esc(f.error)}</b>`
+      : f.result?.outcome === 'ok' ? `<b>Flatten sent${rows ? '' : ': nothing to close'}.</b>`
+      : `<b class="neg">Flatten ${esc(f.result?.outcome || '')}: ${esc(f.result?.reason || f.result?.message || '')}</b> <span class="muted">Check positions before trying again.</span>`;
+    return `<div class="acct-flat">${head}${rows ? `<table class="pos-tbl"><tbody>${rows}</tbody></table>` : ''}
+      <div class="acct-actions"><button type="button" class="btn small" data-flat-cancel="${esc(name)}">Close</button></div></div>${buttons}`;
+  }
+  return buttons;
+}
 
 // Every service that serves an `account` stream gets a card: live accounts first.
 function accountsView(withHeading = true) {
@@ -12,7 +68,7 @@ function accountsView(withHeading = true) {
     .sort((x, y) => (x.a?.environment === 'live' ? 0 : 1) - (y.a?.environment === 'live' ? 0 : 1) || (x.a?.label || x.svc.id).localeCompare(y.a?.label || y.svc.id));
   if (!accts.length) return '';
   const grid = `<div class="cards acct-cards">${accts.map(({ svc, a }) => accountCard(svc, a)).join('')}</div>`;
-  return withHeading ? `<section><div class="sec-head"><h2>Accounts</h2><span class="muted" style="font-size:13px">Balances and positions, read only</span></div>${grid}</section>` : grid;
+  return withHeading ? `<section><div class="sec-head"><h2>Accounts</h2><span class="muted" style="font-size:13px">Balances and positions</span></div>${grid}</section>` : grid;
 }
 function money(v, cur) {
   if (v == null || !isFinite(v)) return '—';
@@ -45,9 +101,46 @@ function accountCard(svc, a) {
     <div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2"></div>
     ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Symbol</th><th>Qty</th><th>Value</th><th>Unrealized</th><th>Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted" style="margin:0;font-size:13px">No open positions.</p>'}
     <div class="foot">${pos.length > 8 ? `${pos.length} positions, largest 8 shown · ` : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
+    ${flattenPanel(a)}
   </article>`;
 }
 
-const draw = () => `<div><h1>Accounts</h1><p class="muted" style="margin:0">Balances and positions of every brokerage account this deployment reads. Read only.</p></div>` + (accountsView(false) || '<p class="muted">No account service is running.</p>');
+const draw = () => `<div><h1>Accounts</h1><p class="muted" style="margin:0">Balances and positions of every brokerage account this deployment reads. Paper accounts with an order gateway can be flattened.</p></div>` + (accountsView(false) || '<p class="muted">No account service is running.</p>');
 
-defineWidget('accounts', { title: 'Accounts and equity', mount: redrawing(draw) });
+// Redraws on every update, keeping the scroll position, but not while the
+// operator is typing a confirmation.
+function mount(el) {
+  const update = () => {
+    if (el.contains(document.activeElement) && document.activeElement.matches('.acct-flat-input')) return;
+    const top = el.scrollTop; el.innerHTML = draw(); el.scrollTop = top;
+    readGateways(update);
+  };
+  const click = async e => {
+    const t = e.target.closest('button'); if (!t) return;
+    const d = t.dataset;
+    if (d.flatOpen) { flat[d.flatOpen] = { stage: 'confirm', typed: '' }; update(); el.querySelector(`[data-flat-typed="${CSS.escape(d.flatOpen)}"]`)?.focus(); }
+    else if (d.flatCancel) { delete flat[d.flatCancel]; update(); }
+    else if (d.flatGo) {
+      const name = d.flatGo;
+      flat[name] = { stage: 'busy' }; update();
+      try { flat[name] = { stage: 'done', result: await post(`/api/accounts/${encodeURIComponent(name)}/flatten`, { confirm: name, reason: 'flatten from the console' }) }; }
+      catch (err) { flat[name] = { stage: 'done', error: err.message }; }
+      gwAt = 0; update();
+    } else if (d.flatResume) {
+      try { await post(`/api/accounts/${encodeURIComponent(d.flatResume)}/resume`, { reason: 'resumed from the console' }); }
+      catch (err) { flat[d.flatResume] = { stage: 'done', error: err.message }; }
+      gwAt = 0; update();
+    }
+  };
+  const input = e => {
+    const name = e.target.dataset?.flatTyped; if (!name || !flat[name]) return;
+    flat[name].typed = e.target.value;
+    const go = el.querySelector(`[data-flat-go="${CSS.escape(name)}"]`);
+    if (go) go.disabled = e.target.value !== name;
+  };
+  el.addEventListener('click', click); el.addEventListener('input', input);
+  update();
+  return { update, dispose: () => { el.removeEventListener('click', click); el.removeEventListener('input', input); } };
+}
+
+defineWidget('accounts', { title: 'Accounts and equity', mount });
