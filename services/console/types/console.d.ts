@@ -95,6 +95,8 @@ interface Topology {
   edges?: TopoEdge[];
   panels?: Panel[];
   bundles?: Bundle[];
+  /** Tools the deployment runs beside tinytrader, by name, such as `notebook`. */
+  links?: Record<string, string>;
 }
 
 /** A part of the deployment graph: an outside source, a service or a store. */

@@ -620,6 +620,10 @@ fn apply_overrides(mut topo: Value, o: &Value) -> Value {
     if let Some(bundles) = o["bundles"].as_array() {
         topo["bundles"] = json!(bundles);
     }
+    // Tools the deployment runs beside tinytrader, by name: { "notebook": URL }.
+    if let Some(links) = o["links"].as_object() {
+        topo["links"] = json!(links);
+    }
     if let Some(hide) = o["hide"].as_array() {
         let hidden = |v: &Value| hide.contains(v);
         for list in ["services", "external", "stores"] {

@@ -3,9 +3,12 @@
 //! Alpha Vantage's EARNINGS (back to the 1990s for large companies).
 //!
 //! Served at `/history?symbol=AAPL` as the last 12 reports, newest first.
-//! Alpha Vantage's free plan allows 25 requests a day, and a history changes
-//! once a quarter, so each is kept a week, in memory and (with
-//! `ECON_CACHE`) on disk across restarts, and at most 20 are fetched a day.
+//! Alpha Vantage's free plan allows 25 requests a day, and a history only
+//! changes when the company reports again, so each is kept (in memory and,
+//! with `ECON_CACHE`, on disk across restarts) until a new report is due:
+//! [`DUE_DAYS`] after its latest, checked again weekly after that. At most 20
+//! are fetched a day, so the requests go on new reports, and the collection
+//! grows towards every company asked about.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,7 +20,26 @@ use serde_json::{Value, json};
 use tinytrader_observe::{lock, unix_seconds};
 use tinytrader_schedule::ny_date_time;
 
-const KEEP: f64 = 7.0 * 86_400.0;
+/// Days after a company's latest report before the next is expected.
+pub const DUE_DAYS: f64 = 80.0;
+/// While a report is due, how often to look again.
+const RECHECK: f64 = 7.0 * 86_400.0;
+
+/// Whether a kept history still stands: fetched in the last week, or with
+/// its latest report too recent for another to have come out.
+fn still_good(v: &Value, now: f64) -> bool {
+    let Some(at) = v["fetched_at"].as_f64() else {
+        return false;
+    };
+    if now - at < RECHECK {
+        return true;
+    }
+    let latest = v["reports"][0]["date"].as_str().and_then(|d| {
+        let p = |a: usize, b: usize| d.get(a..b)?.parse::<i64>().ok();
+        Some(tinytrader_schedule::ny_to_unix(p(0, 4)?, p(5, 7)?, p(8, 10)?, 12, 0) as f64)
+    });
+    latest.is_some_and(|t| now - t < DUE_DAYS * 86_400.0)
+}
 const PER_DAY: u32 = 20;
 const QUARTERS: usize = 12;
 
@@ -100,8 +122,8 @@ impl History {
             return Err((StatusCode::BAD_REQUEST, "symbol: a stock symbol".into()));
         }
         let now = unix_seconds();
-        if let Some((at, v)) = lock(&self.kept).get(&symbol)
-            && now - at < KEEP
+        if let Some((_, v)) = lock(&self.kept).get(&symbol)
+            && still_good(v, now)
         {
             return Ok(v.clone());
         }
@@ -110,7 +132,7 @@ impl History {
             .and_then(|f| std::fs::read_to_string(f).ok())
             .and_then(|t| serde_json::from_str::<Value>(&t).ok());
         if let Some(v) = &on_disk
-            && v["fetched_at"].as_f64().is_some_and(|at| now - at < KEEP)
+            && still_good(v, now)
         {
             lock(&self.kept).insert(
                 symbol.clone(),
@@ -189,6 +211,26 @@ mod tests {
             parse(&json!({ "Note": "limit reached" })).unwrap_err(),
             "limit reached"
         );
+    }
+
+    #[test]
+    fn keeps_a_history_until_a_new_report_is_due() {
+        let day = 86_400.0;
+        let now = tinytrader_schedule::ny_to_unix(2026, 10, 7, 12, 0) as f64;
+        let h = |fetched: f64, latest: &str| json!({ "fetched_at": fetched, "reports": [{ "date": latest }] });
+        assert!(
+            still_good(&h(now - 2.0 * day, "2026-04-30"), now),
+            "fetched this week"
+        );
+        assert!(
+            still_good(&h(now - 30.0 * day, "2026-07-30"), now),
+            "next report not due yet"
+        );
+        assert!(
+            !still_good(&h(now - 30.0 * day, "2026-07-10"), now),
+            "a report is due"
+        );
+        assert!(!still_good(&json!({ "reports": [] }), now));
     }
 
     #[test]
