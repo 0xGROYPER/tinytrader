@@ -476,6 +476,10 @@ struct BarAsk {
     symbol: String,
     days: Option<u64>,
     interval: Option<u64>,
+    /// `split` (the default: prices comparable across splits), `raw` (as
+    /// traded that day: what option strikes of the time refer to), or `all`
+    /// (splits and dividends).
+    adjustment: Option<String>,
 }
 
 async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Response {
@@ -498,10 +502,17 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
         }
     };
     let days = ask.days.unwrap_or(1).clamp(1, max_days);
+    let adjustment = ask.adjustment.unwrap_or_else(|| "split".into());
+    if !matches!(adjustment.as_str(), "split" | "raw" | "all" | "dividend") {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "adjustment: split, raw, dividend or all",
+        );
+    }
     let a = app.clone();
     answer(
         app.kept(
-            format!("bars|{symbol}|{interval}|{days}"),
+            format!("bars|{symbol}|{interval}|{days}|{adjustment}"),
             Duration::from_secs(60),
             || async move {
                 let now = unix_seconds() as i64;
@@ -528,7 +539,7 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
                             ("timeframe", timeframe.to_owned()),
                             ("start", from.map_or_else(|| start.clone(), rfc3339)),
                             ("limit", "10000".to_owned()),
-                            ("adjustment", "split".to_owned()),
+                            ("adjustment", adjustment.clone()),
                             ("feed", feed.clone()),
                         ];
                         if let Some(u) = until {
