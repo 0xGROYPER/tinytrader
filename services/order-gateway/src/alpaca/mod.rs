@@ -7,7 +7,8 @@ mod stream;
 pub mod trading;
 
 use crate::broker::{
-    AccountInfo, Broker, BrokerError, BrokerOrder, CancelResult, Capabilities, MarketClock,
+    AccountInfo, Broker, BrokerError, BrokerOrder, CancelResult, Capabilities, Closing,
+    FlattenResult, MarketClock,
     OrderRef, OrderUpdate, Position, Query, Reply, SessionDay, SubmitResult, Update,
 };
 use crate::intent::{Intent, fmt_cents};
@@ -20,7 +21,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
-use trading::{Credentials, Endpoints, LegSpec, Order, TradeUpdate, compact};
+use trading::{Credentials, Endpoints, LegSpec, Order, TradeUpdate, compact, elements, member};
 
 /// Network timings; the defaults suit the paper endpoint.
 #[derive(Clone, Copy, Debug)]
@@ -353,6 +354,38 @@ impl Broker for AlpacaPaper {
 
     fn cancel_all(&mut self) -> CancelResult {
         self.delete("/v2/orders")
+    }
+
+    /// Alpaca's liquidate-all: `DELETE /v2/positions?cancel_orders=true`
+    /// cancels open orders and sends a market order closing each position.
+    /// Its answer (207) lists each position's `{symbol, status, body}`.
+    fn flatten(&mut self) -> FlattenResult {
+        match self.http.call("DELETE", "/v2/positions?cancel_orders=true", None) {
+            Err(f) => FlattenResult::Unknown { reason: f.reason() },
+            Ok(r) => match unsent(&r) {
+                Some((reason, _)) => FlattenResult::Unknown { reason },
+                None if (200..300).contains(&r.status) => {
+                    let body = raw(&r.body);
+                    let text = |v: Option<&str>| {
+                        v.and_then(|v| serde_json::from_str::<String>(v).ok())
+                            .unwrap_or_default()
+                    };
+                    let closings = elements(&body)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|e| Closing {
+                            symbol: text(member(e, "symbol")),
+                            status: member(e, "status")
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(0),
+                            raw: member(e, "body").unwrap_or("null").to_owned(),
+                        })
+                        .collect();
+                    FlattenResult::Sent(closings, body)
+                }
+                None => FlattenResult::Rejected(error(&r)),
+            },
+        }
     }
 
     fn order(&mut self, target: &OrderRef) -> Query<Option<BrokerOrder>> {

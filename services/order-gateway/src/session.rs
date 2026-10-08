@@ -2,7 +2,8 @@
 //! forwards and correlates requests, never resends, resolves unknown outcomes by
 //! lookup, reconciles after restarts and stream drops, and fans out journaled events.
 use crate::broker::{
-    Broker, BrokerError, BrokerOrder, CancelResult, OrderRef, OrderUpdate, SubmitResult, Update,
+    Broker, BrokerError, BrokerOrder, CancelResult, FlattenResult, OrderRef, OrderUpdate,
+    SubmitResult, Update,
     normalize_event, status_event, terminal,
 };
 use crate::intent::{Intent, hex, occ};
@@ -193,6 +194,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::Calendar { .. } => "calendar",
         Op::Kill { .. } => "kill",
         Op::Unkill => "unkill",
+        Op::Flatten { .. } => "flatten",
         Op::Advance(_) => "advance",
     }
 }
@@ -585,7 +587,7 @@ impl<B: Broker> Session<B> {
         let allowed = match &op {
             Op::Submit(_) | Op::Advance(_) => spec.role == Role::Trade,
             Op::Cancel(_) => spec.role != Role::Observe,
-            Op::Kill { .. } | Op::Unkill => spec.role == Role::Admin,
+            Op::Kill { .. } | Op::Unkill | Op::Flatten { .. } => spec.role == Role::Admin,
             _ => true,
         };
         if !allowed {
@@ -612,6 +614,11 @@ impl<B: Broker> Session<B> {
                 self.kill(level, &reason, &spec.name, &rid)?;
                 let o = outcome("ok").s("state", self.state()).done();
                 self.reply(ci, response(&rid, name, &o));
+            }
+            Op::Flatten { reason } => {
+                self.hold = Some(Vec::new());
+                let result = self.flatten(&spec.name, &rid, &reason);
+                self.release(ci, response(&rid, name, &result?));
             }
             Op::Unkill => {
                 self.killed = None;
@@ -1134,6 +1141,62 @@ impl<B: Broker> Session<B> {
             }
         }
         Ok(())
+    }
+
+    /// Halt opens (unless all is already halted), cancel every open order,
+    /// then close every position at market through the broker, in one request
+    /// that is never resent. Journaled as `flatten` events for the requesting
+    /// admin (observers see every event).
+    fn flatten(&mut self, client: &str, rid: &str, reason: &str) -> Result<String, String> {
+        let event = |phase: &str| {
+            Obj::new()
+                .s("client", client)
+                .s("request_id", rid)
+                .s("phase", phase)
+        };
+        let aud = || Aud::Client(client.to_owned());
+        self.emit(self.ts(), "flatten", &event("requested").s("reason", reason).done(), aud())?;
+        if !matches!(self.killed, Some((KillLevel::HaltAll, _))) {
+            self.kill(KillLevel::HaltOpens, reason, client, rid)?;
+        }
+        self.budget.charge();
+        self.cancel_event(client, rid, "*", "sent", "{}")?;
+        let r = self.b.cancel_all();
+        let o = self.cancel_outcome(r);
+        self.cancel_event(client, rid, "*", "outcome", &Obj::new().raw("outcome", &o).done())?;
+        self.drain()?;
+        self.budget.charge();
+        let o = match self.b.flatten() {
+            FlattenResult::Sent(closings, raw) => {
+                let list = arr(closings.iter().map(|c| {
+                    Obj::new()
+                        .s("symbol", &c.symbol)
+                        .n("status", c.status)
+                        .raw("broker_raw", &c.raw)
+                        .done()
+                }));
+                outcome("ok")
+                    .s("state", self.state())
+                    .raw("positions", &list)
+                    .raw("broker_raw", &raw)
+                    .done()
+            }
+            FlattenResult::Rejected(e) => broker_error_obj("rejected", &e)
+                .s("state", self.state())
+                .done(),
+            FlattenResult::Unknown { reason } => outcome("unknown")
+                .s("reason", reason)
+                .s("state", self.state())
+                .done(),
+        };
+        self.emit(
+            self.ts(),
+            "flatten",
+            &event("outcome").raw("outcome", &o).done(),
+            aud(),
+        )?;
+        self.drain()?;
+        Ok(o)
     }
 
     fn drain(&mut self) -> Result<(), String> {

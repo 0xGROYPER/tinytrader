@@ -483,6 +483,11 @@ fn route(g: &mut State, method: &str, path: &str, body: &str) -> (u16, String) {
         }
         ("GET", "/v2/account") => (200, fixture!("account.json").into()),
         ("GET", "/v2/positions") => (200, fixture!("positions.json").into()),
+        // Liquidate all: one market order per position (Alpaca answers 207).
+        ("DELETE", "/v2/positions") => (
+            207,
+            r#"[{"symbol":"SPY261016P00560000","status":200,"body":{"id":"00000000-0000-4000-8000-0000000000aa","client_order_id":"liq-1","symbol":"SPY261016P00560000","side":"buy","qty":"2","type":"market","time_in_force":"day","status":"accepted"}}]"#.into(),
+        ),
         ("GET", "/v2/clock") => (200, fixture!("clock.json").into()),
         ("GET", "/v2/calendar") => (200, fixture!("calendar.json").into()),
         ("GET", "/v2/account/activities") => (200, fixture!("activities.json").into()),

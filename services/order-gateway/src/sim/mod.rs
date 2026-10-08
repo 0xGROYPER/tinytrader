@@ -6,8 +6,9 @@ mod market;
 mod script;
 
 use crate::broker::{
-    AccountInfo, Broker, BrokerError, BrokerOrder, CancelResult, Capabilities, MarketClock,
-    OrderRef, OrderUpdate, Position, Query, Reply, SessionDay, SubmitResult, Update, terminal,
+    AccountInfo, Broker, BrokerError, BrokerOrder, CancelResult, Capabilities, Closing,
+    FlattenResult, MarketClock, OrderRef, OrderUpdate, Position, Query, Reply, SessionDay,
+    SubmitResult, Update, terminal,
 };
 use crate::intent::{Intent, fmt_cents, hex};
 use crate::protocol::{Obj, arr, quote};
@@ -569,6 +570,64 @@ impl Broker for SimBroker {
             };
         }
         SubmitResult::Accepted(accepted)
+    }
+
+    /// Cancels every open order, then closes each position at once: at its
+    /// touch (bid to sell, ask to buy) in market mode, else at the scripted
+    /// quote's mid, else at its average cost. Each close is an order with a
+    /// fill, as Alpaca's liquidation produces.
+    fn flatten(&mut self) -> FlattenResult {
+        let _ = self.cancel_all();
+        // Scripted positions join the book first so their closes net to zero.
+        for (symbol, qty) in std::mem::take(&mut self.s.positions) {
+            self.pos.entry(symbol).or_insert((0, 0)).0 += qty;
+        }
+        let held: Vec<(String, i64, i128)> = self
+            .pos
+            .iter()
+            .filter(|(_, p)| p.0 != 0)
+            .map(|(s, p)| (s.clone(), p.0, p.1))
+            .collect();
+        let mut closings = Vec::new();
+        for (symbol, qty, cost) in held {
+            let sell = qty > 0;
+            let touch = self.market.as_ref().and_then(|m| {
+                let q = m.book.get(m.ids.get(&symbol)?)?;
+                if sell { q.bid } else { q.ask }
+            });
+            let mid = self.s.quotes.get(&symbol).and_then(|q| match q {
+                (Some(b), Some(a)) => Some((b + a) / 2 * CENT),
+                (Some(x), None) | (None, Some(x)) => Some(x * CENT),
+                _ => None,
+            });
+            let avg = i64::try_from(cost / i128::from(qty)).unwrap_or(0).abs();
+            let px = touch.or(mid).unwrap_or(avg);
+            let cid = format!("flatten-{}-{symbol}", self.orders.len() + 1);
+            let legs = vec![SimLeg {
+                symbol: symbol.clone(),
+                ratio: 1,
+                buy: !sell,
+                open: false,
+                filled: 0,
+                cost: 0,
+            }];
+            let i = self.create(cid, false, legs, qty.unsigned_abs(), 0, Rule::default());
+            self.push(i, "new", None, None, None);
+            self.execute(i, qty.unsigned_abs(), &[px]);
+            closings.push(Closing {
+                symbol,
+                status: 200,
+                raw: Self::order_raw(&self.orders[i]),
+            });
+        }
+        let raw = arr(closings.iter().map(|c| {
+            Obj::new()
+                .s("symbol", &c.symbol)
+                .n("status", c.status)
+                .raw("body", &c.raw)
+                .done()
+        }));
+        FlattenResult::Sent(closings, raw)
     }
 
     fn cancel(&mut self, broker_order_id: &str) -> CancelResult {

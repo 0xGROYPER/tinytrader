@@ -427,3 +427,27 @@ fn cli_refuses_unsafe_or_incomplete_credentials_without_printing_values() {
     let (code, _) = run(&["--credentials-file", path, "--sim-script", path]);
     assert_eq!(code, Some(2));
 }
+
+#[test]
+fn flatten_sends_alpacas_liquidate_all_once() {
+    let r = rig("alpaca-flatten");
+    let mut c = ready(&r.gw, "reactor");
+    let mut ops = ready(&r.gw, "ops");
+    assert_eq!(c.req("flatten", "f0", r#""reason":"test""#).0["code"], "forbidden");
+    let (v, _) = ops.req("flatten", "f1", r#""reason":"test""#);
+    assert_eq!((v["outcome"].as_str(), v["state"].as_str()), (Some("ok"), Some("killed")));
+    assert_eq!(v["positions"][0]["symbol"], "SPY261016P00560000");
+    assert_eq!(v["positions"][0]["status"], 200);
+    assert_eq!(v["positions"][0]["broker_raw"]["type"], "market");
+    let liquidations: Vec<String> = r
+        .fake
+        .lock()
+        .log
+        .iter()
+        .filter(|(m, p, _)| m == "DELETE" && p.starts_with("/v2/positions"))
+        .map(|(_, p, _)| p.clone())
+        .collect();
+    assert_eq!(liquidations, ["/v2/positions?cancel_orders=true"]);
+    // Opens are refused afterwards.
+    assert_eq!(c.submit("r1", &support::buy("wse-1"))["reason"], "killed");
+}

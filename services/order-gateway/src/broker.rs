@@ -133,6 +133,27 @@ pub struct Position {
     pub avg_entry_price: String,
 }
 
+/// One position's closing order from `flatten`.
+#[derive(Clone, Debug)]
+pub struct Closing {
+    pub symbol: String,
+    /// The broker's HTTP status for this position (200 when its order was placed).
+    pub status: u16,
+    /// The broker's per-position body (its closing order, or an error).
+    pub raw: String,
+}
+
+/// Result of closing every position; the fills arrive later as updates.
+#[derive(Clone, Debug)]
+pub enum FlattenResult {
+    /// Sent; one entry per position, and the whole raw answer.
+    Sent(Vec<Closing>, String),
+    /// Refused as a whole by the broker.
+    Rejected(BrokerError),
+    /// May have reached the broker (reasons as for submit). Never resent.
+    Unknown { reason: &'static str },
+}
+
 /// Broker clock.
 #[derive(Clone, Copy, Debug)]
 pub struct MarketClock {
@@ -170,6 +191,9 @@ pub trait Broker {
     fn cancel(&mut self, broker_order_id: &str) -> CancelResult;
     /// Cancel every open order (`DELETE /v2/orders`).
     fn cancel_all(&mut self) -> CancelResult;
+    /// Close every position at market (cancelling open orders first), in one
+    /// request that is never retried.
+    fn flatten(&mut self) -> FlattenResult;
     /// One order by either id; `None` when the broker does not know it.
     fn order(&mut self, target: &OrderRef) -> Query<Option<BrokerOrder>>;
     /// Open orders.

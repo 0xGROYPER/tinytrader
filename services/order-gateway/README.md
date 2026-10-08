@@ -132,6 +132,7 @@ Every request has the form `{type, request_id, …}`. Every response is `{type:"
 | `calendar` | `start`, `end` (dates) | all | `ok{days: [{date, open, close}]}`, with times in America/New_York |
 | `kill` | `level: halt_opens \| halt_all`, `reason` | admin | `ok{state}` |
 | `unkill` | `reason` | admin | `ok{state}` |
+| `flatten` | `reason` | admin | `ok{state, positions: [{symbol, status, broker_raw}], broker_raw}`, or `rejected` / `unknown` ([section 9](#9-safety-rules)) |
 | `advance` | `to_ts` | trade | `ok{market_ts}`. Only for the simulator in client-clocked replay ([section 10](#10-simulated-broker)). |
 
 - Every `ok` query response carries `ts_gateway` and `broker_raw`.
@@ -288,6 +289,7 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 |---|---|
 | Paper/live isolation | Endpoints are compiled constants selected by `--environment`. A paper process cannot build a live URL (enforced by the type system), and tests inject transports instead of overriding URLs. Live trading needs separate operator authorization and is outside v1. |
 | Start gate | The process starts `reconciling` and becomes `ready` only when: the account is active and not blocked; `options_trading_level` ≥ the profile minimum (3); the journal chain verifies; and broker reconciliation ([section 11](#11-order-journal)) is complete. Until then a submit is `not_sent{not_ready}`. Foreign orders or non-option positions are reported as `foreign` events; they do not block unless the profile says so. |
+| Flatten | An admin's `flatten` closes everything: it sets `kill{halt_opens}` (unless `halt_all` is already set), cancels every open order as `halt_all` does, then asks the broker to close every position at market in **one request that is never resent**. Alpaca: `DELETE /v2/positions?cancel_orders=true`, which places a market order per position; the response lists each position's `{symbol, status, broker_raw}` (its closing order, or why not). An `unknown` outcome means the request may have reached the broker: look at `positions` before asking again. The closing orders are the broker's, so they arrive as `foreign` order events, with their fills. Options close at market, across whatever spread there is. Opens stay refused until `unkill`. The request and its outcome are journaled as `flatten` events (phase `requested` / `outcome`), visible to the requesting admin and to observers. The simulated broker closes each position at its touch (else the scripted quote's mid, else its average cost). |
 | Kill switch | `kill{halt_opens}` refuses any submit with an opening leg. `kill{halt_all}` refuses every submit and cancels every open order: first `DELETE /v2/orders`, then a check of each order. The default level is `halt_all`. Triggers: an admin request, the CLI through the admin role, or a `KILL` sentinel file in the state root. The kill state is journaled and **persists across restarts**; only an explicit `unkill` clears it. |
 | Broker stream down | If `trade_updates` has been down for more than 5 s, the state becomes `degraded` and submits are `not_sent{not_ready}`. Cancels are still allowed. While down, the gateway polls open orders at 1 Hz. After reconnecting it resyncs through REST before returning to `ready`. |
 | Client disconnect | **No automatic cancel.** A client can opt in with `hello.cancel_on_disconnect: true`: after a 2 s grace period, its open orders (by prefix) are cancelled. A gateway restart leaves broker orders alone and reconciles them. |
@@ -442,7 +444,7 @@ The same resync runs after every `trade_updates` reconnect. An order in phase `s
 |---|---|
 | `invalid_request` | Unknown type or field, or a wrong JSON type, with `detail.path` |
 | `duplicate_request_id` | Reused within the connection |
-| `forbidden` | Outside the client's role or prefix |
+| `forbidden` | Outside the client's role or prefix (`kill`, `unkill` and `flatten` need the admin role) |
 | `not_found` | `cancel` target unknown to the journal and the broker |
 | `broker_error` | A query failed, with `http_status`, `code` and `message` |
 | `throttled`, `not_ready` | A query was refused by the budget or the state |

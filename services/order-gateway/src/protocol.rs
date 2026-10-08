@@ -246,6 +246,10 @@ pub(crate) enum Op {
         reason: String,
     },
     Unkill,
+    /// Halt opens, cancel every open order, then close every position.
+    Flatten {
+        reason: String,
+    },
     Advance(u64),
 }
 
@@ -387,6 +391,9 @@ pub(crate) fn parse_line(bytes: &[u8]) -> Result<Line, LineError> {
                 f.string("reason")?;
                 Op::Unkill
             }
+            "flatten" => Op::Flatten {
+                reason: f.string("reason")?,
+            },
             "advance" => Op::Advance(f.int("to_ts", 0, u64::MAX)?),
             _ => return Err(invalid("type", "unknown request type")),
         };

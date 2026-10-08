@@ -281,3 +281,36 @@ fn slow_consumer_is_closed_and_recovers_by_resume() {
     assert_eq!(c2.next()["seq"], recent.unwrap() - 1);
     gw.stop().unwrap();
 }
+
+#[test]
+fn flatten_closes_every_position_and_halts_opens() {
+    let script = format!(
+        r#"{{"clock_ts":{T0},"positions":{{"{CALL}":2,"{PUT_A}":-1}},"quotes":{{"{CALL}":{{"bid":"1.20","ask":"1.30"}}}}}}"#
+    );
+    let gw = scripted(config(root("flatten")), &script);
+    let mut c = Conn::open(&gw, "reactor", None);
+    assert_eq!(c.submit("r1", &buy("wse-1"))["outcome"], "accepted");
+    // Only an admin may flatten.
+    assert_eq!(c.req("flatten", "f0", r#""reason":"test""#).0["code"], "forbidden");
+    let mut ops = Conn::open(&gw, "ops", None);
+    let (r, _) = ops.req("flatten", "f1", r#""reason":"test""#);
+    assert_eq!((r["outcome"].as_str(), r["state"].as_str()), (Some("ok"), Some("killed")));
+    let mut closed: Vec<String> = r["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["symbol"].as_str().unwrap().to_owned())
+        .collect();
+    closed.sort();
+    assert_eq!(closed, [CALL, PUT_A]);
+    let (p, _) = ops.req("positions", "p1", "");
+    assert_eq!(p["positions"].as_array().unwrap().len(), 0, "{p}");
+    // The resting open order was cancelled; opens stay refused, closes pass.
+    c.order_event("wse-1", "canceled");
+    assert_eq!(c.submit("r2", &buy("wse-2"))["reason"], "killed");
+    let close = single("wse-3", CALL, "sell", "close", 1, "1.00");
+    assert_eq!(c.submit("r3", &close)["outcome"], "accepted");
+    let ev = ops.event("flatten", |v| v["phase"] == "outcome");
+    assert_eq!(ev["outcome"]["outcome"], "ok");
+    gw.stop().unwrap();
+}
