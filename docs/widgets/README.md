@@ -33,3 +33,4 @@ A workspace is a set of panels, each showing one widget. These pages say what ea
 - [Docs](docs.md): The documentation's home: the tinytrader mark, a search over every document's title and path, and where to start.
 - [Reminders](reminders.md): Reminders after iOS Reminders: lists on the left (with All, Flagged and Completed), the chosen list's items on the right.
 - [Notebook](notebook.md): The deployment's notebook server (JupyterLab), embedded.
+- [Terminal](terminal.md): A terminal program in the browser, such as Emacs, embedded in a panel.
