@@ -372,6 +372,24 @@ body.ws-full .ws-gutter:hover, body.ws-full .ws-gutter.drag { background: var(--
 .cor th { font-weight: 600; color: var(--fg-2); padding: 2px 6px; text-align: right; white-space: nowrap; }
 .cor td { min-width: 3.2em; padding: 5px 4px; text-align: center; border-radius: 3px; }
 .cor .cor-vol { color: var(--fg-2); text-align: right; padding-left: 10px; }
+/* Earnings */
+.er-wrap { overflow: auto; margin-top: 8px; }
+.er { width: 100%; border-collapse: collapse; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+.er th { text-align: left; font: 600 11px var(--ui); color: var(--muted); padding: 4px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; cursor: help; }
+.er td { padding: 5px 6px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+.er .num { text-align: right; }
+.er-row { cursor: pointer; } .er-row:hover, .er-row.open { background: var(--nav-hover); }
+.er td.rich { color: #fff; background: rgb(212 52 44); font-weight: 600; } .er td.cheap { color: #fff; background: rgb(49 92 196); font-weight: 600; }
+.er-detail td { background: var(--surface); white-space: normal; }
+.er-detail-in p { margin: 4px 0 8px; font: 13px var(--ui); }
+.er-bars { display: flex; flex-direction: column; gap: 3px; }
+.er-bar { display: grid; grid-template-columns: 10.5em minmax(80px, 1fr) 5em minmax(0, 1.4fr); gap: 8px; align-items: center; }
+.er-track { position: relative; height: 10px; background: var(--line-soft); border-radius: 2px; }
+.er-track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; }
+.er-track i.up { background: var(--ok); } .er-track i.down { background: var(--crit); }
+.er-track b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fg); }
+.er-m.up { color: var(--ok); } .er-m.down { color: var(--crit); } .er-m { text-align: right; }
+.er-foot { font-size: 12px; margin: 8px 0 0; }
 /* Watchlist */
 .wl { width: 100%; border-collapse: collapse; font: 13px var(--mono); font-variant-numeric: tabular-nums; }
 .wl th { text-align: left; font: 600 11px var(--ui); letter-spacing: .04em; color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--line); }

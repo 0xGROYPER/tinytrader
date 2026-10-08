@@ -17,6 +17,8 @@
 //!   back to three months ahead, medium and high: a company of $10 billion
 //!   or more is medium, $200 billion or more high, and `EARNINGS_WATCH`
 //!   symbols always high). Only BLS is sent the contact address.
+//! - Past earnings per company (`history.rs`): `/history?symbol=`, from
+//!   Alpha Vantage, kept a week (on disk with `ECON_CACHE`).
 //!
 //! Each source is read once a day; when a read fails, its last good copy
 //! is kept and the failure reported. Serves `/events` (`?from=YYYY-MM-DD&
@@ -24,6 +26,7 @@
 //! ahead, medium and high), and the usual `/health`, `/metrics` and `/describe`.
 
 mod earnings;
+mod history;
 mod oil;
 mod sources;
 
@@ -69,6 +72,10 @@ struct Args {
     /// each); Alpha Vantage always gives three months.
     #[arg(long, env = "EARNINGS_DAYS", default_value_t = 42)]
     earnings_days: i64,
+
+    /// A directory to keep companies' earnings histories in across restarts.
+    #[arg(long, env = "ECON_CACHE")]
+    cache: Option<std::path::PathBuf>,
 }
 
 /// A source's last good events, and how its last read went.
@@ -141,7 +148,7 @@ async fn main() {
     observer.describe(json!({
         "role": "Scheduled US economic releases (BLS, BEA, jobless claims) and FOMC decisions, from the agencies' own schedules, and earnings dates compared across calendars.",
         "upstream": upstream,
-        "streams": { "econ": "/events", "earnings": "/earnings" },
+        "streams": { "econ": "/events", "earnings": "/earnings", "earnings_history": "/history" },
         "schedule": [{ "name": "Read the agencies' schedules and the earnings calendars", "kind": "interval", "every_seconds": args.refresh_hours * 3600, "when": format!("every {} h", args.refresh_hours) }],
     }));
     {
@@ -167,6 +174,21 @@ async fn main() {
     let app = Router::new()
         .route("/events", get(events))
         .route("/earnings", get(earnings_list))
+        .route(
+            "/history",
+            get({
+                let h = Arc::new(history::History::new(
+                    keys.alpha_vantage.clone(),
+                    args.cache.clone(),
+                ));
+                move |Query(ask): Query<HistoryAsk>| async move {
+                    match h.get(&ask.symbol).await {
+                        Ok(v) => Json(v).into_response(),
+                        Err((code, e)) => (code, Json(json!({ "error": e }))).into_response(),
+                    }
+                }
+            }),
+        )
         .with_state(shared.clone())
         .merge(observer.router());
     let listen = listen_address("ECON_LISTEN", "127.0.0.1:9122");
@@ -287,6 +309,11 @@ async fn read_all(http: &reqwest::Client, shared: &Shared, bls: bool) {
         Ok(sources::claims(t - 40 * 86_400, t + 200 * 86_400)),
     );
     set("Oil", Ok(oil::events(t - 40 * 86_400, t + 200 * 86_400)));
+}
+
+#[derive(Deserialize)]
+struct HistoryAsk {
+    symbol: String,
 }
 
 #[derive(Deserialize)]

@@ -189,7 +189,13 @@ impl Poller {
 }
 
 /// Streams a page asks a service for on demand, through the console.
-pub const ON_DEMAND: &[&str] = &["bars", "snapshots", "chain", "news_search"];
+pub const ON_DEMAND: &[&str] = &[
+    "bars",
+    "snapshots",
+    "chain",
+    "news_search",
+    "earnings_history",
+];
 
 /// Why a service's events could not be fetched.
 #[derive(Debug)]
