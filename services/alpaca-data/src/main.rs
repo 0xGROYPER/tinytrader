@@ -5,8 +5,9 @@
 //! - `/snapshots?symbols=USO,XLE`: last price, quote, previous close and the
 //!   day's change for each (at most 100).
 //! - `/bars?symbol=AAPL&days=5&interval=60`: bars as the relays serve them
-//!   (`[t, o, h, l, c, v]`, `t` in Unix seconds), one-minute (`60`, the
-//!   default) or daily (`86400`).
+//!   (`[t, o, h, l, c, v]`, `t` in Unix seconds): one-minute (`60`, the
+//!   default), 5- and 15-minute, hourly (`3600`) or daily (`86400`), over the
+//!   last `days` trading days.
 //! - `/chain?underlying=AAPL&from=YYYY-MM-DD&to=YYYY-MM-DD`: option contracts
 //!   with quotes, IV and greeks, and per expiry the at-the-money IV and the
 //!   straddle as an implied move; by default the next 60 days.
@@ -296,11 +297,14 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
     let interval = ask.interval.unwrap_or(60);
     let (timeframe, max_days) = match interval {
         60 => ("1Min", 30),
+        300 => ("5Min", 60),
+        900 => ("15Min", 120),
+        3600 => ("1Hour", 730),
         86_400 => ("1Day", 3650),
         _ => {
             return refuse(
                 StatusCode::BAD_REQUEST,
-                "interval: 60 (one minute) or 86400 (one day)",
+                "interval: 60, 300, 900, 3600 or 86400 seconds",
             );
         }
     };
