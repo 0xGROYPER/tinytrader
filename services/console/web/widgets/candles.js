@@ -58,8 +58,10 @@ const css = name => getComputedStyle(document.documentElement).getPropertyValue(
 // A token's colour, faded for volume (tokens are #rrggbb).
 const faded = c => /^#[0-9a-f]{6}$/i.test(c) ? c + '66' : c;
 // Ranges (in trading days) and the bar size each starts with, as on TradingView.
+/** @type {[string, number, number][]} */
 const RANGES = [['1D', 1, 60], ['5D', 5, 900], ['1M', 21, 3600], ['6M', 126, 86400], ['1Y', 252, 86400], ['5Y', 1260, 86400]];
 // Bar sizes, and the longest range (trading days) each is offered for.
+/** @type {[string, number, number][]} */
 const SIZES = [['1m', 60, 21], ['5m', 300, 42], ['15m', 900, 84], ['1h', 3600, 504], ['1D', 86400, 1260]];
 /** Minute bars combined into bars of `size` seconds (aligned to New York time). @param {number[][]} bars @param {number} size */
 function combine(bars, size) {
