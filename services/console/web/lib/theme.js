@@ -36,8 +36,10 @@ export const parseKeywords = text => [...new Set(text.split(',').map(s => s.trim
 /** Presets offered when editing a theme. @type {Record<string, Theme>} */
 export const PRESETS = {
   'Oil & Iran': {
-    symbols: ['USO', 'BNO', 'XLE', 'XOP', 'OXY', 'XOM', 'CVX', 'ITA', 'LMT', 'NOC', 'RTX', 'GLD'],
-    keywords: ['Iran', 'Israel', 'Hormuz', 'OPEC', 'crude', 'oil', 'tanker', 'Brent', 'Red Sea', 'sanctions'],
+    // Crude, producers, tanker freight (BWET holds tanker freight futures) and
+    // tanker owners, defense, gold.
+    symbols: ['USO', 'BNO', 'XLE', 'XOP', 'OXY', 'XOM', 'CVX', 'BWET', 'FRO', 'DHT', 'STNG', 'INSW', 'ITA', 'LMT', 'NOC', 'RTX', 'GLD'],
+    keywords: ['Iran', 'Israel', 'Hormuz', 'OPEC', 'crude', 'oil', 'tanker', 'Brent', 'Red Sea', 'Houthi', 'shipping', 'refinery', 'pipeline', 'LNG', 'sanctions'],
     layers: ['econ', 'oil'],
   },
 };

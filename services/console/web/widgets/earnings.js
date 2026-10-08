@@ -19,7 +19,7 @@
 import { defineWidget } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
-import { theme } from '../lib/theme.js';
+import { theme, setFocus } from '../lib/theme.js';
 
 const svcWith = k => (fleet.topo?.services || []).find(s => s[k])?.id || null;
 const DAY = 86_400_000;
@@ -136,7 +136,8 @@ function detail(r, o, h) {
 defineWidget('earnings', {
   title: 'Earnings',
   mount(el) {
-    const my = { days: 14, min: 200e9, open: null, opts: new Map(), hist: new Map(), alive: true, busy: false };
+    // A theme's companies report over the coming weeks; otherwise the next two.
+    const my = { days: theme()?.symbols.length ? 42 : 14, min: 200e9, open: null, opts: new Map(), hist: new Map(), alive: true, busy: false };
     const update = () => { const top = el.scrollTop; el.innerHTML = draw(my); el.scrollTop = top; };
     async function json(url) {
       const r = await fetch(url, { cache: 'no-store' });
@@ -182,7 +183,8 @@ defineWidget('earnings', {
       const m = e.target.closest('[data-er-min]'); if (m) { my.min = +m.dataset.erMin; update(); fill(); return; }
       const row = e.target.closest('[data-er]'); if (!row) return;
       const sym = row.dataset.er; my.open = my.open === sym ? null : sym; update();
-      if (my.open) history(sym);
+      // Its underlying goes to the IV heatmap and the chart.
+      if (my.open) { history(sym); setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym })); }
     };
     el.addEventListener('click', click);
     const themed = () => { my.open = null; update(); fill(); };

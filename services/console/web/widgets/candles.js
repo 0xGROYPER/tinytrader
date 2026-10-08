@@ -34,9 +34,10 @@ function relayed() {
  * that carries the symbol, else a service with bars for any symbol), or else
  * every relayed symbol. */
 function choices() {
-  const t = theme(), live = relayed();
-  if (!t?.symbols.length) return live;
+  const t = theme(), live = relayed(), f = focused();
   const any = (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id;
+  // Without a theme, the relays' symbols, and the one picked elsewhere (an earnings report).
+  if (!t?.symbols.length) return f && any && !live.some(c => c.symbol === f) ? [...live, { service: any, symbol: f }] : live;
   return t.symbols.map(symbol => live.find(c => c.symbol === symbol) || (any ? { service: any, symbol } : null)).filter(Boolean);
 }
 
