@@ -25,7 +25,7 @@ const svcWith = k => (fleet.topo?.services || []).find(s => s[k])?.id || null;
 const DAY = 86_400_000;
 const pct = (x, d = 1) => x == null || !isFinite(x) ? '—' : `${(x * 100).toFixed(d)}%`;
 const cap = n => n == null ? '' : n >= 1e12 ? `$${(n / 1e12).toFixed(1)}T` : `$${Math.round(n / 1e9)}B`;
-const WHEN = { 'before-open': 'AM', 'after-close': 'PM', unknown: '—' };
+const WHEN = { 'before-open': 'AM', 'after-close': 'PM', during: 'day', unknown: '—' };
 
 /** Upcoming reports from the econ service, earliest first. */
 function upcoming() {
@@ -67,10 +67,11 @@ export function pastMoves(reports, close, dates) {
   return reports.map(r => {
     const k = before(r.date); // the last close before the report day
     if (k < 0) return { ...r, move: null };
-    // Before the open: the close before to the report day's. After the close:
-    // the report day's to the next day's. Not given: across both days.
+    // Before the open (or during the session): the close before to the
+    // report day's. After the close: the report day's to the next day's. Not
+    // given: across both days.
     const from = r.when === 'after-close' ? dates[k + 1] : dates[k];
-    const to = r.when === 'before-open' ? dates[k + 1] : dates[k + 2];
+    const to = r.when === 'before-open' || r.when === 'during' ? dates[k + 1] : dates[k + 2];
     const move = from && to && close.get(from) && close.get(to) ? close.get(to) / close.get(from) - 1 : null;
     return { ...r, move };
   });

@@ -111,7 +111,12 @@ fn utc_midnight(y: i64, m: i64, d: i64) -> i64 {
 /// The earnings releases in an EDGAR submissions answer, newest first.
 #[must_use]
 pub fn edgar(v: &Value) -> Vec<Value> {
-    let r = &v["filings"]["recent"];
+    releases_in(&v["filings"]["recent"])
+}
+
+/// Earnings releases in one block of filings (the answer's recent ones, or
+/// an older page, which has the same columns at its top).
+fn releases_in(r: &Value) -> Vec<Value> {
     let col = |k: &str| r[k].as_array().cloned().unwrap_or_default();
     let (form, items, accepted) = (col("form"), col("items"), col("acceptanceDateTime"));
     (0..form.len())
@@ -148,7 +153,10 @@ pub fn merge(edgar: &[Value], av: &[Value]) -> Vec<Value> {
                     .is_some_and(|u| (u - t).abs() <= 3.0 * 86_400.0)
             });
             json!({
-                "date": e["date"], "when": e["when"],
+                "date": e["date"],
+                // Alpha Vantage's time where it has one: EDGAR's is when the
+                // filing was accepted, which can lag the release itself.
+                "when": m.map(|a| &a["when"]).filter(|w| *w != "unknown").unwrap_or(&e["when"]),
                 "fiscal": m.map_or(Value::Null, |a| a["fiscal"].clone()),
                 "eps": m.map_or(Value::Null, |a| a["eps"].clone()),
                 "estimate": m.map_or(Value::Null, |a| a["estimate"].clone()),
@@ -177,6 +185,8 @@ pub struct History {
     kept: Mutex<HashMap<String, Value>>,
     /// Alpha Vantage requests sent on a New York date.
     sent: Mutex<(String, u32)>,
+    /// When Alpha Vantage was last asked: it wants a second between requests.
+    last_av: tokio::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl History {
@@ -199,6 +209,7 @@ impl History {
             dir,
             kept: Mutex::default(),
             sent: Mutex::default(),
+            last_av: tokio::sync::Mutex::default(),
         }
     }
 
@@ -272,6 +283,12 @@ impl History {
             }
             sent.1 += 1;
         }
+        // One request at a time, at least 1.2 s apart.
+        let mut last = self.last_av.lock().await;
+        if let Some(t) = *last {
+            tokio::time::sleep(Duration::from_millis(1200).saturating_sub(t.elapsed())).await;
+        }
+        *last = Some(std::time::Instant::now());
         let fetched = self
             .get_json(self.http.get("https://www.alphavantage.co/query").query(&[
                 ("function", "EARNINGS"),
@@ -352,7 +369,29 @@ impl History {
             .header("User-Agent", agent);
         match self.get_json(r).await {
             Ok(v) => {
-                let list = edgar(&v);
+                let mut list = edgar(&v);
+                // A company that files a lot (a bank's prospectuses) has only
+                // its last year or so in the recent block: read older pages.
+                for page in v["filings"]["files"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(3)
+                {
+                    if list.len() >= QUARTERS {
+                        break;
+                    }
+                    let Some(file) = page["name"].as_str() else {
+                        continue;
+                    };
+                    let r = self
+                        .http
+                        .get(format!("https://data.sec.gov/submissions/{file}"))
+                        .header("User-Agent", agent);
+                    if let Ok(older) = self.get_json(r).await {
+                        list.extend(releases_in(&older));
+                    }
+                }
                 self.save(
                     &name,
                     &json!({ "symbol": symbol, "cik": cik, "fetched_at": now, "releases": list }),
