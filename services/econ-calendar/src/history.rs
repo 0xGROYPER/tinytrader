@@ -175,6 +175,24 @@ pub fn merge(edgar: &[Value], av: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Ticker to company number from EDGAR's ticker list. The list is keyed
+/// "0", "1", ... in order of importance and can give one ticker to several
+/// companies (a new trust beside the operating company): the first wins.
+fn ticker_map(v: &Value) -> serde_json::Map<String, Value> {
+    let mut rows: Vec<(u64, &str, &Value)> = v
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, c)| Some((k.parse().ok()?, c["ticker"].as_str()?, &c["cik_str"])))
+        .collect();
+    rows.sort_by_key(|r| r.0);
+    let mut map = serde_json::Map::new();
+    for (_, ticker, cik) in rows {
+        map.entry(ticker.to_owned()).or_insert_with(|| cik.clone());
+    }
+    map
+}
+
 fn symbol_ok(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 10
@@ -336,14 +354,7 @@ impl History {
                 .get("https://www.sec.gov/files/company_tickers.json")
                 .header("User-Agent", agent);
             if let Ok(v) = self.get_json(r).await {
-                let map: serde_json::Map<String, Value> = v
-                    .as_object()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|(_, c)| {
-                        Some((c["ticker"].as_str()?.to_owned(), c["cik_str"].clone()))
-                    })
-                    .collect();
+                let map = ticker_map(&v);
                 let kept = json!({ "fetched_at": now, "ciks": map });
                 self.save(name, &kept);
                 list = Some(kept);
@@ -488,6 +499,18 @@ mod tests {
             (r[1]["date"].as_str(), r[1]["when"].as_str()),
             (Some("2026-01-13"), Some("before-open"))
         );
+    }
+
+    #[test]
+    fn the_first_company_with_a_ticker_wins() {
+        let v = json!({
+            "10": { "cik_str": 2_115_436, "ticker": "XOM", "title": "A new trust" },
+            "2": { "cik_str": 34_088, "ticker": "XOM", "title": "EXXON MOBIL CORP" },
+            "0": { "cik_str": 320_193, "ticker": "AAPL", "title": "Apple Inc." },
+        });
+        let m = ticker_map(&v);
+        assert_eq!(m["XOM"], 34_088);
+        assert_eq!(m["AAPL"], 320_193);
     }
 
     #[test]
