@@ -51,7 +51,9 @@ const BASE: &str = "https://data.alpaca.markets";
 const TRADING: &str = "https://api.alpaca.markets";
 /// Requests to Alpaca allowed in any minute (its free plan allows 200).
 const PER_MINUTE: usize = 180;
-const CACHE_ENTRIES: usize = 512;
+/// Answers kept, at most, by their size as JSON (a long hourly history is
+/// thousands of bars, so a count alone isn't a bound).
+const CACHE_BYTES: usize = 40 * 1024 * 1024;
 
 /// Serves stock snapshots, bars and option chains from Alpaca.
 #[derive(Parser, Debug)]
@@ -80,7 +82,8 @@ struct App {
     /// Recent requests to Alpaca, for the rate limit.
     sent: Mutex<VecDeque<Instant>>,
     /// Answers kept briefly, by request.
-    cache: Mutex<HashMap<String, (Instant, Value)>>,
+    /// Answers kept briefly, by request: when, the answer, its size.
+    cache: Mutex<HashMap<String, (Instant, Value, usize)>>,
 }
 
 impl App {
@@ -154,23 +157,34 @@ impl App {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<Value, (StatusCode, String)>>,
     {
-        if let Some((at, v)) = lock(&self.cache).get(&key)
+        if let Some((at, v, _)) = lock(&self.cache).get(&key)
             && at.elapsed() < ttl
         {
             return Ok(v.clone());
         }
         let v = make().await?;
         let mut cache = lock(&self.cache);
-        if cache.len() >= CACHE_ENTRIES {
-            // Drop the oldest half: simple, and rare.
-            let mut ages: Vec<(String, Instant)> =
-                cache.iter().map(|(k, (t, _))| (k.clone(), *t)).collect();
-            ages.sort_by_key(|(_, t)| *t);
-            for (k, _) in ages.into_iter().take(CACHE_ENTRIES / 2) {
+        let size = v.to_string().len();
+        // Expired answers go first, then the oldest, until this one fits.
+        cache.retain(|_, (t, _, _)| t.elapsed() < Duration::from_secs(86_400));
+        let mut total: usize = cache.values().map(|e| e.2).sum();
+        if total + size > CACHE_BYTES {
+            let mut ages: Vec<(String, Instant, usize)> = cache
+                .iter()
+                .map(|(k, (t, _, n))| (k.clone(), *t, *n))
+                .collect();
+            ages.sort_by_key(|(_, t, _)| *t);
+            for (k, _, n) in ages {
+                if total + size <= CACHE_BYTES {
+                    break;
+                }
                 cache.remove(&k);
+                total -= n;
             }
         }
-        cache.insert(key, (Instant::now(), v.clone()));
+        if size <= CACHE_BYTES {
+            cache.insert(key, (Instant::now(), v.clone(), size));
+        }
         Ok(v)
     }
 }
