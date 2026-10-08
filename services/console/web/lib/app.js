@@ -196,11 +196,13 @@ const LAYOUTS = {
 const THEMED = () => ({ dir: 'row', ratio: 0.5,
   a: { dir: 'col', ratio: 0.45, a: { tabs: ['watchlist', 'correlation'] }, b: { tabs: ['candles', 'ivmap'] } },
   b: { dir: 'col', ratio: 0.5, a: { view: 'news' }, b: { tabs: ['calendar', 'earnings'] } } });
-// Ready-made workspaces, installed (or brought up to date) once per version.
-const READY_VERSION = 1;
+// Ready-made workspaces, each installed (or brought up to date) once per
+// version of it, so a new one never resets the others.
+/** @type {Record<string, [number, () => { tree: object, theme?: object }]>} */
 const READY = {
-  'Oil & Iran': () => ({ tree: THEMED(), theme: PRESETS['Oil & Iran'] }),
-  Earnings: () => ({ tree: { dir: 'row', ratio: 0.6, a: { view: 'earnings' }, b: { dir: 'col', ratio: 0.45, a: { view: 'calendar' }, b: { tabs: ['ivmap', 'candles'] } } } }),
+  'Oil & Iran': [1, () => ({ tree: THEMED(), theme: PRESETS['Oil & Iran'] })],
+  Earnings: [1, () => ({ tree: { dir: 'row', ratio: 0.6, a: { view: 'earnings' }, b: { dir: 'col', ratio: 0.45, a: { view: 'calendar' }, b: { tabs: ['ivmap', 'candles'] } } } })],
+  Notebook: [1, () => ({ tree: { dir: 'row', ratio: 0.72, a: { view: 'notebook' }, b: { dir: 'col', ratio: 0.5, a: { tabs: ['watchlist', 'earnings'] }, b: { tabs: ['candles', 'ivmap'] } } } })],
 };
 const DV = globalThis['dockview-core'];
 let dock = null, wsFocus = null, panelSeq = 0;
@@ -355,7 +357,7 @@ function wsCommands() {
   out.push({ label: activePanel()?.api.isMaximized() ? 'Restore all panels' : 'Maximise this panel', run: wsMaximise });
   if ((dock?.panels.length || 0) > 1) out.push({ label: 'Close this panel', run: () => activePanel()?.api.close() });
   for (const [name, make] of Object.entries(LAYOUTS)) out.push({ label: `Apply template: ${name}`, run: () => { dock.clear(); buildTree(make()); } });
-  for (const [name, make] of Object.entries(READY)) out.push({ label: `New workspace: ${name}`, run: () => wsAdd(name, make()) });
+  for (const [name, [, make]] of Object.entries(READY)) out.push({ label: `New workspace: ${name}`, run: () => wsAdd(name, make()) });
   return out;
 }
 const matching = q => { const words = q.toLowerCase().split(/\s+/).filter(Boolean); return [...layoutCommands(q), ...wsCommands()].filter(c => c.always || words.every(w => c.label.toLowerCase().includes(w))); };
@@ -396,15 +398,18 @@ const lay = { list: [], current: null };
   try { lay.list = JSON.parse(JSON.stringify(lay.list).replaceAll('"view":"roadmap"', '"view":"reminders"')); } catch (_) {}
   // Ready-made workspaces: added, or replaced when they've been improved.
   try {
-    if (+(localStorage.getItem('tinytrader-ready') || 0) < READY_VERSION) {
-      for (const [name, make] of Object.entries(READY)) {
-        const fresh = { name, ...make() }, i = lay.list.findIndex(l => l.name === name);
-        if (i >= 0) lay.list[i] = { ...fresh, group: lay.list[i].group };
-        else if (lay.list.length < 10) lay.list.push(fresh);
-      }
-      localStorage.setItem('tinytrader-ready', String(READY_VERSION));
-      localStorage.setItem(LS.list, JSON.stringify(lay.list));
+    // Versions installed, by name (a plain 1 from before meant the first two).
+    const raw = localStorage.getItem('tinytrader-ready');
+    const had = raw === '1' ? { 'Oil & Iran': 1, Earnings: 1 } : JSON.parse(raw || '{}');
+    let changed = false;
+    for (const [name, [version, make]] of Object.entries(READY)) {
+      if ((had[name] || 0) >= version) continue;
+      const fresh = { name, ...make() }, i = lay.list.findIndex(l => l.name === name);
+      if (i >= 0) lay.list[i] = { ...fresh, group: lay.list[i].group };
+      else if (lay.list.length < 10) lay.list.push(fresh);
+      had[name] = version; changed = true;
     }
+    if (changed) { localStorage.setItem('tinytrader-ready', JSON.stringify(had)); localStorage.setItem(LS.list, JSON.stringify(lay.list)); }
   } catch (_) {}
   if (!lay.list.some(l => l.name === lay.current)) lay.current = lay.list[0].name;
 })();
