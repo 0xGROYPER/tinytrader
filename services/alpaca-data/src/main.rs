@@ -15,6 +15,11 @@
 //! - `/news?symbols=USO,XLE&limit=50`: recent stories on those symbols
 //!   (Benzinga, through Alpaca), in the news service's shape, newest first.
 //!
+//! - `/option_bars?symbols=OCC,...&start=&end=`: daily bars of option
+//!   contracts, expired ones included (from 2024).
+//! - `/option_contracts?underlying=&from=&to=`: the contracts expiring between
+//!   two dates, expired ones included (from Alpaca's trading API, read only).
+//!
 //! Answers are kept briefly (snapshots 2 s, chains 15 s, bars a minute) and
 //! requests to Alpaca are held under its free plan's 200 a minute, so many
 //! panels asking at once don't multiply the load.
@@ -42,6 +47,8 @@ use tinytrader_observe::{Observer, State, listen_address, lock, secret, unix_sec
 use tinytrader_schedule::ny_date_time;
 
 const BASE: &str = "https://data.alpaca.markets";
+/// Alpaca's trading API, read here only for option contract listings.
+const TRADING: &str = "https://api.alpaca.markets";
 /// Requests to Alpaca allowed in any minute (its free plan allows 200).
 const PER_MINUTE: usize = 180;
 const CACHE_ENTRIES: usize = 512;
@@ -99,9 +106,15 @@ impl App {
             }
             sent.push_back(Instant::now());
         }
+        // Contract listings live on the trading API; everything else on the data API.
+        let host = if path.starts_with("/v2/options/contracts") {
+            TRADING
+        } else {
+            BASE
+        };
         let r = self
             .http
-            .get(format!("{BASE}{path}"))
+            .get(format!("{host}{path}"))
             .header("APCA-API-KEY-ID", &self.key)
             .header("APCA-API-SECRET-KEY", &self.secret)
             .query(query)
@@ -263,6 +276,156 @@ async fn snapshots(AxState(app): AxState<Arc<App>>, Query(ask): Query<SnapAsk>) 
                 })
                 .collect();
             Ok(json!({ "snapshots": out, "feed": a.feed }))
+        })
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct OptionBarsAsk {
+    symbols: String,
+    start: String,
+    end: String,
+}
+
+/// An OCC option symbol, such as `AAPL260807C00210000`.
+fn occ_ok(s: &str) -> bool {
+    chain::occ(s).is_some()
+        && s.len() <= 21
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+fn date_ok(d: &str) -> bool {
+    d.len() == 10
+        && d.bytes().enumerate().all(|(i, b)| {
+            if i == 4 || i == 7 {
+                b == b'-'
+            } else {
+                b.is_ascii_digit()
+            }
+        })
+}
+
+/// Daily bars of option contracts, expired ones included (Alpaca keeps them
+/// from 2024): `/option_bars?symbols=OCC,...&start=&end=` (at most 20).
+async fn option_bars(
+    AxState(app): AxState<Arc<App>>,
+    Query(ask): Query<OptionBarsAsk>,
+) -> Response {
+    let list: Vec<String> = ask
+        .symbols
+        .split(',')
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if list.is_empty()
+        || list.len() > 20
+        || !list.iter().all(|s| occ_ok(s))
+        || !date_ok(&ask.start)
+        || !date_ok(&ask.end)
+    {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "symbols: 1 to 20 option contracts (OCC symbols); start and end: YYYY-MM-DD",
+        );
+    }
+    let joined = list.join(",");
+    // The past doesn't change: kept a day; what includes today, a minute.
+    let today = ny_date_time(unix_seconds() as i64).0;
+    let ttl = Duration::from_secs(if ask.end < today { 86_400 } else { 60 });
+    let a = app.clone();
+    let (start, end) = (ask.start.clone(), ask.end.clone());
+    answer(
+        app.kept(
+            format!("obars|{joined}|{start}|{end}"),
+            ttl,
+            || async move {
+                let mut out = serde_json::Map::new();
+                let mut token: Option<String> = None;
+                for _ in 0..10 {
+                    let mut q = vec![
+                        ("symbols", joined.clone()),
+                        ("timeframe", "1Day".to_owned()),
+                        ("start", start.clone()),
+                        ("end", end.clone()),
+                        ("limit", "10000".to_owned()),
+                    ];
+                    if let Some(t) = &token {
+                        q.push(("page_token", t.clone()));
+                    }
+                    let v = a.get("/v1beta1/options/bars", &q).await?;
+                    for (sym, bars) in v["bars"].as_object().into_iter().flatten() {
+                        let rows = out.entry(sym.clone()).or_insert_with(|| json!([]));
+                        for b in bars.as_array().into_iter().flatten() {
+                            if let (Some(t), Some(arr)) =
+                                (b["t"].as_str().and_then(unix), rows.as_array_mut())
+                            {
+                                arr.push(json!([t, b["o"], b["h"], b["l"], b["c"], b["v"]]));
+                            }
+                        }
+                    }
+                    token = v["next_page_token"].as_str().map(str::to_owned);
+                    if token.is_none() {
+                        break;
+                    }
+                }
+                Ok(json!({ "bars": out }))
+            },
+        )
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct ContractsAsk {
+    underlying: String,
+    from: String,
+    to: String,
+}
+
+/// Option contracts of an underlying expiring between two dates, expired
+/// ones included: `/option_contracts?underlying=&from=&to=`.
+async fn option_contracts(
+    AxState(app): AxState<Arc<App>>,
+    Query(ask): Query<ContractsAsk>,
+) -> Response {
+    let underlying = ask.underlying.trim().to_uppercase();
+    if !symbol_ok(&underlying) || !date_ok(&ask.from) || !date_ok(&ask.to) {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "underlying: a stock symbol; from and to: YYYY-MM-DD",
+        );
+    }
+    let today = ny_date_time(unix_seconds() as i64).0;
+    let ttl = Duration::from_secs(if ask.to < today { 86_400 } else { 3600 });
+    let a = app.clone();
+    let (from, to) = (ask.from.clone(), ask.to.clone());
+    answer(
+        app.kept(format!("contracts|{underlying}|{from}|{to}"), ttl, || async move {
+            let mut out = Vec::new();
+            // Expired contracts are "inactive"; listed ones "active".
+            for status in ["inactive", "active"] {
+                let mut token: Option<String> = None;
+                for _ in 0..10 {
+                    let mut q = vec![
+                        ("underlying_symbols", underlying.clone()), ("status", status.to_owned()),
+                        ("expiration_date_gte", from.clone()), ("expiration_date_lte", to.clone()), ("limit", "10000".to_owned()),
+                    ];
+                    if let Some(t) = &token {
+                        q.push(("page_token", t.clone()));
+                    }
+                    let v = a.get("/v2/options/contracts", &q).await?;
+                    for c in v["option_contracts"].as_array().into_iter().flatten() {
+                        out.push(json!({ "symbol": c["symbol"], "expiry": c["expiration_date"], "type": c["type"], "strike": c["strike_price"].as_str().and_then(|x| x.parse::<f64>().ok()) }));
+                    }
+                    token = v["next_page_token"].as_str().map(str::to_owned);
+                    if token.is_none() {
+                        break;
+                    }
+                }
+            }
+            Ok(json!({ "underlying": underlying, "contracts": out }))
         })
         .await,
     )
@@ -506,7 +669,7 @@ async fn main() {
     observer.describe(json!({
         "role": "Market data for any symbol on request: stock snapshots, bars and option chains with IV and greeks, from Alpaca.",
         "upstream": [{ "id": "alpaca-data-api", "label": "Alpaca", "sub": format!("{} stocks, {} options", args.feed, args.options_feed), "kind": "flow", "via": "https" }],
-        "streams": { "bars": "/bars", "snapshots": "/snapshots", "chain": "/chain", "news_search": "/news" },
+        "streams": { "bars": "/bars", "snapshots": "/snapshots", "chain": "/chain", "news_search": "/news", "option_bars": "/option_bars", "option_contracts": "/option_contracts" },
     }));
     let app = Arc::new(App {
         http: reqwest::Client::builder()
@@ -544,6 +707,8 @@ async fn main() {
         .route("/bars", get(bars))
         .route("/chain", get(option_chain))
         .route("/news", get(news))
+        .route("/option_bars", get(option_bars))
+        .route("/option_contracts", get(option_contracts))
         .with_state(app)
         .merge(observer.router());
     let listen = listen_address("ALPACA_DATA_LISTEN", "127.0.0.1:9123");
