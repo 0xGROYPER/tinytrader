@@ -124,11 +124,33 @@ async function impliedMoves(sym, tradingDays) {
   return { spot: v.spot, moves, report: rep };
 }
 
+// Option positions on the chart: the strikes of the account's open option
+// positions on the charted underlying (SPX also shows SPXW), short solid, long
+// dotted, from the accounts service. Only POS_ACCOUNT's positions are drawn.
+const POS_ACCOUNT = 'paper-1';
+const OCC = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/;
+function optionPositions(sym) {
+  const list = Object.values(fleet.snap?.services || {}).map(s => s?.accounts?.accounts).find(Array.isArray) || [];
+  const acct = list.find(a => a.name === POS_ACCOUNT);
+  const roots = sym === 'SPX' ? ['SPX', 'SPXW'] : [sym];
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const legs = new Map();
+  for (const p of acct?.positions || []) {
+    const m = OCC.exec(p.symbol || '');
+    if (!m || !roots.includes(m[1])) continue;
+    const expiry = `20${m[2]}-${m[3]}-${m[4]}`, strike = Number(m[6]) / 1000, type = m[5];
+    if (expiry < today) continue;
+    const key = `${expiry}|${strike}|${type}`;
+    legs.set(key, { expiry, strike, type, qty: (legs.get(key)?.qty || 0) + Number(p.qty || 0) });
+  }
+  return { label: acct?.label || POS_ACCOUNT, legs: [...legs.values()].filter(l => l.qty !== 0) };
+}
+
 defineWidget('candles', {
   title: 'Candles',
   mount(el) {
     const my = { pick: null, days: 1, size: 60, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true, fit: true,
-      im: true, imLines: [], imFor: '', imAt: 0, imText: '' };
+      im: true, imLines: [], imFor: '', imAt: 0, imText: '', pos: true, posLines: [], posSig: '' };
     el.innerHTML = '<div class="cd"><div class="cd-bar"></div><div class="cd-chart"></div><p class="cd-msg muted"></p></div>';
     const bar = el.querySelector('.cd-bar'), box = /** @type {HTMLElement} */ (el.querySelector('.cd-chart')), msg = el.querySelector('.cd-msg');
     const head = () => {
@@ -139,6 +161,7 @@ defineWidget('candles', {
            <span class="chips">${RANGES.map(([l, d]) => `<button type="button" class="chip-btn" data-cd-days="${d}" aria-pressed="${my.days === d}">${l}</button>`).join('')}</span>
            <span class="chips">${SIZES.filter(([, , most]) => my.days <= most).map(([l, z]) => `<button type="button" class="chip-btn" data-cd-size="${z}" aria-pressed="${my.size === z}">${l}</button>`).join('')}</span>
            <span class="chips"><button type="button" class="chip-btn" data-cd-im aria-pressed="${my.im}" title="Implied move from the option chain: over the chart’s range, to today’s close (0DTE), and to the first expiry after an earnings report">IM</button></span>
+           <span class="chips"><button type="button" class="chip-btn" data-cd-pos aria-pressed="${my.pos}" title="Option position strikes on this underlying (${esc(POS_ACCOUNT)}): short solid, long dotted">Pos</button></span>
            <span class="cd-last mono">${esc(my.last)}${my.im && my.imText ? ` · <span class="cd-im">${esc(my.imText)}</span>` : ''}</span>`
         : '';
       msg.textContent = !list.length ? (theme() ? 'No service serves bars for the theme’s symbols.' : 'No relay serves bars yet.') : my.err ? my.err : my.note || '';
@@ -181,6 +204,7 @@ defineWidget('candles', {
           : `${lastBar[4].toFixed(2)} · ${new Date(lastBar[0] * 1000).toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' })} ET`;
         my.err = null; my.note = v.note || (bars.length ? '' : `No bars for ${symbol} in this range yet.`);
         await drawMoves(L, symbol);
+        drawPositions(L, symbol);
       } catch (e) { my.err = e.message; }
       head();
     }
@@ -213,7 +237,25 @@ defineWidget('candles', {
       }
       my.imText = im.moves.map(text).join(' · ');
     }
-    const fresh = () => { my.chart?.remove(); my.chart = my.candles = my.volume = null; my.imLines = []; my.imFor = ''; my.last = ''; my.fit = true; head(); load(); };
+    // Position strikes: redrawn only when the positions change.
+    function drawPositions(L, symbol) {
+      const { label, legs } = my.pos ? optionPositions(symbol) : { label: '', legs: [] };
+      const sig = `${symbol}|${legs.map(l => `${l.expiry}${l.type}${l.strike}x${l.qty}`).sort().join(',')}`;
+      if (sig === my.posSig || !my.candles) return;
+      for (const l of my.posLines) my.candles.removePriceLine(l);
+      my.posLines = [];
+      my.posSig = sig;
+      const day = d => new Date(d + 'T12:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short', day: 'numeric' });
+      for (const l of legs) {
+        const short = l.qty < 0;
+        my.posLines.push(my.candles.createPriceLine({
+          price: l.strike, color: short ? css('--crit') || '#c0392b' : css('--muted') || '#888',
+          lineWidth: short ? 2 : 1, lineStyle: short ? L.LineStyle.Solid : L.LineStyle.Dotted, axisLabelVisible: true,
+          title: `${label} ${short ? 'short' : 'long'} ${l.strike}${l.type} ×${Math.abs(l.qty)} ${day(l.expiry)}`,
+        }));
+      }
+    }
+    const fresh = () => { my.chart?.remove(); my.chart = my.candles = my.volume = null; my.imLines = []; my.imFor = ''; my.posLines = []; my.posSig = ''; my.last = ''; my.fit = true; head(); load(); };
     const click = e => {
       const p = e.target.closest('[data-cd-pick]');
       if (p) { const [service, symbol] = p.dataset.cdPick.split('|'); my.pick = { service, symbol }; fresh(); return; }
@@ -221,7 +263,8 @@ defineWidget('candles', {
       if (d) { my.days = +d.dataset.cdDays; my.size = RANGES.find(r => r[1] === my.days)?.[2] ?? my.size; fresh(); return; }
       const z = e.target.closest('[data-cd-size]');
       if (z) { my.size = +z.dataset.cdSize; fresh(); return; }
-      if (e.target.closest('[data-cd-im]')) { my.im = !my.im; my.imFor = ''; head(); load(); }
+      if (e.target.closest('[data-cd-im]')) { my.im = !my.im; my.imFor = ''; head(); load(); return; }
+      if (e.target.closest('[data-cd-pos]')) { my.pos = !my.pos; head(); load(); }
     };
     el.addEventListener('click', click);
     // The symbol picked in a watchlist, or a new theme.
