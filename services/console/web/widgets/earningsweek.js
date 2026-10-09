@@ -38,7 +38,7 @@ defineWidget('earningsweek', {
       .filter(Boolean).join(' · ');
     const cls = (r, watched) => `${watched.has(r.symbol) ? ' ew-watch' : ''}${r.disputed ? ' ew-disputed' : ''}`;
     const tile = (r, watched) => `<button class="ew-tile${cls(r, watched)}" data-sym="${esc(r.symbol)}" title="${esc(tip(r))}">
-        <span class="ew-sym">${esc(r.symbol)}</span><span class="ew-name">${esc((r.name || '').replace(/,? (Inc|Corp|Corporation|Co|Company|Ltd|plc|Holdings|Group)\.?$/i, ''))}</span><span class="ew-cap">${cap(r.market_cap)}</span></button>`;
+        <span class="ew-sym">${esc(r.symbol)}</span><span class="ew-name">${esc((r.name || '').replace(/,?\s+(?:&\s*)?(Inc|Corp|Corporation|Co|Company|Ltd|plc|Holdings|Group)\.?$/i, ''))}</span><span class="ew-cap">${cap(r.market_cap)}</span></button>`;
     const chip = (r, watched) => `<button class="ew-chip${cls(r, watched)}" data-sym="${esc(r.symbol)}" title="${esc(tip(r))}">${esc(r.symbol)}</button>`;
     const half = (list, key, label, kind, watched) => {
       const all = my.open.has(key);
