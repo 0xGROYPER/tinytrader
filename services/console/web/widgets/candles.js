@@ -76,10 +76,42 @@ function combine(bars, size) {
   return out;
 }
 
+// The implied move: the at-the-money straddle over the price, per expiry, from
+// a service serving option chains (alpaca-data). Drawn as dashed lines at the
+// price plus and minus it, for the next expiry and, when the company reports
+// within the chain's range, the first expiry after the report.
+const chainService = () => (fleet.topo?.services || []).find(s => s.chain)?.id || null;
+const nextReport = sym => {
+  const e = Object.values(fleet.snap?.services || {}).map(s => s?.earnings).find(x => Array.isArray(x?.reports));
+  const today = new Date().toISOString().slice(0, 10);
+  return (e?.reports || []).filter(r => r.symbol === sym && r.date >= today).sort((a, b) => a.date.localeCompare(b.date))[0] || null;
+};
+async function impliedMoves(sym) {
+  const svc = chainService();
+  if (!svc) return null;
+  const to = new Date(Date.now() + 45 * 86400e3).toISOString().slice(0, 10);
+  const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/chain?underlying=${encodeURIComponent(sym)}&to=${to}`, { cache: 'no-store' });
+  if (!r.ok) return null;
+  const v = await r.json().catch(() => null);
+  const today = new Date().toISOString().slice(0, 10);
+  const exps = (v?.expiries || []).filter(x => x.expiry > today && x.implied_move > 0).sort((a, b) => a.expiry.localeCompare(b.expiry));
+  if (!v?.spot || !exps.length) return null;
+  const out = [{ ...exps[0], kind: 'next' }];
+  const rep = nextReport(sym);
+  if (rep) {
+    // The first expiry that includes the reaction to the report.
+    const e = exps.find(x => rep.when === 'after-close' ? x.expiry > rep.date : x.expiry >= rep.date);
+    if (e && e.expiry === out[0].expiry) out[0].kind = 'earnings';
+    else if (e) out.push({ ...e, kind: 'earnings' });
+  }
+  return { spot: v.spot, moves: out, report: rep };
+}
+
 defineWidget('candles', {
   title: 'Candles',
   mount(el) {
-    const my = { pick: null, days: 1, size: 60, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true, fit: true };
+    const my = { pick: null, days: 1, size: 60, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true, fit: true,
+      im: true, imLines: [], imFor: '', imAt: 0, imText: '' };
     el.innerHTML = '<div class="cd"><div class="cd-bar"></div><div class="cd-chart"></div><p class="cd-msg muted"></p></div>';
     const bar = el.querySelector('.cd-bar'), box = /** @type {HTMLElement} */ (el.querySelector('.cd-chart')), msg = el.querySelector('.cd-msg');
     const head = () => {
@@ -89,7 +121,8 @@ defineWidget('candles', {
         ? `<span class="chips">${list.map(c => `<button type="button" class="chip-btn" data-cd-pick="${esc(c.service)}|${esc(c.symbol)}" aria-pressed="${my.pick?.service === c.service && my.pick?.symbol === c.symbol}">${esc(c.symbol)}</button>`).join('')}</span>
            <span class="chips">${RANGES.map(([l, d]) => `<button type="button" class="chip-btn" data-cd-days="${d}" aria-pressed="${my.days === d}">${l}</button>`).join('')}</span>
            <span class="chips">${SIZES.filter(([, , most]) => my.days <= most).map(([l, z]) => `<button type="button" class="chip-btn" data-cd-size="${z}" aria-pressed="${my.size === z}">${l}</button>`).join('')}</span>
-           <span class="cd-last mono">${esc(my.last)}</span>`
+           <span class="chips"><button type="button" class="chip-btn" data-cd-im aria-pressed="${my.im}" title="Implied move from the option chain: the at-the-money straddle, for the next expiry and the first after an earnings report">IM</button></span>
+           <span class="cd-last mono">${esc(my.last)}${my.im && my.imText ? ` · <span class="cd-im">${esc(my.imText)}</span>` : ''}</span>`
         : '';
       msg.textContent = !list.length ? (theme() ? 'No service serves bars for the theme’s symbols.' : 'No relay serves bars yet.') : my.err ? my.err : my.note || '';
     };
@@ -130,17 +163,43 @@ defineWidget('candles', {
           ? `${lastBar[4].toFixed(2)} · ${new Date((lastBar[0] + 43200) * 1000).toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short', day: 'numeric' })}`
           : `${lastBar[4].toFixed(2)} · ${new Date(lastBar[0] * 1000).toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' })} ET`;
         my.err = null; my.note = v.note || (bars.length ? '' : `No bars for ${symbol} in this range yet.`);
+        await drawMoves(L, symbol);
       } catch (e) { my.err = e.message; }
       head();
     }
-    const fresh = () => { my.chart?.remove(); my.chart = my.candles = my.volume = null; my.last = ''; my.fit = true; head(); load(); };
+    // Implied-move lines: refetched when the symbol changes and every 5 minutes.
+    async function drawMoves(L, symbol) {
+      const clear = () => { for (const l of my.imLines) my.candles?.removePriceLine(l); my.imLines = []; };
+      if (!my.im) { clear(); my.imText = ''; return; }
+      if (my.imFor === symbol && Date.now() - my.imAt < 300e3 && my.imLines.length) return;
+      let im = null;
+      try { im = await impliedMoves(symbol); } catch { im = null; }
+      if (!my.alive || my.pick?.symbol !== symbol || !my.candles) return;
+      clear();
+      my.imFor = symbol; my.imAt = Date.now();
+      if (!im) { my.imText = ''; return; }
+      const day = d => new Date(d + 'T12:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short', day: 'numeric' });
+      for (const m of im.moves) {
+        const color = m.kind === 'earnings' ? css('--warn') || '#d98a1c' : css('--accent') || '#5b6fd6';
+        const label = `${m.kind === 'earnings' ? 'earnings ' : ''}±${(m.implied_move * 100).toFixed(1)}% ${day(m.expiry)}`;
+        for (const sign of [1, -1]) {
+          my.imLines.push(my.candles.createPriceLine({
+            price: im.spot * (1 + sign * m.implied_move), color, lineWidth: 1, lineStyle: L.LineStyle.Dashed,
+            axisLabelVisible: true, title: sign > 0 ? label : '',
+          }));
+        }
+      }
+      my.imText = im.moves.map(m => `${m.kind === 'earnings' ? `earnings (${day(im.report.date)}) ` : 'next '}±${(m.implied_move * 100).toFixed(1)}% to ${day(m.expiry)}`).join(' · ');
+    }
+    const fresh = () => { my.chart?.remove(); my.chart = my.candles = my.volume = null; my.imLines = []; my.imFor = ''; my.last = ''; my.fit = true; head(); load(); };
     const click = e => {
       const p = e.target.closest('[data-cd-pick]');
       if (p) { const [service, symbol] = p.dataset.cdPick.split('|'); my.pick = { service, symbol }; fresh(); return; }
       const d = e.target.closest('[data-cd-days]');
       if (d) { my.days = +d.dataset.cdDays; my.size = RANGES.find(r => r[1] === my.days)?.[2] ?? my.size; fresh(); return; }
       const z = e.target.closest('[data-cd-size]');
-      if (z) { my.size = +z.dataset.cdSize; fresh(); }
+      if (z) { my.size = +z.dataset.cdSize; fresh(); return; }
+      if (e.target.closest('[data-cd-im]')) { my.im = !my.im; my.imFor = ''; head(); load(); }
     };
     el.addEventListener('click', click);
     // The symbol picked in a watchlist, or a new theme.
