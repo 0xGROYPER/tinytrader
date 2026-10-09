@@ -30,6 +30,7 @@
         ./nix/generic.nix
         ./nix/web.nix
         ./nix/images.nix
+        ./nix/ai-proxy.nix
       ];
 
       flake = {
