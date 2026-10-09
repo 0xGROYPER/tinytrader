@@ -8,9 +8,15 @@
 #   AI_PROXY_MODELS     "free" (default: OpenRouter's current :free models,
 #                       read at each start) or a comma-separated list of
 #                       OpenRouter model ids
+#   AI_PROXY_POOL_EXCLUDE  models left out of the "free-pool" alias (an
+#                       extended regex; default: classifiers and tiny models)
 #   AI_PROXY_PORT       default 8317;  AI_PROXY_STATE  default
 #                       $XDG_STATE_HOME/ai-proxy (holds the rendered config,
 #                       mode 600, and CLIProxyAPI's auth folder)
+# Two routed aliases: "free" is OpenRouter's own router over the free models
+# available at the time (openrouter/free); "free-pool" is a pool of the
+# served models, round-robin, moving on to the next model in the same request
+# when one fails or is rate-limited before answering.
 # CLIProxyAPI reads keys only from its config file, so the file is written at
 # each start into the private state folder and never anywhere else.
 { ... }:
@@ -78,6 +84,11 @@
             printf '    api-key-entries:\n      - api-key: %s\n    models:\n' "$(jq -Rn --arg k "$openrouter" '$k')"
             while read -r m; do
               [ -n "$m" ] && printf '      - name: %s\n        alias: %s\n' "$(jq -Rn --arg m "$m" '$m')" "$(jq -Rn --arg m "''${m%:free}" '$m')"
+            done <<<"$models"
+            printf '      - name: "openrouter/free"\n        alias: "free"\n'
+            exclude="''${AI_PROXY_POOL_EXCLUDE:-content-safety|lfm-}"
+            while read -r m; do
+              [ -n "$m" ] && ! grep -qE "$exclude" <<<"$m" && printf '      - name: %s\n        alias: "free-pool"\n' "$(jq -Rn --arg m "$m" '$m')"
             done <<<"$models"
           } > "$config.tmp"
           mv "$config.tmp" "$config"
