@@ -10,7 +10,8 @@ import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, setFocus } from '../lib/theme.js';
 
-const TILES = 4; // the largest in each half-day, as tiles
+const TILE_CAP = 50e9; // companies at least this large get a tile
+const TILES = 8; // at most this many tiles in a half-day (at least 2)
 const SHOW = 24; // tickers per half-day before "more"
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
 const iso = d => d.toISOString().slice(0, 10);
@@ -42,12 +43,13 @@ defineWidget('earningsweek', {
     const chip = (r, watched) => `<button class="ew-chip${cls(r, watched)}" data-sym="${esc(r.symbol)}" title="${esc(tip(r))}">${esc(r.symbol)}</button>`;
     const half = (list, key, label, kind, watched) => {
       const all = my.open.has(key);
-      const rest = list.slice(TILES);
+      const n = Math.min(TILES, Math.max(2, list.filter(r => (r.market_cap || 0) >= TILE_CAP).length));
+      const rest = list.slice(n);
       const shown = all ? rest : rest.slice(0, SHOW);
       const more = rest.length - shown.length;
       return `<div class="ew-half ew-${kind}">
         <p class="ew-label"><span>${label}</span><span class="ew-n">${list.length || ''}</span></p>
-        ${list.length ? `<div class="ew-tiles">${list.slice(0, TILES).map(r => tile(r, watched)).join('')}</div>
+        ${list.length ? `<div class="ew-tiles">${list.slice(0, n).map(r => tile(r, watched)).join('')}</div>
         <div class="ew-chips">${shown.map(r => chip(r, watched)).join('')}${more > 0 ? `<button class="ew-more" data-key="${key}">+${more}</button>` : ''}</div>`
         : '<p class="ew-none">No reports</p>'}</div>`;
     };
@@ -79,7 +81,7 @@ defineWidget('earningsweek', {
             ${other.length ? half(other, `${d}o`, 'Time not given', 'tbd', watched) : ''}
           </section>`;
         }).join('')}</div>
-        <footer class="ew-foot"><span>Largest first by market capitalisation · outlined: this workspace's symbols · dashed: calendars disagree</span><span>tinytrader · Nasdaq, Finnhub, Alpha Vantage</span></footer>
+        <footer class="ew-foot"><span>Largest first by market capitalisation; tiles for $50B and over · outlined: this workspace's symbols · dashed: calendars disagree on the date</span><span>tinytrader · Nasdaq, Finnhub, Alpha Vantage</span></footer>
       </div>`;
     };
     el.addEventListener('click', ev => {
