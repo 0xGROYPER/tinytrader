@@ -28,6 +28,7 @@ import '../widgets/correlation.js';
 import '../widgets/earnings.js';
 import '../widgets/notebook.js';
 import '../widgets/terminal.js';
+import '../widgets/earningsweek.js';
 import { setTheme, PRESETS, parseSymbols, parseKeywords, LAYERS, DEFAULT_LAYERS } from './theme.js';
 const state = { openGroups: new Set(), navKey: '', tab: 'workspace', lastOk: 0, collections: [], doc: null };
 /** An element by ID, typed loosely enough for forms and buttons alike. @type {(id: string) => HTMLInputElement} */
