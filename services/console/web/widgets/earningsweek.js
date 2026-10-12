@@ -5,7 +5,7 @@
 // bigger and the workspace theme's symbols marked. Hover for the company, its
 // size and the EPS estimate; click to point the workspace's charts at it.
 // Reports come from the economic calendar service (its merged calendars).
-import { defineWidget } from '../lib/widgets.js';
+import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, setFocus } from '../lib/theme.js';
@@ -56,7 +56,11 @@ defineWidget('earningsweek', {
     const day = d => new Date(d + 'T12:00:00Z');
     const render = () => {
       const all = reports();
-      if (!all) { el.innerHTML = '<p class="muted">No earnings calendar is being served.</p>'; return; }
+      if (!all) { paint(el, '<p class="muted">No earnings calendar is being served.</p>'); return; }
+      // Unchanged reports, week and theme: nothing to redraw.
+      const inputs = [my.week, [...my.open].join(), (theme()?.symbols || []).join(), iso(new Date())].join('\u0000');
+      if (all === my.drawnFrom && inputs === my.drawnKey) return;
+      my.drawnFrom = all; my.drawnKey = inputs;
       const watched = new Set(theme()?.symbols || []);
       const days = DAYS.map((_, i) => { const d = new Date(my.week); d.setUTCDate(d.getUTCDate() + i); return iso(d); });
       const today = iso(new Date());
@@ -66,7 +70,7 @@ defineWidget('earningsweek', {
       const big = inWeek.filter(r => (r.market_cap || 0) >= 100e9).length;
       const fmt = (d, o) => day(d).toLocaleDateString(undefined, o);
       const range = `${fmt(days[0], { month: 'long', day: 'numeric' })} – ${fmt(days[4], days[0].slice(5, 7) === days[4].slice(5, 7) ? { day: 'numeric' } : { month: 'long', day: 'numeric' })}, ${days[4].slice(0, 4)}`;
-      el.innerHTML = `<div class="ew">
+      paint(el, `<div class="ew">
         <header class="ew-head">
           <div><p class="ew-kicker">Earnings this week</p><h3 class="ew-title">${range}</h3></div>
           <div class="ew-stats"><span><b>${inWeek.length}</b> reports</span><span><b>${big}</b> over $100B</span></div>
@@ -82,7 +86,7 @@ defineWidget('earningsweek', {
           </section>`;
         }).join('')}</div>
         <footer class="ew-foot"><span>Largest first by market capitalisation; tiles for $50B and over · outlined: this workspace's symbols · dashed: calendars disagree on the date</span><span>tinytrader · Nasdaq, Finnhub, Alpha Vantage</span></footer>
-      </div>`;
+      </div>`);
     };
     el.addEventListener('click', ev => {
       const t = ev.target.closest('button');

@@ -3,7 +3,7 @@
 // days, from daily bars (a service with bars for any symbol, alpaca-data),
 // shown as a matrix coloured blue (-1) through white (0) to red (+1). Each
 // row also gives the symbol's annualised realised volatility over the window.
-import { defineWidget } from '../lib/widgets.js';
+import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme } from '../lib/theme.js';
@@ -61,7 +61,7 @@ defineWidget('correlation', {
   title: 'Correlation',
   mount(el) {
     const my = { window: 60, m: null, err: null, alive: true, seq: 0 };
-    const update = () => { const top = el.scrollTop; el.innerHTML = draw(my); el.scrollTop = top; };
+    const update = () => { paint(el, draw(my)); };
     async function load() {
       const t = theme(), svc = source(), seq = ++my.seq;
       if (!t || t.symbols.length < 2 || !svc) return update();

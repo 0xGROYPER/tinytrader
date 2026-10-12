@@ -12,6 +12,17 @@ export function defineWidget(name, def) {
 export const widget = name => registry.get(name);
 export const widgetNames = () => [...registry.keys()];
 
+// Replaces an element's HTML, keeping its scroll position, unless it is
+// unchanged: most polls change nothing a widget shows, and rebuilding its DOM
+// every two seconds costs layout, style and garbage collection for nothing.
+/** @param {HTMLElement} el @param {string} html @returns {boolean} whether it changed */
+export function paint(el, html) {
+  if (/** @type {any} */ (el).ttHtml === html) return false;
+  const top = el.scrollTop; el.innerHTML = html; el.scrollTop = top;
+  /** @type {any} */ (el).ttHtml = html;
+  return true;
+}
+
 // Mounts for a widget that redraws its HTML on every update, keeping its
 // scroll position. `draw` returns the HTML; `wire(el)`, if given, attaches
 // listeners once, to the element only.
@@ -22,7 +33,7 @@ export const widgetNames = () => [...registry.keys()];
  */
 export function redrawing(draw, wire) {
   return el => {
-    const update = () => { const top = el.scrollTop; el.innerHTML = draw(); el.scrollTop = top; };
+    const update = () => { paint(el, draw()); };
     const off = wire?.(el, update);
     update();
     return { update, dispose: () => off?.() };

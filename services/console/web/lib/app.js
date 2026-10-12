@@ -796,10 +796,26 @@ function status() {
 async function loadTopology() {
   try { const r = await fetch('/api/topology', { cache: 'no-store' }); if (r.ok) { fleet.topo = await r.json(); document.title = fleet.topo.name ? `tinytrader · ${fleet.topo.name}` : 'tinytrader'; } } catch (_) {}
 }
+// The snapshot, as changes since the last answer: each service's unchanged
+// fields keep their previous value (and object), so most polls carry only
+// what moved (see services/console/src/delta.rs).
+const since = { generation: 0, epoch: '' };
 async function poll() {
   try {
-    const r = await fetch('/api/state', { cache: 'no-store' });
-    if (r.ok) { fleet.snap = await r.json(); state.lastOk = Date.now(); }
+    const r = await fetch(`/api/state?since=${since.generation}&epoch=${since.epoch}`, { cache: 'no-store' });
+    if (r.ok) {
+      const v = await r.json(), old = v.full ? {} : (fleet.snap?.services || {}), services = {};
+      for (const [id, s] of Object.entries(v.services || {})) {
+        if (!s || typeof s !== 'object' || !Array.isArray(s._fields)) { services[id] = s; continue; }
+        const prev = old[id] || {}, o = {};
+        for (const f of s._fields) o[f] = f in s ? s[f] : prev[f];
+        services[id] = o;
+      }
+      since.generation = v.generation ?? 0; since.epoch = v.epoch ?? '';
+      delete v.generation; delete v.epoch; delete v.full;
+      fleet.snap = { ...v, services };
+      state.lastOk = Date.now();
+    }
   } catch (_) {}
   if (!document.querySelector('.tip:not([hidden])')) render(); else status();
 }

@@ -3,7 +3,7 @@
 // account with an order gateway also gets Flatten (close every position at
 // market, through the gateway, after typing the account's name) and, while
 // its gateway halts opens, Resume opening.
-import { defineWidget } from '../lib/widgets.js';
+import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 
@@ -112,7 +112,7 @@ const draw = () => `<div><h1>Accounts</h1><p class="muted" style="margin:0">Bala
 function mount(el) {
   const update = () => {
     if (el.contains(document.activeElement) && document.activeElement.matches('.acct-flat-input')) return;
-    const top = el.scrollTop; el.innerHTML = draw(); el.scrollTop = top;
+    paint(el, draw());
     readGateways(update);
   };
   const click = async e => {

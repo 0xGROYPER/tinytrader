@@ -1,7 +1,7 @@
 // Watchlist: the workspace theme's symbols with price and day change, from a
 // service serving stock snapshots (alpaca-data), every few seconds while
 // shown. Clicking a symbol makes it the one charts follow.
-import { defineWidget } from '../lib/widgets.js';
+import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused, setFocus } from '../lib/theme.js';
@@ -34,7 +34,7 @@ defineWidget('watchlist', {
   title: 'Watchlist',
   mount(el) {
     const my = { rows: null, err: null, at: 0, alive: true };
-    const update = () => { const top = el.scrollTop; el.innerHTML = draw(my); el.scrollTop = top; };
+    const update = () => { paint(el, draw(my)); };
     async function load() {
       const t = theme(), svc = source();
       if (!my.alive || !t?.symbols.length || !svc) return;

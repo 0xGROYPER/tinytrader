@@ -1,7 +1,7 @@
 // System graph: what runs where, and how data flows. Hovering a part shows
 // its details in a floating card; clicking pins the card, which then adds a
 // live event tail and every metric. Only what's running now is drawn.
-import { defineWidget } from '../lib/widgets.js';
+import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf } from '../lib/fleet.js';
 import { esc, bytes, duration, fmt, labelText, clip } from '../lib/format.js';
 
@@ -280,7 +280,7 @@ defineWidget('overview', {
     }
     function hideSoon() { clearTimeout(g.hideT); g.hideT = setTimeout(() => { if (!g.node) { g.hover = null; g.pop?.remove(); g.pop = null; } }, 150); }
     function draw() {
-      const top = el.scrollTop; el.innerHTML = topology(g); el.scrollTop = top;
+      paint(el, topology(g));
     }
     g.pin = id => { if (!activeGraph().byId[id]) return; g.node = id; g.ev.fresh = new Set(); draw(); card(); };
     const over = e => {

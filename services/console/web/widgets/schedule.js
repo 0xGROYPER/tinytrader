@@ -5,7 +5,7 @@
 // on events, yields to capture). Details are in the tooltips. The strip: a
 // bar for active hours (bright while running), hatched for a pause, a thin
 // line for always running.
-import { defineWidget } from '../lib/widgets.js';
+import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState, statusOf } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 
@@ -103,7 +103,7 @@ defineWidget('schedule', {
   title: 'Schedule',
   mount(el) {
     const my = { open: new Set() };
-    const update = () => { const top = el.scrollTop; el.innerHTML = draw(my); el.scrollTop = top; };
+    const update = () => { paint(el, draw(my)); };
     const click = e => { const b = e.target.closest('[data-bundle]'); if (!b) return; const n = b.dataset.bundle; my.open.has(n) ? my.open.delete(n) : my.open.add(n); update(); };
     el.addEventListener('click', click);
     update();

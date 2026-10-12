@@ -20,6 +20,10 @@ export function drawCharts() {
     const pts = (svcState(id)[source] || {})[key] || [];
     if (pts.length < 2) { el.innerHTML = '<div class="empty" style="padding:8px 0">Collecting…</div>'; return; }
     const W = el.clientWidth || 320, H = 110, m = { l: 0, r: 6, t: 8, b: 8 };
+    // Unchanged series keep their object between polls: skip a redraw that would draw the same.
+    const e = /** @type {any} */ (el);
+    if (e.ttPts === pts && e.ttW === W && el.firstElementChild) return;
+    e.ttPts = pts; e.ttW = W;
     const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
     const x0 = xs[0], x1 = xs[xs.length - 1], lo = Math.min(...ys), hi = Math.max(...ys), pad = (hi - lo) * 0.12 || hi * 0.0005 || 1;
     const X = x => m.l + (x - x0) / (x1 - x0 || 1) * (W - m.l - m.r), Y = y => m.t + (1 - (y - (lo - pad)) / (hi - lo + 2 * pad)) * (H - m.t - m.b);

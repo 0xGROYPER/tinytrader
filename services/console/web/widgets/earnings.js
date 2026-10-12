@@ -16,7 +16,7 @@
 // Chains and bars come from alpaca-data, reports and past earnings from
 // econ-calendar (whose Alpha Vantage histories are limited to 20 a day, so
 // they load for theme companies and for a row when it's opened).
-import { defineWidget } from '../lib/widgets.js';
+import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, setFocus } from '../lib/theme.js';
@@ -139,7 +139,7 @@ defineWidget('earnings', {
   mount(el) {
     // A theme's companies report over the coming weeks; otherwise the next two.
     const my = { days: theme()?.symbols.length ? 42 : 14, min: 200e9, open: null, opts: new Map(), hist: new Map(), alive: true, busy: false };
-    const update = () => { const top = el.scrollTop; el.innerHTML = draw(my); el.scrollTop = top; };
+    const update = () => { paint(el, draw(my)); };
     async function json(url) {
       const r = await fetch(url, { cache: 'no-store' });
       const v = await r.json().catch(() => ({}));

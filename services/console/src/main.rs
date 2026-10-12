@@ -6,7 +6,8 @@
 //!   edges and panels.
 //! - `GET /api/state`: the latest snapshot of every service: container state
 //!   from the Docker Engine API, plus each service's `/health`, `/metrics`
-//!   and optional `/recent` endpoints.
+//!   and optional `/recent` endpoints. With `?since=G&epoch=E` (the last
+//!   answer's), only the service fields changed since (see `delta`).
 //!
 //! A background task refreshes the snapshot every two seconds, so any number
 //! of viewers cost one round of polling. The console never writes to Docker
@@ -61,6 +62,7 @@
 //!   roadmap to start it from (optional).
 
 mod collections;
+mod delta;
 mod gateways;
 mod notify;
 mod reminders;
@@ -97,6 +99,8 @@ struct App {
     /// Order gateways by account, for Flatten and Resume.
     gateways: gateways::Gateways,
     polls: AtomicU64,
+    /// Changes-only snapshots for pages that poll.
+    delta: delta::Delta,
     collections: Vec<collections::Collection>,
 }
 
@@ -123,6 +127,11 @@ async fn main() {
     let app = Arc::new(App {
         poller: Poller::new(config),
         polls: AtomicU64::new(0),
+        delta: delta::Delta::new(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64),
+        ),
         collections: collections::parse(&env("CONSOLE_COLLECTIONS", "")),
         store: std::env::var("CONSOLE_STORE")
             .ok()
@@ -334,8 +343,13 @@ async fn topology(AxumState(app): AxumState<Arc<App>>) -> Response {
     no_store(axum::Json(app.poller.topology_json()))
 }
 
-async fn state(AxumState(app): AxumState<Arc<App>>) -> Response {
-    no_store(axum::Json(app.poller.snapshot_json()))
+async fn state(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    let since = q.get("since").and_then(|v| v.parse().ok());
+    let epoch = q.get("epoch").and_then(|v| v.parse().ok());
+    no_store(axum::Json(app.delta.answer(app.poller.snapshot_json(), since, epoch)))
 }
 
 /// Live tail of a service's events, forwarded from the service.

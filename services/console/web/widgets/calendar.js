@@ -1,4 +1,4 @@
-import { defineWidget } from '../lib/widgets.js';
+import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { theme, LAYERS, DEFAULT_LAYERS } from '../lib/theme.js';
@@ -138,7 +138,7 @@ defineWidget('calendar', {
       const lo = el.scrollTop + 4, hi = el.scrollTop + el.clientHeight - pop.offsetHeight - 4;
       pop.style.top = `${Math.max(lo, Math.min(c.top - h.top + el.scrollTop, hi))}px`;
     };
-    const update = () => { const top = el.scrollTop; el.innerHTML = draw(my); el.scrollTop = top; card(); };
+    const update = () => { paint(el, draw(my)); card(); };
     const over = e => {
       if (e.target.closest('.cal-pop')) return;
       const day = e.target.closest('[data-day]')?.dataset.day || null;

@@ -3,7 +3,7 @@
 // theme, the Theme chip (chosen first) shows stories on its symbols or
 // mentioning its keywords, adding recent stories on its symbols from a
 // service that searches news (alpaca-data).
-import { defineWidget } from '../lib/widgets.js';
+import { defineWidget, paint } from '../lib/widgets.js';
 import { newsItems, fleet } from '../lib/fleet.js';
 import { esc, ago, unentity } from '../lib/format.js';
 import { theme, onTheme } from '../lib/theme.js';
@@ -49,7 +49,7 @@ defineWidget('news', {
     const timer = setInterval(find, 60_000);
     const themed = () => { my.symbol = undefined; my.found = []; find(); update(); };
     document.addEventListener('tt-theme', themed);
-    const update = () => { const top = el.scrollTop; el.innerHTML = draw(my); el.scrollTop = top; };
+    const update = () => { paint(el, draw(my)); };
     const click = e => {
       const chip = e.target.closest('[data-news-symbol]');
       if (chip) { my.symbol = chip.dataset.newsSymbol || null; update(); }
