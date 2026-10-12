@@ -760,6 +760,21 @@ a.doc-card { text-decoration: none; }
 .sb-sum { margin: 0; font-size: 13px; line-height: 1.7; }
 .sb-msg { margin: 0; font-size: 12px; }
 .cd-over { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+.cd-legend { position: absolute; top: 4px; left: 6px; z-index: 4; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; max-width: calc(100% - 90px); font: 12px var(--mono, monospace); pointer-events: none; }
+.cd-legend > * { pointer-events: auto; }
+.cd-lg-row { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; padding: 1px 4px; border-radius: 4px; background: color-mix(in srgb, var(--bg) 82%, transparent); }
+.cd-lg-row.off { opacity: .5; }
+.cd-lg-sym { font-size: 13px; }
+.cd-sw { display: inline-block; width: 12px; height: 2px; border-radius: 1px; }
+.cd-lg-btn { min-width: 22px; min-height: 22px; padding: 0 4px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
+.cd-lg-btn:hover, .cd-lg-btn[aria-expanded="true"] { color: var(--fg); background: var(--line-soft, rgba(127,127,127,.15)); }
+.cd-lg-add { padding: 0 6px; background: color-mix(in srgb, var(--bg) 82%, transparent); }
+.cd-lg-set { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 1px 0 3px 18px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.cd-lg-set select, .cd-lg-set input { font: 12px var(--mono, monospace); padding: 2px 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface, var(--bg)); color: var(--fg); }
+.cd-lg-set input { width: 5em; }
+.cd-lg-cols { display: inline-flex; gap: 3px; }
+.cd-lg-col { width: 16px; height: 16px; padding: 0; border: 2px solid transparent; border-radius: 50%; cursor: pointer; }
+.cd-lg-col[aria-pressed="true"] { border-color: var(--fg); }
 .cd-msg { margin: 0; font-size: 13px; } .cd-msg:empty { display: none; }
 .tile-body:has(> .cd) { overflow: hidden; }
 .pool { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }

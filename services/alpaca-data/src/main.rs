@@ -5,6 +5,7 @@
 //! - `/snapshots?symbols=USO,XLE`: last price, quote, previous close and the
 //!   day's change for each (at most 100).
 //! - `/bars?symbol=AAPL&days=5&interval=60`: bars as the relays serve them
+//!   (`&end=<unix seconds>`: the `days` before then, for older history)
 //!   (`[t, o, h, l, c, v]`, `t` in Unix seconds): one-minute (`60`, the
 //!   default), 5- and 15-minute, hourly (`3600`) or daily (`86400`), over the
 //!   last `days` trading days.
@@ -523,6 +524,9 @@ struct BarAsk {
     symbol: String,
     days: Option<u64>,
     interval: Option<u64>,
+    /// Only bars before this time (unix seconds): the `days` before it, so a
+    /// chart can reach back a chunk at a time. Absent: up to now.
+    end: Option<i64>,
     /// `split` (the default: prices comparable across splits), `raw` (as
     /// traded that day: what option strikes of the time refer to), or `all`
     /// (splits and dividends).
@@ -541,10 +545,12 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
         900 => ("15Min", 120),
         3600 => ("1Hour", 730),
         86_400 => ("1Day", 3650),
+        // `days` counts weeks here.
+        604_800 => ("1Week", 1040),
         _ => {
             return refuse(
                 StatusCode::BAD_REQUEST,
-                "interval: 60, 300, 900, 3600 or 86400 seconds",
+                "interval: 60, 300, 900, 3600, 86400 or 604800 seconds",
             );
         }
     };
@@ -556,28 +562,27 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
             "adjustment: split, raw, dividend or all",
         );
     }
+    let end = ask.end.filter(|&e| e > 0);
     let a = app.clone();
     answer(
         app.kept(
-            format!("bars|{symbol}|{interval}|{days}|{adjustment}"),
+            format!("bars|{symbol}|{interval}|{days}|{adjustment}|{}", end.unwrap_or(0)),
             Duration::from_secs(60),
             || async move {
                 let now = unix_seconds() as i64;
-                // `days` counts trading days (sessions with bars): reach back far
-                // enough for weekends and holidays, then keep the last ones.
-                let start = ny_date_time(now - (days as i64 * 7 / 5 + 4) * 86_400).0;
+                let upto = end.map_or(now, |e| e.min(now));
+                // `days` counts trading days (sessions with bars; weeks for weekly
+                // bars): reach back far enough for weekends and holidays, then
+                // keep the last ones.
+                let back = if interval == 604_800 { days as i64 * 7 + 7 } else { days as i64 * 7 / 5 + 4 };
+                let start = ny_date_time(upto - back * 86_400).0;
                 // History from the full market (SIP) up to 15 minutes ago, where
                 // the free plan allows it; the stock feed (IEX) after that. IEX
                 // alone is a small slice of trading: a thin ETF can go hours
                 // without an IEX trade, leaving stale closes.
                 let cutoff = now - 16 * 60;
-                let split = a.history_feed != a.feed;
                 let mut out = Vec::new();
-                let parts: Vec<(String, Option<i64>, Option<i64>)> = if split {
-                    vec![(a.history_feed.clone(), None, Some(cutoff)), (a.feed.clone(), Some(cutoff), None)]
-                } else {
-                    vec![(a.feed.clone(), None, None)]
-                };
+                let parts = feed_windows(&a.history_feed, &a.feed, cutoff, end);
                 // Newest first, so if a long range is cut short it's the oldest
                 // part that's missing (Alpaca sends about 200 bars a page for
                 // full-market history, whatever the limit asked).
@@ -615,13 +620,32 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
                 // In time order; where the two feeds meet, the full market's bar wins.
                 out.sort_by_key(|b| b[0].as_i64().unwrap_or(0));
                 out.dedup_by_key(|b| b[0].as_i64().unwrap_or(0));
-                let keep = last_days(&out, days as usize, interval == 86_400);
+                // Alpaca's end is inclusive; `end` here is not.
+                if let Some(e) = end {
+                    out.retain(|b| b[0].as_i64().unwrap_or(0) < e);
+                }
+                let keep = last_days(&out, days as usize, interval >= 86_400);
                 let note = truncated.then(|| "only the most recent part of this range (too many bars)".to_owned());
                 Ok(json!({ "symbol": symbol, "interval": interval, "bars": &out[out.len() - keep..], "note": note }))
             },
         )
         .await,
     )
+}
+
+/// The feeds to ask and their (start, end) overrides: the full market (SIP)
+/// up to `cutoff` (15 minutes ago, where the free plan allows it) and the
+/// stock feed after, or one feed when they're the same; all ending at `end`
+/// when one is given.
+fn feed_windows(history: &str, feed: &str, cutoff: i64, end: Option<i64>) -> Vec<(String, Option<i64>, Option<i64>)> {
+    if history == feed {
+        return vec![(feed.to_owned(), None, end)];
+    }
+    match end {
+        Some(e) if e <= cutoff => vec![(history.to_owned(), None, Some(e))],
+        Some(e) => vec![(history.to_owned(), None, Some(cutoff)), (feed.to_owned(), Some(cutoff), Some(e))],
+        None => vec![(history.to_owned(), None, Some(cutoff)), (feed.to_owned(), Some(cutoff), None)],
+    }
 }
 
 /// How many of `bars` (in time order) make up the last `days` trading days:
@@ -1098,6 +1122,24 @@ mod tests {
         assert_eq!(unix("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(unix("2026-10-07T19:04:00Z"), Some(1_791_399_840));
         assert_eq!(unix("2026-10"), None);
+    }
+
+    #[test]
+    fn older_history_ends_where_asked() {
+        // Now: SIP history to the cutoff, IEX after.
+        assert_eq!(
+            feed_windows("sip", "iex", 1000, None),
+            vec![("sip".into(), None, Some(1000)), ("iex".into(), Some(1000), None)]
+        );
+        // An older chunk: SIP alone, up to its end.
+        assert_eq!(feed_windows("sip", "iex", 1000, Some(400)), vec![("sip".into(), None, Some(400))]);
+        // A chunk ending after the cutoff: both, the second ending there.
+        assert_eq!(
+            feed_windows("sip", "iex", 1000, Some(1200)),
+            vec![("sip".into(), None, Some(1000)), ("iex".into(), Some(1000), Some(1200))]
+        );
+        // One feed.
+        assert_eq!(feed_windows("iex", "iex", 1000, Some(400)), vec![("iex".into(), None, Some(400))]);
     }
 
     #[test]
