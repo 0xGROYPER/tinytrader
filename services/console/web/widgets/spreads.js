@@ -201,6 +201,7 @@ defineWidget('spreads', {
     function ticket(a) {
       const box = $('.sb-ticket'), o = order(a), accts = my.orders?.accounts || [];
       if (!my.orders) { box.innerHTML = ''; return; }
+      if (my.orders.unavailable) { box.innerHTML = `<p class="muted sb-note">Orders: ${esc(my.orders.unavailable)}</p>`; return; }
       if (!my.orders.trading) { box.innerHTML = '<p class="muted sb-note">Sending orders needs the console\'s trade token for the paper gateways (operator: scripts/gateway-token GATEWAY_CONSOLE_TOKEN, then restart the gateways and the console).</p>'; return; }
       if (!o) { box.innerHTML = ''; return; }
       const usable = accts.filter(x => !x.error);
@@ -231,8 +232,11 @@ defineWidget('spreads', {
     async function loadOrders() {
       try {
         const r = await fetch('/api/orders', { cache: 'no-store' });
-        if (r.ok && my.alive) { my.orders = await r.json(); my.ordersAt = Date.now(); }
-      } catch (_) { /* shown as nothing */ }
+        if (my.alive) {
+          my.orders = r.ok ? await r.json() : { unavailable: r.status === 404 ? 'this console has no order routing yet (it needs redeploying).' : `the console answered ${r.status}.` };
+          my.ordersAt = Date.now();
+        }
+      } catch (e) { my.orders = { unavailable: `the console can't be reached (${e.message}).` }; my.ordersAt = Date.now(); }
       if (my.alive) { if (!my.review) ticket(analyse()); ordersList(); }
     }
     async function send() {
