@@ -212,7 +212,8 @@ function gexLevels(v, /** @type {Indicator} */ ind) {
 }
 /** One horizon's expected move from a chain: { move, name, short } or { none }. */
 function expected(v, /** @type {Horizon} */ h, sym) {
-  const exps = (v?.expiries || []).filter(x => x.implied_move > 0 && daysTo(x.expiry) > 0.05)
+  // Every expiry still trading, today's until its 16:00 close.
+  const exps = (v?.expiries || []).filter(x => x.implied_move > 0 && daysTo(x.expiry) > 1 / 1440)
     .map(x => ({ ...x, t: daysTo(x.expiry), w: (x.implied_move / K) ** 2 })).sort((a, b) => a.t - b.t);
   if (!v?.spot || !exps.length) return { none: 'no option chain' };
   if (h.type === 'days') {
@@ -229,7 +230,7 @@ function expected(v, /** @type {Horizon} */ h, sym) {
   }
   if (h.type === 'expiry') {
     const e = exps.find(x => x.expiry === h.expiry);
-    return e ? { move: e.implied_move, name: `to ${dayLabel(e.expiry)}`, short: dayLabel(e.expiry), ref: e, scale: 1 } : { none: `${dayLabel(h.expiry)} not listed` };
+    return e ? { move: e.implied_move, name: `to ${dayLabel(e.expiry)}`, short: dayLabel(e.expiry), ref: e, scale: 1 } : { none: daysTo(h.expiry) <= 0 ? `${dayLabel(h.expiry)} has expired: pick another expiry` : `${dayLabel(h.expiry)} not listed` };
   }
   if (h.type === 'earnings') {
     const rep = nextReport(sym);
