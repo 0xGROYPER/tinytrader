@@ -4,12 +4,17 @@
 // bars where no such service runs (a relay has only its session hours).
 // Pre-market and after-hours candles are drawn faded. Symbols: the theme's,
 // the relays', or any typed into the ticker box.
+// With the Spread builder's "Show on chart", the position is drawn too: its
+// strikes and breakevens as lines, where it profits or loses at expiry shaded
+// across the chart, and its payoff sideways at the right edge on the same
+// prices. Dragging a strike line moves that leg to the nearest listed strike.
 // Times are New York time. Drawn with TradingView's Lightweight Charts
 // (Apache-2.0), loaded the first time a chart opens.
 import { defineWidget } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused } from '../lib/theme.js';
+import { position, dragLeg } from '../lib/position.js';
 
 const LIB = '/vendor/lightweight-charts-5.2.1.min.js';
 /** @type {Promise<any> | null} */
@@ -130,7 +135,8 @@ defineWidget('candles', {
   mount(el) {
     const my = { typed: [],
       pick: null, days: 1, size: 60, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true, fit: true,
-      im: true, imLines: [], imFor: '', imAt: 0, imText: '' };
+      im: true, imLines: [], imFor: '', imAt: 0, imText: '',
+      L: null, posLines: [], over: null, raf: 0, sig: '', hoverY: null, near: -1, drag: -1 };
     el.innerHTML = '<div class="cd"><div class="cd-top"><form class="cd-search"><input class="cd-ticker mono" name="ticker" placeholder="Ticker" maxlength="10" autocomplete="off" spellcheck="false" aria-label="Show a ticker"></form><div class="cd-bar"></div></div><div class="cd-chart"></div><p class="cd-msg muted"></p></div>';
     const bar = el.querySelector('.cd-bar'), box = /** @type {HTMLElement} */ (el.querySelector('.cd-chart')), msg = el.querySelector('.cd-msg');
     const anyService = () => (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id;
@@ -179,6 +185,14 @@ defineWidget('candles', {
           my.candles = my.chart.addSeries(L.CandlestickSeries, { upColor: css('--ok'), downColor: css('--crit'), wickUpColor: css('--ok'), wickDownColor: css('--crit'), borderVisible: false });
           my.volume = my.chart.addSeries(L.HistogramSeries, { priceScaleId: 'volume', priceFormat: { type: 'volume' }, color: css('--line') });
           my.chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+          // Keep a shown position's strikes and breakevens in view.
+          my.candles.applyOptions({ autoscaleInfoProvider: (/** @type {() => any} */ orig) => {
+            const r = orig(), ks = shownHere() ? [...position.legs.map(l => l.strike), ...position.be] : [];
+            return r && ks.length ? { ...r, priceRange: { minValue: Math.min(r.priceRange.minValue, ...ks), maxValue: Math.max(r.priceRange.maxValue, ...ks) } } : r;
+          } });
+          my.chart.subscribeCrosshairMove((/** @type {any} */ p) => { my.hoverY = p?.point ? p.point.y : null; });
+          my.over = document.createElement('canvas'); my.over.className = 'cd-over'; box.appendChild(my.over);
+          my.L = L;
         } else my.chart.applyOptions(colours());
         const bars = v.bars || [];
         // Outside 09:30-16:00 New York (intraday bars only), faded.
@@ -198,6 +212,7 @@ defineWidget('candles', {
           : `${lastBar[4].toFixed(2)} · ${new Date(lastBar[0] * 1000).toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' })} ET`;
         my.err = null; my.note = v.note || (bars.length ? '' : `No bars for ${symbol} in this range yet.`);
         await drawMoves(L, symbol);
+        drawPosition();
       } catch (e) { my.err = e.message; }
       head();
     }
@@ -230,7 +245,102 @@ defineWidget('candles', {
       }
       my.imText = im.moves.map(text).join(' · ');
     }
-    const fresh = () => { my.chart?.remove(); my.chart = my.candles = my.volume = null; my.imLines = []; my.imFor = ''; my.last = ''; my.fit = true; head(); load(); };
+    const fresh = () => { my.chart?.remove(); my.over?.remove(); my.chart = my.candles = my.volume = my.over = null; my.imLines = []; my.posLines = []; my.sig = ''; my.imFor = ''; my.last = ''; my.fit = true; head(); load(); };
+    // The builder's position, when shown and on this chart's symbol.
+    const shownHere = () => !!(position.shown && position.pay && position.legs.length && position.sym === my.pick?.symbol);
+    const money = (/** @type {number} */ v) => `${v < 0 ? '−' : '+'}$${Math.abs(v * 100).toFixed(0)}`;
+    const sideCol = (/** @type {number} */ side) => side < 0 ? css('--crit-mark') || css('--crit') : css('--ok');
+    function drawPosition() {
+      for (const l of my.posLines) my.candles?.removePriceLine(l);
+      my.posLines = []; my.sig = '';
+      cancelAnimationFrame(my.raf);
+      if (!my.candles || !my.L) return;
+      if (!shownHere()) { paint(); return; }
+      const pay = /** @type {(s: number) => number} */ (position.pay);
+      for (const l of position.legs) my.posLines.push(my.candles.createPriceLine({
+        price: l.strike, color: sideCol(l.side), lineWidth: 2, lineStyle: l.side < 0 ? my.L.LineStyle.Solid : my.L.LineStyle.Dashed, axisLabelVisible: true,
+        title: `${l.side < 0 ? 'Sell' : 'Buy'}${l.qty > 1 ? ' ' + l.qty : ''} ${l.strike}${l.type === 'call' ? 'C' : 'P'}  ${money(pay(l.strike))}`,
+      }));
+      for (const b of position.be) my.posLines.push(my.candles.createPriceLine({
+        price: b, color: css('--warn-mark') || css('--warn'), lineWidth: 1, lineStyle: my.L.LineStyle.Dotted, axisLabelVisible: true, title: 'breakeven',
+      }));
+      my.chart.priceScale('right').applyOptions({ autoScale: true });
+      const loop = () => { paint(); my.raf = requestAnimationFrame(loop); };
+      loop();
+    }
+    // The overlay: profit and loss shading, the sideways payoff and the P&L
+    // at the pointer's price; repainted only when the scale or pointer moves.
+    function paint() {
+      const c = my.over; if (!c || !my.candles || !my.chart) return;
+      const on = shownHere(), plotW = my.chart.timeScale().width(), plotH = box.clientHeight - my.chart.timeScale().height();
+      const sig = on ? [plotW, plotH, my.candles.priceToCoordinate(100), my.candles.priceToCoordinate(200), my.hoverY, position.net, position.legs.map(l => l.side * l.qty + l.type + l.strike).join()].join('|') : 'off';
+      if (sig === my.sig) return;
+      my.sig = sig;
+      const dpr = window.devicePixelRatio || 1, W = box.clientWidth, H = box.clientHeight;
+      if (c.width !== Math.round(W * dpr) || c.height !== Math.round(H * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+      const g = /** @type {CanvasRenderingContext2D} */ (c.getContext('2d'));
+      g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+      if (!on || plotW <= 0 || plotH <= 0) return;
+      const pay = /** @type {(s: number) => number} */ (position.pay), ok = css('--ok'), bad = css('--crit');
+      const at = (/** @type {number} */ y) => { const p = my.candles.coordinateToPrice(y); return p == null ? null : pay(p); };
+      // Shading: green where it profits at expiry, red where it loses.
+      const vals = [];
+      for (let y = 0; y < plotH; y += 2) { const v = at(y); vals.push([y, v]); if (v == null) continue; g.fillStyle = v >= 0 ? ok : bad; g.globalAlpha = 0.07; g.fillRect(0, y, plotW, 2); }
+      g.globalAlpha = 1;
+      // The payoff sideways, in the right-hand 96 px.
+      const fin = vals.filter(([, v]) => v != null && isFinite(v)), lo = Math.min(0, ...fin.map(([, v]) => v)), hi = Math.max(0, ...fin.map(([, v]) => v));
+      if (fin.length && hi > lo) {
+        const x0 = plotW - 100, x1 = plotW - 6, X = (/** @type {number} */ v) => x0 + (v - lo) / (hi - lo) * (x1 - x0);
+        g.fillStyle = css('--bg') || '#fff'; g.globalAlpha = 0.75; g.fillRect(x0 - 4, 0, x1 - x0 + 10, plotH); g.globalAlpha = 1;
+        g.strokeStyle = css('--line'); g.lineWidth = 1; g.beginPath(); g.moveTo(X(0), 0); g.lineTo(X(0), plotH); g.stroke();
+        g.strokeStyle = css('--fg') || '#111'; g.lineWidth = 2; g.beginPath();
+        fin.forEach(([y, v], i) => i ? g.lineTo(X(v), y) : g.moveTo(X(v), y)); g.stroke();
+        g.font = `10px ${css('--mono') || 'monospace'}`; g.fillStyle = css('--muted');
+        g.textAlign = 'center'; g.fillText('P&L at expiry', (x0 + x1) / 2, 12);
+      }
+      // The P&L at the pointer's price.
+      if (my.hoverY != null && my.hoverY < plotH) {
+        const p = my.candles.coordinateToPrice(my.hoverY), v = p == null ? null : pay(p);
+        if (v != null) {
+          const text = `${p.toFixed(2)}: ${money(v)} at expiry`;
+          g.font = `12px ${css('--mono') || 'monospace'}`; g.textAlign = 'left';
+          const w = g.measureText(text).width + 12;
+          g.fillStyle = css('--bg') || '#fff'; g.globalAlpha = 0.9; g.fillRect(6, 6, w, 20); g.globalAlpha = 1;
+          g.fillStyle = v >= 0 ? ok : bad; g.fillText(text, 12, 20);
+        }
+      }
+    }
+    // Dragging a strike line: near one, the chart stops panning so the drag moves the leg.
+    const yOf = (/** @type {PointerEvent} */ e) => e.clientY - box.getBoundingClientRect().top;
+    const nearLeg = (/** @type {number} */ y) => {
+      if (!shownHere() || !my.candles) return -1;
+      let best = -1, dist = 7;
+      position.legs.forEach((l, i) => { const ly = my.candles.priceToCoordinate(l.strike); if (ly != null && Math.abs(ly - y) < dist) { dist = Math.abs(ly - y); best = i; } });
+      return best;
+    };
+    const pan = (/** @type {boolean} */ on) => my.chart?.applyOptions({ handleScroll: on, handleScale: on });
+    const down = (/** @type {PointerEvent} */ e) => {
+      const i = nearLeg(yOf(e)); if (i < 0) return;
+      e.preventDefault(); e.stopPropagation();
+      my.drag = i; pan(false); box.setPointerCapture(e.pointerId);
+    };
+    const move = (/** @type {PointerEvent} */ e) => {
+      if (my.drag >= 0) {
+        e.stopPropagation();
+        const p = my.candles?.coordinateToPrice(yOf(e));
+        if (p != null) dragLeg(my.drag, p);
+        return;
+      }
+      const i = nearLeg(yOf(e));
+      if (i !== my.near) { my.near = i; box.style.cursor = i >= 0 ? 'ns-resize' : ''; pan(i < 0); }
+    };
+    const up = () => { if (my.drag < 0) return; my.drag = -1; my.near = -1; box.style.cursor = ''; pan(true); };
+    box.addEventListener('pointerdown', down, true);
+    box.addEventListener('pointermove', move, true);
+    box.addEventListener('pointerup', up, true);
+    box.addEventListener('pointercancel', up, true);
+    const changed = () => drawPosition();
+    document.addEventListener('tt-position', changed);
     // The ticker box: any symbol, from the service with bars for any symbol.
     el.addEventListener('submit', e => {
       e.preventDefault();
@@ -269,7 +379,7 @@ defineWidget('candles', {
     return {
       // The fleet's polls only matter for which symbols are offered.
       update() { if (!my.pick) { head(); load(); } },
-      dispose() { my.alive = false; clearInterval(my.timer); my.chart?.remove(); el.removeEventListener('click', click); document.removeEventListener('tt-focus', follow); document.removeEventListener('tt-theme', follow); },
+      dispose() { my.alive = false; clearInterval(my.timer); cancelAnimationFrame(my.raf); document.removeEventListener('tt-position', changed); my.chart?.remove(); el.removeEventListener('click', click); document.removeEventListener('tt-focus', follow); document.removeEventListener('tt-theme', follow); },
     };
   },
 });

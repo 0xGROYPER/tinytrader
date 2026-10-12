@@ -14,3 +14,5 @@ Candlesticks and volume for a symbol, with TradingView-style ranges (1D, 5D, 1M,
   - **earnings** (amber): to the first expiry after the company's next report.
 - **Ticker box:** type any symbol and press Enter to chart it (needs a service with bars for any symbol, alpaca-data). Clicking a ticker in another widget (Watchlist, Earnings week) charts it too.
 - **Extended hours:** bars cover 04:00-20:00 New York; pre-market and after-hours candles are drawn faded.
+
+**A position on the chart:** with the [Spread builder](spreads.md)'s **Show on chart**, the position is drawn on its underlying: each strike as a line labelled with the profit or loss there at expiry (sold solid, bought dashed), the breakevens dotted, the prices where it profits at expiry shaded green and where it loses red, and its payoff sideways at the right edge on the same prices. The pointer's price shows its profit or loss at the top left. Drag a strike line up or down to move that leg to the nearest listed strike; the chart doesn't pan while the pointer is on a line.

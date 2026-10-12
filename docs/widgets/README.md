@@ -10,7 +10,7 @@ A workspace is a set of panels, each showing one widget. These pages say what ea
 - [Correlation](correlation.md): How the theme's symbols move together: Pearson correlation of daily log returns over the last 20, 60, 120 or 250 trading days, as a matrix from blue (−1) through white (0) to red (+1), with each symbol's annualised realised volatility.
 - [Earnings](earnings.md): Upcoming reports with what options expect against what has happened before, to judge whether the expected move is rich or cheap: the jump implied by the term structure, the straddle, and the company's past moves, EPS and surprises.
 - [Earnings week](earningsweek.md): The week's earnings reports as a grid, before the open and after the close, largest companies first.
-- [Spread builder](spreads.md): An options position from a structure and the live chain, with its payoff, price, breakevens and greeks.
+- [Spread builder](spreads.md): An options position from a structure and the live chain, priced, with Show on chart to draw it on Candles and drag its strikes.
 - [Options screener](screener.md): Stocks ranked by implied volatility, expected move (in percent and dollars of market value), IV over realized, the day's move and volume.
 - [Calendar](calendar.md): The market month: trading days, early closes and holidays, with scheduled economic releases, FOMC decisions and earnings as layers.
 - [News](news.md): Recent stories, newest first, filtered by symbol with the chips along the top.
