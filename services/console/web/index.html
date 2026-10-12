@@ -782,6 +782,20 @@ a.doc-card { text-decoration: none; }
 .sb-qty-cell b { min-width: 2ch; text-align: center; }
 .sb-x { width: 24px; height: 24px; border: 1.5px solid var(--muted); border-radius: 50%; background: none; color: var(--muted); font-size: 14px; line-height: 1; cursor: pointer; }
 .sb-x:hover { border-color: var(--crit); color: var(--crit); }
+.sb-pay svg { display: block; max-width: 100%; height: auto; }
+.pc-win { fill: var(--ok-soft); } .pc-lose { fill: var(--crit-soft); }
+.pc-band { fill: var(--accent-soft); opacity: .45; }
+.pc-zero { stroke: var(--line); stroke-width: 1; }
+.pc-expiry { fill: none; stroke: var(--fg); stroke-width: 2; stroke-linejoin: round; }
+.pc-today { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 5 4; }
+.pc-spot { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3; }
+.pc-be { stroke: var(--warn-mark); stroke-width: 1; stroke-dasharray: 1 3; }
+.pc-tick { fill: var(--muted); font: 11px var(--mono); }
+.pc-cross { stroke: var(--muted); stroke-width: 1; } .pc-dot { fill: var(--fg); stroke: var(--bg); stroke-width: 2; }
+.sb-paykey { margin: 2px 0 0; font-size: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pc-k { display: inline-block; width: 16px; height: 0; border-top: 2px solid var(--fg); margin-left: 6px; }
+.pc-k-today { border-top: 2px dashed var(--accent); } .pc-k-band { height: 10px; border: 0; background: var(--accent-soft); }
+.sb-payread { margin-left: auto; color: var(--fg); }
 .sb-k { min-width: 4.5em; text-align: center; font-size: 13px; }
 .sb-buy { color: var(--ok); } .sb-sell { color: var(--crit); }
 .sb-sum { margin: 0; font-size: 13px; line-height: 1.7; }

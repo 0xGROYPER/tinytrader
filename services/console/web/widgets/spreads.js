@@ -66,6 +66,7 @@ defineWidget('spreads', {
       <p class="sb-why"></p>
       <div class="sb-table"><table class="sb-legs"></table></div>
       <p class="sb-sum mono"></p>
+      <div class="sb-pay"></div>
       <div class="sb-ticket"></div>
       <div class="sb-orders"></div>
       <p class="sb-msg muted"></p></div>`;
@@ -139,7 +140,9 @@ defineWidget('spreads', {
       } : x => x <= 0 ? 0 : N((Math.log(x / spot) + sd * sd / 2) / sd);
       let pop = 0;
       for (let i = 1; i < grid.length; i++) if (pay((grid[i - 1] + grid[i]) / 2) > 0) pop += cdf(grid[i]) - cdf(grid[i - 1]);
-      return { net, cross, pay, maxP, maxL, be, pop, popFrom: pts ? `implied, ${dist.quality} fit` : 'lognormal', missing: ls.some(l => !l.q) };
+      // Worth today at an underlying price: each leg at its own implied volatility, less what was paid.
+      const today = S => ls.reduce((v, l) => v + l.side * l.qty * bs(l.type, S, l.strike, t, iv(l)), 0) - net;
+      return { net, cross, pay, today, spot, sd: (atmIV() || 0.3) * Math.sqrt(t), strikes: ls.map(l => l.strike), maxP, maxL, be, pop, popFrom: pts ? `implied, ${dist.quality} fit` : 'lognormal', missing: ls.some(l => !l.q) };
     }
 
     const money = v => !isFinite(v) ? 'unlimited' : `${v < 0 ? '−' : ''}$${Math.abs(v * 100).toFixed(0)}`;
@@ -185,6 +188,7 @@ defineWidget('spreads', {
         <tbody>${rows}</tbody>
         <tfoot><tr><td><button type="button" class="chip-btn" data-act="add">Add leg</button></td><td></td><td></td>
           <td class="num"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr></tfoot>`;
+      payoff(a);
       $('.sb-sum').innerHTML = a ? [
         `${a.net >= 0 ? 'Debit' : 'Credit'} <b>$${Math.abs(a.net * 100).toFixed(0)}</b> <span class="muted">($${Math.abs(a.cross * 100).toFixed(0)} crossing)</span>`,
         `max profit <b>${money(a.maxP)}</b>`, `max loss <b>${money(a.maxL)}</b>`,
@@ -194,6 +198,61 @@ defineWidget('spreads', {
       $('.sb-msg').textContent = my.err || (a?.missing ? 'A leg has no quote on this expiry; it is priced from its implied volatility.' : '') ||
         (my.chain ? 'Per position: 100 shares a contract. Alpaca indicative quotes; implied volatilities worked out from them.' : 'Loading the chain…');
     }
+
+    // The payoff chart: P&L at expiry (solid, green above zero and red below) and
+    // today (dashed, each leg at its implied volatility) across underlying prices
+    // spanning the strikes and about 2.5 standard deviations either side, with
+    // the price, breakevens and the one-standard-deviation range marked. It is
+    // drawn from the legs alone, so it works for any structure.
+    const PH = 190, PAD = { l: 52, r: 12, t: 10, b: 22 };
+    let drawn = null;
+    function payoff(a) {
+      const box = /** @type {HTMLElement} */ ($('.sb-pay'));
+      drawn = a;
+      if (!a) { box.innerHTML = ''; return; }
+      const W = Math.max(280, box.clientWidth || 600), w = W - PAD.l - PAD.r, h = PH - PAD.t - PAD.b;
+      // The strikes and the price, with a margin of 2.5 standard deviations or 60% of the strikes' spread.
+      const kLo = Math.min(a.spot, ...a.strikes), kHi = Math.max(a.spot, ...a.strikes);
+      const m = Math.max(a.spot * a.sd * 2.5, (kHi - kLo) * 0.6, a.spot * 0.004);
+      const lo = Math.max(0, kLo - m), hi = kHi + m;
+      const n = 240, xs = Array.from({ length: n + 1 }, (_, i) => lo + (hi - lo) * i / n);
+      const ex = xs.map(a.pay), td = xs.map(a.today);
+      let yMin = Math.min(0, ...ex, ...td), yMax = Math.max(0, ...ex, ...td);
+      const pad = (yMax - yMin) * 0.08 || 1; yMin -= pad; yMax += pad;
+      const X = v => PAD.l + (v - lo) / (hi - lo) * w, Y = v => PAD.t + (yMax - v) / (yMax - yMin) * h;
+      const line = ys => ys.map((y, i) => `${i ? 'L' : 'M'}${X(xs[i]).toFixed(1)},${Y(y).toFixed(1)}`).join('');
+      // Profit and loss areas between the expiry line and zero.
+      const area = sign => `M${X(lo).toFixed(1)},${Y(0).toFixed(1)}` + ex.map((y, i) => `L${X(xs[i]).toFixed(1)},${Y(sign > 0 ? Math.max(y, 0) : Math.min(y, 0)).toFixed(1)}`).join('') + `L${X(hi).toFixed(1)},${Y(0).toFixed(1)}Z`;
+      const money = v => `${v < 0 ? '−' : ''}$${Math.abs(v * 100) >= 1000 ? (Math.abs(v * 100) / 1000).toFixed(1) + 'k' : Math.abs(v * 100).toFixed(0)}`;
+      // Zero, the best and the worst, unless too close to zero to read.
+      const ticks = [0, ...[yMax - pad, yMin + pad].filter(v => Math.abs(Y(v) - Y(0)) > 14)];
+      const sd1 = [a.spot * Math.exp(-a.sd), a.spot * Math.exp(a.sd)];
+      box.innerHTML = `<svg class="sb-chart" viewBox="0 0 ${W} ${PH}" width="${W}" height="${PH}" role="img" aria-label="Profit and loss at expiry and today across underlying prices">
+        <rect x="${X(sd1[0]).toFixed(1)}" y="${PAD.t}" width="${(X(sd1[1]) - X(sd1[0])).toFixed(1)}" height="${h}" class="pc-band"/>
+        <path d="${area(1)}" class="pc-win"/><path d="${area(-1)}" class="pc-lose"/>
+        <line x1="${PAD.l}" x2="${W - PAD.r}" y1="${Y(0).toFixed(1)}" y2="${Y(0).toFixed(1)}" class="pc-zero"/>
+        ${ticks.map(v => `<text x="${PAD.l - 6}" y="${(Y(v) + 4).toFixed(1)}" class="pc-tick" text-anchor="end">${money(v)}</text>`).join('')}
+        ${[lo, a.spot, hi].map((v, i) => `<text x="${X(v).toFixed(1)}" y="${PH - 6}" class="pc-tick" text-anchor="${['start', 'middle', 'end'][i]}">${v.toFixed(v < 100 ? 2 : 0)}</text>`).join('')}
+        ${a.be.filter(b => b > lo && b < hi).map(b => `<line x1="${X(b).toFixed(1)}" x2="${X(b).toFixed(1)}" y1="${PAD.t}" y2="${PAD.t + h}" class="pc-be"/>`).join('')}
+        <line x1="${X(a.spot).toFixed(1)}" x2="${X(a.spot).toFixed(1)}" y1="${PAD.t}" y2="${PAD.t + h}" class="pc-spot"/>
+        <path d="${line(td)}" class="pc-today"/><path d="${line(ex)}" class="pc-expiry"/>
+        <g class="pc-hover" hidden><line class="pc-cross" y1="${PAD.t}" y2="${PAD.t + h}"/><circle r="3.5" class="pc-dot"/></g>
+      </svg>
+      <p class="sb-paykey muted"><span class="pc-k pc-k-exp"></span>At expiry <span class="pc-k pc-k-today"></span>Today <span class="pc-k pc-k-band"></span>±1 SD <span class="sb-payread mono"></span></p>`;
+      const svg = /** @type {SVGSVGElement} */ (box.querySelector('svg')), read = box.querySelector('.sb-payread'), hov = /** @type {SVGGElement} */ (box.querySelector('.pc-hover'));
+      svg.onmousemove = e => {
+        const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) * W / r.width;
+        if (px < PAD.l || px > W - PAD.r) { hov.setAttribute('hidden', ''); read.textContent = ''; return; }
+        const S = lo + (px - PAD.l) / w * (hi - lo), pe = a.pay(S), pt = a.today(S);
+        hov.removeAttribute('hidden');
+        hov.querySelector('line').setAttribute('x1', px.toFixed(1)); hov.querySelector('line').setAttribute('x2', px.toFixed(1));
+        hov.querySelector('circle').setAttribute('cx', px.toFixed(1)); hov.querySelector('circle').setAttribute('cy', Y(pe).toFixed(1));
+        read.textContent = `at ${S.toFixed(2)}: ${money(pe)} at expiry, ${money(pt)} today`;
+      };
+      svg.onmouseleave = () => { hov.setAttribute('hidden', ''); read.textContent = ''; };
+    }
+    // Redrawn at the panel's width.
+    const resized = new ResizeObserver(() => { if (drawn) payoff(drawn); });
 
     // A suggested position for the stock asked about (from the screener).
     function suggest(ask) {
@@ -367,6 +426,7 @@ defineWidget('spreads', {
     document.addEventListener('tt-focus', follow);
     if (wanted.ask) asked(); else { render(); loadChain(); }
     loadOrders();
+    resized.observe(el);
     const timer = setInterval(() => {
       if (Date.now() - my.at > 30e3) loadChain();
       if (Date.now() - my.ordersAt > 10e3) loadOrders();
@@ -374,7 +434,7 @@ defineWidget('spreads', {
     return {
       update() {},
       dispose() {
-        my.alive = false; clearInterval(timer);
+        my.alive = false; clearInterval(timer); resized.disconnect();
         document.removeEventListener('tt-recommend', asked); document.removeEventListener('tt-focus', follow);
         publish({ shown: false });
       },
