@@ -638,14 +638,25 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
 /// up to `cutoff` (15 minutes ago, where the free plan allows it) and the
 /// stock feed after, or one feed when they're the same; all ending at `end`
 /// when one is given.
-fn feed_windows(history: &str, feed: &str, cutoff: i64, end: Option<i64>) -> Vec<(String, Option<i64>, Option<i64>)> {
+fn feed_windows(
+    history: &str,
+    feed: &str,
+    cutoff: i64,
+    end: Option<i64>,
+) -> Vec<(String, Option<i64>, Option<i64>)> {
     if history == feed {
         return vec![(feed.to_owned(), None, end)];
     }
     match end {
         Some(e) if e <= cutoff => vec![(history.to_owned(), None, Some(e))],
-        Some(e) => vec![(history.to_owned(), None, Some(cutoff)), (feed.to_owned(), Some(cutoff), Some(e))],
-        None => vec![(history.to_owned(), None, Some(cutoff)), (feed.to_owned(), Some(cutoff), None)],
+        Some(e) => vec![
+            (history.to_owned(), None, Some(cutoff)),
+            (feed.to_owned(), Some(cutoff), Some(e)),
+        ],
+        None => vec![
+            (history.to_owned(), None, Some(cutoff)),
+            (feed.to_owned(), Some(cutoff), None),
+        ],
     }
 }
 
@@ -730,8 +741,13 @@ async fn option_chain(AxState(app): AxState<Arc<App>>, Query(ask): Query<ChainAs
             }
             // By expiry, then strike, calls before puts.
             contracts.sort_by(|a, b| a.expiry.cmp(&b.expiry).then(a.strike.total_cmp(&b.strike)).then(b.call.cmp(&a.call)));
+            // An index (XSP) has no stock quote: price it from its options.
+            let (spot, spot_from) = match spot {
+                Some(s) => (Some(s), "trade"),
+                None => (chain::parity_spot(&contracts), "parity"),
+            };
             Ok(json!({
-                "underlying": underlying, "spot": spot, "feed": a.options_feed, "from": from, "to": to,
+                "underlying": underlying, "spot": spot, "spot_from": spot_from, "feed": a.options_feed, "from": from, "to": to,
                 "expiries": chain::expiries(&contracts, spot, &|x| years_to_close(x, now)),
                 "contracts": contracts.iter().map(chain::Contract::to_json).collect::<Vec<_>>(),
                 "truncated": truncated,
@@ -785,7 +801,8 @@ async fn universe(app: &App) -> Result<Arc<Vec<screener::Stock>>, (StatusCode, S
             Ok(u)
         }
         (Err(e), Some((_, u))) => {
-            app.observer.record_error(&format!("Nasdaq's screener: {e}"));
+            app.observer
+                .record_error(&format!("Nasdaq's screener: {e}"));
             Ok(u)
         }
         (Err(e), None) => Err((StatusCode::BAD_GATEWAY, format!("Nasdaq's screener: {e}"))),
@@ -805,17 +822,30 @@ async fn screen(AxState(app): AxState<Arc<App>>, Query(ask): Query<ScreenAsk>) -
     // only what passes the filters is used, and the screener answers without them.
     let a = app.clone();
     let actives = app
-        .kept("screen|actives".into(), Duration::from_secs(300), || async move {
-            a.get("/v1beta1/screener/stocks/most-actives", &[("by", "volume".into()), ("top", "50".into())]).await
-        })
+        .kept(
+            "screen|actives".into(),
+            Duration::from_secs(300),
+            || async move {
+                a.get(
+                    "/v1beta1/screener/stocks/most-actives",
+                    &[("by", "volume".into()), ("top", "50".into())],
+                )
+                .await
+            },
+        )
         .await
         .map(|v| screener::most_actives(&v))
         .unwrap_or_default();
     let a = app.clone();
     let movers = app
-        .kept("screen|movers".into(), Duration::from_secs(300), || async move {
-            a.get("/v1beta1/screener/stocks/movers", &[("top", "50".into())]).await
-        })
+        .kept(
+            "screen|movers".into(),
+            Duration::from_secs(300),
+            || async move {
+                a.get("/v1beta1/screener/stocks/movers", &[("top", "50".into())])
+                    .await
+            },
+        )
         .await
         .map(|v| screener::movers(&v))
         .unwrap_or_default();
@@ -824,7 +854,8 @@ async fn screen(AxState(app): AxState<Arc<App>>, Query(ask): Query<ScreenAsk>) -
         .iter()
         .filter(|s| s.market_cap.unwrap_or(0.0) >= min_cap && s.price.unwrap_or(0.0) >= min_price)
         .collect();
-    let by: HashMap<&str, &screener::Stock> = fits.iter().map(|s| (s.symbol.as_str(), *s)).collect();
+    let by: HashMap<&str, &screener::Stock> =
+        fits.iter().map(|s| (s.symbol.as_str(), *s)).collect();
     // Each stock once, in the order first listed, with why it's listed.
     let mut order: Vec<&str> = Vec::new();
     let mut tags: HashMap<&str, Vec<&'static str>> = HashMap::new();
@@ -859,12 +890,22 @@ async fn screen(AxState(app): AxState<Arc<App>>, Query(ask): Query<ScreenAsk>) -
         add(s, "alpaca-active");
     }
     for (s, side) in &movers {
-        add(s, if *side == "gainer" { "alpaca-gainer" } else { "alpaca-loser" });
+        add(
+            s,
+            if *side == "gainer" {
+                "alpaca-gainer"
+            } else {
+                "alpaca-loser"
+            },
+        );
     }
 
     let today = ny_date_time(unix_seconds() as i64).0;
     let mut sc = lock(&app.screen);
-    sc.wanted = order.iter().map(|k| ((*k).to_owned(), by[k].price.unwrap_or(0.0))).collect();
+    sc.wanted = order
+        .iter()
+        .map(|k| ((*k).to_owned(), by[k].price.unwrap_or(0.0)))
+        .collect();
     sc.asked = Some(Instant::now());
     let mut pending = 0;
     let rows: Vec<Value> = order
@@ -974,7 +1015,11 @@ async fn daily_bars(app: &App, symbols: &[String]) {
         for (sym, bars) in v["bars"].as_object().into_iter().flatten() {
             let list = got.entry(sym.clone()).or_default();
             for b in bars.as_array().into_iter().flatten() {
-                if let (Some(t), Some(c), Some(vol)) = (b["t"].as_str().and_then(unix), b["c"].as_f64(), b["v"].as_f64()) {
+                if let (Some(t), Some(c), Some(vol)) = (
+                    b["t"].as_str().and_then(unix),
+                    b["c"].as_f64(),
+                    b["v"].as_f64(),
+                ) {
                     list.push((t, c, vol));
                 }
             }
@@ -991,8 +1036,14 @@ async fn daily_bars(app: &App, symbols: &[String]) {
         b.sort_by_key(|x| x.0);
         let closes: Vec<f64> = b.iter().rev().take(21).rev().map(|x| x.1).collect();
         let before = b.len().saturating_sub(1);
-        let vols: Vec<f64> = b[before.saturating_sub(20)..before].iter().map(|x| x.2).collect();
-        sc.daily.insert(s.clone(), (at, screener::realized_vol(&closes), screener::mean(&vols)));
+        let vols: Vec<f64> = b[before.saturating_sub(20)..before]
+            .iter()
+            .map(|x| x.2)
+            .collect();
+        sc.daily.insert(
+            s.clone(),
+            (at, screener::realized_vol(&closes), screener::mean(&vols)),
+        );
     }
 }
 
@@ -1000,7 +1051,10 @@ async fn daily_bars(app: &App, symbols: &[String]) {
 fn years_to_close(expiry: &str, now: i64) -> Option<f64> {
     let day = screener::days(expiry)?;
     // 16:00 is 20:00 UTC in daylight saving time, else 21:00.
-    let close = [20, 21].into_iter().map(|h| day * 86_400 + h * 3600).find(|&t| ny_date_time(t).1 == "16:00")?;
+    let close = [20, 21]
+        .into_iter()
+        .map(|h| day * 86_400 + h * 3600)
+        .find(|&t| ny_date_time(t).1 == "16:00")?;
     let s = close - now;
     (s > 0).then(|| s as f64 / (365.0 * 86_400.0))
 }
@@ -1025,7 +1079,10 @@ async fn near_chain(app: &App, sym: &str, spot: f64) {
         if let Some(t) = &token {
             q.push(("page_token", t.clone()));
         }
-        match app.get(&format!("/v1beta1/options/snapshots/{sym}"), &q).await {
+        match app
+            .get(&format!("/v1beta1/options/snapshots/{sym}"), &q)
+            .await
+        {
             Ok(v) => {
                 contracts.extend(chain::contracts(&v));
                 token = v["next_page_token"].as_str().map(str::to_owned);
@@ -1049,10 +1106,14 @@ async fn near_chain(app: &App, sym: &str, spot: f64) {
     // Skew at the 30-day expiry (25-delta risk reversal), when its implied distribution is usable.
     m.skew = m.iv_expiry.as_deref().and_then(|x| {
         let d = &exps.iter().find(|e| e["expiry"] == x)?["distribution"];
-        (d["quality"] != "poor").then(|| d["rr25"].as_f64()).flatten()
+        (d["quality"] != "poor")
+            .then(|| d["rr25"].as_f64())
+            .flatten()
     });
     (m.implied_move, m.move_expiry) = mv.map_or((None, None), |(v, x)| (Some(v), Some(x)));
-    lock(&app.screen).options.insert(sym.to_owned(), (Instant::now(), m));
+    lock(&app.screen)
+        .options
+        .insert(sym.to_owned(), (Instant::now(), m));
 }
 
 #[tokio::main]
@@ -1146,17 +1207,29 @@ mod tests {
         // Now: SIP history to the cutoff, IEX after.
         assert_eq!(
             feed_windows("sip", "iex", 1000, None),
-            vec![("sip".into(), None, Some(1000)), ("iex".into(), Some(1000), None)]
+            vec![
+                ("sip".into(), None, Some(1000)),
+                ("iex".into(), Some(1000), None)
+            ]
         );
         // An older chunk: SIP alone, up to its end.
-        assert_eq!(feed_windows("sip", "iex", 1000, Some(400)), vec![("sip".into(), None, Some(400))]);
+        assert_eq!(
+            feed_windows("sip", "iex", 1000, Some(400)),
+            vec![("sip".into(), None, Some(400))]
+        );
         // A chunk ending after the cutoff: both, the second ending there.
         assert_eq!(
             feed_windows("sip", "iex", 1000, Some(1200)),
-            vec![("sip".into(), None, Some(1000)), ("iex".into(), Some(1000), Some(1200))]
+            vec![
+                ("sip".into(), None, Some(1000)),
+                ("iex".into(), Some(1000), Some(1200))
+            ]
         );
         // One feed.
-        assert_eq!(feed_windows("iex", "iex", 1000, Some(400)), vec![("iex".into(), None, Some(400))]);
+        assert_eq!(
+            feed_windows("iex", "iex", 1000, Some(400)),
+            vec![("iex".into(), None, Some(400))]
+        );
     }
 
     #[test]

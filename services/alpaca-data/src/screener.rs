@@ -21,7 +21,12 @@ pub struct Stock {
 
 /// A number from Nasdaq's text: `$230.48`, `-2.944%`, `5554568000000.00`.
 fn number(v: &Value) -> Option<f64> {
-    let s = v.as_str()?.trim().trim_start_matches('$').trim_end_matches('%').replace(',', "");
+    let s = v
+        .as_str()?
+        .trim()
+        .trim_start_matches('$')
+        .trim_end_matches('%')
+        .replace(',', "");
     s.parse::<f64>().ok().filter(|x| x.is_finite())
 }
 
@@ -31,13 +36,29 @@ fn number(v: &Value) -> Option<f64> {
 #[must_use]
 pub fn shares(name: &str) -> bool {
     let n = name.to_lowercase();
-    if ["common stock", "ordinary shares", "american depositary", " adr"].iter().any(|x| n.contains(x)) {
+    if [
+        "common stock",
+        "ordinary shares",
+        "american depositary",
+        " adr",
+    ]
+    .iter()
+    .any(|x| n.contains(x))
+    {
         return true;
     }
-    let words: Vec<&str> = n.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let words: Vec<&str> = n
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
     let has = |w: &str| words.contains(&w);
     let pair = |a: &str, b: &[&str]| words.windows(2).any(|x| x[0] == a && b.contains(&x[1]));
-    !(has("warrant") || has("warrants") || has("rights") || has("notes") || has("debentures") || has("zones")
+    !(has("warrant")
+        || has("warrants")
+        || has("rights")
+        || has("notes")
+        || has("debentures")
+        || has("zones")
         || pair("preferred", &["stock", "share", "shares", "units", "unit"])
         || pair("equity", &["unit", "units"]))
 }
@@ -56,7 +77,9 @@ pub fn nasdaq(v: &Value) -> Vec<Stock> {
             let ok = shares(&name)
                 && !symbol.is_empty()
                 && symbol.len() <= 10
-                && symbol.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'.');
+                && symbol
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'.');
             ok.then(|| Stock {
                 name,
                 sector: r["sector"].as_str().unwrap_or_default().trim().to_owned(),
@@ -204,8 +227,14 @@ mod tests {
         assert_eq!(s[0].price, Some(230.48));
         assert!((s[0].change_pct.unwrap() + 0.029_44).abs() < 1e-12);
         assert_eq!(s[0].market_cap, Some(5_554_568_000_000.0));
-        assert_eq!((s[1].symbol.as_str(), s[1].volume), ("BRK.B", Some(3_100_200.0)));
-        assert_eq!((s[2].price, s[2].change_pct, s[2].market_cap), (None, None, None));
+        assert_eq!(
+            (s[1].symbol.as_str(), s[1].volume),
+            ("BRK.B", Some(3_100_200.0))
+        );
+        assert_eq!(
+            (s[2].price, s[2].change_pct, s[2].market_cap),
+            (None, None, None)
+        );
     }
 
     #[test]
@@ -238,7 +267,10 @@ mod tests {
         let a = json!({ "most_actives": [{ "symbol": "T", "volume": 1 }, { "symbol": "WFF" }] });
         assert_eq!(most_actives(&a), ["T", "WFF"]);
         let m = json!({ "gainers": [{ "symbol": "WFF", "percent_change": 499.51 }], "losers": [{ "symbol": "SXTC" }] });
-        assert_eq!(movers(&m), [("WFF".to_owned(), "gainer"), ("SXTC".to_owned(), "loser")]);
+        assert_eq!(
+            movers(&m),
+            [("WFF".to_owned(), "gainer"), ("SXTC".to_owned(), "loser")]
+        );
     }
 
     #[test]
@@ -247,7 +279,13 @@ mod tests {
         let mut closes = vec![100.0];
         for i in 0..20 {
             let last = *closes.last().unwrap();
-            closes.push(last * if i % 2 == 0 { 0.01_f64.exp() } else { (-0.01_f64).exp() });
+            closes.push(
+                last * if i % 2 == 0 {
+                    0.01_f64.exp()
+                } else {
+                    (-0.01_f64).exp()
+                },
+            );
         }
         let v = realized_vol(&closes).unwrap();
         assert!((v - 0.01 * 252f64.sqrt()).abs() < 1e-9, "{v}");
@@ -259,7 +297,10 @@ mod tests {
     #[test]
     fn picks_the_30_day_iv_and_the_next_move() {
         assert_eq!(days("1970-01-02"), Some(1));
-        assert_eq!(days("2026-10-11").unwrap() - days("2026-09-11").unwrap(), 30);
+        assert_eq!(
+            days("2026-10-11").unwrap() - days("2026-09-11").unwrap(),
+            30
+        );
         let e = vec![
             json!({ "expiry": "2026-10-09", "atm_iv": 0.9, "implied_move": 0.01 }),
             json!({ "expiry": "2026-10-16", "atm_iv": 0.30, "implied_move": null }),
@@ -271,8 +312,14 @@ mod tests {
         assert_eq!(iv, Some((0.35, "2026-11-13".to_owned())));
         assert_eq!(mv, Some((0.031, "2026-10-23".to_owned())));
         // From Sunday: Monday's expiry is one session away, too close.
-        let e = vec![json!({ "expiry": "2026-10-12", "implied_move": 0.03 }), json!({ "expiry": "2026-10-16", "implied_move": 0.05 })];
-        assert_eq!(pick(&e, "2026-10-11").1, Some((0.05, "2026-10-16".to_owned())));
+        let e = vec![
+            json!({ "expiry": "2026-10-12", "implied_move": 0.03 }),
+            json!({ "expiry": "2026-10-16", "implied_move": 0.05 }),
+        ];
+        assert_eq!(
+            pick(&e, "2026-10-11").1,
+            Some((0.05, "2026-10-16".to_owned()))
+        );
     }
 
     #[test]

@@ -47,21 +47,28 @@ fn erfc(x: f64) -> f64 {
     // Numerical Recipes' erfcc: fractional error below 1.2e-7 everywhere.
     let z = x.abs();
     let t = 1.0 / (1.0 + 0.5 * z);
-    let r = t * (-z * z - 1.265_512_23
-        + t * (1.000_023_68
-            + t * (0.374_091_96
-                + t * (0.096_784_18
-                    + t * (-0.186_288_06
-                        + t * (0.278_868_07
-                            + t * (-1.135_203_98 + t * (1.488_515_87 + t * (-0.822_152_23 + t * 0.170_872_77)))))))))
-        .exp();
+    let r = t
+        * (-z * z - 1.265_512_23
+            + t * (1.000_023_68
+                + t * (0.374_091_96
+                    + t * (0.096_784_18
+                        + t * (-0.186_288_06
+                            + t * (0.278_868_07
+                                + t * (-1.135_203_98
+                                    + t * (1.488_515_87
+                                        + t * (-0.822_152_23 + t * 0.170_872_77)))))))))
+            .exp();
     if x >= 0.0 { r } else { 2.0 - r }
 }
 
 /// Black's price on the forward, zero rates, with total variance `w`.
 fn black(f: f64, k: f64, w: f64, call: bool) -> f64 {
     if w <= 0.0 {
-        return if call { (f - k).max(0.0) } else { (k - f).max(0.0) };
+        return if call {
+            (f - k).max(0.0)
+        } else {
+            (k - f).max(0.0)
+        };
     }
     let s = w.sqrt();
     let d1 = ((f / k).ln() + w / 2.0) / s;
@@ -85,7 +92,11 @@ fn implied_w(price: f64, f: f64, k: f64, call: bool) -> Option<f64> {
     }
     for _ in 0..100 {
         let mid = 0.5 * (lo + hi);
-        if black(f, k, mid * mid, call) < price { lo = mid } else { hi = mid }
+        if black(f, k, mid * mid, call) < price {
+            lo = mid
+        } else {
+            hi = mid
+        }
     }
     let s = 0.5 * (lo + hi);
     Some(s * s)
@@ -103,7 +114,13 @@ struct Point {
 /// A fitted smile in total variance.
 #[derive(Clone, Copy, Debug)]
 enum Smile {
-    Svi { a: f64, c: f64, d: f64, m: f64, s: f64 },
+    Svi {
+        a: f64,
+        c: f64,
+        d: f64,
+        m: f64,
+        s: f64,
+    },
     /// `q0 + q1 k + q2 k²` inside [lo, hi], linear beyond.
     Quad { q: [f64; 3], lo: f64, hi: f64 },
 }
@@ -164,21 +181,39 @@ fn lsq3(rows: &[([f64; 3], f64, f64)]) -> Option<[f64; 3]> {
 }
 
 fn sse(smile: &Smile, pts: &[Point]) -> f64 {
-    pts.iter().map(|p| p.weight * (smile.w(p.k) - p.w).powi(2)).sum()
+    pts.iter()
+        .map(|p| p.weight * (smile.w(p.k) - p.w).powi(2))
+        .sum()
 }
 
 fn fit_svi(pts: &[Point]) -> Option<Smile> {
-    let (lo, hi) = pts.iter().fold((f64::MAX, f64::MIN), |(l, h), p| (l.min(p.k), h.max(p.k)));
+    let (lo, hi) = pts
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(l, h), p| (l.min(p.k), h.max(p.k)));
     let mut best: Option<(f64, Smile)> = None;
     for i in 0..=24 {
         let m = lo + (hi - lo) * f64::from(i) / 24.0;
-        for s in [0.002, 0.005, 0.01, 0.02, 0.04, 0.07, 0.1, 0.15, 0.2, 0.3, 0.45, 0.7, 1.0] {
+        for s in [
+            0.002, 0.005, 0.01, 0.02, 0.04, 0.07, 0.1, 0.15, 0.2, 0.3, 0.45, 0.7, 1.0,
+        ] {
             let rows: Vec<_> = pts
                 .iter()
-                .map(|p| ([1.0, p.k - m, ((p.k - m).powi(2) + s * s).sqrt()], p.w, p.weight))
+                .map(|p| {
+                    (
+                        [1.0, p.k - m, ((p.k - m).powi(2) + s * s).sqrt()],
+                        p.w,
+                        p.weight,
+                    )
+                })
                 .collect();
-            let Some([a, c, d]) = lsq3(&rows) else { continue };
-            let min_w = if d > 0.0 { a + s * (d * d - c * c).max(0.0).sqrt() } else { a };
+            let Some([a, c, d]) = lsq3(&rows) else {
+                continue;
+            };
+            let min_w = if d > 0.0 {
+                a + s * (d * d - c * c).max(0.0).sqrt()
+            } else {
+                a
+            };
             if d < 0.0 || c.abs() > d || d + c.abs() > 2.0 || min_w <= 0.0 {
                 continue;
             }
@@ -193,12 +228,19 @@ fn fit_svi(pts: &[Point]) -> Option<Smile> {
 }
 
 fn fit_quad(pts: &[Point]) -> Option<Smile> {
-    let (lo, hi) = pts.iter().fold((f64::MAX, f64::MIN), |(l, h), p| (l.min(p.k), h.max(p.k)));
-    let rows: Vec<_> = pts.iter().map(|p| ([1.0, p.k, p.k * p.k], p.w, p.weight)).collect();
+    let (lo, hi) = pts
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(l, h), p| (l.min(p.k), h.max(p.k)));
+    let rows: Vec<_> = pts
+        .iter()
+        .map(|p| ([1.0, p.k, p.k * p.k], p.w, p.weight))
+        .collect();
     let q = lsq3(&rows)?;
     let smile = Smile::Quad { q, lo, hi };
     // Positive variance across a generous range.
-    (0..=40).all(|i| smile.w(lo - 0.5 + (hi - lo + 1.0) * f64::from(i) / 40.0) > 0.0).then_some(smile)
+    (0..=40)
+        .all(|i| smile.w(lo - 0.5 + (hi - lo + 1.0) * f64::from(i) / 40.0) > 0.0)
+        .then_some(smile)
 }
 
 /// The forward from put-call parity at the (up to) three strikes nearest
@@ -234,8 +276,15 @@ fn interp(xs: &[f64], ys: &[f64], x: f64) -> f64 {
     ys[i - 1] + t * (ys[i] - ys[i - 1])
 }
 
-const QUANTILES: [(&str, f64); 7] =
-    [("p2_5", 0.025), ("p16", 0.16), ("p25", 0.25), ("p50", 0.5), ("p75", 0.75), ("p84", 0.84), ("p97_5", 0.975)];
+const QUANTILES: [(&str, f64); 7] = [
+    ("p2_5", 0.025),
+    ("p16", 0.16),
+    ("p25", 0.25),
+    ("p50", 0.5),
+    ("p75", 0.75),
+    ("p84", 0.84),
+    ("p97_5", 0.975),
+];
 
 /// The implied distribution of one expiry's contracts, `t` years away, with
 /// the price `spot` and the at-the-money straddle (for the probability of
@@ -246,8 +295,14 @@ pub fn distribution(list: &[&Contract], spot: f64, t: f64, straddle: Option<f64>
         return Value::Null;
     }
     let f = forward(list, spot);
-    let otm: Vec<&&Contract> = list.iter().filter(|c| if c.call { c.strike >= f } else { c.strike < f }).collect();
-    let candidates = otm.iter().filter(|c| c.bid.is_some() || c.ask.is_some()).count();
+    let otm: Vec<&&Contract> = list
+        .iter()
+        .filter(|c| if c.call { c.strike >= f } else { c.strike < f })
+        .collect();
+    let candidates = otm
+        .iter()
+        .filter(|c| c.bid.is_some() || c.ask.is_some())
+        .count();
     let pts: Vec<Point> = otm
         .iter()
         .filter_map(|c| {
@@ -263,11 +318,23 @@ pub fn distribution(list: &[&Contract], spot: f64, t: f64, straddle: Option<f64>
             }
             // Equal weight to errors in volatility (dσ ≈ dw / 2√(wT)), more to tight quotes.
             let tight = 1.0 / ((ask - bid) / mid).max(0.05);
-            Some(Point { k: (c.strike / f).ln(), w, weight: tight / w, put: !c.call })
+            Some(Point {
+                k: (c.strike / f).ln(),
+                w,
+                weight: tight / w,
+                put: !c.call,
+            })
         })
         .collect();
-    let (puts, calls) = (pts.iter().filter(|p| p.put).count(), pts.iter().filter(|p| !p.put).count());
-    let usable = if candidates > 0 { pts.len() as f64 / candidates as f64 } else { 0.0 };
+    let (puts, calls) = (
+        pts.iter().filter(|p| p.put).count(),
+        pts.iter().filter(|p| !p.put).count(),
+    );
+    let usable = if candidates > 0 {
+        pts.len() as f64 / candidates as f64
+    } else {
+        0.0
+    };
     let base = json!({ "forward": f, "strikes": pts.len(), "puts": puts, "calls": calls, "usable": usable });
     let poor = |why: &str| {
         let mut v = base.clone();
@@ -278,8 +345,13 @@ pub fn distribution(list: &[&Contract], spot: f64, t: f64, straddle: Option<f64>
     if pts.len() < 5 {
         return poor("fewer than 5 usable strikes");
     }
-    let Some(smile) = fit_svi(&pts).or_else(|| fit_quad(&pts)) else { return poor("no smile fits") };
-    let rms_iv = (pts.iter().map(|p| ((smile.w(p.k).max(0.0) / t).sqrt() - (p.w / t).sqrt()).powi(2)).sum::<f64>()
+    let Some(smile) = fit_svi(&pts).or_else(|| fit_quad(&pts)) else {
+        return poor("no smile fits");
+    };
+    let rms_iv = (pts
+        .iter()
+        .map(|p| ((smile.w(p.k).max(0.0) / t).sqrt() - (p.w / t).sqrt()).powi(2))
+        .sum::<f64>()
         / pts.len() as f64)
         .sqrt();
     let quality = if pts.len() >= 8 && puts >= 3 && calls >= 3 && rms_iv <= 0.02 {
@@ -331,16 +403,26 @@ pub fn distribution(list: &[&Contract], spot: f64, t: f64, straddle: Option<f64>
             mad += at(0.5 * (a + spot)) * (spot - a) + (1.0 - at(0.5 * (spot + b))) * (b - spot);
         }
     }
-    let q: serde_json::Map<String, Value> = QUANTILES.iter().map(|(name, p)| ((*name).to_owned(), json!(quantile(*p)))).collect();
+    let q: serde_json::Map<String, Value> = QUANTILES
+        .iter()
+        .map(|(name, p)| ((*name).to_owned(), json!(quantile(*p))))
+        .collect();
     let (q2, q97) = (quantile(0.025), quantile(0.975));
     // The 25-delta risk reversal: the fitted volatility where a put's delta
     // is -0.25 less where a call's is 0.25 (forward deltas, N(d1)).
     let at_delta = |target: f64| {
-        let d1 = |k: f64| { let sw = smile.w(k).max(1e-12).sqrt(); -k / sw + sw / 2.0 };
+        let d1 = |k: f64| {
+            let sw = smile.w(k).max(1e-12).sqrt();
+            -k / sw + sw / 2.0
+        };
         let (mut lo, mut hi) = (-7.0 * sd, 7.0 * sd);
         for _ in 0..80 {
             let mid = 0.5 * (lo + hi);
-            if norm_cdf(d1(mid)) > target { lo = mid } else { hi = mid }
+            if norm_cdf(d1(mid)) > target {
+                lo = mid
+            } else {
+                hi = mid
+            }
         }
         (smile.w(0.5 * (lo + hi)).max(0.0) / t).sqrt()
     };
@@ -422,7 +504,9 @@ mod tests {
         // The straddle's move is about 0.8σ: about 57% inside.
         let straddle = 2.0 * black(100.0, 100.0, sw * sw, true);
         let refs: Vec<&Contract> = chain(t, |_| 0.3).leak().iter().collect();
-        let inside = distribution(&refs, 100.0, t, Some(straddle))["p_inside_straddle"].as_f64().unwrap();
+        let inside = distribution(&refs, 100.0, t, Some(straddle))["p_inside_straddle"]
+            .as_f64()
+            .unwrap();
         assert!((inside - 0.575).abs() < 0.02, "{inside}");
         // The mean absolute move is the straddle (zero rates, at the money).
         assert!((d["mean_abs_move"].as_f64().unwrap() - straddle / 100.0).abs() < 0.002);
@@ -435,7 +519,12 @@ mod tests {
         let skew = dist(&chain(t, |k| 0.3 - 0.5 * k + 0.8 * k * k), t);
         assert_ne!(skew["quality"], "poor", "{skew}");
         let lo = |d: &Value| d["quantiles"]["p2_5"].as_f64().unwrap();
-        assert!(lo(&skew) < lo(&flat) - 1.0, "{} vs {}", lo(&skew), lo(&flat));
+        assert!(
+            lo(&skew) < lo(&flat) - 1.0,
+            "{} vs {}",
+            lo(&skew),
+            lo(&flat)
+        );
         assert!(skew["tail_ratio"].as_f64().unwrap() > flat["tail_ratio"].as_f64().unwrap() + 0.2);
         // Puts richer than calls by the smile's slope: about 0.5 × the 25-delta strikes' gap.
         assert!(flat["rr25"].as_f64().unwrap().abs() < 0.005);
@@ -448,9 +537,23 @@ mod tests {
         let mut c = chain(t, |_| 0.3);
         let n0 = dist(&c, t)["strikes"].as_u64().unwrap();
         // A crossed quote, one without a bid and one far too wide.
-        c.push(Contract { strike: 131.0, bid: Some(2.0), ask: Some(1.0), ..contract(131.0, true, 1.0, 0.0) });
-        c.push(Contract { strike: 132.0, bid: None, ..contract(132.0, true, 0.5, 0.1) });
-        c.push(Contract { strike: 133.0, bid: Some(0.05), ask: Some(0.9), ..contract(133.0, true, 0.5, 0.0) });
+        c.push(Contract {
+            strike: 131.0,
+            bid: Some(2.0),
+            ask: Some(1.0),
+            ..contract(131.0, true, 1.0, 0.0)
+        });
+        c.push(Contract {
+            strike: 132.0,
+            bid: None,
+            ..contract(132.0, true, 0.5, 0.1)
+        });
+        c.push(Contract {
+            strike: 133.0,
+            bid: Some(0.05),
+            ask: Some(0.9),
+            ..contract(133.0, true, 0.5, 0.0)
+        });
         let d = dist(&c, t);
         assert_eq!(d["strikes"].as_u64().unwrap(), n0);
         assert_eq!(d["quality"], "good");
@@ -459,10 +562,19 @@ mod tests {
     #[test]
     fn a_thin_chain_is_poor() {
         let t = 30.0 / 365.0;
-        let c: Vec<Contract> = chain(t, |_| 0.3).into_iter().filter(|c| (c.strike - 100.0).abs() < 2.0).collect();
+        let c: Vec<Contract> = chain(t, |_| 0.3)
+            .into_iter()
+            .filter(|c| (c.strike - 100.0).abs() < 2.0)
+            .collect();
         assert_eq!(dist(&c, t)["quality"], "poor");
         // Wildly inconsistent quotes are poor too.
-        let noisy = chain(t, |k| if (k * 100.0).round() as i64 % 2 == 0 { 0.2 } else { 0.6 });
+        let noisy = chain(t, |k| {
+            if (k * 100.0).round() as i64 % 2 == 0 {
+                0.2
+            } else {
+                0.6
+            }
+        });
         assert_eq!(dist(&noisy, t)["quality"], "poor");
     }
 
@@ -470,8 +582,12 @@ mod tests {
     fn the_cdf_is_monotone_and_bounded() {
         let t = 7.0 / 365.0;
         let d = dist(&chain(t, |k| 0.25 - 0.8 * k + 2.0 * k * k), t);
-        let pts: Vec<(f64, f64)> =
-            d["cdf"].as_array().unwrap().iter().map(|p| (p[0].as_f64().unwrap(), p[1].as_f64().unwrap())).collect();
+        let pts: Vec<(f64, f64)> = d["cdf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (p[0].as_f64().unwrap(), p[1].as_f64().unwrap()))
+            .collect();
         assert!(pts.windows(2).all(|w| w[1].0 > w[0].0 && w[1].1 >= w[0].1));
         assert!(pts.iter().all(|p| (0.0..=1.0).contains(&p.1)));
         assert!(pts[0].1 < 0.01 && pts[pts.len() - 1].1 > 0.99);

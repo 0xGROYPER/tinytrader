@@ -132,7 +132,7 @@ defineWidget('spreads', {
       // Publish first: Candles draws from it.
       publish({ sym: my.sym, expiry: my.expiry, strikes: { call: strikesOf('call'), put: strikesOf('put') }, net: a?.net ?? 0, be: a?.be ?? [], pay: a?.pay ?? null });
       $('.sb-sym').textContent = my.sym;
-      $('.sb-spot').textContent = my.chain?.spot ? my.chain.spot.toFixed(2) : '';
+      $('.sb-spot').textContent = my.chain?.spot ? my.chain.spot.toFixed(2) + (my.chain.spot_from === 'parity' ? ' (from options)' : '') : '';
       const exps = expiries(), sel = /** @type {HTMLSelectElement} */ ($('.sb-exp')), key = `${my.sym}|${exps.map(e => e.expiry).join()}`;
       if (sel.dataset.for !== key) {
         sel.innerHTML = exps.map(e => `<option value="${e.expiry}">${day(e.expiry)}${e.implied_move ? ` · ±${(e.implied_move * 100).toFixed(1)}%` : ''}</option>`).join('');

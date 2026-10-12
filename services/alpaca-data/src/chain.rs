@@ -98,12 +98,56 @@ pub fn contracts(page: &Value) -> Vec<Contract> {
         .collect()
 }
 
+/// The underlying's price implied by put-call parity, for an underlying
+/// with no quote of its own (an index such as XSP): on the nearest expiry
+/// with three strikes quoted both ways, strike + call − put at the three
+/// strikes where call and put are closest, their median. Over a day or two
+/// the forward and the price differ by well under a basis point.
+#[must_use]
+pub fn parity_spot(contracts: &[Contract]) -> Option<f64> {
+    // Expiry → strike (as bits) → (call mid, put mid).
+    type Mids = BTreeMap<u64, (Option<f64>, Option<f64>)>;
+    let mut by: BTreeMap<&str, Mids> = BTreeMap::new();
+    for c in contracts {
+        let at = by
+            .entry(c.expiry.as_str())
+            .or_default()
+            .entry(c.strike.to_bits())
+            .or_default();
+        if c.call {
+            at.0 = c.mid();
+        } else {
+            at.1 = c.mid();
+        }
+    }
+    by.values().find_map(|strikes| {
+        let mut pairs: Vec<(f64, f64)> = strikes
+            .iter()
+            .filter_map(|(k, q)| match *q {
+                (Some(c), Some(p)) => Some(((c - p).abs(), f64::from_bits(*k) + c - p)),
+                _ => None,
+            })
+            .collect();
+        if pairs.len() < 3 {
+            return None;
+        }
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut f: Vec<f64> = pairs[..3].iter().map(|x| x.1).collect();
+        f.sort_by(f64::total_cmp);
+        Some(f[1])
+    })
+}
+
 /// Per expiry, from the strike nearest `spot`: the call and put IVs and their
 /// average, and the straddle's mid as an implied move (in dollars and as a
 /// fraction of `spot`), and the implied distribution with `years` (the time
 /// to an expiry's close, in years) when it is given.
 #[must_use]
-pub fn expiries(contracts: &[Contract], spot: Option<f64>, years: &dyn Fn(&str) -> Option<f64>) -> Vec<Value> {
+pub fn expiries(
+    contracts: &[Contract],
+    spot: Option<f64>,
+    years: &dyn Fn(&str) -> Option<f64>,
+) -> Vec<Value> {
     let mut by: BTreeMap<&str, Vec<&Contract>> = BTreeMap::new();
     for c in contracts {
         by.entry(c.expiry.as_str()).or_default().push(c);
@@ -154,6 +198,35 @@ mod tests {
         );
         assert_eq!(occ("AAPL"), None);
         assert_eq!(occ("AAPL261016X00250000"), None);
+    }
+
+    #[test]
+    fn prices_the_underlying_by_parity() {
+        let q = |sym: &str, bid: f64, ask: f64| {
+            (
+                sym.to_owned(),
+                json!({ "latestQuote": { "bp": bid, "ap": ask } }),
+            )
+        };
+        let page = json!({ "snapshots": serde_json::Map::from_iter([
+            // The nearest expiry has only one pair, so the next one is used.
+            q("X261015C00100000", 1.0, 1.2),
+            q("X261015P00100000", 1.0, 1.2),
+            q("X261016C00099000", 2.5, 2.7),
+            q("X261016P00099000", 1.3, 1.5),
+            q("X261016C00100000", 1.9, 2.1),
+            q("X261016P00100000", 1.6, 1.8),
+            q("X261016C00101000", 1.4, 1.6),
+            q("X261016P00101000", 2.1, 2.3),
+            q("X261016C00110000", 0.1, 0.2),
+            q("X261016P00110000", 9.2, 9.4),
+            // One-sided: ignored.
+            q("X261016C00102000", 0.0, 1.0),
+        ]) });
+        // 99 + 1.2 = 100.2, 100 + 0.3, 101 − 0.7 = 100.3: the median, 100.3.
+        let s = parity_spot(&contracts(&page)).unwrap();
+        assert!((s - 100.3).abs() < 1e-9, "{s}");
+        assert_eq!(parity_spot(&[]), None);
     }
 
     #[test]
