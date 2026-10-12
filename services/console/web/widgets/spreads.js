@@ -64,7 +64,7 @@ defineWidget('spreads', {
       </div>
       <div class="sb-structs chips"></div>
       <p class="sb-why"></p>
-      <ul class="sb-legs"></ul>
+      <div class="sb-table"><table class="sb-legs"></table></div>
       <p class="sb-sum mono"></p>
       <div class="sb-ticket"></div>
       <div class="sb-orders"></div>
@@ -161,14 +161,30 @@ defineWidget('spreads', {
       $('.sb-structs').innerHTML = Object.keys(STRUCTURES).map(n => `<button type="button" class="chip-btn" data-st="${esc(n)}" aria-pressed="${my.structure === n}">${esc(n)}</button>`).join('')
         + (STRUCTURES[my.structure] ? '' : `<span class="chip-btn" aria-pressed="true">${esc(my.structure)}</span>`)
         + `<span class="sb-width muted">width <button type="button" class="chip-btn" data-w="-1" aria-label="Narrower">−</button><b class="mono">${my.width}</b><button type="button" class="chip-btn" data-w="1" aria-label="Wider">+</button></span>`;
-      $('.sb-legs').innerHTML = legs().map((l, i) => { const q = quote(l.type, l.strike); return `<li data-i="${i}">
-        <button type="button" class="chip-btn ${l.side > 0 ? 'sb-buy' : 'sb-sell'}" data-act="side">${l.side > 0 ? 'Buy' : 'Sell'}</button>
-        <span class="mono">${l.qty}×</span>
-        <button type="button" class="chip-btn" data-act="down" aria-label="Lower strike">‹</button><b class="mono sb-k">${l.strike}</b><button type="button" class="chip-btn" data-act="up" aria-label="Higher strike">›</button>
-        <button type="button" class="chip-btn" data-act="type">${l.type === 'call' ? 'Call' : 'Put'}</button>
-        <span class="mono muted">${q?.bid != null ? `${q.bid.toFixed(2)} / ${q.ask?.toFixed(2) ?? '—'}` : 'no quote'}</span>
-        <button type="button" class="chip-btn" data-act="remove" aria-label="Remove this leg">×</button></li>`; }).join('')
-        + `<li><button type="button" class="chip-btn" data-act="add">Add leg</button></li>`;
+      // The legs as a positions table, like the broker's: each contract, its mid,
+      // signed quantity (− sells), market value and delta in shares; the strike
+      // steps with ‹ ›, C/P switches type, the quantity steps through zero to flip side.
+      const usd = v => `${v < 0 ? '−' : ''}$${Math.abs(v).toFixed(2)}`;
+      const midOf = q => q && q.bid != null && q.ask ? (q.bid + q.ask) / 2 : null;
+      let mv = 0, dl = 0, known = true;
+      const rows = legs().map((l, i) => {
+        const q = quote(l.type, l.strike), n = l.side * l.qty, m = midOf(q);
+        const value = m == null ? null : n * m * 100, delta = q?.delta == null ? null : n * q.delta * 100;
+        if (value == null) known = false; else mv += value;
+        if (delta != null) dl += delta;
+        return `<tr data-i="${i}">
+          <td class="sb-asset"><span class="mono">${esc(q?.symbol || `${my.sym} ${l.strike}${l.type[0].toUpperCase()}`)}</span>
+            <span class="sb-steps"><button type="button" class="sb-mini" data-act="down" aria-label="Lower strike" title="Lower strike">‹</button><button type="button" class="sb-mini" data-act="type" title="Switch call / put">${l.type === 'call' ? 'C' : 'P'}</button><button type="button" class="sb-mini" data-act="up" aria-label="Higher strike" title="Higher strike">›</button></span></td>
+          <td class="num">${m == null ? '<span class="muted">no quote</span>' : usd(m)}<small class="muted">${q?.bid != null ? `${q.bid.toFixed(2)} × ${q.ask?.toFixed(2) ?? '—'}` : ''}</small></td>
+          <td class="num"><span class="sb-qty-cell"><button type="button" class="sb-mini" data-act="less" aria-label="One fewer">−</button><b class="mono">${n}</b><button type="button" class="sb-mini" data-act="more" aria-label="One more">+</button></span></td>
+          <td class="num">${value == null ? '—' : usd(value)}</td>
+          <td class="num muted">${delta == null ? '—' : delta.toFixed(0)}</td>
+          <td><button type="button" class="sb-x" data-act="remove" aria-label="Remove this leg" title="Remove">×</button></td></tr>`;
+      }).join('');
+      $('.sb-legs').innerHTML = `<thead><tr><th>Asset</th><th class="num">Price</th><th class="num">Qty</th><th class="num">Market value</th><th class="num" title="Delta in shares">Δ</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+        <tfoot><tr><td><button type="button" class="chip-btn" data-act="add">Add leg</button></td><td></td><td></td>
+          <td class="num"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr></tfoot>`;
       $('.sb-sum').innerHTML = a ? [
         `${a.net >= 0 ? 'Debit' : 'Credit'} <b>$${Math.abs(a.net * 100).toFixed(0)}</b> <span class="muted">($${Math.abs(a.cross * 100).toFixed(0)} crossing)</span>`,
         `max profit <b>${money(a.maxP)}</b>`, `max loss <b>${money(a.maxL)}</b>`,
@@ -321,8 +337,14 @@ defineWidget('spreads', {
         const ks = strikesOf('call');
         if (ks.length) { position.sym = my.sym; position.legs = [...legs(), { type: 'call', strike: nearest(ks, my.chain?.spot || 0), side: 1, qty: 1 }]; }
       } else {
-        const i = +(/** @type {HTMLElement} */ (b.closest('li[data-i]'))?.dataset.i), l = legs()[i]; if (!l) return;
+        const i = +(/** @type {HTMLElement} */ (b.closest('[data-i]'))?.dataset.i), l = legs()[i]; if (!l) return;
         if (act === 'side') l.side = l.side > 0 ? -1 : 1;
+        // Signed quantity, skipping zero: past it the leg flips between buy and sell.
+        if (act === 'more' || act === 'less') {
+          let n = l.side * l.qty + (act === 'more' ? 1 : -1);
+          if (n === 0) n = act === 'more' ? 1 : -1;
+          n = Math.max(-20, Math.min(20, n)); l.side = n > 0 ? 1 : -1; l.qty = Math.abs(n);
+        }
         if (act === 'type') { l.type = l.type === 'call' ? 'put' : 'call'; l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike; }
         if (act === 'up' || act === 'down') { const ks = strikesOf(l.type), j = ks.indexOf(l.strike) + (act === 'up' ? 1 : -1); if (ks[j] != null) l.strike = ks[j]; }
         if (act === 'remove') legs().splice(i, 1);

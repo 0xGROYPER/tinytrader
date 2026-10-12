@@ -766,8 +766,22 @@ a.doc-card { text-decoration: none; }
 .sb-show { margin-left: auto; }
 .sb-structs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 0; }
 .sb-width { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; font-size: 12px; }
-.sb-legs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.sb-legs li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+.sb-table { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+.sb-legs { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.sb-legs th { text-align: left; font: 500 13px var(--ui); text-transform: none; letter-spacing: normal; color: var(--muted); padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.sb-legs td { padding: 6px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; white-space: nowrap; }
+.sb-legs td + td { border-left: 1px solid var(--line-soft); }
+.sb-legs tfoot td { border-bottom: 0; border-top: 1px solid var(--line); }
+.sb-legs .num { text-align: right; }
+.sb-legs td small { display: block; font-size: 11px; }
+.sb-asset .mono { text-decoration: underline; text-underline-offset: 3px; }
+.sb-steps { display: inline-flex; gap: 2px; margin-left: 8px; vertical-align: middle; }
+.sb-mini { min-width: 22px; height: 22px; padding: 0 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--fg-2); font: 12px var(--mono); cursor: pointer; }
+.sb-mini:hover { border-color: var(--accent-2); color: var(--accent); }
+.sb-qty-cell { display: inline-flex; align-items: center; gap: 6px; }
+.sb-qty-cell b { min-width: 2ch; text-align: center; }
+.sb-x { width: 24px; height: 24px; border: 1.5px solid var(--muted); border-radius: 50%; background: none; color: var(--muted); font-size: 14px; line-height: 1; cursor: pointer; }
+.sb-x:hover { border-color: var(--crit); color: var(--crit); }
 .sb-k { min-width: 4.5em; text-align: center; font-size: 13px; }
 .sb-buy { color: var(--ok); } .sb-sell { color: var(--crit); }
 .sb-sum { margin: 0; font-size: 13px; line-height: 1.7; }
