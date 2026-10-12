@@ -1,8 +1,9 @@
-// Candles: one-minute candlesticks and volume for a symbol, from a relay's
-// bars (the relay builds them from the trades it relays, and fills earlier
-// minutes from its source's history where it keeps one, as Alpaca does), or
-// in a themed workspace for the theme's symbols, from a service with bars
-// for any symbol (alpaca-data) where no relay carries them.
+// Candles: candlesticks and volume for a symbol, from a service with bars for
+// any symbol (alpaca-data: consolidated history with pre-market and after-
+// hours, 04:00-20:00 New York, and its latest minutes), or from a relay's own
+// bars where no such service runs (a relay has only its session hours).
+// Pre-market and after-hours candles are drawn faded. Symbols: the theme's,
+// the relays', or any typed into the ticker box.
 // Times are New York time. Drawn with TradingView's Lightweight Charts
 // (Apache-2.0), loaded the first time a chart opens.
 import { defineWidget } from '../lib/widgets.js';
@@ -127,12 +128,19 @@ async function impliedMoves(sym, tradingDays) {
 defineWidget('candles', {
   title: 'Candles',
   mount(el) {
-    const my = { pick: null, days: 1, size: 60, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true, fit: true,
+    const my = { typed: [],
+      pick: null, days: 1, size: 60, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true, fit: true,
       im: true, imLines: [], imFor: '', imAt: 0, imText: '' };
-    el.innerHTML = '<div class="cd"><div class="cd-bar"></div><div class="cd-chart"></div><p class="cd-msg muted"></p></div>';
+    el.innerHTML = '<div class="cd"><div class="cd-top"><form class="cd-search"><input class="cd-ticker mono" name="ticker" placeholder="Ticker" maxlength="10" autocomplete="off" spellcheck="false" aria-label="Show a ticker"></form><div class="cd-bar"></div></div><div class="cd-chart"></div><p class="cd-msg muted"></p></div>';
     const bar = el.querySelector('.cd-bar'), box = /** @type {HTMLElement} */ (el.querySelector('.cd-chart')), msg = el.querySelector('.cd-msg');
+    const anyService = () => (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id;
+    const offered = () => {
+      const list = choices(), any = anyService();
+      for (const symbol of my.typed) if (any && !list.some(c => c.symbol === symbol)) list.push({ service: any, symbol });
+      return list;
+    };
     const head = () => {
-      const list = choices();
+      const list = offered();
       if (!my.pick || !list.some(c => c.service === my.pick.service && c.symbol === my.pick.symbol)) my.pick = list.find(c => c.symbol === focused()) || list[0] || null;
       bar.innerHTML = list.length
         ? `<span class="chips">${list.map(c => `<button type="button" class="chip-btn" data-cd-pick="${esc(c.service)}|${esc(c.symbol)}" aria-pressed="${my.pick?.service === c.service && my.pick?.symbol === c.symbol}">${esc(c.symbol)}</button>`).join('')}</span>
@@ -153,8 +161,10 @@ defineWidget('candles', {
       const { symbol } = my.pick, days = my.days, size = my.size;
       // Minutes come from the pick's source (a relay's are live); longer bars
       // from a service with bars for any symbol, else combined from minutes.
-      const any = (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id;
-      const service = size > 60 && any ? any : my.pick.service, ask = service === any ? size : 60;
+      // History from a service with bars for any symbol (with extended hours);
+      // a relay's own bars only when there is none.
+      const any = anyService();
+      const service = any || my.pick.service, ask = service === any ? size : 60;
       try {
         if (ask === 60 && size >= 86400) throw new Error('Daily bars need a service with history for any symbol (alpaca-data).');
         const r = await fetch(`/api/bars/${encodeURIComponent(service)}?symbol=${encodeURIComponent(symbol)}&days=${days}&interval=${ask}`, { cache: 'no-store' });
@@ -171,7 +181,14 @@ defineWidget('candles', {
           my.chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
         } else my.chart.applyOptions(colours());
         const bars = v.bars || [];
-        my.candles.setData(bars.map(([t, o, h, l, c]) => ({ time: t + nyOffset(t), open: o, high: h, low: l, close: c })));
+        // Outside 09:30-16:00 New York (intraday bars only), faded.
+        const extended = t => { if (size >= 86400) return false; const m = Math.floor(((t + nyOffset(t)) % 86400 + 86400) % 86400 / 60); return m < 570 || m >= 960; };
+        my.candles.setData(bars.map(([t, o, h, l, c]) => {
+          const bar = { time: t + nyOffset(t), open: o, high: h, low: l, close: c };
+          if (!extended(t)) return bar;
+          const col = faded(c >= o ? css('--ok') : css('--crit'));
+          return { ...bar, color: col, wickColor: col, borderColor: col };
+        }));
         my.volume.setData(bars.map(([t, o, , , c, vol]) => ({ time: t + nyOffset(t), value: vol, color: faded(c >= o ? css('--ok') : css('--crit')) })));
         // Show the whole range when one is picked; later refreshes keep the reader's zoom.
         if (my.fit) { my.chart.timeScale().fitContent(); my.fit = false; }
@@ -214,6 +231,18 @@ defineWidget('candles', {
       my.imText = im.moves.map(text).join(' · ');
     }
     const fresh = () => { my.chart?.remove(); my.chart = my.candles = my.volume = null; my.imLines = []; my.imFor = ''; my.last = ''; my.fit = true; head(); load(); };
+    // The ticker box: any symbol, from the service with bars for any symbol.
+    el.addEventListener('submit', e => {
+      e.preventDefault();
+      const input = /** @type {HTMLInputElement} */ (e.target.closest('form')?.querySelector('.cd-ticker'));
+      const symbol = (input?.value || '').trim().toUpperCase();
+      const any = anyService();
+      if (!/^[A-Z][A-Z0-9.]{0,9}$/.test(symbol)) return;
+      if (!any) { my.err = 'Typing a ticker needs a service with bars for any symbol (alpaca-data).'; head(); return; }
+      if (!my.typed.includes(symbol)) my.typed.push(symbol);
+      my.pick = offered().find(c => c.symbol === symbol) || { service: any, symbol };
+      fresh();
+    });
     const click = e => {
       const p = e.target.closest('[data-cd-pick]');
       if (p) { const [service, symbol] = p.dataset.cdPick.split('|'); my.pick = { service, symbol }; fresh(); return; }
@@ -226,7 +255,9 @@ defineWidget('candles', {
     el.addEventListener('click', click);
     // The symbol picked in a watchlist, or a new theme.
     const follow = (/** @type {Event} */ e) => {
-      const sym = /** @type {CustomEvent} */ (e).detail, c = typeof sym === 'string' && choices().find(x => x.symbol === sym);
+      const sym = /** @type {CustomEvent} */ (e).detail, any = anyService();
+      if (typeof sym === 'string' && any && !offered().some(x => x.symbol === sym)) my.typed.push(sym);
+      const c = typeof sym === 'string' && offered().find(x => x.symbol === sym);
       if (c) { my.pick = c; fresh(); } else if (e.type === 'tt-theme') { my.pick = null; fresh(); }
     };
     document.addEventListener('tt-focus', follow);
