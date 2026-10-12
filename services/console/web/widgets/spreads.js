@@ -55,7 +55,9 @@ defineWidget('spreads', {
       // The order ticket.
       acct: store('tt-sb-account') || '', payoff: store('tt-sb-payoff') === '1',
       // Limit (at the mid unless typed) or market (a limit crossing the spread); the price reviewed.
-      type: 'limit', reviewed: /** @type {number | null} */ (null), qty: 1, limit: /** @type {number | null} */ (null), review: false, sending: false, result: '',
+      type: 'limit', reviewed: /** @type {number | null} */ (null),
+      // What's typed to confirm a live order: kept here, as the review is redrawn on every refresh.
+      typed: '', qty: 1, limit: /** @type {number | null} */ (null), review: false, sending: false, result: '',
       orders: /** @type {any} */ (null), ordersAt: 0 };
     el.innerHTML = `<div class="sb">
       <div class="sb-top">
@@ -199,7 +201,7 @@ defineWidget('spreads', {
       ].join(' · ') : '';
       ticket(a);
       $('.sb-msg').textContent = my.err || (a?.missing ? 'A leg has no quote on this expiry; it is priced from its implied volatility.' : '') ||
-        (my.chain ? 'Per position: 100 shares a contract. Alpaca indicative quotes; implied volatilities worked out from them.' : 'Loading the chain…');
+        (my.chain ? `Per position: 100 shares a contract. ${({ opra: 'Databento OPRA quotes', mixed: `Databento OPRA quotes for ${my.chain.opra_quotes} contracts, Alpaca indicative for the rest` })[my.chain.quotes] || 'Alpaca indicative quotes'}; implied volatilities worked out from them.` : 'Loading the chain…');
     }
 
     // The payoff chart: P&L at expiry (solid, green above zero and red below) and
@@ -314,8 +316,8 @@ defineWidget('spreads', {
         const k = l => `${l.side > 0 ? 'Buy' : 'Sell'} ${l.qty * my.qty} ${my.sym} ${my.expiry} ${l.strike} ${l.type}`;
         box.innerHTML = `<div class="sb-review${live ? ' sb-live' : ''}">${live ? '<p class="sb-bad"><b>LIVE ACCOUNT: real money.</b></p>' : ''}<p><b>Send to ${esc(my.acct)}</b> (${live ? 'live' : 'paper'}) as ${single ? 'one order' : 'one combo order'}, ${kind}${single ? '' : ' per spread'} × ${o.qty}: ${credit ? `receive at least $${total.toFixed(0)}` : `pay at most $${total.toFixed(0)}`}; ${risk}. Day order, opening.</p>
           <ul class="mono">${legs().map(l => `<li>${esc(k(l))} <span class="muted">${esc(symbolOf(l))}</span></li>`).join('')}</ul>
-          ${live ? `<p><label>Type <b class="mono">${esc(my.acct)}</b> to send: <input class="sb-confirm mono" autocomplete="off" spellcheck="false"></label></p>` : ''}
-          <p><button type="button" class="btn primary" data-act="send"${my.sending || live ? ' disabled' : ''}>${my.sending ? 'Sending…' : live ? 'Send live order' : 'Send order'}</button> <button type="button" class="btn" data-act="back">Back</button></p></div>`;
+          ${live ? `<p><label>Type <b class="mono">${esc(my.acct)}</b> to send: <input class="sb-confirm mono" autocomplete="off" spellcheck="false" value="${esc(my.typed)}"></label></p>` : ''}
+          <p><button type="button" class="btn primary" data-act="send"${my.sending || (live && my.typed.trim() !== my.acct) ? ' disabled' : ''}>${my.sending ? 'Sending…' : live ? 'Send live order' : 'Send order'}</button> <button type="button" class="btn" data-act="back">Back</button></p></div>`;
         return;
       }
       box.innerHTML = `<div class="sb-tk">
@@ -343,25 +345,27 @@ defineWidget('spreads', {
     }
     async function send() {
       if (my.sending) return;
+      // Checked before anything is redrawn: a live order needs the account's name typed.
+      const live = (my.orders?.accounts || []).find(x => x.account === my.acct)?.environment === 'live';
+      if (live && my.typed.trim() !== my.acct) { my.result = `<span class="sb-bad">Type ${esc(my.acct)} to send a live order.</span>`; ticket(analyse()); return; }
+      my.sending = true; ticket(analyse());
       // A market price is worked out again from fresh quotes; if it's worse than the one
       // reviewed, it goes back for review instead of being sent.
       if (my.type === 'market') { my.at = 0; await loadChain(); }
-      const o = order(analyse()); if (!o) return;
+      const o = order(analyse());
+      if (!o) { my.sending = false; my.result = '<span class="sb-bad">Not sent: a leg has no price on the side it would trade at.</span>'; my.review = false; render(); return; }
       if (my.reviewed != null && o.limit_price > my.reviewed + 1e-9) {
-        my.result = `<span class="sb-bad">The market moved: it's now ${o.limit_price < 0 ? 'a credit of' : 'a debit of'} $${Math.abs(o.limit_price).toFixed(2)}. Review it again.</span>`;
+        my.sending = false;
+        my.result = `<span class="sb-bad">Not sent: the market moved to ${o.limit_price < 0 ? 'a credit of' : 'a debit of'} $${Math.abs(o.limit_price).toFixed(2)}. Review it again.</span>`;
         my.review = false; render(); return;
       }
-      const live = (my.orders?.accounts || []).find(x => x.account === my.acct)?.environment === 'live';
-      const typed = /** @type {HTMLInputElement | null} */ (el.querySelector('.sb-confirm'))?.value.trim();
-      if (live && typed !== my.acct) return;
-      my.sending = true; ticket(analyse());
       try {
         const r = await fetch(`/api/orders/${encodeURIComponent(my.acct)}`, { method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ confirm: my.acct, live, order: { legs: o.legs, qty: o.qty, limit_price: o.limit_price, effect: 'open' } }) });
         const v = await r.json().catch(() => ({}));
         my.result = outcome(v, r.ok);
       } catch (e) { my.result = `Not known whether it was sent: ${esc(e.message)}. Check working orders before sending again.`; }
-      my.sending = false; my.review = false; render(); loadOrders();
+      my.sending = false; my.review = false; my.typed = ''; render(); loadOrders();
     }
     function outcome(v, ok) {
       if (!ok || v.error) return `<span class="sb-bad">Not sent: ${esc(v.error || 'error')}.</span>`;
@@ -382,8 +386,9 @@ defineWidget('spreads', {
     el.addEventListener('input', e => {
       const t = /** @type {HTMLInputElement} */ (e.target);
       if (!t.classList.contains('sb-confirm')) return;
+      my.typed = t.value;
       const send = /** @type {HTMLButtonElement | null} */ (el.querySelector('[data-act="send"]'));
-      if (send) send.disabled = my.sending || t.value.trim() !== my.acct;
+      if (send) send.disabled = my.sending || my.typed.trim() !== my.acct;
     });
     el.addEventListener('change', e => {
       const t = /** @type {HTMLSelectElement} */ (e.target);
@@ -423,7 +428,7 @@ defineWidget('spreads', {
       if (act === 'review') {
         // The price reviewed is the price sent: a limit at the mid stops following it.
         const o = order(analyse()); if (!o) return;
-        my.reviewed = o.limit_price; if (my.type === 'limit') my.limit = o.limit_price;
+        my.reviewed = o.limit_price; my.typed = ''; if (my.type === 'limit') my.limit = o.limit_price;
         my.review = true; my.result = ''; render(); return;
       }
       if (act === 'back') { my.review = false; render(); return; }
