@@ -33,6 +33,14 @@ function library() {
 }
 
 /** Every symbol some relay serves bars for: [{ service, symbol }]. */
+/** A compact OCC option symbol, such as SPY261012C00777000: [match, root]. */
+const OCC = /^([A-Z]{1,6})\d{6}[CP]\d{8}$/;
+/** The relay carrying an option's root (SPY.OPT for SPY options), which charts today's mid from Databento's replay. */
+function optionRelay(symbol) {
+  const root = OCC.exec(symbol)?.[1];
+  return root ? (fleet.topo?.services || []).find(s => s.bars && (s.schedule || []).some(x => (x.symbols || []).includes(`${root}.OPT`)))?.id || null : null;
+}
+
 function relayed() {
   return (fleet.topo?.services || []).filter(s => s.bars).flatMap(s => {
     const symbols = [...new Set((s.schedule || []).flatMap(x => x.symbols || []))];
@@ -202,18 +210,23 @@ defineWidget('candles', {
       drawn: { key: '', first: 0, len: 0 }, backing: false,
       ind: loadIndicators(), open: '', expiries: /** @type {string[]} */ ([]), em: /** @type {Record<string, any>} */ ({}), emLines: [], spot: 0, emAt: 0, emFor: '',
       L: null, posLines: [], over: null, raf: 0, sig: '', hoverY: null };
-    el.innerHTML = '<div class="cd"><div class="cd-top"><form class="cd-search"><input class="cd-ticker mono" name="ticker" placeholder="Ticker" maxlength="10" autocomplete="off" spellcheck="false" aria-label="Show a ticker"></form><div class="cd-bar"></div></div><div class="cd-chart"><div class="cd-legend"></div></div><p class="cd-msg muted"></p></div>';
+    el.innerHTML = '<div class="cd"><div class="cd-top"><form class="cd-search"><input class="cd-ticker mono" name="ticker" placeholder="Ticker or option" maxlength="21" autocomplete="off" spellcheck="false" aria-label="Show a ticker"></form><div class="cd-bar"></div></div><div class="cd-chart"><div class="cd-legend"></div></div><p class="cd-msg muted"></p></div>';
     const bar = el.querySelector('.cd-bar'), box = /** @type {HTMLElement} */ (el.querySelector('.cd-chart')), msg = el.querySelector('.cd-msg');
     const leg = /** @type {HTMLElement} */ (el.querySelector('.cd-legend'));
     const anyService = () => (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id;
     const offered = () => {
       const list = choices(), any = anyService();
-      for (const symbol of my.typed) if (any && !list.some(c => c.symbol === symbol)) list.push({ service: any, symbol });
+      for (const symbol of my.typed) {
+        if (list.some(c => c.symbol === symbol)) continue;
+        const relay = optionRelay(symbol);
+        if (relay) list.push({ service: relay, symbol }); else if (any && !OCC.test(symbol)) list.push({ service: any, symbol });
+      }
       return list;
     };
     // Where bars come from: a service with bars for any symbol (history at
     // every size), else the pick's relay (minutes, combined into larger bars).
-    const source = () => { const any = anyService(), service = any || my.pick.service; return { service, ask: service === any ? my.size : 60 }; };
+    // An option comes from its relay: today's minutes, combined into larger bars.
+    const source = () => { const any = anyService(), service = OCC.test(my.pick.symbol) ? my.pick.service : any || my.pick.service; return { service, ask: service === any ? my.size : 60 }; };
     const head = () => {
       const list = offered();
       if (!my.pick || !list.some(c => c.service === my.pick.service && c.symbol === my.pick.symbol)) my.pick = list.find(c => c.symbol === focused()) || list[0] || null;
@@ -467,10 +480,11 @@ defineWidget('candles', {
       const input = /** @type {HTMLInputElement} */ (/** @type {HTMLElement} */ (e.target).closest('form')?.querySelector('.cd-ticker'));
       const symbol = (input?.value || '').trim().toUpperCase();
       const any = anyService();
-      if (!/^[A-Z][A-Z0-9.]{0,9}$/.test(symbol)) return;
-      if (!any) { my.err = 'Typing a ticker needs a service with bars for any symbol (alpaca-data).'; head(); return; }
+      if (!/^[A-Z][A-Z0-9.]{0,9}$/.test(symbol) && !OCC.test(symbol)) return;
+      if (OCC.test(symbol) && !optionRelay(symbol)) { my.err = `No OPRA relay carries ${OCC.exec(symbol)[1]} options, so there's nothing to chart for ${symbol}.`; head(); return; }
+      if (!any && !OCC.test(symbol)) { my.err = 'Typing a ticker needs a service with bars for any symbol (alpaca-data).'; head(); return; }
       if (!my.typed.includes(symbol)) my.typed.push(symbol);
-      my.pick = offered().find(c => c.symbol === symbol) || { service: any, symbol };
+      my.pick = offered().find(c => c.symbol === symbol) || { service: optionRelay(symbol) || any, symbol };
       fresh();
     });
     const click = e => {
@@ -488,6 +502,14 @@ defineWidget('candles', {
       if (c) { my.pick = c; fresh(); } else if (e.type === 'tt-theme') { my.pick = null; fresh(); }
     };
     document.addEventListener('tt-focus', follow);
+    // A contract to chart (the Spread builder's legs): today's mid from its relay.
+    const chart = (/** @type {Event} */ e) => {
+      const symbol = /** @type {CustomEvent} */ (e).detail, relay = typeof symbol === 'string' ? optionRelay(symbol) : null;
+      if (!relay) return;
+      if (!my.typed.includes(symbol)) my.typed.push(symbol);
+      my.pick = { service: relay, symbol }; fresh();
+    };
+    document.addEventListener('tt-chart', chart);
     document.addEventListener('tt-theme', follow);
     head(); legend(); load();
     // Minute bars change once a minute: refresh them every 5 s, longer ones every minute.
@@ -496,7 +518,7 @@ defineWidget('candles', {
     return {
       // The fleet's polls only matter for which symbols are offered.
       update() { if (!my.pick) { head(); load(); } },
-      dispose() { my.alive = false; clearInterval(my.timer); cancelAnimationFrame(my.raf); document.removeEventListener('tt-position', changed); my.chart?.remove(); el.removeEventListener('click', click); document.removeEventListener('tt-focus', follow); document.removeEventListener('tt-theme', follow); },
+      dispose() { my.alive = false; clearInterval(my.timer); cancelAnimationFrame(my.raf); document.removeEventListener('tt-position', changed); my.chart?.remove(); el.removeEventListener('click', click); document.removeEventListener('tt-focus', follow); document.removeEventListener('tt-chart', chart); document.removeEventListener('tt-theme', follow); },
     };
   },
 });

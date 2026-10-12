@@ -98,7 +98,10 @@ The relay answers with a DBN v3 stream: a metadata header (dataset, schema,
     merges them by event time and encodes them exactly as live data, then
     switches to the live tail. Rows before the first live message come from
     history; that message and everything after comes from the live stream.
-  - OPRA: nothing is replayed per client. Databento refuses intraday replay
+  - OPRA: nothing is replayed per client (one contract's quotes for today
+    can be had from the relay's `/session`, which replays `cbbo-1m`,
+    `cbbo-1s`, `tcbbo` or `trades` for it on request: see the
+    [API](../relay-api.md)). Databento refuses intraday replay
     for `cmbp-1` (tested 2026-10-05; it does replay `trades`, `tcbbo`,
     `cbbo-1s`, `cbbo-1m`, `definition` and `statistics`), so missed quotes
     come from the next day's historical data. If that becomes a problem, this

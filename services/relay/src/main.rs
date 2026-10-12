@@ -26,6 +26,7 @@ mod hours;
 mod hub;
 mod protocol;
 mod quotes;
+mod session;
 mod source;
 
 use std::str::FromStr as _;
@@ -189,7 +190,7 @@ async fn run(args: Args) -> Result<(), String> {
     observer.describe(json!({
         "role": format!("Relays {dataset} {schema_name} for {} to local clients ({}).", args.symbols.join(", "), protocol::PROTOCOL),
         "upstream": [{ "id": provider_id, "label": provider_id, "sub": dataset, "kind": "flow", "via": via }],
-        "streams": { "events": "/events", "series": "/recent", "bars": "/bars", "quotes": "/quotes", "clients": "/clients" },
+        "streams": { "events": "/events", "series": "/recent", "bars": "/bars", "quotes": "/quotes", "session": "/session", "clients": "/clients" },
         "panels": [{ "heading": format!("{dataset} {}", args.symbols.join(", ")), "note": "Trade prices of the most active instruments, sampled once per second", "decimals": 2 }],
         "relay": { "protocol": protocol::PROTOCOL, "listen": args.listen, "symbols": args.symbols },
         // Relays carrying the same feed on the same hours are one line on a schedule.
@@ -203,13 +204,25 @@ async fn run(args: Args) -> Result<(), String> {
     // Bars for charts: the relay's own symbols, with history where the
     // source keeps it.
     hub.bars.keep(&args.symbols);
+    // Today's session for one contract, replayed on request (option relays on Databento).
+    let session = match args.source {
+        Provider::Databento => {
+            session::Session::new(&secret("DATABENTO_API_KEY")?, &args.dataset, &args.symbols)
+        }
+        Provider::AlpacaIex => None,
+    };
     let observe_at = listen_address("RELAY_OBSERVE_LISTEN", "127.0.0.1:9110");
     let app = observer
         .router()
         .merge(hub.events.router())
         .merge(hub.series.router())
-        .merge(bars::router(hub.bars.clone(), source.clone()))
+        .merge(bars::router(
+            hub.bars.clone(),
+            source.clone(),
+            session.clone(),
+        ))
         .merge(quotes::router(hub.clone()))
+        .merge(session.clone().map(session::router).unwrap_or_default())
         .merge({
             let hub = hub.clone();
             axum::Router::new().route(

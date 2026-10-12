@@ -120,16 +120,48 @@ struct Ask {
 struct Ctx {
     bars: Arc<Bars>,
     source: Arc<dyn Source>,
+    session: Option<Arc<crate::session::Session>>,
 }
 
-/// `/bars?symbol=SPY&days=2`.
-pub fn router(bars: Arc<Bars>, source: Arc<dyn Source>) -> Router {
+/// `/bars?symbol=SPY&days=2`; on an option relay, also `/bars?symbol=OCC`:
+/// today's one-minute bars of that contract's mid, from Databento's intraday
+/// replay (`session.rs`).
+pub fn router(
+    bars: Arc<Bars>,
+    source: Arc<dyn Source>,
+    session: Option<Arc<crate::session::Session>>,
+) -> Router {
     Router::new()
         .route("/bars", get(serve))
-        .with_state(Arc::new(Ctx { bars, source }))
+        .with_state(Arc::new(Ctx {
+            bars,
+            source,
+            session,
+        }))
 }
 
 async fn serve(State(ctx): State<Arc<Ctx>>, Query(ask): Query<Ask>) -> (StatusCode, Json<Value>) {
+    if let Some(h) = ctx.session.as_ref().filter(|h| h.serves(&ask.symbol)) {
+        let now = tinytrader_observe::unix_seconds() as i64;
+        let start = crate::session::default_start(now);
+        return match h
+            .quotes(&ask.symbol, databento::dbn::Schema::Cbbo1M, start)
+            .await
+        {
+            Ok(v) => {
+                let bars =
+                    crate::session::mid_bars(v["rows"].as_array().map_or(&[][..], Vec::as_slice));
+                let note = v["note"].as_str().map_or_else(|| "today's mid, minute by minute, from Databento's OPRA consolidated quotes (cbbo-1m)".to_owned(), str::to_owned);
+                (
+                    StatusCode::OK,
+                    Json(
+                        json!({ "symbol": ask.symbol, "interval": 60, "bars": bars, "note": note }),
+                    ),
+                )
+            }
+            Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))),
+        };
+    }
     if !ctx.bars.lock().symbols.contains(&ask.symbol) {
         return (
             StatusCode::NOT_FOUND,

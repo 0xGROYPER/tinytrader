@@ -181,7 +181,7 @@ defineWidget('spreads', {
         if (value == null) known = false; else mv += value;
         if (delta != null) dl += delta;
         return `<tr data-i="${i}">
-          <td class="sb-asset"><span class="mono">${esc(q?.symbol || `${my.sym} ${l.strike}${l.type[0].toUpperCase()}`)}</span>
+          <td class="sb-asset">${q?.symbol ? `<button type="button" class="sb-occ mono" data-chart="${esc(q.symbol)}" title="Chart today's mid on Candles (SPY and XSP options, from Databento)">${esc(q.symbol)}</button>` : `<span class="mono">${esc(`${my.sym} ${l.strike}${l.type[0].toUpperCase()}`)}</span>`}
             <span class="sb-steps"><button type="button" class="sb-mini" data-act="down" aria-label="Lower strike" title="Lower strike">‹</button><button type="button" class="sb-mini" data-act="type" title="Switch call / put">${l.type === 'call' ? 'C' : 'P'}</button><button type="button" class="sb-mini" data-act="up" aria-label="Higher strike" title="Higher strike">›</button></span></td>
           <td class="num">${m == null ? '<span class="muted">no quote</span>' : usd(m)}<small class="muted">${q?.bid != null ? `${q.bid.toFixed(2)} × ${q.ask?.toFixed(2) ?? '—'}` : ''}</small></td>
           <td class="num"><span class="sb-qty-cell"><button type="button" class="sb-mini" data-act="less" aria-label="One fewer" title="One fewer (shift: the whole position one unit smaller)">−</button><b class="mono">${n}</b><button type="button" class="sb-mini" data-act="more" aria-label="One more" title="One more (shift: the whole position one unit bigger)">+</button></span></td>
@@ -406,6 +406,8 @@ defineWidget('spreads', {
     el.addEventListener('click', e => {
       const b = /** @type {HTMLElement} */ (e.target).closest('button'); if (!b) return;
       // The payoff chart, shown on request (Candles has the overlay); remembered.
+      // A contract's symbol: its chart on Candles, opened if need be.
+      if (b.dataset.chart) { document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'candles' })); setTimeout(() => document.dispatchEvent(new CustomEvent('tt-chart', { detail: b.dataset.chart }))); return; }
       if (b.classList.contains('sb-paybtn')) { my.payoff = !my.payoff; store('tt-sb-payoff', my.payoff ? '1' : '0'); render(); return; }
       if (b.classList.contains('sb-show')) {
         position.shown = !position.shown;

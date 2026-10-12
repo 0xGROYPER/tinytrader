@@ -8,5 +8,6 @@ format.
 - **[Widgets](widgets/README.md)** describes each of the console's widgets.
 - **[Profile mode](profile-mode.md)** measures everything on a console page while it's used, and records it for reading later.
 - **[The implied distribution](implied-distribution.md)** is how option chains become probabilities: the bands on Candles, the Spread builder's chance of profit, the screener's skew.
+- **[Market data relay API](relay-api.md)**: the stream protocol and every HTTP endpoint, including today's replay of one option contract (`/session`).
 - **Decisions** record why it is built the way it is.
 - [Dataset names](datasets.md) lists the data it knows.
