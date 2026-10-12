@@ -76,7 +76,13 @@ impl AlpacaPaper {
         Self::new(Endpoints::paper(), creds, AlpacaOptions::default())
     }
 
-    /// Explicit endpoints (`Endpoints` can only be paper or loopback) and timings. The
+    /// The live endpoints: real money, only for `--allow-live`.
+    #[must_use]
+    pub fn live(creds: Credentials) -> Self {
+        Self::new(Endpoints::live(), creds, AlpacaOptions::default())
+    }
+
+    /// Explicit endpoints (paper, live or loopback) and timings. The
     /// stream starts down; `StreamUp` follows the first `listening`.
     #[must_use]
     pub fn new(endpoints: Endpoints, creds: Credentials, opts: AlpacaOptions) -> Self {

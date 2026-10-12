@@ -31,7 +31,8 @@ async function post(path, body) {
 
 function flattenPanel(a) {
   const name = a?.name, g = name && gateways[name];
-  if (!g) return a?.environment === 'live' ? '<p class="muted" style="margin:0;font-size:12px">No gateway: flatten not available.</p>' : '';
+  if (a?.environment === 'live' || g?.environment === 'live') return '<p class="muted" style="margin:0;font-size:12px">Live account: flatten isn\'t offered from the console.</p>';
+  if (!g) return '';
   if (g.error) return `<p class="muted" style="margin:0;font-size:12px">Gateway unreachable: ${esc(g.error)}</p>`;
   const f = flat[name] || {};
   const halted = g.state === 'killed';

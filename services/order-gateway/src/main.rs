@@ -15,9 +15,9 @@ use std::process::ExitCode;
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::Duration;
 
-const HELP: &str = "order-gateway --account NAME --broker sim|alpaca-paper --listen 127.0.0.1:PORT --state DIR
+const HELP: &str = "order-gateway --account NAME --broker sim|alpaca-paper|alpaca-live --listen 127.0.0.1:PORT --state DIR
     --client NAME,ROLE,PREFIX,TOKEN [--client ...]      (ROLE: trade|observe|admin)
-    [--environment paper] [--credentials-file FILE | --credentials env] [--listen-any]
+    [--environment paper] [--credentials-file FILE | --credentials env] [--listen-any] [--allow-live]
     [--sim-script FILE] [--sim-quotes DBN_FILE|tcp:HOST:PORT]
     [--underlyings SPY,..] [--any-underlying-client NAME ...] [--equities AAPL,..] [--allow-short] [--max-shares N]
     [--max-qty N] [--max-open N] [--max-legs N] [--max-notional DOLLARS]
@@ -27,7 +27,8 @@ Serves one broker account on a loopback port (tinytrader.gateway/1, NDJSON). The
 scripted (--sim-script) or against DBN quotes (--sim-quotes; client-clocked with `advance`).
 alpaca-paper needs --credentials-file (mode 600, APCA_* or ALPACA_* key names) or --credentials env
 (APCA_API_KEY_ID and APCA_API_SECRET_KEY, each from the environment or a *_FILE such as a Docker
-secret); values are never printed. It uses the compiled paper endpoints. TOKEN is a file (mode 600,
+secret); values are never printed. It uses the compiled paper endpoints. alpaca-live trades the
+live account (real money) and is refused without --allow-live; it takes the same credentials. TOKEN is a file (mode 600,
 not a symlink) or env:VAR (VAR or VAR_FILE); either way >= 64 hex chars. --listen-any allows a
 non-loopback --listen, only for a container whose port is published on loopback.
 ";
@@ -80,8 +81,8 @@ fn token_file(path: &str) -> Result<String, String> {
 #[expect(clippy::too_many_lines, reason = "one flat option table")]
 fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
     let mut o: BTreeMap<&str, &str> = BTreeMap::new();
-    let (mut clients, mut stall, mut allow_short, mut listen_any) =
-        (Vec::new(), false, false, false);
+    let (mut clients, mut stall, mut allow_short, mut listen_any, mut allow_live) =
+        (Vec::new(), false, false, false, false);
     let mut any_underlying: Vec<String> = Vec::new();
     // `--name=value` is the same as `--name value`.
     let args: Vec<&str> = args
@@ -97,6 +98,7 @@ fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
             "--test-stall-after-admitted" => stall = true,
             "--allow-short" => allow_short = true,
             "--listen-any" => listen_any = true,
+            "--allow-live" => allow_live = true,
             "--client" => clients.push(it.next().ok_or("--client needs a value")?),
             "--any-underlying-client" => any_underlying.push(
                 it.next()
@@ -121,9 +123,20 @@ fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
     };
     let account = need(take("--account"), "--account")?;
     let broker = need(take("--broker"), "--broker")?;
-    let environment = take("--environment").unwrap_or("paper").to_owned();
-    if environment != "paper" {
-        return Err("only --environment paper is supported in v1".into());
+    let live = broker == "alpaca-live";
+    if live && !allow_live {
+        return Err("--broker alpaca-live trades real money: it needs --allow-live".into());
+    }
+    if allow_live && !live {
+        return Err("--allow-live is only for --broker alpaca-live".into());
+    }
+    let environment = take("--environment")
+        .unwrap_or(if live { "live" } else { "paper" })
+        .to_owned();
+    if environment != if live { "live" } else { "paper" } {
+        return Err(format!(
+            "--environment {environment} doesn't match --broker {broker}"
+        ));
     }
     let listen: SocketAddr = need(take("--listen"), "--listen")?
         .parse()
@@ -144,16 +157,20 @@ fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
         "sim" if credentials.is_some() => {
             return Err("credentials need --broker alpaca-paper".into());
         }
-        "alpaca-paper" if script.is_some() || quotes.is_some() => {
+        "alpaca-paper" | "alpaca-live" if script.is_some() || quotes.is_some() => {
             return Err("--sim-script and --sim-quotes need --broker sim".into());
         }
-        "alpaca-paper" if credentials.is_none() => {
-            return Err(
-                "--broker alpaca-paper needs --credentials-file or --credentials env".into(),
-            );
+        "alpaca-paper" | "alpaca-live" if credentials.is_none() => {
+            return Err(format!(
+                "--broker {broker} needs --credentials-file or --credentials env"
+            ));
         }
-        "sim" | "alpaca-paper" => {}
-        b => return Err(format!("--broker {b}: expected sim or alpaca-paper")),
+        "sim" | "alpaca-paper" | "alpaca-live" => {}
+        b => {
+            return Err(format!(
+                "--broker {b}: expected sim, alpaca-paper or alpaca-live"
+            ));
+        }
     }
     let d = Profile::default();
     let n = |v, k, d: usize| num(v, k, d as u64).map(|x| usize::try_from(x).unwrap_or(usize::MAX));
@@ -268,6 +285,7 @@ fn main() -> ExitCode {
             load_credentials(std::path::Path::new(&path))
         };
         return match creds {
+            Ok(c) if cfg.environment == "live" => serve(&cfg, Ok(AlpacaPaper::live(c))),
             Ok(c) => serve(&cfg, Ok(AlpacaPaper::paper(c))),
             Err(e) => {
                 eprintln!("order-gateway: {e}");
@@ -329,5 +347,60 @@ fn serve<B: Broker + Send + 'static>(cfg: &Config, broker: Result<B, String>) ->
             eprintln!("order-gateway: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    fn args(extra: &[&str]) -> Vec<String> {
+        [
+            "--account",
+            "live",
+            "--listen",
+            "127.0.0.1:7710",
+            "--state",
+            "/nonexistent/live",
+            "--credentials",
+            "env",
+        ]
+        .iter()
+        .chain(extra)
+        .map(|s| (*s).to_owned())
+        .collect()
+    }
+
+    fn refusal(extra: &[&str]) -> String {
+        parse(&args(extra)).err().unwrap_or_default()
+    }
+
+    #[test]
+    fn live_needs_allow_live_and_nothing_else_takes_it() {
+        assert!(refusal(&["--broker", "alpaca-live"]).contains("needs --allow-live"));
+        assert!(
+            refusal(&["--broker", "alpaca-paper", "--allow-live"])
+                .contains("only for --broker alpaca-live")
+        );
+        assert!(
+            refusal(&[
+                "--broker",
+                "alpaca-live",
+                "--allow-live",
+                "--environment",
+                "paper"
+            ])
+            .contains("doesn't match")
+        );
+        assert!(
+            refusal(&["--broker", "alpaca-paper", "--environment", "live"])
+                .contains("doesn't match")
+        );
+        // With --allow-live it gets past those checks (and on to the clients, absent here).
+        let e = refusal(&["--broker", "alpaca-live", "--allow-live"]);
+        assert!(
+            !e.contains("allow-live") && !e.contains("doesn't match"),
+            "{e}"
+        );
     }
 }

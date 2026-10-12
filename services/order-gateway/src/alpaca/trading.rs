@@ -1,4 +1,4 @@
-//! Alpaca paper trading for `gateway orders`: endpoint constants, auth construction from
+//! Alpaca trading (paper, or live with the operator's explicit `--allow-live`) for `gateway orders`: endpoint constants, auth construction from
 //! injected secrets, order request bodies, and parsing of order, account, position,
 //! clock, calendar, error and `trade_updates` bodies. No I/O: the gateway sends and
 //! receives. Raw texts keep key order and number lexemes; only whitespace outside
@@ -9,12 +9,15 @@ use std::net::SocketAddr;
 
 const PAPER_REST: &str = "https://paper-api.alpaca.markets";
 const PAPER_STREAM: &str = "wss://paper-api.alpaca.markets/stream";
+/// The live host, the only place it appears (operator decision, 2026-10-12: the console's
+/// Spread builder trades the live account through its own gateway, under small caps).
+const LIVE_HOST: &str = "api.alpaca.markets";
 
 /// The `trade_updates` subscription message.
 pub const LISTEN: &str = r#"{"action":"listen","data":{"streams":["trade_updates"]}}"#;
 
-/// A REST and stream endpoint pair. Only the paper pair or a loopback test server can be
-/// built; there is no live constructor (live trading needs a separate authorization).
+/// A REST and stream endpoint pair: paper, a loopback test server, or live, which the
+/// gateway builds only for `--broker alpaca-live --allow-live`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Endpoints {
     rest: String,
@@ -30,6 +33,16 @@ impl Endpoints {
             rest: PAPER_REST.into(),
             stream: PAPER_STREAM.into(),
             environment: "paper",
+        }
+    }
+
+    /// The live account's endpoints. Real money: only for `--allow-live`.
+    #[must_use]
+    pub fn live() -> Self {
+        Self {
+            rest: format!("https://{LIVE_HOST}"),
+            stream: format!("wss://{LIVE_HOST}/stream"),
+            environment: "live",
         }
     }
 
@@ -55,7 +68,7 @@ impl Endpoints {
         &self.stream
     }
 
-    /// `paper` or `loopback`.
+    /// `paper`, `live` or `loopback`.
     #[must_use]
     pub fn environment(&self) -> &'static str {
         self.environment

@@ -703,6 +703,14 @@ async fn order_submit(
         now.as_secs(),
         now.subsec_nanos() % 100_000
     );
+    // A live account's order also says so, from the ticket's typed confirmation.
+    if ask["live"] != true && is_live(&app, &account).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "a live account's order must be confirmed as live" })),
+        )
+            .into_response();
+    }
     let intent = match gateways::intent(&ask["order"], &id) {
         Ok(i) => i,
         Err(e) => {
@@ -788,6 +796,9 @@ async fn account_flatten(
         )
             .into_response();
     }
+    if is_live(&app, &account).await {
+        return live_refused();
+    }
     let reason = ask["reason"]
         .as_str()
         .filter(|r| !r.is_empty())
@@ -808,6 +819,9 @@ async fn account_resume(
     body: axum::body::Bytes,
 ) -> Response {
     let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    if is_live(&app, &account).await {
+        return live_refused();
+    }
     let reason = ask["reason"]
         .as_str()
         .filter(|r| !r.is_empty())
@@ -819,6 +833,29 @@ async fn account_resume(
         15,
     )
     .await
+}
+
+/// Whether an account's gateway trades live (from its welcome); unreachable counts as live,
+/// so Flatten and Resume fail closed.
+async fn is_live(app: &App, account: &str) -> bool {
+    match app
+        .gateways
+        .call(account, None, Duration::from_secs(5))
+        .await
+    {
+        Ok((w, _)) => w["environment"] != "paper",
+        Err(_) => true,
+    }
+}
+
+/// Flatten (sell everything at market) and Resume are for paper accounts only: a live
+/// account holds more than the console's orders.
+fn live_refused() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        axum::Json(json!({ "error": "not offered for a live account from the console" })),
+    )
+        .into_response()
 }
 
 async fn gateway_request(

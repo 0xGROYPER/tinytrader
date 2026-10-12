@@ -204,25 +204,28 @@ defineWidget('spreads', {
       if (my.orders.unavailable) { box.innerHTML = `<p class="muted sb-note">Orders: ${esc(my.orders.unavailable)}</p>`; return; }
       if (!my.orders.trading) { box.innerHTML = '<p class="muted sb-note">Sending orders needs the console\'s trade token for the paper gateways (operator: scripts/gateway-token GATEWAY_CONSOLE_TOKEN, then restart the gateways and the console).</p>'; return; }
       if (!o) { box.innerHTML = ''; return; }
-      const usable = accts.filter(x => !x.error);
-      if (!usable.some(x => x.account === my.acct)) my.acct = usable[0]?.account || '';
+      // A live account is never picked for you: the first paper one is the default.
+      const usable = accts.filter(x => !x.error), isLive = x => x?.environment === 'live';
+      if (!usable.some(x => x.account === my.acct)) my.acct = usable.find(x => !isLive(x))?.account || '';
+      const live = isLive(accts.find(x => x.account === my.acct));
       const credit = o.limit_price < 0, single = o.legs.length === 1;
       const unit = `${credit ? 'credit' : 'debit'} $${Math.abs(o.limit_price).toFixed(2)}`;
       const total = Math.abs(o.limit_price) * 100 * o.qty;
       const risk = isFinite(a.maxL) ? `max loss $${Math.abs(a.maxL * 100 * my.qty).toFixed(0)}` : 'loss unlimited';
       if (my.review) {
         const k = l => `${l.side > 0 ? 'Buy' : 'Sell'} ${l.qty * my.qty} ${my.sym} ${my.expiry} ${l.strike} ${l.type}`;
-        box.innerHTML = `<div class="sb-review"><p><b>Send to ${esc(my.acct)}</b> (paper) as ${single ? 'one order' : 'one combo order'}, limit ${unit}${single ? '' : ' per spread'} × ${o.qty}: ${credit ? `receive at least $${total.toFixed(0)}` : `pay at most $${total.toFixed(0)}`}; ${risk}. Day order, opening.</p>
+        box.innerHTML = `<div class="sb-review${live ? ' sb-live' : ''}">${live ? '<p class="sb-bad"><b>LIVE ACCOUNT: real money.</b></p>' : ''}<p><b>Send to ${esc(my.acct)}</b> (${live ? 'live' : 'paper'}) as ${single ? 'one order' : 'one combo order'}, limit ${unit}${single ? '' : ' per spread'} × ${o.qty}: ${credit ? `receive at least $${total.toFixed(0)}` : `pay at most $${total.toFixed(0)}`}; ${risk}. Day order, opening.</p>
           <ul class="mono">${legs().map(l => `<li>${esc(k(l))} <span class="muted">${esc(symbolOf(l))}</span></li>`).join('')}</ul>
-          <p><button type="button" class="btn primary" data-act="send"${my.sending ? ' disabled' : ''}>${my.sending ? 'Sending…' : 'Send order'}</button> <button type="button" class="btn" data-act="back">Back</button></p></div>`;
+          ${live ? `<p><label>Type <b class="mono">${esc(my.acct)}</b> to send: <input class="sb-confirm mono" autocomplete="off" spellcheck="false"></label></p>` : ''}
+          <p><button type="button" class="btn primary" data-act="send"${my.sending || live ? ' disabled' : ''}>${my.sending ? 'Sending…' : live ? 'Send live order' : 'Send order'}</button> <button type="button" class="btn" data-act="back">Back</button></p></div>`;
         return;
       }
       box.innerHTML = `<div class="sb-tk">
-        <label>Account <select class="sb-acct">${accts.map(x => `<option value="${esc(x.account)}"${x.error ? ' disabled' : ''}${x.account === my.acct ? ' selected' : ''}>${esc(x.account)}${x.error ? ' (unreachable)' : x.state && x.state !== 'ready' ? ` (${esc(x.state)})` : ''}</option>`).join('')}</select></label>
+        <label>Account <select class="sb-acct">${accts.map(x => `<option value="${esc(x.account)}"${x.error ? ' disabled' : ''}${x.account === my.acct ? ' selected' : ''}>${esc(x.account)}${isLive(x) ? ' (LIVE: real money)' : ''}${x.error ? ' (unreachable)' : x.state && x.state !== 'ready' ? ` (${esc(x.state)})` : ''}</option>`).join('')}</select></label>
         <label>Qty <input class="sb-qty mono" type="number" min="1" max="100" value="${my.qty}"></label>
         <label>Limit <input class="sb-limit mono" type="number" step="0.01" value="${o.limit_price.toFixed(2)}" title="Net per ${single ? 'contract' : 'spread'}: positive pays (debit), negative receives (credit)"></label>
         <span class="muted mono">${unit} · ${risk}</span>
-        <button type="button" class="btn primary" data-act="review"${my.acct ? '' : ' disabled'}>Review order</button></div>
+        <button type="button" class="btn primary" data-act="review"${my.acct ? '' : ' disabled'}>Review ${live ? 'live ' : ''}order</button></div>
         ${my.result ? `<p class="sb-result">${my.result}</p>` : ''}`;
     }
     function ordersList() {
@@ -241,10 +244,13 @@ defineWidget('spreads', {
     }
     async function send() {
       const o = order(analyse()); if (!o || my.sending) return;
+      const live = (my.orders?.accounts || []).find(x => x.account === my.acct)?.environment === 'live';
+      const typed = /** @type {HTMLInputElement | null} */ (el.querySelector('.sb-confirm'))?.value.trim();
+      if (live && typed !== my.acct) return;
       my.sending = true; ticket(analyse());
       try {
         const r = await fetch(`/api/orders/${encodeURIComponent(my.acct)}`, { method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ confirm: my.acct, order: { legs: o.legs, qty: o.qty, limit_price: o.limit_price, effect: 'open' } }) });
+          body: JSON.stringify({ confirm: my.acct, live, order: { legs: o.legs, qty: o.qty, limit_price: o.limit_price, effect: 'open' } }) });
         const v = await r.json().catch(() => ({}));
         my.result = outcome(v, r.ok);
       } catch (e) { my.result = `Not known whether it was sent: ${esc(e.message)}. Check working orders before sending again.`; }
@@ -265,6 +271,12 @@ defineWidget('spreads', {
       e.preventDefault();
       const s = (/** @type {HTMLInputElement} */ ($('.sb-ticker')).value || '').trim().toUpperCase();
       if (/^[A-Z][A-Z0-9.]{0,9}$/.test(s)) switchTo(s);
+    });
+    el.addEventListener('input', e => {
+      const t = /** @type {HTMLInputElement} */ (e.target);
+      if (!t.classList.contains('sb-confirm')) return;
+      const send = /** @type {HTMLButtonElement | null} */ (el.querySelector('[data-act="send"]'));
+      if (send) send.disabled = my.sending || t.value.trim() !== my.acct;
     });
     el.addEventListener('change', e => {
       const t = /** @type {HTMLSelectElement} */ (e.target);

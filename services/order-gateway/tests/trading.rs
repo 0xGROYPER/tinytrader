@@ -6,7 +6,7 @@ use order_gateway::trading::{
 };
 
 #[test]
-fn only_paper_or_loopback_endpoints_exist() {
+fn endpoints_are_paper_loopback_or_the_one_live_pair() {
     let p = Endpoints::paper();
     assert_eq!(p.rest(), "https://paper-api.alpaca.markets");
     assert_eq!(p.stream(), "wss://paper-api.alpaca.markets/stream");
@@ -14,13 +14,25 @@ fn only_paper_or_loopback_endpoints_exist() {
     assert!(Endpoints::loopback("10.0.0.1:80".parse().unwrap()).is_none());
     let l = Endpoints::loopback("127.0.0.1:9".parse().unwrap()).unwrap();
     assert_eq!(l.stream(), "ws://127.0.0.1:9/stream");
-    // No live host is compiled into the trading module or the gateway driver.
+    let l = Endpoints::live();
+    assert_eq!(l.rest(), "https://api.alpaca.markets");
+    assert_eq!(l.stream(), "wss://api.alpaca.markets/stream");
+    assert_eq!(l.environment(), "live");
+    // The live host is written once, in trading.rs's LIVE_HOST, and nowhere else in the
+    // Alpaca module or the gateway driver.
     let dir = env!("CARGO_MANIFEST_DIR");
-    for name in ["trading.rs", "mod.rs", "stream.rs", "http.rs"] {
-        let src = format!("{dir}/src/alpaca/{name}");
+    for name in [
+        "alpaca/trading.rs",
+        "alpaca/mod.rs",
+        "alpaca/stream.rs",
+        "alpaca/http.rs",
+        "main.rs",
+    ] {
+        let src = format!("{dir}/src/{name}");
         let text = std::fs::read_to_string(&src).unwrap();
         let live = text.replace("paper-api.alpaca.markets", "");
-        assert!(!live.contains("api.alpaca.markets"), "{src}");
+        let want = usize::from(name == "alpaca/trading.rs");
+        assert_eq!(live.matches("api.alpaca.markets").count(), want, "{src}");
     }
 }
 
