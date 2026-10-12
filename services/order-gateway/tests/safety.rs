@@ -325,3 +325,54 @@ fn flatten_closes_every_position_and_halts_opens() {
     assert_eq!(ev["outcome"]["outcome"], "ok");
     gw.stop().unwrap();
 }
+
+#[test]
+fn an_any_underlying_client_skips_only_the_allowlist() {
+    let mut cfg = config(root("any-underlying"));
+    cfg.profile.any_underlying_clients = vec!["other".into()];
+    let gw = scripted(cfg, &clocked());
+    let sap = |cid: &str, qty: u32, price: &str| {
+        single(cid, "SAP261016C00250000", "buy", "open", qty, price)
+    };
+    // Another trading client on the same account keeps the allowlist.
+    let mut c = Conn::open(&gw, "reactor", None);
+    let r = c.submit("r1", &sap("wse-1", 1, "1.00"));
+    assert_eq!(
+        (r["reason"].as_str(), r["detail"]["underlying"].as_str()),
+        (Some("unsupported"), Some("SAP"))
+    );
+    let mut o = Conn::open(&gw, "other", None);
+    assert_eq!(
+        o.submit("o1", &sap("oth-1", 1, "1.00"))["outcome"],
+        "accepted"
+    );
+    // Caps still apply: contracts and notional.
+    assert_eq!(
+        o.submit("o2", &sap("oth-2", 11, "0.10"))["detail"]["cap"],
+        "qty"
+    );
+    assert_eq!(
+        o.submit("o3", &sap("oth-3", 1, "26.00"))["detail"]["cap"],
+        "notional"
+    );
+    gw.stop().unwrap();
+}
+
+#[test]
+fn an_any_underlying_client_has_the_earlier_expiry_day_cutoff() {
+    // 15:20 New York: past close − 45 min − 30 s for a non-SPY/QQQ underlying.
+    let script = format!(
+        r#"{{"clock_ts":{}}}"#,
+        T0 + (5 * 3600 + 20 * 60) * 1_000_000_000
+    );
+    let mut cfg = config(root("any-underlying-cutoff"));
+    cfg.profile.any_underlying_clients = vec!["other".into()];
+    let gw = scripted(cfg, &script);
+    let mut o = Conn::open(&gw, "other", None);
+    let r = o.submit(
+        "o1",
+        &single("oth-1", "SAP261005C00250000", "buy", "open", 1, "1.00"),
+    );
+    assert_eq!(r["reason"], "cutoff", "{r}");
+    gw.stop().unwrap();
+}

@@ -11,6 +11,9 @@ const NS: i64 = 1_000_000_000;
 pub struct Profile {
     /// Allowed option roots.
     pub underlyings: Vec<String>,
+    /// Clients whose option orders may be on any underlying (a manual
+    /// trading client); every other check and cap still applies to them.
+    pub any_underlying_clients: Vec<String>,
     /// Allowed stocks (single orders, `day` or `cls`); none by default.
     pub equities: Vec<String>,
     /// Whether a stock may be sold to open (a short sale).
@@ -41,6 +44,7 @@ impl Default for Profile {
     fn default() -> Self {
         Self {
             underlyings: vec!["SPY".into()],
+            any_underlying_clients: Vec::new(),
             equities: Vec::new(),
             allow_short: false,
             max_shares: 1_000,
@@ -61,9 +65,16 @@ impl Profile {
     pub(crate) fn json(&self) -> String {
         let u = crate::protocol::arr(self.underlyings.iter().map(|s| crate::protocol::quote(s)));
         let e = crate::protocol::arr(self.equities.iter().map(|s| crate::protocol::quote(s)));
-        Obj::new()
-            .raw("underlyings", &u)
-            .raw("equities", &e)
+        let mut o = Obj::new().raw("underlyings", &u);
+        if !self.any_underlying_clients.is_empty() {
+            let a = crate::protocol::arr(
+                self.any_underlying_clients
+                    .iter()
+                    .map(|s| crate::protocol::quote(s)),
+            );
+            o = o.raw("any_underlying_clients", &a);
+        }
+        o.raw("equities", &e)
             .s("allow_short", if self.allow_short { "yes" } else { "no" })
             .n("max_shares", self.max_shares)
             .n("max_legs", self.max_legs)

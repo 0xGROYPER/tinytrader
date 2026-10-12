@@ -19,7 +19,7 @@ const HELP: &str = "order-gateway --account NAME --broker sim|alpaca-paper --lis
     --client NAME,ROLE,PREFIX,TOKEN [--client ...]      (ROLE: trade|observe|admin)
     [--environment paper] [--credentials-file FILE | --credentials env] [--listen-any]
     [--sim-script FILE] [--sim-quotes DBN_FILE|tcp:HOST:PORT]
-    [--underlyings SPY,..] [--equities AAPL,..] [--allow-short] [--max-shares N]
+    [--underlyings SPY,..] [--any-underlying-client NAME ...] [--equities AAPL,..] [--allow-short] [--max-shares N]
     [--max-qty N] [--max-open N] [--max-legs N] [--max-notional DOLLARS]
     [--submits-per-min N] [--submits-per-day N] [--max-rejects N] [--budget N] [--min-options-level N]
     [--resolve-ms 1000,2000,4000] [--test-stall-after-admitted]
@@ -82,6 +82,7 @@ fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
     let mut o: BTreeMap<&str, &str> = BTreeMap::new();
     let (mut clients, mut stall, mut allow_short, mut listen_any) =
         (Vec::new(), false, false, false);
+    let mut any_underlying: Vec<String> = Vec::new();
     // `--name=value` is the same as `--name value`.
     let args: Vec<&str> = args
         .iter()
@@ -97,6 +98,11 @@ fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
             "--allow-short" => allow_short = true,
             "--listen-any" => listen_any = true,
             "--client" => clients.push(it.next().ok_or("--client needs a value")?),
+            "--any-underlying-client" => any_underlying.push(
+                it.next()
+                    .ok_or("--any-underlying-client needs a client name")?
+                    .to_owned(),
+            ),
             k if k.starts_with("--") => {
                 let v = it.next().ok_or_else(|| format!("{k} needs a value"))?;
                 if o.insert(k, v).is_some() {
@@ -156,6 +162,7 @@ fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
         underlyings: take("--underlyings").map_or(d.underlyings.clone(), |s| {
             s.split(',').map(String::from).collect()
         }),
+        any_underlying_clients: any_underlying.clone(),
         equities: take("--equities").map_or(d.equities.clone(), |s| {
             s.split(',').map(String::from).collect()
         }),
@@ -211,6 +218,17 @@ fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
             prefix,
             token,
         });
+    }
+    // Only a trading client may be let past the underlying allowlist.
+    for name in &any_underlying {
+        if !specs
+            .iter()
+            .any(|c| &c.name == name && c.role == Role::Trade)
+        {
+            return Err(format!(
+                "--any-underlying-client {name}: no trade client of that name"
+            ));
+        }
     }
     if listen_any {
         check_state(&state)?;

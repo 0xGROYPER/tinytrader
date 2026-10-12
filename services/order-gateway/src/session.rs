@@ -811,14 +811,14 @@ impl<B: Broker> Session<B> {
                 return self.outcome_event(client, rid, raw_cid.as_deref(), o);
             }
         };
-        if let Some(o) = self.refusal(prefix, &intent) {
+        if let Some(o) = self.refusal(client, prefix, &intent) {
             return self.outcome_event(client, rid, Some(&intent.client_order_id), o);
         }
         self.forward(client, rid, &intent)
     }
 
     /// Every check that runs before any I/O, in contract order.
-    fn refusal(&mut self, prefix: &str, intent: &Intent) -> Option<String> {
+    fn refusal(&mut self, client: &str, prefix: &str, intent: &Intent) -> Option<String> {
         let cid = &intent.client_order_id;
         if !cid.starts_with(prefix) {
             return Some(not_sent("prefix", &Obj::new().s("prefix", prefix).done()));
@@ -845,7 +845,9 @@ impl<B: Broker> Session<B> {
                 continue;
             }
             let root = occ(&l.symbol).map_or("", |(r, _)| r);
-            if !p.underlyings.iter().any(|u| u == root) {
+            if !p.underlyings.iter().any(|u| u == root)
+                && !p.any_underlying_clients.iter().any(|c| c == client)
+            {
                 return Some(not_sent(
                     "unsupported",
                     &Obj::new().s("underlying", root).done(),

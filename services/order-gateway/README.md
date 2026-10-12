@@ -196,6 +196,7 @@ TICKER = ^[A-Z]{1,5}(\.[A-Z])?$       (e.g. AAPL, BRK.B)
 
 **The account allowlist** comes from the operator profile:
 - underlyings (default `SPY`), class `option`
+- clients allowed options on any underlying (`--any-underlying-client NAME`, repeatable, default none): for a manual trading client such as the console's. Only the underlying check is skipped, and only for that client's orders; every cap, the kill switch and the expiry-day cutoff still apply, and other clients on the account keep the list. The name must be a `trade` client. The profile in `welcome` lists them as `any_underlying_clients` when there are any.
 - stocks (`--equities`, default none), and whether short sales are allowed (`--allow-short`, default no)
 - shapes and maximum legs
 - the caps in [section 8](#8-rate-budget-and-caps)
@@ -556,7 +557,7 @@ order-gateway --account sim-1 --broker sim --listen 127.0.0.1:7601 --state ~/.lo
   --client reactor,trade,wse-,~/.config/tinytrader/gateway-clients/reactor.token \
   --client watch,observe,,~/.config/tinytrader/gateway-clients/watch.token \
   [--sim-script FILE] [--sim-quotes DBN_FILE|tcp:HOST:PORT] \
-  [--underlyings SPY] [--equities AAPL,..] [--allow-short] [--max-shares 1000] [--max-qty 10] [--max-open 4] [--max-legs 4] [--max-notional 2500] \
+  [--underlyings SPY] [--any-underlying-client NAME ...] [--equities AAPL,..] [--allow-short] [--max-shares 1000] [--max-qty 10] [--max-open 4] [--max-legs 4] [--max-notional 2500] \
   [--submits-per-min 60] [--submits-per-day 500] [--max-rejects 5] [--budget 150] [--min-options-level 3] \
   [--resolve-ms 1000,2000,4000]
 ```
