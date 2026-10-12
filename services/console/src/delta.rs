@@ -31,13 +31,18 @@ struct Inner {
 
 impl Delta {
     pub fn new(epoch: u64) -> Self {
-        Delta { epoch, inner: Mutex::default() }
+        Delta {
+            epoch,
+            inner: Mutex::default(),
+        }
     }
 
     /// The answer for a page that last saw `since` in `epoch`, or the whole
     /// snapshot unchanged when it passes neither.
     pub fn answer(&self, snapshot: Value, since: Option<u64>, epoch: Option<u64>) -> Value {
-        let Value::Object(mut top) = snapshot else { return snapshot };
+        let Value::Object(mut top) = snapshot else {
+            return snapshot;
+        };
         let services = match top.remove("services") {
             Some(Value::Object(s)) => s,
             other => {
@@ -90,7 +95,11 @@ impl Delta {
             let names: Vec<Value> = fields.keys().map(|k| Value::String(k.clone())).collect();
             let mut kept = Map::new();
             for (name, f) in fields {
-                if full || gens.get(&(svc.clone(), name.clone())).is_some_and(|&g| g > since) {
+                if full
+                    || gens
+                        .get(&(svc.clone(), name.clone()))
+                        .is_some_and(|&g| g > since)
+                {
                     kept.insert(name, f);
                 }
             }
@@ -142,7 +151,10 @@ mod tests {
         assert_eq!(next["services"]["relay"]["recent"], json!([2]));
         assert!(next["services"]["alpaca-news"].get("news").is_none());
         assert!(next["services"]["relay"].get("health").is_none());
-        assert_eq!(next["services"]["alpaca-news"]["_fields"], json!(["health", "news"]));
+        assert_eq!(
+            next["services"]["alpaca-news"]["_fields"],
+            json!(["health", "news"])
+        );
         // Nothing changed: nothing but the names.
         let g2 = next["generation"].as_u64().unwrap();
         let same = d.answer(snap("a", 2), Some(g2), Some(7));
@@ -153,7 +165,9 @@ mod tests {
     #[test]
     fn a_change_seen_by_another_page_still_reaches_this_one() {
         let d = Delta::new(7);
-        let g = d.answer(snap("a", 1), Some(0), None)["generation"].as_u64().unwrap();
+        let g = d.answer(snap("a", 1), Some(0), None)["generation"]
+            .as_u64()
+            .unwrap();
         d.answer(snap("b", 1), Some(0), None); // another page sees the news change first
         let mine = d.answer(snap("b", 1), Some(g), Some(7));
         assert_eq!(mine["services"]["alpaca-news"]["news"], json!(["b"]));

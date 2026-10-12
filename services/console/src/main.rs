@@ -57,6 +57,8 @@
 //! - `CONSOLE_PAGE`: serve the page from this file, and its modules and
 //!   libraries from beside it, read on each request, instead of the copies
 //!   built in (optional; lets the page change without a rebuild).
+//! - `CONSOLE_PROFILES`: where profile-mode recordings are kept
+//!   (`/api/profiles`); by default `profiles/` beside `CONSOLE_REMINDERS`.
 //! - `CONSOLE_REMINDERS`: a JSON file for the roadmap's reminders, which the
 //!   console edits (`/api/reminders`); `CONSOLE_REMINDERS_SEED`: a Markdown
 //!   roadmap to start it from (optional).
@@ -65,6 +67,7 @@ mod collections;
 mod delta;
 mod gateways;
 mod notify;
+mod profiles;
 mod reminders;
 
 use std::collections::HashMap;
@@ -96,6 +99,8 @@ struct App {
     store: Option<String>,
     /// The roadmap's reminders, if configured.
     reminders: Option<reminders::Reminders>,
+    /// Profile-mode recordings uploaded by pages, if a directory is configured.
+    profiles: Option<profiles::Profiles>,
     /// Order gateways by account, for Flatten and Resume.
     gateways: gateways::Gateways,
     polls: AtomicU64,
@@ -146,6 +151,22 @@ async fn main() {
             .filter(|s| !s.is_empty())
             .map(|u| (u.trim_end_matches('/').to_owned(), reqwest::Client::new())),
         gateways: gateways::Gateways::from_env(),
+        // Beside the reminders unless named.
+        profiles: std::env::var("CONSOLE_PROFILES")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var("CONSOLE_REMINDERS")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|r| {
+                        std::path::Path::new(&r)
+                            .parent()
+                            .map(|d| d.join("profiles"))
+                    })
+            })
+            .map(profiles::Profiles::new),
         reminders: std::env::var("CONSOLE_REMINDERS")
             .ok()
             .filter(|s| !s.is_empty())
@@ -204,6 +225,15 @@ async fn main() {
             axum::routing::post(store_approve),
         )
         .route("/api/reminders", get(reminders_get).post(reminders_post))
+        .route(
+            "/api/profiles",
+            get(profiles_list)
+                .post(profiles_post)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    profiles::MAX_BYTES + 1024,
+                )),
+        )
+        .route("/api/profiles/{id}", get(profiles_get))
         .route("/api/accounts/gateways", get(gateways_list))
         .route(
             "/api/accounts/{account}/flatten",
@@ -349,7 +379,11 @@ async fn state(
 ) -> Response {
     let since = q.get("since").and_then(|v| v.parse().ok());
     let epoch = q.get("epoch").and_then(|v| v.parse().ok());
-    no_store(axum::Json(app.delta.answer(app.poller.snapshot_json(), since, epoch)))
+    no_store(axum::Json(app.delta.answer(
+        app.poller.snapshot_json(),
+        since,
+        epoch,
+    )))
 }
 
 /// Live tail of a service's events, forwarded from the service.
@@ -459,6 +493,33 @@ async fn reminders_post(
     match r.apply(&change) {
         Ok(doc) => no_store(axum::Json(doc)),
         Err(e) => (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn profiles_list(AxumState(app): AxumState<Arc<App>>) -> Response {
+    match &app.profiles {
+        Some(p) => no_store(axum::Json(p.list())),
+        None => (StatusCode::NOT_FOUND, "no profiles directory configured").into_response(),
+    }
+}
+
+async fn profiles_post(AxumState(app): AxumState<Arc<App>>, body: axum::body::Bytes) -> Response {
+    let Some(p) = &app.profiles else {
+        return (StatusCode::NOT_FOUND, "no profiles directory configured").into_response();
+    };
+    match p.store(&body) {
+        Ok(id) => no_store(axum::Json(json!({ "id": id }))),
+        Err(e) => (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn profiles_get(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match app.profiles.as_ref().and_then(|p| p.get(&id)) {
+        Some(b) => no_store(([(header::CONTENT_TYPE, "application/json")], b)),
+        None => (StatusCode::NOT_FOUND, "no such recording").into_response(),
     }
 }
 
