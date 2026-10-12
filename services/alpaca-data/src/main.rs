@@ -10,7 +10,8 @@
 //!   default), 5- and 15-minute, hourly (`3600`) or daily (`86400`), over the
 //!   last `days` trading days.
 //! - `/chain?underlying=AAPL&from=YYYY-MM-DD&to=YYYY-MM-DD`: option contracts
-//!   with quotes, IV and greeks, and per expiry the at-the-money IV and the
+//!   with quotes, and IV and greeks computed here from them (`pricing`; never
+//!   Alpaca's), and per expiry the at-the-money IV and the
 //!   straddle as an implied move; by default the next 60 days.
 //!
 //! - `/news?symbols=USO,XLE&limit=50`: recent stories on those symbols
@@ -42,6 +43,7 @@
 
 mod cboe;
 mod chain;
+mod pricing;
 mod screener;
 mod smile;
 
@@ -854,8 +856,9 @@ async fn option_chain(AxState(app): AxState<Arc<App>>, Query(ask): Query<ChainAs
                 Some(s) => (Some(s), "trade"),
                 None => (chain::parity_spot(&contracts), "parity"),
             };
+            pricing::price(&mut contracts, spot, &|x| years_to_close(x, now));
             Ok(json!({
-                "underlying": underlying, "spot": spot, "spot_from": spot_from, "feed": a.options_feed, "from": from, "to": to,
+                "underlying": underlying, "spot": spot, "spot_from": spot_from, "iv_from": "mid", "feed": a.options_feed, "from": from, "to": to,
                 "expiries": chain::expiries(&contracts, spot, &|x| years_to_close(x, now)),
                 "contracts": contracts.iter().map(chain::Contract::to_json).collect::<Vec<_>>(),
                 "truncated": truncated,
@@ -1208,6 +1211,7 @@ async fn near_chain(app: &App, sym: &str, spot: f64) {
     if contracts.is_empty() && m.note.is_none() {
         m.note = Some("no options quoted".into());
     }
+    pricing::price(&mut contracts, Some(spot), &|x| years_to_close(x, now));
     let exps = chain::expiries(&contracts, Some(spot), &|x| years_to_close(x, now));
     let (iv, mv) = screener::pick(&exps, &today);
     (m.atm_iv_30d, m.iv_expiry) = iv.map_or((None, None), |(v, x)| (Some(v), Some(x)));
@@ -1238,7 +1242,7 @@ async fn main() {
     let observer = Observer::new("alpaca-data", env!("CARGO_PKG_VERSION"));
     observer.set_state(State::Ready, "waiting for requests");
     observer.describe(json!({
-        "role": "Market data for any symbol on request: stock snapshots, bars and option chains with IV and greeks, from Alpaca; index bars (XSP, SPX, VIX, ...) from Cboe, 15 minutes delayed.",
+        "role": "Market data for any symbol on request: stock snapshots, bars and option chains from Alpaca with IV and greeks computed here from the quotes; index bars (XSP, SPX, VIX, ...) from Cboe, 15 minutes delayed.",
         "upstream": [
             { "id": "alpaca-data-api", "label": "Alpaca", "sub": format!("{} stocks, {} options", args.feed, args.options_feed), "kind": "flow", "via": "https" },
             { "id": "cboe-delayed", "label": "Cboe", "sub": "index bars, 15 min delayed", "kind": "flow", "via": "https" },

@@ -2,7 +2,7 @@
 
 An underlying's implied volatility by strike (rows) and expiry (columns), on the usual heatmap scale from blue (low) through green and yellow to red (high). The first rows are the term structure: at-the-money IV and the straddle's implied move per expiry.
 
-**Data:** Option chains from alpaca-data, with IV and greeks from Alpaca's snapshots; refreshed every 30 seconds. Each cell is the out-of-the-money contract's IV (puts below spot, calls above).
+**Data:** Option chains from alpaca-data, with IV and greeks computed by alpaca-data from each contract's mid (Black-76 on the parity forward; Alpaca's own values are not used); refreshed every 30 seconds. Each cell is the out-of-the-money contract's IV (puts below spot, calls above).
 
 **Using it:**
 

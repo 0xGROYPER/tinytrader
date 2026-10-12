@@ -2,7 +2,7 @@
 
 An options position from a structure and the live chain, priced, and drawn on Candles to adjust by dragging. It builds and prices; it sends nothing.
 
-**Data:** a service serving option chains (alpaca-data): quotes from Alpaca's indicative feed, with implied volatility. Refreshed every 30 seconds.
+**Data:** a service serving option chains (alpaca-data): quotes from Alpaca's indicative feed, with implied volatility computed by alpaca-data from each mid (Alpaca's own values are not used). Refreshed every 30 seconds.
 
 **Using it:**
 

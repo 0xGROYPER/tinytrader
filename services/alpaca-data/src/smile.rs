@@ -1,15 +1,15 @@
 //! The market-implied distribution of the price at one expiry, from the whole
 //! chain rather than the at-the-money straddle alone.
 //!
-//! - **Forward.** From put-call parity at the strikes nearest the price
-//!   (`F = K + C - P`, zero rates), so dividends and carry are in it; the
-//!   price when no strike has both quotes.
+//! - **Forward.** From put-call parity (`pricing::forward`, discounted at
+//!   `pricing::RATE`), so dividends and carry are in it; the price when too
+//!   few strikes have both quotes.
 //! - **Quotes used.** The out-of-the-money side at each strike (puts below the
 //!   forward, calls at or above), with a bid, not crossed, a mid of at least
 //!   [`MIN_MID`] and a spread of at most [`MAX_SPREAD`] of the mid. Implied
 //!   volatility is inverted from the mid with Black's formula on the forward
-//!   (zero rates, European exercise: Alpaca's own IVs use another model), and
-//!   kept between 2% and 400%.
+//!   (`pricing`; Alpaca's own IVs are never used), and kept between 2% and
+//!   400%.
 //! - **Smile.** Total variance `w = σ²T` against log-moneyness `k = ln(K/F)`,
 //!   fitted as raw SVI, `w = a + c(k - m) + d·√((k - m)² + s²)`: for each
 //!   (m, s) on a grid the rest is a weighted linear least squares; candidates
@@ -28,79 +28,14 @@
 use serde_json::{Value, json};
 
 use crate::chain::Contract;
+#[cfg(test)]
+use crate::pricing::black;
+use crate::pricing::{discount, forward, implied_w, norm_cdf, norm_pdf};
 
 /// Widest bid-ask spread used, as a fraction of the mid.
 pub const MAX_SPREAD: f64 = 0.6;
 /// Smallest mid used: quotes of a cent or two are mostly spread.
 pub const MIN_MID: f64 = 0.02;
-
-fn norm_pdf(x: f64) -> f64 {
-    (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt()
-}
-
-/// The standard normal CDF.
-fn norm_cdf(x: f64) -> f64 {
-    0.5 * erfc(-x / std::f64::consts::SQRT_2)
-}
-
-fn erfc(x: f64) -> f64 {
-    // Numerical Recipes' erfcc: fractional error below 1.2e-7 everywhere.
-    let z = x.abs();
-    let t = 1.0 / (1.0 + 0.5 * z);
-    let r = t
-        * (-z * z - 1.265_512_23
-            + t * (1.000_023_68
-                + t * (0.374_091_96
-                    + t * (0.096_784_18
-                        + t * (-0.186_288_06
-                            + t * (0.278_868_07
-                                + t * (-1.135_203_98
-                                    + t * (1.488_515_87
-                                        + t * (-0.822_152_23 + t * 0.170_872_77)))))))))
-            .exp();
-    if x >= 0.0 { r } else { 2.0 - r }
-}
-
-/// Black's price on the forward, zero rates, with total variance `w`.
-fn black(f: f64, k: f64, w: f64, call: bool) -> f64 {
-    if w <= 0.0 {
-        return if call {
-            (f - k).max(0.0)
-        } else {
-            (k - f).max(0.0)
-        };
-    }
-    let s = w.sqrt();
-    let d1 = ((f / k).ln() + w / 2.0) / s;
-    let d2 = d1 - s;
-    if call {
-        f * norm_cdf(d1) - k * norm_cdf(d2)
-    } else {
-        k * norm_cdf(-d2) - f * norm_cdf(-d1)
-    }
-}
-
-/// The total variance at which Black's price is `price`, by bisection.
-fn implied_w(price: f64, f: f64, k: f64, call: bool) -> Option<f64> {
-    let (lo_p, hi_p) = (black(f, k, 0.0, call), if call { f } else { k });
-    if !(price > lo_p && price < hi_p) {
-        return None;
-    }
-    let (mut lo, mut hi) = (1e-4_f64, 5.0_f64); // σ√T
-    if black(f, k, hi * hi, call) < price {
-        return None;
-    }
-    for _ in 0..100 {
-        let mid = 0.5 * (lo + hi);
-        if black(f, k, mid * mid, call) < price {
-            lo = mid
-        } else {
-            hi = mid
-        }
-    }
-    let s = 0.5 * (lo + hi);
-    Some(s * s)
-}
 
 /// One quoted strike: log-moneyness, total variance, and the fit's weight.
 #[derive(Clone, Copy, Debug)]
@@ -243,26 +178,6 @@ fn fit_quad(pts: &[Point]) -> Option<Smile> {
         .then_some(smile)
 }
 
-/// The forward from put-call parity at the (up to) three strikes nearest
-/// `spot` with both mids; the median, or `spot`.
-fn forward(list: &[&Contract], spot: f64) -> f64 {
-    let mut pairs: Vec<(f64, f64)> = list
-        .iter()
-        .filter(|c| c.call)
-        .filter_map(|c| {
-            let p = list.iter().find(|p| !p.call && p.strike == c.strike)?;
-            Some(((c.strike - spot).abs(), c.strike + c.mid()? - p.mid()?))
-        })
-        .collect();
-    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut f: Vec<f64> = pairs.iter().take(3).map(|x| x.1).collect();
-    f.sort_by(f64::total_cmp);
-    match f.get(f.len() / 2) {
-        Some(&x) if x > 0.0 && (x / spot - 1.0).abs() < 0.1 => x,
-        _ => spot,
-    }
-}
-
 /// Linear interpolation of `ys` at `x` over increasing `xs`.
 fn interp(xs: &[f64], ys: &[f64], x: f64) -> f64 {
     if x <= xs[0] {
@@ -294,7 +209,8 @@ pub fn distribution(list: &[&Contract], spot: f64, t: f64, straddle: Option<f64>
     if !(spot > 0.0 && t > 0.0) {
         return Value::Null;
     }
-    let f = forward(list, spot);
+    let f = forward(list, t, Some(spot)).unwrap_or(spot);
+    let df = discount(t);
     let otm: Vec<&&Contract> = list
         .iter()
         .filter(|c| if c.call { c.strike >= f } else { c.strike < f })
@@ -311,7 +227,7 @@ pub fn distribution(list: &[&Contract], spot: f64, t: f64, straddle: Option<f64>
             if bid <= 0.0 || ask < bid || mid < MIN_MID || (ask - bid) / mid > MAX_SPREAD {
                 return None;
             }
-            let w = implied_w(mid, f, c.strike, c.call)?;
+            let w = implied_w(mid / df, f, c.strike, c.call)?;
             let iv = (w / t).sqrt();
             if !(0.02..=4.0).contains(&iv) {
                 return None;
@@ -476,7 +392,7 @@ mod tests {
             let k = 70.0 + 1.5 * f64::from(i);
             let w = vol((k / 100.0_f64).ln()).powi(2) * t;
             for call in [true, false] {
-                let p = black(100.0, k, w, call);
+                let p = discount(t) * black(100.0, k, w, call);
                 out.push(contract(k, call, p, (p * 0.03).max(0.01)));
             }
         }

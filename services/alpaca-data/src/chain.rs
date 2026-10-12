@@ -79,7 +79,8 @@ pub fn contracts(page: &Value) -> Vec<Contract> {
         .flatten()
         .filter_map(|(sym, s)| {
             let (_, expiry, call, strike) = occ(sym)?;
-            let g = &s["greeks"];
+            // Alpaca's `impliedVolatility` and `greeks` are ignored:
+            // `pricing::price` sets ours from the quotes.
             Some(Contract {
                 symbol: sym.clone(),
                 expiry,
@@ -88,11 +89,11 @@ pub fn contracts(page: &Value) -> Vec<Contract> {
                 bid: num(&s["latestQuote"]["bp"]),
                 ask: num(&s["latestQuote"]["ap"]),
                 last: num(&s["latestTrade"]["p"]),
-                iv: num(&s["impliedVolatility"]),
-                delta: num(&g["delta"]),
-                gamma: num(&g["gamma"]),
-                theta: num(&g["theta"]),
-                vega: num(&g["vega"]),
+                iv: None,
+                delta: None,
+                gamma: None,
+                theta: None,
+                vega: None,
             })
         })
         .collect()
@@ -138,8 +139,10 @@ pub fn parity_spot(contracts: &[Contract]) -> Option<f64> {
     })
 }
 
-/// Per expiry, from the strike nearest `spot`: the call and put IVs and their
-/// average, and the straddle's mid as an implied move (in dollars and as a
+/// Per expiry, from the strike nearest `spot`: the at-the-money IV (the
+/// out-of-the-money side's there, against the forward: the call at or above
+/// it, the put below; the other side when that one has none; contracts
+/// priced by `pricing::price` first), and the straddle's mid as an implied move (in dollars and as a
 /// fraction of `spot`), and the implied distribution with `years` (the time
 /// to an expiry's close, in years) when it is given.
 #[must_use]
@@ -163,7 +166,13 @@ pub fn expiries(
                 atm.and_then(|k| list.iter().find(|c| c.call == call && c.strike == k))
             };
             let (c, p) = (at(true), at(false));
-            let ivs: Vec<f64> = [c, p].into_iter().flatten().filter_map(|x| x.iv).collect();
+            let fwd = years(expiry).and_then(|t| crate::pricing::forward(&list, t, spot));
+            let call_side = match (atm, fwd) {
+                (Some(k), Some(f)) => k >= f,
+                _ => true,
+            };
+            let (otm, itm) = if call_side { (c, p) } else { (p, c) };
+            let atm_iv = otm.and_then(|x| x.iv).or_else(|| itm.and_then(|x| x.iv));
             let straddle = match (c.and_then(|x| x.mid()), p.and_then(|x| x.mid())) {
                 (Some(a), Some(b)) => Some(a + b),
                 _ => None,
@@ -174,7 +183,7 @@ pub fn expiries(
             };
             json!({
                 "expiry": expiry, "contracts": list.len(), "atm_strike": atm, "distribution": distribution,
-                "atm_iv": (!ivs.is_empty()).then(|| ivs.iter().sum::<f64>() / ivs.len() as f64),
+                "atm_iv": atm_iv,
                 "straddle": straddle,
                 "implied_move": straddle.zip(spot).map(|(x, s)| x / s),
             })
@@ -237,12 +246,19 @@ mod tests {
             "X261016C00110000": { "latestQuote": { "bp": 0.3, "ap": 0.4 } },
             "X261023C00100000": { "latestQuote": { "bp": 3.0, "ap": 3.2 }, "impliedVolatility": 0.4 },
         }});
-        let cs = contracts(&page);
+        let mut cs = contracts(&page);
         assert_eq!(cs.len(), 4);
-        let e = expiries(&cs, Some(101.0), &|_| None);
+        // Alpaca's IVs and greeks are dropped on reading.
+        assert!(cs.iter().all(|c| c.iv.is_none() && c.delta.is_none()));
+        let t = 30.0 / 365.0;
+        crate::pricing::price(&mut cs, Some(101.0), &|_| Some(t));
+        let e = expiries(&cs, Some(101.0), &|_| Some(t));
         assert_eq!(e.len(), 2);
         assert_eq!(e[0]["atm_strike"], 100.0);
-        assert!((e[0]["atm_iv"].as_f64().unwrap() - 0.52).abs() < 1e-9);
+        // The strike is below the forward (101: one pair, so the price), so the put's.
+        let put = crate::pricing::greeks(1.9, 101.0, 100.0, t, false, 101.0).unwrap();
+        assert!((e[0]["atm_iv"].as_f64().unwrap() - put.iv).abs() < 1e-9);
+        assert!((put.iv - 0.5).abs() > 0.01);
         assert!((e[0]["straddle"].as_f64().unwrap() - 4.0).abs() < 1e-9);
         assert!((e[0]["implied_move"].as_f64().unwrap() - 4.0 / 101.0).abs() < 1e-9);
         // Only a call at the money: an IV, but no straddle.
