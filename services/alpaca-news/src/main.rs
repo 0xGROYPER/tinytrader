@@ -12,8 +12,14 @@
 //! stories as a live tail at `/events`, and the usual `/health`, `/metrics`
 //! and `/describe`.
 //!
+//! With `--rss` (`ALPACA_NEWS_RSS`), headlines from those RSS feeds join
+//! the same list, polled every five minutes, with `source` naming the site
+//! and no `symbols` (see `rss.rs`).
+//!
 //! Credentials: `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`, or the same
 //! names with a `_FILE` suffix pointing at files containing them.
+
+mod rss;
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,6 +45,10 @@ struct Args {
     /// Symbols to follow, comma-separated; all news when empty.
     #[arg(long, env = "ALPACA_NEWS_SYMBOLS", default_value = "")]
     symbols: String,
+
+    /// RSS feeds whose headlines join the news, comma-separated URLs.
+    #[arg(long, env = "ALPACA_NEWS_RSS", default_value = "")]
+    rss: String,
 
     /// Stories kept and served.
     #[arg(long, default_value_t = 300)]
@@ -74,14 +84,33 @@ async fn main() {
     let listen = listen_address("ALPACA_NEWS_LISTEN", "127.0.0.1:9106");
     let observer = Observer::new("alpaca-news", env!("CARGO_PKG_VERSION"));
     let shared = Arc::new(Shared::default());
+    let feeds: Vec<String> = args
+        .rss
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut upstream = vec![
+        json!({ "id": "benzinga", "label": "benzinga", "sub": "news via Alpaca", "kind": "flow", "via": "websocket" }),
+    ];
+    let mut schedule = vec![
+        json!({ "name": "News stream", "kind": "always", "when": "always" }),
+        json!({ "name": "Catch-up of missed stories", "kind": "event", "when": "at start and after each reconnect" }),
+    ];
+    for f in &feeds {
+        let name = rss::source(f);
+        upstream.push(json!({ "id": format!("rss-{name}"), "label": name, "sub": "RSS headlines", "kind": "flow", "via": "http" }));
+    }
+    if !feeds.is_empty() {
+        schedule.push(
+            json!({ "name": "RSS headlines", "kind": "interval", "when": "every 5 minutes" }),
+        );
+    }
     observer.describe(json!({
         "role": if symbols.is_empty() { "Market news from Alpaca (Benzinga), all symbols.".to_owned() } else { format!("Market news from Alpaca (Benzinga) for {}.", symbols.join(", ")) },
-        "upstream": [{ "id": "benzinga", "label": "benzinga", "sub": "news via Alpaca", "kind": "flow", "via": "websocket" }],
+        "upstream": upstream,
         "streams": { "events": "/events", "news": "/news" },
-        "schedule": [
-            { "name": "News stream", "kind": "always", "when": "always" },
-            { "name": "Catch-up of missed stories", "kind": "event", "when": "at start and after each reconnect" },
-        ],
+        "schedule": schedule,
     }));
     {
         let s = shared.clone();
@@ -153,6 +182,15 @@ async fn main() {
         .build()
         .expect("http client");
     let _ = rustls::crypto::ring::default_provider().install_default();
+    for url in feeds {
+        tokio::spawn(follow_rss(
+            http.clone(),
+            url,
+            shared.clone(),
+            observer.clone(),
+            args.keep,
+        ));
+    }
     let mut backoff = Duration::from_secs(1);
     loop {
         // Catch up on anything published while disconnected, then stream.
@@ -283,6 +321,44 @@ async fn poll(
     Ok(body["news"].as_array().cloned().unwrap_or_default())
 }
 
+/// Poll one RSS feed every five minutes, merging its headlines.
+async fn follow_rss(
+    http: reqwest::Client,
+    url: String,
+    shared: Arc<Shared>,
+    observer: Observer,
+    keep: usize,
+) {
+    let source = rss::source(&url);
+    let mut tick = tokio::time::interval(Duration::from_secs(300));
+    loop {
+        tick.tick().await;
+        let got = async {
+            let r = http
+                .get(&url)
+                .header("User-Agent", "tinytrader-news")
+                .send()
+                .await
+                .map_err(|e| format!("{source} feed: request failed: {e}"))?;
+            if !r.status().is_success() {
+                return Err(format!("{source} feed answered {}", r.status()));
+            }
+            r.text()
+                .await
+                .map_err(|e| format!("{source} feed: unreadable response: {e}"))
+        }
+        .await;
+        match got {
+            Ok(xml) => merge(&shared, rss::parse(&xml, &source), keep),
+            Err(e) => {
+                shared.errors.fetch_add(1, Ordering::Relaxed);
+                eprintln!("alpaca-news: {e}");
+                observer.record_error(&e);
+            }
+        }
+    }
+}
+
 /// Add stories not seen before (newest first), announce them, keep `keep`.
 fn merge(shared: &Shared, fresh: Vec<Value>, keep: usize) {
     let first_poll = lock(&shared.updated_at).is_none();
@@ -290,6 +366,14 @@ fn merge(shared: &Shared, fresh: Vec<Value>, keep: usize) {
     let mut new: Vec<Value> = fresh
         .into_iter()
         .filter(|n| !items.iter().any(|i| i["id"] == n["id"]))
+        // Once full, a story older than all those kept was trimmed (or
+        // would be), so it isn't news.
+        .filter(|n| {
+            items.len() < keep
+                || items
+                    .back()
+                    .is_none_or(|o| n["created_at"].as_str() > o["created_at"].as_str())
+        })
         .collect();
     new.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
     for n in new.iter().rev() {
@@ -347,5 +431,21 @@ mod tests {
             .collect();
         assert_eq!(ids, [4, 2, 1]);
         assert_eq!(s.events.since(0, 10)["events"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn trimmed_stories_dont_come_back() {
+        let s = Shared::default();
+        let at = |id: i64, h: u32| json!({ "id": id, "created_at": format!("2026-10-05T{h:02}:00:00Z") });
+        merge(&s, vec![at(1, 9), at(2, 10), at(3, 11)], 2);
+        *lock(&s.updated_at) = Some(1.0);
+        // The feed still lists 1, trimmed above; 4 is new.
+        merge(&s, vec![at(1, 9), at(4, 12)], 2);
+        let ids: Vec<i64> = lock(&s.items)
+            .iter()
+            .map(|i| i["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, [4, 3]);
+        assert_eq!(s.events.since(0, 10)["events"].as_array().unwrap().len(), 1);
     }
 }
