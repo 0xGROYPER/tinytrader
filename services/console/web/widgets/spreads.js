@@ -212,7 +212,7 @@ defineWidget('spreads', {
       const risk = isFinite(a.maxL) ? `max loss $${Math.abs(a.maxL * 100 * my.qty).toFixed(0)}` : 'loss unlimited';
       if (my.review) {
         const k = l => `${l.side > 0 ? 'Buy' : 'Sell'} ${l.qty * my.qty} ${my.sym} ${my.expiry} ${l.strike} ${l.type}`;
-        box.innerHTML = `<div class="sb-review"><p><b>Send to ${esc(my.acct)}</b> (paper) as ${single ? 'one order' : 'one combo order'}, limit ${unit}${single ? '' : ' per spread'} × ${o.qty}: ${credit ? 'receive' : 'pay'} $${total.toFixed(0)} at most${credit ? ' less' : ''}; ${risk}. Day order, opening.</p>
+        box.innerHTML = `<div class="sb-review"><p><b>Send to ${esc(my.acct)}</b> (paper) as ${single ? 'one order' : 'one combo order'}, limit ${unit}${single ? '' : ' per spread'} × ${o.qty}: ${credit ? `receive at least $${total.toFixed(0)}` : `pay at most $${total.toFixed(0)}`}; ${risk}. Day order, opening.</p>
           <ul class="mono">${legs().map(l => `<li>${esc(k(l))} <span class="muted">${esc(symbolOf(l))}</span></li>`).join('')}</ul>
           <p><button type="button" class="btn primary" data-act="send"${my.sending ? ' disabled' : ''}>${my.sending ? 'Sending…' : 'Send order'}</button> <button type="button" class="btn" data-act="back">Back</button></p></div>`;
         return;
