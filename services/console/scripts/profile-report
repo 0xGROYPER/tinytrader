@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Summarise a console profile-mode recording.
+
+    profile-report                 the newest recording on the console
+    profile-report p1791...-0      that recording
+    profile-report file.json       a downloaded recording
+    profile-report --list          the recordings the console keeps
+
+The console is http://127.0.0.1:8080 unless CONSOLE_URL says otherwise.
+Shows the slowest widgets, the stalls with what happened just before each
+(an interaction, a widget update, a fetch), fetch traffic by path, and the
+DOM and heap over time.
+"""
+import json
+import os
+import sys
+import urllib.request
+from collections import defaultdict
+
+BASE = os.environ.get("CONSOLE_URL", "http://127.0.0.1:8080").rstrip("/")
+
+
+def get(path):
+    with urllib.request.urlopen(BASE + path, timeout=30) as r:
+        return json.load(r)
+
+
+def load(arg):
+    if arg and os.path.exists(arg):
+        with open(arg) as f:
+            return json.load(f)
+    if not arg:
+        rows = get("/api/profiles")["profiles"]
+        if not rows:
+            sys.exit("no recordings on the console yet")
+        arg = rows[0]["id"]
+    return get("/api/profiles/" + arg)
+
+
+def kb(b):
+    return f"{b / 1e6:.1f} MB" if b >= 1e6 else f"{b / 1e3:.0f} KB"
+
+
+def describe(e):
+    k = e["k"]
+    if k == "i":
+        return f"{e['type']} on {e.get('on') or '?'}" + (f" “{e['text']}”" if e.get("text") else "")
+    if k == "w":
+        return f"{e['v']} {e['op']} {e['ms']} ms"
+    if k == "f":
+        return f"fetch {e['path']} {e['ms']} ms {kb(e.get('bytes') or 0)}" + (f" by {e['by']}" if e.get("by") else "")
+    if k == "p":
+        return f"parse {e['path']} {kb(e['bytes'])} {e['ms']} ms" + (f" by {e['by']}" if e.get("by") else "")
+    if k == "st":
+        return f"state poll {kb(e['bytes'])} parsed in {e['ms']} ms"
+    if k == "ev":
+        return f"event {e['type']}" + (f" from {e['by']}" if e.get("by") else "")
+    if k == "e":
+        return f"error {e['msg']}"
+    return k
+
+
+def main():
+    args = [a for a in sys.argv[1:]]
+    if "--list" in args:
+        for r in get("/api/profiles")["profiles"]:
+            print(f"{r['id']}  {r.get('at') or '?'}  {r.get('seconds') or '?'} s  {kb(r['bytes'])}  {(r.get('user_agent') or '')[:70]}")
+        return
+    p = load(args[0] if args else None)
+    m, ev = p.get("meta", {}), p.get("events", [])
+    print(f"Recording {m.get('started_at')} for {m.get('seconds')} s, {len(ev)} events"
+          + (f" ({m['dropped']} dropped at the cap)" if m.get("dropped") else ""))
+    print(f"  {m.get('user_agent', '')}")
+    print(f"  {m.get('viewport')} @{m.get('dpr')}x · panels: {', '.join(m.get('panels') or [])}")
+
+    print("\nWidgets, by average update (since profile mode was turned on):")
+    ws = sorted(p.get("widgets", {}).values(), key=lambda w: -(w.get("avg") or 0))
+    for w in ws[:12]:
+        skipped = w.get("unchanged", 0)
+        total = skipped + w.get("changed", 0)
+        print(f"  {w['view']:<14} {w.get('avg', 0):>7.2f} ms avg  {w.get('max', 0):>7.1f} max  "
+              f"{w.get('updates', 0):>5} updates  mount {w.get('mount', 0):.1f} ms"
+              + (f"  {100 * skipped // total}% redraws skipped" if total else ""))
+
+    work = defaultdict(lambda: [0, 0.0, 0.0])
+    for e in ev:
+        if (e["k"] == "w" and e["op"] == "timer") or e["k"] == "p":
+            key = f"{e.get('v') or e.get('by') or '?'} {'timer' if e['k'] == 'w' else 'parse ' + e['path']}"
+            w = work[key]; w[0] += 1; w[1] += e["ms"]; w[2] = max(w[2], e["ms"])
+    if work:
+        print("\nTimers and response parsing (calls of 1 ms or more, during the recording):")
+        for k, (n, ms, mx) in sorted(work.items(), key=lambda x: -x[1][1])[:12]:
+            print(f"  {ms:8.0f} ms  {n:>5} calls  {mx:6.0f} max  {k}")
+
+    stalls = [e for e in ev if e["k"] == "s"]
+    print(f"\nStalls (main thread blocked > 50 ms): {len(stalls)}"
+          + (f", {sum(s['ms'] for s in stalls)} ms in all, longest {max(s['ms'] for s in stalls)} ms" if stalls else ""))
+    for s in sorted(stalls, key=lambda s: -s["ms"])[:10]:
+        # What happened in the second before it ended.
+        before = [e for e in ev if e["k"] in {"i", "w", "f", "p", "st", "ev", "e"} and s["t"] - s["ms"] - 1000 <= e["t"] <= s["t"]]
+        print(f"  {s['ms']:>5} ms at {s['t'] / 1000:7.1f} s ({s.get('src')})")
+        for e in before[-5:]:
+            print(f"      {e['t'] / 1000:7.1f} s  {describe(e)}")
+
+    fetches = defaultdict(lambda: [0, 0, 0.0, 0.0, set()])
+    for e in ev:
+        if e["k"] == "f":
+            f = fetches[e["path"]]
+            f[0] += 1; f[1] += e.get("bytes") or 0; f[2] += e["ms"]; f[3] = max(f[3], e["ms"])
+            if e.get("by"):
+                f[4].add(e["by"])
+    secs = max(m.get("seconds") or 1, 1)
+    print(f"\nFetches by path (bytes over {secs} s):")
+    for path, (n, b, ms, mx, by) in sorted(fetches.items(), key=lambda x: -x[1][1])[:15]:
+        print(f"  {kb(b):>9}  {n:>5} req  {ms / n:6.0f} ms avg  {mx:6.0f} max  {path}" + (f"  ({', '.join(sorted(by))})" if by else ""))
+    polls = [e for e in ev if e["k"] == "st"]
+    if polls:
+        print(f"  state poll: {len(polls)} polls, {kb(sum(e['bytes'] for e in polls) / len(polls))} avg, "
+              f"parse {sum(e['ms'] for e in polls) / len(polls):.1f} ms avg, {max(e['ms'] for e in polls):.1f} max")
+
+    samples = [e for e in ev if e["k"] == "m"]
+    if samples:
+        heap = [s.get("heapMB") for s in samples if s.get("heapMB")]
+        print(f"\nDOM elements: {samples[0]['dom']} → {samples[-1]['dom']} (max {max(s['dom'] for s in samples)})"
+              + (f" · heap {heap[0]} → {heap[-1]} MB (max {max(heap)})" if heap else " · heap not reported by this browser")
+              + f" · frame rate {min(s['fps'] for s in samples)}–{max(s['fps'] for s in samples)} fps")
+    evs = defaultdict(int)
+    for e in ev:
+        if e["k"] == "ev":
+            evs[e["type"]] += 1
+    if evs:
+        print("Events: " + ", ".join(f"{k} ×{v}" for k, v in sorted(evs.items())))
+    errs = [e for e in ev if e["k"] == "e"]
+    if errs:
+        print(f"\nErrors ({len(errs)}):")
+        for e in errs[:10]:
+            print(f"  {e['t'] / 1000:7.1f} s  {e['msg']}  {e.get('at', '')}")
+    if p.get("minutes"):
+        print("\nBy minute: " + " | ".join(
+            f"{x['minute']}: {x['updates']} upd {x['update_ms']:.0f} ms, {x['stalls']} stalls, {kb(x['bytes'])}" for x in p["minutes"]))
+
+
+if __name__ == "__main__":
+    main()

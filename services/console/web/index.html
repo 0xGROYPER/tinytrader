@@ -759,6 +759,13 @@ a.doc-card { text-decoration: none; }
 .sb-buy { color: var(--ok); } .sb-sell { color: var(--crit); }
 .sb-sum { margin: 0; font-size: 13px; line-height: 1.7; }
 .sb-msg { margin: 0; font-size: 12px; }
+.pf-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 5px 12px calc(5px + env(safe-area-inset-bottom, 0px)); background: var(--surface, #fff); border-top: 1px solid var(--line); font: 12px var(--mono, monospace); color: var(--fg-2, var(--fg)); }
+.pf-bar b { color: var(--fg); } .pf-bar .pf-gap { flex: 1; }
+.pf-bar button { min-height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; cursor: pointer; }
+.pf-bar .pf-rec { color: var(--crit); } .pf-bar .pf-err { color: var(--crit); } .pf-bar a { color: inherit; }
+body.pf-on { padding-bottom: 40px; }
+.pf-badges { position: fixed; inset: 0; pointer-events: none; z-index: 999; }
+.pf-badge { position: fixed; padding: 1px 6px; border-radius: 4px; background: var(--surface, #fff); border: 1px solid var(--line); font: 10px var(--mono, monospace); color: var(--muted); opacity: .92; white-space: nowrap; }
 .cd-over { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
 .cd-legend { position: absolute; top: 4px; left: 6px; z-index: 4; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; max-width: calc(100% - 90px); font: 12px var(--mono, monospace); pointer-events: none; }
 .cd-legend > * { pointer-events: auto; }

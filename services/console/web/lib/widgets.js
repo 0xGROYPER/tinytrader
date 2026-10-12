@@ -1,3 +1,5 @@
+import { prof, painted } from './profile.js';
+
 // The widget registry (decision 0010). A widget registers a title and a
 // mount(el) that builds into the element it's given and returns an
 // instance: update() after each poll, dispose() when its panel goes.
@@ -17,7 +19,8 @@ export const widgetNames = () => [...registry.keys()];
 // every two seconds costs layout, style and garbage collection for nothing.
 /** @param {HTMLElement} el @param {string} html @returns {boolean} whether it changed */
 export function paint(el, html) {
-  if (/** @type {any} */ (el).ttHtml === html) return false;
+  if (/** @type {any} */ (el).ttHtml === html) { if (prof.on) painted(false); return false; }
+  if (prof.on) painted(true);
   const top = el.scrollTop; el.innerHTML = html; el.scrollTop = top;
   /** @type {any} */ (el).ttHtml = html;
   return true;

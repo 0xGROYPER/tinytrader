@@ -5,6 +5,7 @@ import { esc, bytes, duration, fmt, ago } from './format.js';
 import { fleet, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf, newsItems } from './fleet.js';
 import { widget, widgetNames } from './widgets.js';
 import { drawCharts } from './charts.js';
+import { prof, timed, statePoll, profileWanted, startProfile, stopProfile } from './profile.js';
 import { folderLabel, groupLabel, collections } from './docs.js';
 // The widgets, in the order the palette and Split offer them.
 import { showNode } from '../widgets/graph.js';
@@ -218,19 +219,23 @@ const activePanel = () => dock?.activePanel || dock?.panels[0];
 function workspaceView() { return '<div class="ws dv-tt" id="ws-root"></div>'; }
 // A widget is mounted into its panel and kept as an instance.
 const mounted = new Map(); // panel body → widget instance
-function unmount(body) { mounted.get(body)?.dispose?.(); mounted.delete(body); }
+// In profile mode each mount, update and dispose is timed (lib/profile.js).
+let pfSeq = 0;
+const call = (op, body, fn) => prof.on ? timed(op, body.dataset.view || '?', body.dataset.pfKey ||= `${body.dataset.view}#${++pfSeq}`, fn) : fn();
+function unmount(body) { const m = mounted.get(body); if (m?.dispose) call('dispose', body, () => m.dispose()); mounted.delete(body); }
 function renderPanel(body, view) {
   unmount(body);
   body.dataset.view = view;
   const w = widget(view);
-  if (w) { body.innerHTML = ''; mounted.set(body, w.mount(body) || {}); return; }
+  if (w) { body.innerHTML = ''; delete body.dataset.pfKey; mounted.set(body, call('mount', body, () => w.mount(body)) || {}); return; }
   body.innerHTML = `<p class="muted" style="padding:16px">There's no widget called “${esc(view)}” any more. Close this panel, or show another widget here from the palette (⌘K).</p>`;
 }
 // On each refresh, only visible panels without state of their own redraw.
 function refreshTiles() {
   for (const body of panelBody.values()) {
     if (!body.isConnected) continue;
-    mounted.get(body)?.update?.();
+    const m = mounted.get(body);
+    if (m?.update) call('update', body, () => m.update());
   }
 }
 // Build a template tree into the dock: each split's second half takes the
@@ -272,7 +277,7 @@ function mountWorkspace() {
           // A tab brought into view shows the latest at once, not at the next
           // poll. (Not on becoming active: a click inside a panel does that,
           // and redrawing then would swallow the click.)
-          p.api.onDidVisibilityChange(v => { if (v.isVisible) mounted.get(body)?.update?.(); });
+          p.api.onDidVisibilityChange(v => { const m = mounted.get(body); if (v.isVisible && m?.update) call('update', body, () => m.update()); });
         },
       };
     },
@@ -582,6 +587,7 @@ function layoutCommands(q) {
     if (verb === 'group') out.unshift({ label: `Move “${lay.current}” to the group “${arg}”`, always: true, run: () => { if (cur) { cur.group = arg; layStore(); } } });
   } else out.push({ label: 'Save these panels as a new workspace… (type: save <name>)', run: () => {} }, { label: 'Rename this workspace… (type: rename <name>)', run: () => {} }, { label: 'Move this workspace to a group… (type: group <name>)', run: () => {} });
   out.push({ label: 'Open the workspace switcher (⌥W)', run: swOpen });
+  out.push(prof.on ? { label: 'Profile mode: turn off', run: stopProfile } : { label: 'Profile mode: turn on (measure everything on this page)', run: startProfile });
   if (lay.list.length > 1) out.push({ label: `Delete this workspace: ${lay.current}`, run: () => layDelete(lay.current) });
   return out;
 }
@@ -804,7 +810,10 @@ async function poll() {
   try {
     const r = await fetch(`/api/state?since=${since.generation}&epoch=${since.epoch}`, { cache: 'no-store' });
     if (r.ok) {
-      const v = await r.json(), old = v.full ? {} : (fleet.snap?.services || {}), services = {};
+      let v;
+      if (prof.on) { const text = await r.text(), a = performance.now(); v = JSON.parse(text); statePoll(text.length, performance.now() - a); }
+      else v = await r.json();
+      const old = v.full ? {} : (fleet.snap?.services || {}), services = {};
       for (const [id, s] of Object.entries(v.services || {})) {
         if (!s || typeof s !== 'object' || !Array.isArray(s._fields)) { services[id] = s; continue; }
         const prev = old[id] || {}, o = {};
@@ -891,6 +900,8 @@ $('theme-btn').addEventListener('click', () => {
   drawCharts();
 });
 
+// Profile mode first, so the first mounts are measured too.
+if (profileWanted()) startProfile();
 (async () => {
   await loadCollections();
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
