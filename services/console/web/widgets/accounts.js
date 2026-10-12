@@ -6,6 +6,24 @@
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
+import { askHeld } from '../lib/position.js';
+
+/** An account's option positions by underlying and expiry, for the Spread builder's payoff. */
+const heldGroups = new Map();
+function optionGroups(account, pos) {
+  const groups = new Map();
+  for (const p of pos) {
+    const m = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(p.symbol || '');
+    const qty = +p.qty, cost = +p.avg_entry_price;
+    if (!m || !qty || !isFinite(cost)) continue;
+    const [, root, yy, mm, dd, cp, k] = m, expiry = `20${yy}-${mm}-${dd}`, key = `${account}|${root}|${expiry}`;
+    if (!groups.has(key)) groups.set(key, { key, sym: root, expiry, account, legs: [] });
+    groups.get(key).legs.push({ type: cp === 'C' ? 'call' : 'put', strike: +k / 1000, side: qty > 0 ? 1 : -1, qty: Math.abs(qty), cost });
+  }
+  for (const g of groups.values()) heldGroups.set(g.key, g);
+  return [...groups.values()];
+}
+const dayLabel = d => new Date(d + 'T12:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short', day: 'numeric' });
 
 // Order gateways by account name ({state} or {error}), read every 15 s while shown.
 let gateways = {};
@@ -101,6 +119,7 @@ function accountCard(svc, a) {
     <div class="acct-stats">${stats.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('')}</div>
     <div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2"></div>
     ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Symbol</th><th>Qty</th><th>Value</th><th>Unrealized</th><th>Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted" style="margin:0;font-size:13px">No open positions.</p>'}
+    ${(() => { const g = optionGroups(a.name || a.label || svc.id, pos); return g.length ? `<div class="acct-payoffs">${g.map(x => `<button type="button" class="chip-btn" data-held="${esc(x.key)}" title="Load these legs into the Spread builder at their entry prices">Payoff: ${esc(x.sym)} ${esc(dayLabel(x.expiry))} · ${x.legs.length} leg${x.legs.length > 1 ? 's' : ''}</button>`).join('')}</div>` : ''; })()}
     <div class="foot">${pos.length > 8 ? `${pos.length} positions, largest 8 shown · ` : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
     ${flattenPanel(a)}
   </article>`;
@@ -119,6 +138,11 @@ function mount(el) {
   const click = async e => {
     const t = e.target.closest('button'); if (!t) return;
     const d = t.dataset;
+    if (d.held) {
+      const g = heldGroups.get(d.held); if (!g) return;
+      askHeld(g); document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'spreads' }));
+      return;
+    }
     if (d.flatOpen) { flat[d.flatOpen] = { stage: 'confirm', typed: '' }; update(); el.querySelector(`[data-flat-typed="${CSS.escape(d.flatOpen)}"]`)?.focus(); }
     else if (d.flatCancel) { delete flat[d.flatCancel]; update(); }
     else if (d.flatGo) {

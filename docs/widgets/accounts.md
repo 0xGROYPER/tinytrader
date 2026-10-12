@@ -9,3 +9,5 @@ A card per brokerage account, live first: equity, the day's change, balances, an
 - **Flatten** (paper accounts with an order gateway): closes every position at market. Click it, check the positions listed, type the account's name and click Flatten now. The gateway halts new opening orders, cancels every open order, then asks the broker to close each position with a market order, in one request it never resends. The card shows each position's result. Options close at whatever the spread is.
 - **Resume opening** appears while the account's gateway is halting opens (after a Flatten or a kill), and lets opening orders through again.
 - A live account has no gateway, so no Flatten; its card says so.
+
+**Payoff:** each account's options are grouped by underlying and expiry, each with a **Payoff** button that loads the legs into the [Spread builder](spreads.md) at their entry prices, for the position's payoff at expiry, maximum loss and chance of profit.

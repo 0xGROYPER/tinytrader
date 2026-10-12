@@ -58,7 +58,9 @@ defineWidget('spreads', {
       type: 'limit', reviewed: /** @type {number | null} */ (null),
       // What's typed to confirm a live order: kept here, as the review is redrawn on every refresh.
       typed: '', qty: 1, limit: /** @type {number | null} */ (null), review: false, sending: false, result: '',
-      orders: /** @type {any} */ (null), ordersAt: 0 };
+      orders: /** @type {any} */ (null), ordersAt: 0,
+      // Positions held, loaded from Accounts: their legs carry `cost`, the entry price.
+      held: /** @type {any} */ (null), heldAsk: /** @type {any} */ (null) };
     el.innerHTML = `<div class="sb">
       <div class="sb-top">
         <form class="sb-search"><input class="sb-ticker mono" name="t" placeholder="Ticker" maxlength="10" autocomplete="off" spellcheck="false" aria-label="Underlying"></form>
@@ -87,6 +89,7 @@ defineWidget('spreads', {
         if (!my.alive || sym !== my.sym) return;
         my.chain = v; my.at = Date.now(); my.err = '';
         if (my.ask?.sym === sym) { suggest(my.ask); my.ask = null; render(); return; }
+        if (my.heldAsk?.sym === sym) { hold(my.heldAsk); my.heldAsk = null; render(); return; }
         const exps = expiries().map(e => e.expiry);
         if (!exps.includes(my.expiry)) { my.expiry = exps[0] || null; build(); }
         else if (!legs().length) build();
@@ -117,9 +120,11 @@ defineWidget('spreads', {
       const mid = q => q && q.bid != null && q.ask ? (q.bid + q.ask) / 2 : null;
       // A leg without a two-sided quote: at its own implied volatility, else the at-the-money one.
       const iv = l => l.q?.iv || atmIV();
-      if (ls.some(l => mid(l.q) == null && !iv(l))) return null;
-      // Signed per-share prices: + paid, - received.
-      const net = ls.reduce((s, l) => s + l.side * l.qty * (mid(l.q) ?? bs(l.type, spot, l.strike, t, iv(l))), 0);
+      if (ls.some(l => l.cost == null && mid(l.q) == null && !iv(l))) return null;
+      // Signed per-share prices: + paid, - received; a held leg at what was paid for it.
+      const now = l => mid(l.q) ?? bs(l.type, spot, l.strike, t, iv(l));
+      const net = ls.reduce((s, l) => s + l.side * l.qty * (l.cost ?? now(l)), 0);
+      const worth = ls.reduce((s, l) => s + l.side * l.qty * now(l), 0), held = ls.some(l => l.cost != null);
       const cross = ls.reduce((s, l) => s + l.side * l.qty * (l.side > 0 ? (l.q?.ask ?? mid(l.q) ?? 0) : (l.q?.bid ?? mid(l.q) ?? 0)), 0);
       const pay = S => ls.reduce((s, l) => s + l.side * l.qty * Math.max(l.type === 'call' ? S - l.strike : l.strike - S, 0), 0) - net;
       const hi = Math.max(spot * 3, ...ls.map(l => l.strike * 1.5)), n = 2400;
@@ -146,7 +151,7 @@ defineWidget('spreads', {
       for (let i = 1; i < grid.length; i++) if (pay((grid[i - 1] + grid[i]) / 2) > 0) pop += cdf(grid[i]) - cdf(grid[i - 1]);
       // Worth today at an underlying price: each leg at its own implied volatility, less what was paid.
       const today = S => ls.reduce((v, l) => v + l.side * l.qty * bs(l.type, S, l.strike, t, iv(l)), 0) - net;
-      return { net, cross, pay, today, spot, sd: (atmIV() || 0.3) * Math.sqrt(t), strikes: ls.map(l => l.strike), maxP, maxL, be, pop, popFrom: pts ? `implied, ${dist.quality} fit` : 'lognormal', missing: ls.some(l => !l.q) };
+      return { net, worth, held, cross, pay, today, spot, sd: (atmIV() || 0.3) * Math.sqrt(t), strikes: ls.map(l => l.strike), maxP, maxL, be, pop, popFrom: pts ? `implied, ${dist.quality} fit` : 'lognormal', missing: ls.some(l => !l.q) };
     }
 
     const money = v => !isFinite(v) ? 'unlimited' : `${v < 0 ? '−' : ''}$${Math.abs(v * 100).toFixed(0)}`;
@@ -195,7 +200,8 @@ defineWidget('spreads', {
           <td class="num" data-label="Net"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted" data-label="Δ">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr></tfoot>`;
       payoff(a);
       $('.sb-sum').innerHTML = a ? [
-        `${a.net >= 0 ? 'Debit' : 'Credit'} <b>$${Math.abs(a.net * 100).toFixed(0)}</b> <span class="muted">($${Math.abs(a.cross * 100).toFixed(0)} crossing)</span>`,
+        a.held ? `${a.net >= 0 ? 'Paid' : 'Received'} <b>$${Math.abs(a.net * 100).toFixed(0)}</b> · worth <b>$${(a.worth * 100).toFixed(0)}</b> now <span class="${a.worth - a.net >= 0 ? 'sb-good' : 'sb-bad'}">(${a.worth - a.net >= 0 ? '+' : '−'}$${Math.abs((a.worth - a.net) * 100).toFixed(0)})</span>`
+          : `${a.net >= 0 ? 'Debit' : 'Credit'} <b>$${Math.abs(a.net * 100).toFixed(0)}</b> <span class="muted">($${Math.abs(a.cross * 100).toFixed(0)} crossing)</span>`,
         `max profit <b>${money(a.maxP)}</b>`, `max loss <b>${money(a.maxL)}</b>`,
         `breakeven <b>${a.be.length ? a.be.map(b => b.toFixed(2)).join(' / ') : '—'}</b>`, `chance <b>${(a.pop * 100).toFixed(0)}%</b> <span class="muted">(${a.popFrom})</span>`,
       ].join(' · ') : '';
@@ -259,6 +265,18 @@ defineWidget('spreads', {
     // Redrawn at the panel's width.
     const resized = new ResizeObserver(() => { if (drawn) payoff(drawn); });
 
+    // Positions held, loaded from Accounts.
+    function hold(h) {
+      my.expiry = h.expiry; my.structure = `Held on ${h.account}`; my.why = ''; my.held = { account: h.account };
+      position.sym = my.sym; position.legs = h.legs.map(l => ({ ...l })); my.limit = null; my.review = false; my.result = '';
+    }
+    const heldAsked = () => {
+      const h = wanted.held; if (!h) return;
+      wanted.held = null;
+      if (h.sym === my.sym && my.chain) { hold(h); render(); }
+      else { my.heldAsk = h; switchTo(h.sym); }
+    };
+
     // A suggested position for the stock asked about (from the screener).
     function suggest(ask) {
       const r = recommend({ chain: my.chain, view: ask.view, row: ask.row, earnings: ask.earnings });
@@ -299,6 +317,8 @@ defineWidget('spreads', {
     }
     function ticket(a) {
       const box = $('.sb-ticket'), o = order(a), accts = my.orders?.accounts || [];
+      // Held legs are already open: an order for them would open more, so no ticket.
+      if (a?.held) { box.innerHTML = `<p class="muted sb-note">${my.held ? `Your positions on ${esc(my.held.account)}, at their entry prices.` : 'Includes positions held, at their entry prices.'} Change a strike or type to try an adjustment; the order ticket returns once no held legs are left.</p>`; return; }
       if (!my.orders) { box.innerHTML = ''; return; }
       if (my.orders.unavailable) { box.innerHTML = `<p class="muted sb-note">Orders: ${esc(my.orders.unavailable)}</p>`; return; }
       if (!my.orders.trading) { box.innerHTML = '<p class="muted sb-note">Sending orders needs the console\'s trade token for the paper gateways (operator: scripts/gateway-token GATEWAY_CONSOLE_TOKEN, then restart the gateways and the console).</p>'; return; }
@@ -376,7 +396,7 @@ defineWidget('spreads', {
       if (v.outcome === 'unknown') return `<span class="sb-bad">Unknown (${esc(v.reason || '')}): it may have reached the broker. Don't send it again; the gateway is checking and it will show below if it did.</span>`;
       return esc(JSON.stringify(v).slice(0, 200));
     }
-    const switchTo = s => { my.sym = s; my.chain = null; my.expiry = null; my.why = ''; my.limit = null; my.review = false; my.result = ''; if (!STRUCTURES[my.structure]) my.structure = 'Iron condor'; position.legs = []; render(); loadChain(); };
+    const switchTo = s => { my.sym = s; my.chain = null; my.expiry = null; my.why = ''; my.held = null; my.limit = null; my.review = false; my.result = ''; if (!STRUCTURES[my.structure]) my.structure = 'Iron condor'; position.legs = []; render(); loadChain(); };
 
     el.addEventListener('submit', e => {
       e.preventDefault();
@@ -400,7 +420,7 @@ defineWidget('spreads', {
       my.expiry = t.value;
       // A preset structure is rebuilt; a suggested or edited one keeps its strikes, moved to listed ones.
       if (STRUCTURES[my.structure] && !my.why) build();
-      else for (const l of legs()) l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike;
+      else for (const l of legs()) { l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike; delete l.cost; }
       render();
     });
     el.addEventListener('click', e => {
@@ -436,7 +456,7 @@ defineWidget('spreads', {
       if (act === 'back') { my.review = false; render(); return; }
       if (act === 'send') { send(); return; }
       my.review = false; my.limit = null; my.result = '';
-      if (b.dataset.st) { my.structure = b.dataset.st; my.why = ''; build(); render(); return; }
+      if (b.dataset.st) { my.structure = b.dataset.st; my.why = ''; my.held = null; build(); render(); return; }
       if (b.dataset.w) { my.width = Math.max(1, Math.min(20, my.width + +b.dataset.w)); if (STRUCTURES[my.structure]) build(); render(); return; }
       if (!act) return;
       if (act === 'add') {
@@ -459,8 +479,9 @@ defineWidget('spreads', {
           if (n === 0) n = act === 'more' ? 1 : -1;
           n = Math.max(-20, Math.min(20, n)); l.side = n > 0 ? 1 : -1; l.qty = Math.abs(n);
         }
-        if (act === 'type') { l.type = l.type === 'call' ? 'put' : 'call'; l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike; }
-        if (act === 'up' || act === 'down') { const ks = strikesOf(l.type), j = ks.indexOf(l.strike) + (act === 'up' ? 1 : -1); if (ks[j] != null) l.strike = ks[j]; }
+        // A held leg moved to another contract is a what-if: priced at the market, not its entry.
+        if (act === 'type') { l.type = l.type === 'call' ? 'put' : 'call'; l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike; delete l.cost; }
+        if (act === 'up' || act === 'down') { const ks = strikesOf(l.type), j = ks.indexOf(l.strike) + (act === 'up' ? 1 : -1); if (ks[j] != null) { l.strike = ks[j]; delete l.cost; } }
         if (act === 'remove') legs().splice(i, 1);
       }
       my.structure = 'Custom'; my.why = ''; render();
@@ -478,8 +499,9 @@ defineWidget('spreads', {
       if (typeof s === 'string' && s !== my.sym && wanted.ask?.sym !== s && my.ask?.sym !== s) switchTo(s);
     };
     document.addEventListener('tt-recommend', asked);
+    document.addEventListener('tt-held', heldAsked);
     document.addEventListener('tt-focus', follow);
-    if (wanted.ask) asked(); else { render(); loadChain(); }
+    if (wanted.held) heldAsked(); else if (wanted.ask) asked(); else { render(); loadChain(); }
     loadOrders();
     resized.observe(el);
     const timer = setInterval(() => {
@@ -490,7 +512,7 @@ defineWidget('spreads', {
       update() {},
       dispose() {
         my.alive = false; clearInterval(timer); resized.disconnect();
-        document.removeEventListener('tt-recommend', asked); document.removeEventListener('tt-focus', follow);
+        document.removeEventListener('tt-recommend', asked); document.removeEventListener('tt-held', heldAsked); document.removeEventListener('tt-focus', follow);
         publish({ shown: false });
       },
     };
