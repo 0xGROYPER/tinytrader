@@ -255,7 +255,7 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 - For a combo:
   - `fill.price` is the net price per unit.
   - Each element of `legs` gives that leg's cumulative quantity and average price, plus `fill` for the increment.
-  - How Alpaca reports MLEG fills in `trade_updates` (per leg or aggregate) is **UNVERIFIED**. Until the paper qualification captures it, `legs` comes from the nested `order.legs[]` in `broker_raw`.
+  - Alpaca reports an MLEG fill in `trade_updates` as **one aggregate `fill` message** for the parent: the net `price` and `qty`, no parent `execution_id`, a top-level `legs` list with each leg's price, quantity and execution id, and `position_qtys`. Seen on paper 2026-10-12 (a 1-lot IWM call debit spread on paper-2, opened at 0.49 and closed at −0.43, each filled at once). Partial MLEG fills haven't been seen yet. `legs` comes from the nested `order.legs[]` in `broker_raw`.
 - During reconciliation, if the broker's `execution_id` is missing, the gateway emits the aggregate change with `fill` absent. It never fabricates an execution id.
 
 ## 8. Rate budget and caps
