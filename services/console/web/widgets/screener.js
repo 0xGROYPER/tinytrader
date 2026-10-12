@@ -49,6 +49,7 @@ function reports() {
 }
 
 // Columns: label, value for sorting, cell.
+/** @type {[string, (r: any, next?: Map<string, any>) => any, (r: any, next?: Map<string, any>) => string][]} */
 const COLS = [
   ['Symbol', r => r.symbol, r => `<b class="mono">${esc(r.symbol)}</b><span class="sc-name">${esc(r.name.replace(/\s+(Common Stock|Class [A-C].*|Ordinary Shares.*|American Depositary.*)$/i, ''))}</span>`],
   ['Sector', r => r.sector, r => `<span class="sc-sector">${esc(r.sector)}</span>`],
@@ -115,7 +116,7 @@ defineWidget('screener', {
       const key = col ? (r => col[1](r, next)) : VIEWS[my.view].key;
       const list = rows.filter(r => !my.sector || r.sector === my.sector)
         .map(r => ({ r, k: key(r) }))
-        .sort((a, b) => (a.k == null) - (b.k == null) || (typeof a.k === 'string' ? a.k.localeCompare(b.k) : a.k - b.k) * (my.desc ? -1 : 1));
+        .sort((a, b) => Number(a.k == null) - Number(b.k == null) || (typeof a.k === 'string' ? a.k.localeCompare(b.k) : a.k - b.k) * (my.desc ? -1 : 1));
       const shown = my.all ? list : list.slice(0, SHOW);
       $('.sc-table').innerHTML = `<thead><tr><th>#</th>${COLS.map(([l], i) => `<th data-col="${i}" class="${my.sort === i ? 'sc-sorted' : ''}">${l}${my.sort === i ? (my.desc ? ' ↓' : ' ↑') : ''}</th>`).join('')}</tr></thead>
         <tbody>${shown.map(({ r }, i) => `<tr data-sym="${esc(r.symbol)}" title="${esc(r.name)} · listed for ${esc(r.sources.join(', '))}"><td class="muted">${i + 1}</td>${COLS.map(c => `<td>${c[2](r, next)}</td>`).join('')}</tr>`).join('')}</tbody>`;
@@ -129,7 +130,7 @@ defineWidget('screener', {
       const b = t.closest('button');
       if (b?.dataset.view) { my.view = b.dataset.view; my.sort = null; my.desc = true; my.all = false; render(); return; }
       if (b?.classList.contains('sc-more')) { my.all = true; render(); return; }
-      const th = t.closest('th[data-col]');
+      const th = /** @type {HTMLElement | null} */ (t.closest('th[data-col]'));
       if (th) { const i = +th.dataset.col; my.desc = my.sort === i ? !my.desc : i > 1; my.sort = i; render(); return; }
       const row = t.closest('tr[data-sym]');
       if (row) {

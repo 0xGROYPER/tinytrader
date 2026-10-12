@@ -89,7 +89,7 @@ defineWidget('earningsweek', {
       </div>`);
     };
     el.addEventListener('click', ev => {
-      const t = ev.target.closest('button');
+      const t = /** @type {HTMLElement} */ (ev.target).closest('button');
       if (!t) return;
       if (t.dataset.sym) {
         setFocus(t.dataset.sym);

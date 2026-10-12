@@ -85,7 +85,7 @@ const collapse = p => p.replace(/\/[A-Z][A-Z0-9.]{0,9}(?=\/|$)/g, '/:sym').repla
 function wrapFetch() {
   const native = window.fetch.bind(window);
   window.fetch = async (input, init) => {
-    const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.href);
     const by = caller(), a = performance.now();
     try {
       const r = await native(input, init);
@@ -237,7 +237,7 @@ export function startProfile() {
   document.body.append(bar, badges);
   document.body.classList.add('pf-on');
   bar.addEventListener('click', e => {
-    const b = /** @type {HTMLElement} */ (e.target).closest('[data-pf]'); if (!b) return;
+    const b = /** @type {HTMLElement | null} */ (/** @type {HTMLElement} */ (e.target).closest('[data-pf]')); if (!b) return;
     if (b.dataset.pf === 'record') {
       rec = []; recBytes = 0; recDropped = 0; recStart = now(); saved = '';
       recMeta = { started_at: new Date().toISOString(), user_agent: navigator.userAgent, viewport: `${innerWidth}x${innerHeight}`, dpr: devicePixelRatio, url: location.pathname + location.hash,

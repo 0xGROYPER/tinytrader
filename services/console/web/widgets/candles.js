@@ -464,7 +464,7 @@ defineWidget('candles', {
     // The ticker box: any symbol, from the service with bars for any symbol.
     el.addEventListener('submit', e => {
       e.preventDefault();
-      const input = /** @type {HTMLInputElement} */ (e.target.closest('form')?.querySelector('.cd-ticker'));
+      const input = /** @type {HTMLInputElement} */ (/** @type {HTMLElement} */ (e.target).closest('form')?.querySelector('.cd-ticker'));
       const symbol = (input?.value || '').trim().toUpperCase();
       const any = anyService();
       if (!/^[A-Z][A-Z0-9.]{0,9}$/.test(symbol)) return;
