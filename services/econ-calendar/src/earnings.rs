@@ -129,8 +129,10 @@ pub fn alpha_vantage(text: &str) -> Result<Vec<Row>, String> {
             },
         );
     };
-    Ok(lines
-        .map(csv_fields)
+    let lines: Vec<&str> = lines.filter(|l| !l.trim().is_empty()).collect();
+    let rows: Vec<Row> = lines
+        .iter()
+        .map(|l| csv_fields(l))
         .filter(|f| f.len() > sym.max(name).max(date).max(est).max(time))
         .map(|f| Row {
             source: ALPHA_VANTAGE,
@@ -143,7 +145,13 @@ pub fn alpha_vantage(text: &str) -> Result<Vec<Row>, String> {
             market_cap: None,
         })
         .filter(|r| !r.symbol.is_empty() && r.date.len() == 10)
-        .collect())
+        .collect();
+    // At its daily limit Alpha Vantage can answer the CSV header followed by
+    // a fragment of its note (seen: "I,n,f,o,r,m,a") instead of rows.
+    if rows.is_empty() && !lines.is_empty() {
+        return Err("Alpha Vantage answered a note instead of rows (usually its daily limit)".to_owned());
+    }
+    Ok(rows)
 }
 
 /// Finnhub's `/calendar/earnings` answer.
@@ -308,6 +316,9 @@ mod tests {
         assert_eq!(av[0].name.as_deref(), Some("BANK OF AMERICA, CORP"));
         assert_eq!((av[0].when, av[0].eps_estimate), (When::Before, Some(1.16)));
         assert!(alpha_vantage("{\"Information\": \"rate limit\"}").is_err());
+        let header = "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay";
+        assert!(alpha_vantage(&format!("{header}\nI,n,f,o,r,m,a\n")).is_err());
+        assert_eq!(alpha_vantage(&format!("{header}\n")).unwrap().len(), 0);
         let why = alpha_vantage("{\"Information\": \"We have detected your API key as SECRETKEY ... 25 requests per day\"}").unwrap_err();
         assert!(!why.contains("SECRETKEY"), "{why}");
 

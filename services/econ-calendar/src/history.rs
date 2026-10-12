@@ -16,11 +16,12 @@
 //! Alpha Vantage's whole answer and EDGAR's filings, per company. A source is
 //! asked again only when it has nothing kept for the company, or when the
 //! company has reported since: [`DUE_DAYS`] after its latest report, checked
-//! at most weekly. At most 20 Alpha Vantage requests are sent a day.
+//! at most weekly. Alpha Vantage requests come out of a shared
+//! [`Budget`](crate::alphavantage::Budget).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -28,11 +29,12 @@ use serde_json::{Value, json};
 use tinytrader_observe::{lock, unix_seconds};
 use tinytrader_schedule::{ny_date_time, ny_to_unix};
 
+use crate::alphavantage::{self, Budget};
+
 /// Days after a company's latest report before the next is expected.
 pub const DUE_DAYS: f64 = 80.0;
 /// While a report is due, how often to look again.
 const RECHECK: f64 = 7.0 * 86_400.0;
-const AV_PER_DAY: u32 = 20;
 const QUARTERS: usize = 12;
 
 /// Unix seconds at noon New York time of a YYYY-MM-DD date.
@@ -225,15 +227,20 @@ pub struct History {
     dir: Option<PathBuf>,
     /// What's kept, by file name (as on disk): { fetched_at, ... }.
     kept: Mutex<HashMap<String, Value>>,
-    /// Alpha Vantage requests sent on a New York date.
-    sent: Mutex<(String, u32)>,
+    /// Alpha Vantage requests, shared with the earnings calendar.
+    budget: Arc<Budget>,
     /// When Alpha Vantage was last asked: it wants a second between requests.
     last_av: tokio::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl History {
     #[must_use]
-    pub fn new(key: Option<String>, sec_contact: Option<String>, dir: Option<PathBuf>) -> Self {
+    pub fn new(
+        key: Option<String>,
+        sec_contact: Option<String>,
+        dir: Option<PathBuf>,
+        budget: Arc<Budget>,
+    ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -250,7 +257,7 @@ impl History {
             sec_agent,
             dir,
             kept: Mutex::default(),
-            sent: Mutex::default(),
+            budget,
             last_av: tokio::sync::Mutex::default(),
         }
     }
@@ -315,18 +322,10 @@ impl History {
                 .map(|v| reports(&v))
                 .ok_or_else(|| "no Alpha Vantage key".into());
         };
-        {
-            let today = ny_date_time(now as i64).0;
-            let mut sent = lock(&self.sent);
-            if sent.0 != today {
-                *sent = (today, 0);
-            }
-            if sent.1 >= AV_PER_DAY {
-                return kept
-                    .map(|v| reports(&v))
-                    .ok_or_else(|| "today's Alpha Vantage requests are used up".into());
-            }
-            sent.1 += 1;
+        if !self.budget.take(alphavantage::HISTORY_MAX, now) {
+            return kept
+                .map(|v| reports(&v))
+                .ok_or_else(|| "Alpha Vantage's requests for the last 24 hours are used up".into());
         }
         // One request at a time, at least 1.2 s apart.
         let mut last = self.last_av.lock().await;
@@ -575,7 +574,7 @@ mod tests {
     #[test]
     fn answers_from_what_is_kept() {
         let dir = std::env::temp_dir().join(format!("tinytrader-history-{}", std::process::id()));
-        let h = History::new(None, None, Some(dir.clone()));
+        let h = History::new(None, None, Some(dir.clone()), Arc::new(Budget::new(None)));
         let now = unix_seconds();
         h.save("alphavantage/AAPL.json", &json!({ "fetched_at": now, "reports": [{ "date": "2026-07-30", "when": "after-close", "eps": 2.02 }] }));
         // Forget memory: it must come back from disk.

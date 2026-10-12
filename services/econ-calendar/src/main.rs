@@ -28,6 +28,7 @@
 //! to=YYYY-MM-DD&min=low|medium|high`; by default a month back to six months
 //! ahead, medium and high), and the usual `/health`, `/metrics` and `/describe`.
 
+mod alphavantage;
 mod earnings;
 mod history;
 mod oil;
@@ -134,6 +135,7 @@ async fn main() {
         alpha_vantage: tinytrader_observe::secret("ALPHAVANTAGE_API_KEY").ok(),
         finnhub: tinytrader_observe::secret("FINNHUB_API_KEY").ok(),
     };
+    let budget = Arc::new(alphavantage::Budget::new(args.cache.as_deref()));
     let mut upstream = vec![
         json!({ "id": "bls", "label": "BLS", "sub": "release schedule", "kind": "flow", "via": "https" }),
         json!({ "id": "bea", "label": "BEA", "sub": "release schedule", "kind": "flow", "via": "https" }),
@@ -184,6 +186,7 @@ async fn main() {
                     keys.alpha_vantage.clone(),
                     tinytrader_observe::secret("SEC_CONTACT").ok(),
                     args.cache.clone(),
+                    budget.clone(),
                 ));
                 move |Query(ask): Query<HistoryAsk>| async move {
                     match h.get(&ask.symbol).await {
@@ -237,12 +240,14 @@ async fn main() {
         if shared.earnings().sources.is_empty() {
             observer.set_state(State::Ready, "reading the earnings calendars");
         }
-        read_earnings(&plain, &shared, &keys, args.earnings_days).await;
+        read_earnings(&plain, &shared, &keys, &budget, args.cache.as_deref(), args.earnings_days).await;
+        let now = unix_seconds();
+        let mut notes = Vec::new();
         let (mut failing, held) = {
             let sources = shared.lock();
             let failing: Vec<String> = sources
                 .iter()
-                .filter_map(|(n, src)| src.error.as_ref().map(|e| format!("{n}: {e}")))
+                .filter_map(|(n, src)| sort_failure(n, src, now, &mut notes))
                 .collect();
             (
                 failing,
@@ -254,17 +259,37 @@ async fn main() {
             failing.extend(
                 e.sources
                     .iter()
-                    .filter_map(|(n, src)| src.error.as_ref().map(|err| format!("{n}: {err}"))),
+                    .filter_map(|(n, src)| sort_failure(n, src, now, &mut notes)),
             );
             e.reports.len()
         };
-        let held = format!("{held} events, {reports} earnings reports");
+        let mut held = format!("{held} events, {reports} earnings reports");
+        if !notes.is_empty() {
+            held = format!("{held}; {}", notes.join("; "));
+        }
         if failing.is_empty() {
             observer.set_state(State::Ready, &held);
         } else {
             observer.set_state(State::Degraded, &format!("{held}; {}", failing.join("; ")));
         }
         tokio::time::sleep(Duration::from_secs(args.refresh_hours.max(1) * 3600)).await;
+    }
+}
+
+/// How long a source that fails may serve its last good rows before the
+/// service counts as degraded.
+const STALE_AFTER: f64 = 3.0 * 86_400.0;
+
+/// A source whose last read failed: a failure, or only a note while it still
+/// holds rows read within [`STALE_AFTER`] (a daily limit, a brief outage).
+fn sort_failure<T>(name: &str, src: &Source<T>, now: f64, notes: &mut Vec<String>) -> Option<String> {
+    let err = src.error.as_ref()?;
+    if !src.events.is_empty() && now - src.read_at < STALE_AFTER {
+        let hours = (now - src.read_at) / 3600.0;
+        notes.push(format!("{name}: {err} (serving rows from {hours:.0} h ago)"));
+        None
+    } else {
+        Some(format!("{name}: {err}"))
     }
 }
 
@@ -397,7 +422,14 @@ struct Keys {
 
 /// Read the earnings calendars and merge them; a source that fails keeps
 /// its last good rows. Requests are a second apart, gently.
-async fn read_earnings(http: &reqwest::Client, shared: &Shared, keys: &Keys, days: i64) {
+async fn read_earnings(
+    http: &reqwest::Client,
+    shared: &Shared,
+    keys: &Keys,
+    budget: &alphavantage::Budget,
+    cache: Option<&std::path::Path>,
+    days: i64,
+) {
     async fn get(r: reqwest::RequestBuilder) -> Result<String, String> {
         // Errors without the URL, which may carry a key.
         let r = r.send().await.map_err(|e| e.without_url().to_string())?;
@@ -413,13 +445,38 @@ async fn read_earnings(http: &reqwest::Client, shared: &Shared, keys: &Keys, day
     let mut got: Vec<(&'static str, Result<Vec<earnings::Row>, String>)> = Vec::new();
 
     if let Some(key) = &keys.alpha_vantage {
-        let r = get(http.get("https://www.alphavantage.co/query").query(&[
-            ("function", "EARNINGS_CALENDAR"),
-            ("horizon", "3month"),
-            ("apikey", key),
-        ]))
-        .await
-        .and_then(|t| earnings::alpha_vantage(&t));
+        // Its calendar covers three months, so a day-old copy (kept on disk
+        // across restarts) is good enough; each read spends a request.
+        let file = cache.map(|d| d.join("alphavantage").join("calendar.csv"));
+        let kept = file.as_ref().and_then(|f| {
+            let age = f.metadata().ok()?.modified().ok()?.elapsed().ok()?;
+            (age < Duration::from_secs(20 * 3600)).then(|| std::fs::read_to_string(f).ok())?
+        });
+        let r = match kept {
+            Some(t) => earnings::alpha_vantage(&t),
+            None if !budget.take(alphavantage::LIMIT, now as f64) => {
+                Err("Alpha Vantage's requests for the last 24 hours are used up".to_owned())
+            }
+            None => {
+                let r = get(http.get("https://www.alphavantage.co/query").query(&[
+                    ("function", "EARNINGS_CALENDAR"),
+                    ("horizon", "3month"),
+                    ("apikey", key),
+                ]))
+                .await;
+                r.and_then(|t| {
+                    let rows = earnings::alpha_vantage(&t)?;
+                    if let Some(f) = file.as_ref().filter(|_| !rows.is_empty()) {
+                        let _ = f.parent().map(std::fs::create_dir_all);
+                        let tmp = f.with_extension("csv.tmp");
+                        if std::fs::write(&tmp, &t).is_ok() {
+                            let _ = std::fs::rename(&tmp, f);
+                        }
+                    }
+                    Ok(rows)
+                })
+            }
+        };
         got.push((earnings::ALPHA_VANTAGE, r));
     }
     if let Some(key) = &keys.finnhub {
