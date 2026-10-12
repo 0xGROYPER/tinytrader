@@ -13,6 +13,11 @@
 //! seconds. A quote changes only when its book does, so a quiet contract's
 //! can be old and still current: `last_record` (Unix seconds, null before
 //! any) says whether the feed itself is live.
+//!
+//! `GET /stats` takes the same selection and answers each contract's open
+//! interest from the day's `statistics` the relay holds for joining clients:
+//! `{"stats": {OCC: {open_interest, date}}}`, `date` (YYYY-MM-DD) the trading
+//! day the figure is for. OPRA publishes it once a day, before the open.
 
 use std::collections::{HashMap, HashSet};
 use std::mem::{offset_of, size_of};
@@ -165,7 +170,9 @@ fn yymmdd(d: &str) -> Option<String> {
     (d.len() == 10).then(|| format!("{}{}{}", &d[2..4], &d[5..7], &d[8..10]))
 }
 
-async fn serve(State(hub): State<Arc<Hub>>, Query(ask): Query<Ask>) -> (StatusCode, Json<Value>) {
+/// The contracts a request selects: `symbols=...`, or `underlying` with
+/// optional `from` / `to` expiries.
+fn selection(ask: &Ask) -> Option<impl Fn(&str) -> bool + use<>> {
     let wanted: Option<HashSet<String>> = ask.symbols.as_deref().map(|s| {
         s.split(',')
             .map(|x| compact(x).to_uppercase())
@@ -174,14 +181,11 @@ async fn serve(State(hub): State<Arc<Hub>>, Query(ask): Query<Ask>) -> (StatusCo
     });
     let root = ask.underlying.as_deref().map(str::to_uppercase);
     if wanted.is_none() && root.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "symbols=OCC,... or underlying=SPY" })),
-        );
+        return None;
     }
     let from = ask.from.as_deref().and_then(yymmdd);
     let to = ask.to.as_deref().and_then(yymmdd);
-    let keep = |s: &str| {
+    Some(move |s: &str| {
         if let Some(w) = &wanted {
             return w.contains(s);
         }
@@ -191,6 +195,36 @@ async fn serve(State(hub): State<Arc<Hub>>, Query(ask): Query<Ask>) -> (StatusCo
         root.as_deref() == Some(r)
             && from.as_deref().is_none_or(|f| exp >= f)
             && to.as_deref().is_none_or(|t| exp <= t)
+    })
+}
+
+/// Open interest per contract, from the held statistics.
+async fn stats(State(hub): State<Arc<Hub>>, Query(ask): Query<Ask>) -> (StatusCode, Json<Value>) {
+    let Some(keep) = selection(&ask) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "symbols=OCC,... or underlying=SPY" })),
+        );
+    };
+    const OPEN_INTEREST: u16 = 9;
+    let mut out = Map::new();
+    for (s, q, ts_ref) in hub.stats_matching(OPEN_INTEREST, keep) {
+        let date =
+            tinytrader_schedule::ny_date_time(i64::try_from(ts_ref / 1_000_000_000).unwrap_or(0)).0;
+        out.insert(s, json!({ "open_interest": q, "date": date }));
+    }
+    (
+        StatusCode::OK,
+        Json(json!({ "stats": out, "as_of": crate::protocol::now_ns() as f64 / 1e9 })),
+    )
+}
+
+async fn serve(State(hub): State<Arc<Hub>>, Query(ask): Query<Ask>) -> (StatusCode, Json<Value>) {
+    let Some(keep) = selection(&ask) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "symbols=OCC,... or underlying=SPY" })),
+        );
     };
     let found = hub.quotes_matching(keep);
     let mut quotes = Map::new();
@@ -214,7 +248,10 @@ async fn serve(State(hub): State<Arc<Hub>>, Query(ask): Query<Ask>) -> (StatusCo
 }
 
 pub fn router(hub: Arc<Hub>) -> Router {
-    Router::new().route("/quotes", get(serve)).with_state(hub)
+    Router::new()
+        .route("/quotes", get(serve))
+        .route("/stats", get(stats))
+        .with_state(hub)
 }
 
 #[cfg(test)]

@@ -167,6 +167,24 @@ impl App {
         }
     }
 
+    /// Open interest from the OPRA relay that carries this underlying, if any.
+    async fn open_interest(
+        &self,
+        underlying: &str,
+        from: &str,
+        to: &str,
+    ) -> std::collections::HashMap<String, (i64, String)> {
+        let Some(base) = self.relays.get(underlying) else {
+            return std::collections::HashMap::new();
+        };
+        opra::open_interest(&self.http, base, underlying, from, to)
+            .await
+            .unwrap_or_else(|e| {
+                self.observer.record_error(&e);
+                std::collections::HashMap::new()
+            })
+    }
+
     /// GET from Alpaca, within the rate limit.
     async fn get(
         &self,
@@ -884,6 +902,8 @@ async fn option_chain(AxState(app): AxState<Arc<App>>, Query(ask): Query<ChainAs
             contracts.sort_by(|a, b| a.expiry.cmp(&b.expiry).then(a.strike.total_cmp(&b.strike)).then(b.call.cmp(&a.call)));
             // Real quotes from the OPRA relay where one carries this underlying, before anything is priced.
             let opra = a.opra(&underlying, &mut contracts, &from, &to).await.unwrap_or_default();
+            // Open interest (OPRA's, as of the morning) for gamma exposure, from the same relay.
+            let oi = a.open_interest(&underlying, &from, &to).await;
             // An index (XSP) has no stock quote: price it from its options.
             let (spot, spot_from) = match spot {
                 Some(s) => (Some(s), "trade"),
@@ -893,10 +913,14 @@ async fn option_chain(AxState(app): AxState<Arc<App>>, Query(ask): Query<ChainAs
             Ok(json!({
                 "underlying": underlying, "spot": spot, "spot_from": spot_from, "iv_from": "mid", "feed": a.options_feed, "from": from, "to": to,
                 "quotes": opra::label(opra.len(), contracts.len()), "opra_quotes": opra.len(),
+                "open_interest_date": oi.values().map(|(_, d)| d.as_str()).max(),
                 "expiries": chain::expiries(&contracts, spot, &|x| years_to_close(x, now)),
                 "contracts": contracts.iter().map(|c| {
                     let mut j = c.to_json();
                     j["quote_src"] = json!(if opra.contains(&c.symbol) { "opra" } else { "indicative" });
+                    if let Some((n, _)) = oi.get(&c.symbol) {
+                        j["open_interest"] = json!(n);
+                    }
                     j
                 }).collect::<Vec<_>>(),
                 "truncated": truncated,

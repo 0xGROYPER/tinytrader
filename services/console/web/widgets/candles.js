@@ -116,7 +116,8 @@ const COLOURS = ['--accent', '--warn-mark', '--ok', '#4f7fd9', '#a865c9', '#2a9d
 /**
  * @typedef {{ type: 'days', n: number } | { type: 'expiry', expiry: string } | { type: 'earnings' } | { type: '0dte' }} Horizon
  * @typedef {'straddle' | '68' | '95'} Band
- * @typedef {{ id: string, kind: 'em', h: Horizon, colour: number, on: boolean, band?: Band }} Indicator
+ * @typedef {'0dte' | 'week' | 'month'} GexScope
+ * @typedef {{ id: string, kind: 'em' | 'gex', h?: Horizon, colour: number, on: boolean, band?: Band, scope?: GexScope, top?: number }} Indicator
  */
 /** @returns {Indicator[]} */
 function loadIndicators() {
@@ -152,7 +153,9 @@ function chainFor(sym, to) {
 /** How far ahead (a date) the chain must reach for these horizons. */
 function reach(sym, /** @type {Indicator[]} */ list) {
   let days = 60;
-  for (const { h } of list) {
+  for (const { h, kind, scope } of list) {
+    if (kind === 'gex') { days = Math.max(days, scope === 'month' ? 31 : scope === 'week' ? 8 : 1); continue; }
+    if (!h) continue;
     if (h.type === 'days') days = Math.max(days, h.n * 365 / 252 + 30);
     if (h.type === 'expiry') days = Math.max(days, daysTo(h.expiry) + 1);
     if (h.type === 'earnings') { const r = nextReport(sym); if (r) days = Math.max(days, daysTo(r.date) + 30); }
@@ -160,6 +163,53 @@ function reach(sym, /** @type {Indicator[]} */ list) {
   return isoIn(Math.min(days, 800));
 }
 const pct = m => `±${(m * 100).toFixed(m < 0.01 ? 2 : 1)}%`;
+
+// GEX levels: gamma exposure by strike from the chain's own gamma (worked out
+// from quotes) and OPRA's open interest (as of the morning, from the OPRA
+// relay; SPY and XSP), over expiries out to the scope. Each contract adds
+// gamma x open interest x 100 x price^2 x 1%: dollars of delta per 1% move,
+// counted positive for calls and negative for puts (the usual assumption
+// that dealers are long calls and short puts; their real positions aren't
+// known). The zero-gamma level is where the total changes sign as the
+// price moves (each contract's gamma re-worked at that price from its
+// implied volatility); the call wall and put wall are the strikes with the
+// largest call and put exposure.
+/** @type {Record<string, [string, number]>} */
+const GEX_SCOPES = { '0dte': ['Today', 0], week: ['Next 7 days', 7], month: ['Next 30 days', 30] };
+const phi = x => Math.exp(-x * x / 2) / Math.sqrt(2 * Math.PI);
+/** Black-Scholes gamma (zero rates). */
+const gammaAt = (S, K, t, v) => t > 0 && v > 0 ? phi((Math.log(S / K) + v * v * t / 2) / (v * Math.sqrt(t))) / (S * v * Math.sqrt(t)) : 0;
+const bn = v => { const a = Math.abs(v); return `${v < 0 ? '−' : '+'}$${a >= 1e9 ? (a / 1e9).toFixed(2) + 'B' : a >= 1e6 ? (a / 1e6).toFixed(0) + 'M' : (a / 1e3).toFixed(0) + 'K'}`; };
+/** @returns {{ none: string } | { total: number, flip: number | null, callWall: number | null, callG: number, putWall: number | null, putG: number, top: [number, number][], date: string | null, n: number }} */
+function gexLevels(v, /** @type {Indicator} */ ind) {
+  const S = v?.spot; if (!S) return { none: 'no price' };
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }), last = isoIn(GEX_SCOPES[ind.scope || '0dte'][1]);
+  const cs = (v.contracts || []).filter(c => c.open_interest > 0 && c.expiry >= today && c.expiry <= last);
+  if (!cs.length) return { none: v.contracts?.some(c => c.open_interest != null) ? 'no open interest in that range' : 'no open interest (SPY and XSP only, from the OPRA relays)' };
+  const by = new Map(); let calls = new Map(), puts = new Map(), total = 0;
+  const one = (c, gamma, price) => (c.type === 'call' ? 1 : -1) * gamma * c.open_interest * 100 * price * price * 0.01;
+  for (const c of cs) {
+    if (c.gamma == null) continue;
+    const g = one(c, c.gamma, S); total += g;
+    by.set(c.strike, (by.get(c.strike) || 0) + g);
+    const side = c.type === 'call' ? calls : puts; side.set(c.strike, (side.get(c.strike) || 0) + g);
+  }
+  // Total exposure at another price, each contract's gamma worked out there.
+  const priced = cs.filter(c => c.iv > 0).map(c => ({ c, t: Math.max(daysTo(c.expiry), 0.5 / 24) / 365 }));
+  const at = x => priced.reduce((sum, { c, t }) => sum + one(c, gammaAt(x, c.strike, t, c.iv), x), 0);
+  let flip = null;
+  if (priced.length) {
+    const xs = Array.from({ length: 121 }, (_, i) => S * (0.94 + i * 0.001)), ys = xs.map(at);
+    for (let i = 1; i < xs.length; i++) if ((ys[i - 1] < 0) !== (ys[i] < 0)) {
+      const x = xs[i - 1] + (xs[i] - xs[i - 1]) * (-ys[i - 1]) / (ys[i] - ys[i - 1]);
+      if (flip == null || Math.abs(x - S) < Math.abs(flip - S)) flip = x;
+    }
+  }
+  const best = (m, sign) => [...m].sort((a, b) => sign * (b[1] - a[1]))[0] ?? [null, 0];
+  const [callWall, callG] = best(calls, 1), [putWall, putG] = best(puts, -1);
+  const top = [...by].sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, ind.top ?? 5);
+  return { total, flip, callWall, callG, putWall, putG, top, date: v.open_interest_date || null, n: cs.length };
+}
 /** One horizon's expected move from a chain: { move, name, short } or { none }. */
 function expected(v, /** @type {Horizon} */ h, sym) {
   const exps = (v?.expiries || []).filter(x => x.implied_move > 0 && daysTo(x.expiry) > 0.05)
@@ -340,7 +390,18 @@ defineWidget('candles', {
       my.emLines = []; my.em = {}; my.spot = v?.spot || 0; my.expiries = (v?.expiries || []).map(x => x.expiry);
       my.emFor = `${symbol}|${want}`; my.emAt = Date.now();
       for (const ind of my.ind) {
-        const e = v ? expected(v, ind.h, symbol) : { none: chainService() ? 'no option chain' : 'no option chain service' };
+        if (ind.kind === 'gex') {
+          const e = v ? gexLevels(v, ind) : { none: chainService() ? 'no option chain' : 'no option chain service' };
+          my.em[ind.id] = e;
+          if (!ind.on || 'none' in e) continue;
+          const color = colourOf(ind.colour), line = (price, title, style, width = 1) => price != null && my.emLines.push(my.candles.createPriceLine({ price, color, lineWidth: width, lineStyle: style, axisLabelVisible: true, title }));
+          line(e.flip, 'zero γ', my.L.LineStyle.Solid, 2);
+          line(e.callWall, `call wall ${bn(e.callG)}`, my.L.LineStyle.Dashed, 2);
+          line(e.putWall, `put wall ${bn(e.putG)}`, my.L.LineStyle.Dashed, 2);
+          for (const [k, g] of e.top) if (k !== e.callWall && k !== e.putWall) line(k, `γ ${bn(g)}`, my.L.LineStyle.Dotted);
+          continue;
+        }
+        const e = v ? expected(v, /** @type {Horizon} */ (ind.h), symbol) : { none: chainService() ? 'no option chain' : 'no option chain service' };
         my.em[ind.id] = e;
         if (!ind.on || !e.move) continue;
         const color = colourOf(ind.colour), r = e.r = range(e, ind.band, v.spot);
@@ -359,7 +420,19 @@ defineWidget('candles', {
       const { service, ask } = my.pick ? source() : { service: '', ask: 0 };
       const status = my.backing ? ' · loading older…' : my.pick && my.drawn.len && exhausted(service, my.pick.symbol, ask) ? ' · start of history' : '';
       const rows = my.ind.map(ind => {
-        const e = my.em[ind.id] || {}, col = colourOf(ind.colour), h = ind.h;
+        const e = my.em[ind.id] || {}, col = colourOf(ind.colour);
+        const buttons = `<button type="button" class="cd-lg-btn" data-act="eye" aria-label="${ind.on ? 'Hide' : 'Show'}" title="${ind.on ? 'Hide' : 'Show'}">${ind.on ? '◉' : '○'}</button><button type="button" class="cd-lg-btn" data-act="gear" aria-label="Settings" aria-expanded="${my.open === ind.id}" title="Settings">⚙</button><button type="button" class="cd-lg-btn" data-act="remove" aria-label="Remove" title="Remove">×</button>`;
+        const colours = `<span class="cd-lg-cols">${COLOURS.map((_, i) => `<button type="button" class="cd-lg-col" data-set="colour" data-v="${i}" aria-label="Colour ${i + 1}" aria-pressed="${ind.colour === i}" style="background:${colourOf(i)}"></button>`).join('')}</span>`;
+        if (ind.kind === 'gex') {
+          const val = 'none' in e || e.total == null ? `<span class="muted">${esc(e.none || '')}</span>`
+            : `<b>${bn(e.total)}</b> <span class="muted">per 1% · zero γ ${e.flip != null ? e.flip.toFixed(2) : 'none in ±6%'} · walls ${e.putWall ?? '—'} / ${e.callWall ?? '—'}${e.date ? ` · OI of ${dayLabel(e.date)}` : ''}</span>`;
+          const set = my.open === ind.id ? `<div class="cd-lg-set" data-ind="${ind.id}">
+              <select data-set="scope" aria-label="Expiries">${Object.entries(GEX_SCOPES).map(([v, [l]]) => `<option value="${v}"${(ind.scope || '0dte') === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
+              <select data-set="top" aria-label="Strikes drawn">${[0, 3, 5, 10].map(n => `<option value="${n}"${(ind.top ?? 5) === n ? ' selected' : ''}>${n ? `Top ${n} strikes` : 'Levels only'}</option>`).join('')}</select>
+              ${colours}<span class="muted cd-lg-note">Dealers assumed long calls, short puts; open interest as of the morning.</span></div>` : '';
+          return `<div class="cd-lg-row${ind.on ? '' : ' off'}" data-ind="${ind.id}"><span class="cd-sw" style="background:${col}"></span><span>GEX <span class="muted">${esc(GEX_SCOPES[ind.scope || '0dte'][0].toLowerCase())}</span></span> ${val} ${buttons}</div>${set}`;
+        }
+        const h = /** @type {Horizon} */ (ind.h);
         const r = e.r, inside = e.ref?.distribution?.quality !== 'poor' ? e.ref?.distribution?.p_inside_straddle : null;
         const chg = x => `${x >= my.spot ? '+' : '−'}${Math.abs((x / my.spot - 1) * 100).toFixed(1)}%`;
         const val = !e.move ? `<span class="muted">${esc(e.none || '')}</span>`
@@ -375,12 +448,17 @@ defineWidget('candles', {
         return `<div class="cd-lg-row${ind.on ? '' : ' off'}" data-ind="${ind.id}"><span class="cd-sw" style="background:${col}"></span><span>Expected move <span class="muted">${esc(e.name || (h.type === 'days' ? `${h.n} trading days` : h.type))}</span></span> ${val}
           <button type="button" class="cd-lg-btn" data-act="eye" aria-label="${ind.on ? 'Hide' : 'Show'}" title="${ind.on ? 'Hide' : 'Show'}">${ind.on ? '◉' : '○'}</button><button type="button" class="cd-lg-btn" data-act="gear" aria-label="Settings" aria-expanded="${my.open === ind.id}" title="Settings">⚙</button><button type="button" class="cd-lg-btn" data-act="remove" aria-label="Remove" title="Remove">×</button></div>${set}`;
       }).join('');
-      leg.innerHTML = my.pick ? `<div class="cd-lg-row cd-lg-sym"><b>${esc(my.pick.symbol)}</b> <span class="muted">${sz}</span> ${esc(my.last)}<span class="muted">${status}</span></div>${rows}<div><button type="button" class="cd-lg-btn cd-lg-add" data-act="add">+ Expected move</button></div>` : '';
+      leg.innerHTML = my.pick ? `<div class="cd-lg-row cd-lg-sym"><b>${esc(my.pick.symbol)}</b> <span class="muted">${sz}</span> ${esc(my.last)}<span class="muted">${status}</span></div>${rows}<div><button type="button" class="cd-lg-btn cd-lg-add" data-act="add">+ Expected move</button> <button type="button" class="cd-lg-btn cd-lg-add" data-act="add-gex">+ GEX levels</button></div>` : '';
     }
     const changedInd = () => { saveIndicators(my.ind); drawMoves(true); };
     leg.addEventListener('click', e => {
       const b = /** @type {HTMLElement} */ (e.target).closest('button'); if (!b) return;
       const id = /** @type {HTMLElement} */ (b.closest('[data-ind]'))?.dataset.ind, ind = my.ind.find(i => i.id === id);
+      if (b.dataset.act === 'add-gex') {
+        const used = new Set(my.ind.map(i => i.colour)), colour = COLOURS.findIndex((_, i) => !used.has(i));
+        const n = /** @type {Indicator} */ ({ id: 'gx' + Date.now().toString(36), kind: 'gex', scope: '0dte', top: 5, colour: colour < 0 ? my.ind.length : colour, on: true });
+        my.ind.push(n); my.open = n.id; changedInd(); return;
+      }
       if (b.dataset.act === 'add') {
         const used = new Set(my.ind.map(i => i.colour)), colour = COLOURS.findIndex((_, i) => !used.has(i));
         const n = { id: 'em' + Date.now().toString(36), kind: /** @type {'em'} */ ('em'), h: /** @type {Horizon} */ ({ type: 'days', n: 21 }), colour: colour < 0 ? my.ind.length : colour, on: true };
@@ -401,6 +479,8 @@ defineWidget('candles', {
       } else if (t.dataset.set === 'n') ind.h = { type: 'days', n: Math.max(1, Math.min(1260, Math.round(+t.value) || 1)) };
       else if (t.dataset.set === 'expiry') ind.h = { type: 'expiry', expiry: t.value };
       else if (t.dataset.set === 'band') ind.band = /** @type {Band} */ (t.value);
+      else if (t.dataset.set === 'scope') ind.scope = /** @type {GexScope} */ (t.value);
+      else if (t.dataset.set === 'top') ind.top = +t.value;
       t.blur(); changedInd();
     });
     // Clicks on the legend aren't chart drags.

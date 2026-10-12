@@ -190,7 +190,7 @@ async fn run(args: Args) -> Result<(), String> {
     observer.describe(json!({
         "role": format!("Relays {dataset} {schema_name} for {} to local clients ({}).", args.symbols.join(", "), protocol::PROTOCOL),
         "upstream": [{ "id": provider_id, "label": provider_id, "sub": dataset, "kind": "flow", "via": via }],
-        "streams": { "events": "/events", "series": "/recent", "bars": "/bars", "quotes": "/quotes", "session": "/session", "clients": "/clients" },
+        "streams": { "events": "/events", "series": "/recent", "bars": "/bars", "quotes": "/quotes", "stats": "/stats", "session": "/session", "clients": "/clients" },
         "panels": [{ "heading": format!("{dataset} {}", args.symbols.join(", ")), "note": "Trade prices of the most active instruments, sampled once per second", "decimals": 2 }],
         "relay": { "protocol": protocol::PROTOCOL, "listen": args.listen, "symbols": args.symbols },
         // Relays carrying the same feed on the same hours are one line on a schedule.

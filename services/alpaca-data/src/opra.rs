@@ -55,6 +55,53 @@ pub async fn fetch(
         .map_err(|e| format!("OPRA relay for {underlying}: unreadable: {e}"))
 }
 
+/// The relay's open interest for an underlying's expiries `from` to `to`
+/// (OPRA's daily statistic): symbol to (contracts, the trading day it's for).
+pub async fn open_interest(
+    http: &reqwest::Client,
+    base: &str,
+    underlying: &str,
+    from: &str,
+    to: &str,
+) -> Result<HashMap<String, (i64, String)>, String> {
+    let r = http
+        .get(format!("{base}/stats"))
+        .query(&[("underlying", underlying), ("from", from), ("to", to)])
+        .send()
+        .await
+        .map_err(|e| format!("OPRA relay for {underlying}: {e}"))?;
+    if !r.status().is_success() {
+        return Err(format!(
+            "OPRA relay for {underlying} answered {} for statistics",
+            r.status()
+        ));
+    }
+    let v: Value = r
+        .json()
+        .await
+        .map_err(|e| format!("OPRA relay for {underlying}: unreadable: {e}"))?;
+    Ok(stats(&v))
+}
+
+/// `{"stats": {OCC: {open_interest, date}}}` as symbol to (open interest, date).
+#[must_use]
+pub fn stats(v: &Value) -> HashMap<String, (i64, String)> {
+    v["stats"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(s, x)| {
+            Some((
+                s.clone(),
+                (
+                    x["open_interest"].as_i64()?,
+                    x["date"].as_str().unwrap_or("").to_owned(),
+                ),
+            ))
+        })
+        .collect()
+}
+
 /// Replace contracts' bid and ask with the relay's, when its feed is live at
 /// `now` (Unix seconds); returns the symbols that took an OPRA quote. A side
 /// the relay shows empty is a zero bid, or no ask.
@@ -96,6 +143,14 @@ pub fn label(opra: usize, total: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_open_interest() {
+        let v = json!({ "stats": { "SPY261016C00775000": { "open_interest": 1234, "date": "2026-10-12" }, "BAD": { "date": "x" } } });
+        let s = stats(&v);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s["SPY261016C00775000"], (1234, "2026-10-12".to_owned()));
+    }
     use serde_json::json;
 
     fn contract(symbol: &str, bid: f64, ask: f64) -> Contract {

@@ -129,6 +129,27 @@ impl Reference {
         self.definitions.len() + self.statistics.len()
     }
 
+    /// One kind of statistic (`stat_type`, such as 9 for open interest) for
+    /// the instruments whose symbol `keep` accepts: (symbol, quantity, the
+    /// day it refers to as `ts_ref` nanoseconds).
+    fn stats_matching(&self, kind: u16, keep: &impl Fn(&str) -> bool) -> Vec<(String, i64, u64)> {
+        self.statistics
+            .iter()
+            .filter(|((_, k), _)| *k == kind)
+            .filter_map(|((id, _), rec)| {
+                let s = crate::quotes::compact(&self.symbol(*id)?);
+                keep(&s).then_some(())?;
+                let q = i64::from_le_bytes(
+                    rec.get(offset_of!(StatMsg, quantity)..)?
+                        .get(..8)?
+                        .try_into()
+                        .ok()?,
+                );
+                Some((s, q, u64_at(rec, offset_of!(StatMsg, ts_ref)).unwrap_or(0)))
+            })
+            .collect()
+    }
+
     /// The instrument's symbol, from its definition.
     fn symbol(&self, id: u32) -> Option<String> {
         let (_, def) = self.definitions.get(&id)?;
@@ -349,6 +370,15 @@ impl Hub {
     ) -> Vec<(String, crate::quotes::Quote)> {
         let reference = lock(&self.reference);
         self.quotes.matching(|id| reference.symbol(id), keep)
+    }
+
+    /// A statistic of the contracts `keep` accepts (see `Reference::stats_matching`).
+    pub fn stats_matching(
+        &self,
+        kind: u16,
+        keep: impl Fn(&str) -> bool,
+    ) -> Vec<(String, i64, u64)> {
+        lock(&self.reference).stats_matching(kind, &keep)
     }
 
     /// Reference records held for joining clients.
@@ -995,6 +1025,41 @@ mod tests {
             .1;
         assert_eq!((put.bid, put.ask), (None, Some(0.3)));
         assert_eq!(hub.quotes.len(), 2);
+    }
+
+    #[test]
+    fn open_interest_by_compact_symbol() {
+        use databento::dbn::RecordRef;
+        let hub = Hub::new(metadata(), 8, Duration::from_secs(10));
+        let mut d = InstrumentDefMsg {
+            hd: RecordHeader::new::<InstrumentDefMsg>(rtype::INSTRUMENT_DEF, 1, 7, 0),
+            expiration: u64::MAX,
+            ..Default::default()
+        };
+        d.raw_symbol = databento::dbn::record::str_to_c_chars("SPY   261016C00775000").unwrap();
+        let mut chunk = RecordRef::from(&d).as_ref().to_vec();
+        let mut oi = StatMsg {
+            hd: RecordHeader::new::<StatMsg>(rtype::STATISTICS, 1, 7, 0),
+            stat_type: 9,
+            quantity: 1234,
+            update_action: 1,
+            ..Default::default()
+        };
+        oi.ts_ref = 1_791_518_400_000_000_000; // 2026-10-09 New York
+        chunk.extend(RecordRef::from(&oi).as_ref());
+        // Another kind of statistic isn't open interest.
+        chunk.extend(statistic(7, 1, 55));
+        hub.publish(chunk, 3);
+        let got = hub.stats_matching(9, |s| s.starts_with("SPY261016"));
+        assert_eq!(
+            got,
+            vec![(
+                "SPY261016C00775000".to_owned(),
+                1234,
+                1_791_518_400_000_000_000
+            )]
+        );
+        assert!(hub.stats_matching(9, |s| s.starts_with("QQQ")).is_empty());
     }
 
     #[test]

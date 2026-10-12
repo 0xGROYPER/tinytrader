@@ -87,6 +87,16 @@ The latest consolidated quote of each contract the relay carries, from the live 
 - `{"quotes": {OCC: {bid, ask, bid_size, ask_size, ts}}, "as_of", "last_record"}`: compact OCC symbols, `null` for an empty side, `ts` the provider's receive time.
 - A quote changes only when its book does, so a quiet contract's can be old and still current. `last_record` (null before any) says whether the feed itself is live; alpaca-data uses quotes only while it's within 120 seconds.
 
+### `GET /stats`
+
+Each contract's **open interest**, from the day's `statistics` the relay holds for joining clients (OPRA publishes it once a day, before the open, for the previous close). Same selection as `/quotes` (`symbols=` or `underlying=` with `from`/`to`).
+
+```json
+{"stats": {"SPY261016C00775000": {"open_interest": 1234, "date": "2026-10-12"}}, "as_of": 1791830000.1}
+```
+
+`date` is the trading day the figure is for. alpaca-data puts it on SPY and XSP chain contracts (`open_interest`, and the chain's `open_interest_date`), which Candles' GEX levels use.
+
 ### `GET /session`: today's replay of one contract
 
 ```
