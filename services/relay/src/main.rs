@@ -318,6 +318,7 @@ async fn accept(clients: TcpListener, hub: Arc<Hub>, source: Arc<dyn Source>, ma
             hub.serve(
                 out,
                 hub::Serve {
+                    who: format!("{who} from {peer}"),
                     // The effective start: live from now unless history is sent.
                     start: if history.is_some() {
                         requested.unwrap_or(now)

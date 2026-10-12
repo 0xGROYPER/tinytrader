@@ -249,10 +249,17 @@ impl Hub {
 
     /// Disconnect a client that fell behind, telling it why if it can still
     /// take a record.
-    async fn drop_slow(&self, out: &mut OwnedWriteHalf, why: &str) {
+    ///
+    /// Each drop is logged with who it was and how far behind, to tell a
+    /// client that stalled briefly from one that can't keep up.
+    async fn drop_slow(&self, out: &mut OwnedWriteHalf, why: &str, behind: &Behind) {
         self.slow_disconnects.fetch_add(1, Ordering::Relaxed);
-        self.events
-            .push(format!("disconnected a client: {why}"), why.to_owned());
+        let detail = behind.describe();
+        eprintln!("relay: disconnected {}: {why}; {detail}", behind.who);
+        self.events.push(
+            format!("disconnected {}: {why}", behind.who),
+            format!("{why}; {detail}"),
+        );
         let e = protocol::error(ErrorCode::SkippedRecordsAfterSlowReading, why);
         let _ = tokio::time::timeout(Duration::from_secs(1), out.write_all(&e)).await;
         let _ = tokio::time::timeout(Duration::from_secs(1), out.shutdown()).await;
@@ -432,6 +439,7 @@ impl Hub {
         if !matches!(self.send(&mut out, &first).await, Sent::Ok) {
             return;
         }
+        let mut behind = Behind::new(join.who);
         let mut buffered: Vec<Chunk> = Vec::new();
         if let Some(mut history) = join.history {
             loop {
@@ -450,8 +458,9 @@ impl Hub {
                     },
                     got = rx.recv() => match got {
                         Ok(chunk) => buffered.push(chunk),
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            self.drop_slow(&mut out, "client fell behind while catching up").await;
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            behind.skipped = n;
+                            self.drop_slow(&mut out, "client fell behind while catching up", &behind).await;
                             return;
                         }
                         Err(broadcast::error::RecvError::Closed) => return,
@@ -485,16 +494,20 @@ impl Hub {
                     Ok(chunk) => {
                         let mut bytes = after_cut(&chunk, &mut cut);
                         let queued = rx.len();
+                        behind.reading(&chunk, queued);
                         if !warned && queued > self.capacity / 2 {
                             warned = true;
+                            behind.warned = Some(Instant::now());
                             bytes.extend(protocol::system_code(SystemCode::SlowReaderWarning));
                         } else if queued < self.capacity / 4 {
                             warned = false;
+                            behind.warned = None;
                         }
                         bytes
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        self.drop_slow(&mut out, "client fell behind its queue").await;
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        behind.skipped = n;
+                        self.drop_slow(&mut out, "client fell behind its queue", &behind).await;
                         return;
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
@@ -513,7 +526,7 @@ impl Hub {
                 Sent::Ok => last_write = Instant::now(),
                 Sent::Closed => return,
                 Sent::Stalled => {
-                    self.drop_slow(&mut out, "client stopped reading").await;
+                    self.drop_slow(&mut out, "client stopped reading", &behind).await;
                     return;
                 }
             }
@@ -521,8 +534,68 @@ impl Hub {
     }
 }
 
+/// How far a client is behind, for the log when it's dropped.
+struct Behind {
+    who: String,
+    joined: Instant,
+    /// When it was last warned (cleared once it caught up).
+    warned: Option<Instant>,
+    /// The most chunks it has had waiting, and the market time of the last
+    /// record it was given.
+    most_queued: usize,
+    last_ts: u64,
+    /// Chunks it missed when the queue overflowed.
+    skipped: u64,
+}
+
+impl Behind {
+    fn new(who: String) -> Self {
+        Self {
+            who,
+            joined: Instant::now(),
+            warned: None,
+            most_queued: 0,
+            last_ts: 0,
+            skipped: 0,
+        }
+    }
+
+    fn reading(&mut self, chunk: &[u8], queued: usize) {
+        self.most_queued = self.most_queued.max(queued);
+        // Every chunk starts with a whole record: its header's ts_event.
+        let at = offset_of!(RecordHeader, ts_event);
+        if let Some(b) = chunk.get(at..at + 8) {
+            let ts = u64::from_le_bytes(b.try_into().unwrap_or_default());
+            if ts != UNDEF_TIMESTAMP {
+                self.last_ts = ts;
+            }
+        }
+    }
+
+    fn describe(&self) -> String {
+        let mut d = format!(
+            "connected {:.0} s, most queued {} chunks",
+            self.joined.elapsed().as_secs_f64(),
+            self.most_queued
+        );
+        if self.last_ts > 0 {
+            let lag = protocol::now_ns().saturating_sub(self.last_ts) as f64 / 1e9;
+            d.push_str(&format!(", last record given {lag:.1} s old"));
+        }
+        if let Some(w) = self.warned {
+            d.push_str(&format!(", warned {:.1} s before", w.elapsed().as_secs_f64()));
+        }
+        if self.skipped > 0 {
+            d.push_str(&format!(", {} chunks skipped", self.skipped));
+        }
+        d
+    }
+}
+
 /// How a client is served.
 pub struct Serve {
+    /// Who it is and where from, for the log.
+    pub who: String,
     /// For the stream header.
     pub start: u64,
     /// Interleave trade conditions.
@@ -663,6 +736,7 @@ mod tests {
                         hub.serve(
                             out,
                             Serve {
+                                who: "a test client".to_owned(),
                                 start: protocol::now_ns(),
                                 conditions: false,
                                 history: None,
