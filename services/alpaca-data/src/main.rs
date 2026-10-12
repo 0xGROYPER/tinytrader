@@ -40,11 +40,13 @@
 //! `sip` with a subscription) and `ALPACA_OPTIONS_FEED` (`indicative`, or
 //! `opra` with a subscription).
 
+mod cboe;
 mod chain;
 mod screener;
 mod smile;
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -88,6 +90,14 @@ struct Args {
     /// history on every plan) by default; the stock feed serves the rest.
     #[arg(long, env = "ALPACA_HISTORY_FEED", default_value = "sip")]
     history_feed: String,
+    /// Where index minutes from Cboe are saved, so intraday history builds
+    /// up a day at a time; not saved when absent.
+    #[arg(long, env = "ALPACA_DATA_DIR")]
+    dir: Option<PathBuf>,
+    /// Indexes whose minutes are saved every 10 minutes whether or not
+    /// anyone is looking, comma-separated.
+    #[arg(long, env = "ALPACA_DATA_RECORD", default_value = "XSP,SPX,VIX")]
+    record: String,
 }
 
 struct App {
@@ -105,6 +115,8 @@ struct App {
     cache: Mutex<HashMap<String, (Instant, Value, usize)>>,
     /// The screener's universe, its scans and what it was last asked for.
     screen: Mutex<Screen>,
+    /// Where index minutes are saved (`cboe`).
+    dir: Option<PathBuf>,
 }
 
 /// The options screener's state, shared with its background scan.
@@ -564,6 +576,9 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
         );
     }
     let end = ask.end.filter(|&e| e > 0);
+    if cboe::is_index(&symbol) {
+        return answer(index_bars(&app, symbol, interval, days, end).await);
+    }
     let a = app.clone();
     answer(
         app.kept(
@@ -632,6 +647,99 @@ async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Res
         )
         .await,
     )
+}
+
+/// An index's bars from Cboe: daily and weekly from its daily history (with
+/// today's bar from its minutes), intraday from the minutes saved and
+/// today's.
+async fn index_bars(
+    app: &Arc<App>,
+    symbol: String,
+    interval: u64,
+    days: u64,
+    end: Option<i64>,
+) -> Result<Value, (StatusCode, String)> {
+    let a = app.clone();
+    app.kept(format!("bars|{symbol}|{interval}|{days}|{}", end.unwrap_or(0)), Duration::from_secs(60), || async move {
+        let today = cboe_minutes(&a, &symbol).await?;
+        let daily = interval >= 86_400;
+        let mut out = if daily {
+            let (s, b) = (symbol.clone(), a.clone());
+            let hist = a
+                .kept(format!("cboe|historical|{s}"), Duration::from_secs(3600), || async move {
+                    cboe::fetch(&b.http, "historical", &s).await.map_err(|e| (StatusCode::BAD_GATEWAY, e))
+                })
+                .await?;
+            let mut d = cboe::daily(&hist);
+            if let Some(t) = cboe::day_of(&today)
+                && d.last().is_none_or(|l| l[0].as_i64() < t[0].as_i64())
+            {
+                d.push(t);
+            }
+            if interval == 604_800 { cboe::weekly(&d) } else { d }
+        } else {
+            // Saved days back far enough, then today's (newer wins).
+            let upto = end.unwrap_or(unix_seconds() as i64);
+            let from = ny_date_time(upto - (days as i64 * 7 / 5 + 4) * 86_400).0;
+            let mut m: Vec<Value> = a.dir.as_deref().map(|d| cboe::load(d, &symbol, &from)).unwrap_or_default();
+            m.extend(today);
+            m.sort_by_key(|b| b[0].as_i64().unwrap_or(0));
+            m.dedup_by(|later, earlier| later[0] == earlier[0] && { *earlier = later.clone(); true });
+            if interval == 60 { m } else { cboe::combine(&m, interval as i64) }
+        };
+        if let Some(e) = end {
+            out.retain(|b| b[0].as_i64().unwrap_or(0) < e);
+        }
+        let keep = last_days(&out, days as usize, daily);
+        let note = if daily {
+            "Cboe, 15 minutes delayed".to_owned()
+        } else {
+            let since = a.dir.as_deref().and_then(|d| cboe::first_saved(d, &symbol));
+            format!("Cboe, 15 minutes delayed; minutes kept since {}", since.unwrap_or_else(|| "today".into()))
+        };
+        Ok(json!({ "symbol": symbol, "interval": interval, "bars": &out[out.len() - keep..], "note": note, "source": "cboe" }))
+    })
+    .await
+}
+
+/// Today's minutes for an index from Cboe (kept a minute), saved as they
+/// arrive.
+async fn cboe_minutes(app: &Arc<App>, symbol: &str) -> Result<Vec<Value>, (StatusCode, String)> {
+    let (a, s) = (app.clone(), symbol.to_owned());
+    let v = app
+        .kept(
+            format!("cboe|intraday|{symbol}"),
+            Duration::from_secs(60),
+            || async move {
+                let v = cboe::fetch(&a.http, "intraday", &s)
+                    .await
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+                let m = cboe::minutes(&v);
+                if let Some(d) = &a.dir
+                    && let Err(e) = cboe::save(d, &s, &m)
+                {
+                    a.observer.record_error(&format!("saving {s} minutes: {e}"));
+                }
+                Ok(Value::Array(m))
+            },
+        )
+        .await?;
+    Ok(v.as_array().cloned().unwrap_or_default())
+}
+
+/// Save the minutes of `symbols` every 10 minutes, so each day is kept
+/// whole whether or not a chart asks for it.
+async fn record_indexes(app: Arc<App>, symbols: Vec<String>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(600));
+    loop {
+        tick.tick().await;
+        for s in &symbols {
+            if let Err((_, e)) = cboe_minutes(&app, s).await {
+                eprintln!("alpaca-data: {e}");
+                app.observer.record_error(&e);
+            }
+        }
+    }
 }
 
 /// The feeds to ask and their (start, end) overrides: the full market (SIP)
@@ -1130,8 +1238,11 @@ async fn main() {
     let observer = Observer::new("alpaca-data", env!("CARGO_PKG_VERSION"));
     observer.set_state(State::Ready, "waiting for requests");
     observer.describe(json!({
-        "role": "Market data for any symbol on request: stock snapshots, bars and option chains with IV and greeks, from Alpaca.",
-        "upstream": [{ "id": "alpaca-data-api", "label": "Alpaca", "sub": format!("{} stocks, {} options", args.feed, args.options_feed), "kind": "flow", "via": "https" }],
+        "role": "Market data for any symbol on request: stock snapshots, bars and option chains with IV and greeks, from Alpaca; index bars (XSP, SPX, VIX, ...) from Cboe, 15 minutes delayed.",
+        "upstream": [
+            { "id": "alpaca-data-api", "label": "Alpaca", "sub": format!("{} stocks, {} options", args.feed, args.options_feed), "kind": "flow", "via": "https" },
+            { "id": "cboe-delayed", "label": "Cboe", "sub": "index bars, 15 min delayed", "kind": "flow", "via": "https" },
+        ],
         "streams": { "bars": "/bars", "snapshots": "/snapshots", "chain": "/chain", "news_search": "/news", "option_bars": "/option_bars", "option_contracts": "/option_contracts", "screener": "/screener" },
     }));
     let app = Arc::new(App {
@@ -1148,8 +1259,18 @@ async fn main() {
         sent: Mutex::default(),
         cache: Mutex::default(),
         screen: Mutex::default(),
+        dir: args.dir,
     });
     tokio::spawn(scan(app.clone()));
+    let record: Vec<String> = args
+        .record
+        .split(',')
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| cboe::is_index(s))
+        .collect();
+    if app.dir.is_some() && !record.is_empty() {
+        tokio::spawn(record_indexes(app.clone(), record));
+    }
     {
         let a = app.clone();
         observer.set_metrics(move |w| {
