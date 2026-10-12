@@ -33,4 +33,4 @@ The screener's rows gain `skew`, the 30-day expiry's `rr25` when the fit isn't p
 
 - These are the market's prices, not forecasts. Options carry a premium (implied volatility above what follows, on average), largest for indexes, so stocks finish inside the ranges somewhat more often than priced.
 - On 9 October 2026's close: SPY's weeklies were peaked, with 62-63% inside the straddle (57% on a bell curve), puts over calls by 1-2 points, a longer left tail; NFLX through its 20 October report was close to symmetric, slightly upside-skewed; thinly quoted names (BSP) were `poor`.
-- Alpaca's option quotes are its indicative feed: wide for far-from-the-money strikes, which the spread filter drops. Short-dated wings rest on few quotes.
+- Option quotes are Databento's consolidated OPRA quotes for underlyings an OPRA relay carries (SPY and XSP) while its feed is live, and otherwise Alpaca's indicative feed: wide for far-from-the-money strikes, which the spread filter drops. Short-dated wings rest on few quotes.

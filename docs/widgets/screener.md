@@ -4,7 +4,7 @@ Stocks ranked by what their options expect: implied volatility, the expected mov
 
 **Data:** a service serving the screener (alpaca-data). The universe is Nasdaq's stock screener: every US listing with its price, the day's change and volume, sector and market capitalisation, refreshed every 10 minutes. Of the listings at or above the size picked and over $5, the 150 largest, the 25 biggest movers, the 25 most traded by dollar volume, and those on Alpaca's most-active list are scanned in the background:
 
-- **IV 30d:** at-the-money implied volatility of the expiry nearest 30 days (computed from Alpaca's indicative quotes: the out-of-the-money side's mid, Black-76 on the parity forward).
+- **IV 30d:** at-the-money implied volatility of the expiry nearest 30 days (computed from the quotes: the out-of-the-money side's mid, Black-76 on the parity forward; Databento's OPRA quotes for underlyings a relay carries, SPY and XSP, while its feed is live, else Alpaca's indicative ones).
 - **Exp. move:** the at-the-money straddle's mid over the price, for the first expiry at least three sessions away (a straddle of a day or two is mostly noise, or one event). Ranked scaled to a week (five sessions), so names with only monthly expiries compare with weeklies. **E** marks an earnings report before that expiry: the move includes it.
 - **Exp. $ move:** the weekly expected move times market capitalisation: where the most value is expected to move.
 - **Skew:** the 25-delta risk reversal at the expiry nearest 30 days, from the chain's fitted smile: put less call implied volatility, in points. Positive: downside priced richer (usual for indexes); negative: upside richer. Blank when the chain is too thin to fit ([the method](../implied-distribution.md)).

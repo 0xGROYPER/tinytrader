@@ -25,6 +25,7 @@ mod databento;
 mod hours;
 mod hub;
 mod protocol;
+mod quotes;
 mod source;
 
 use std::str::FromStr as _;
@@ -188,7 +189,7 @@ async fn run(args: Args) -> Result<(), String> {
     observer.describe(json!({
         "role": format!("Relays {dataset} {schema_name} for {} to local clients ({}).", args.symbols.join(", "), protocol::PROTOCOL),
         "upstream": [{ "id": provider_id, "label": provider_id, "sub": dataset, "kind": "flow", "via": via }],
-        "streams": { "events": "/events", "series": "/recent", "bars": "/bars", "clients": "/clients" },
+        "streams": { "events": "/events", "series": "/recent", "bars": "/bars", "quotes": "/quotes", "clients": "/clients" },
         "panels": [{ "heading": format!("{dataset} {}", args.symbols.join(", ")), "note": "Trade prices of the most active instruments, sampled once per second", "decimals": 2 }],
         "relay": { "protocol": protocol::PROTOCOL, "listen": args.listen, "symbols": args.symbols },
         // Relays carrying the same feed on the same hours are one line on a schedule.
@@ -208,6 +209,7 @@ async fn run(args: Args) -> Result<(), String> {
         .merge(hub.events.router())
         .merge(hub.series.router())
         .merge(bars::router(hub.bars.clone(), source.clone()))
+        .merge(quotes::router(hub.clone()))
         .merge({
             let hub = hub.clone();
             axum::Router::new().route(
@@ -344,6 +346,12 @@ fn register_metrics(observer: &Observer, hub: &Arc<Hub>) {
             "Connected clients.",
             &[],
             c(&hub.clients),
+        );
+        w.gauge(
+            "tinytrader_relay_quotes",
+            "Instruments with a latest quote held for /quotes.",
+            &[],
+            hub.quotes.len() as f64,
         );
         w.gauge(
             "tinytrader_relay_reference_records",

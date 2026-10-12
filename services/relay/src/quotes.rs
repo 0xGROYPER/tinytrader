@@ -7,10 +7,12 @@
 //! `GET /quotes?symbols=SPY261016C00775000,...` answers for those contracts;
 //! `?underlying=SPY` for every contract of that root, optionally only those
 //! expiring `from` / `to` (YYYY-MM-DD). The answer is
-//! `{"quotes": {OCC: {bid, ask, bid_size, ask_size, ts}}, "as_of"}`: symbols
+//! `{"quotes": {OCC: {bid, ask, bid_size, ask_size, ts}}, "as_of", "last_record"}`: symbols
 //! in compact OCC form (the provider's padding removed), prices in dollars
 //! (`null` when a side is empty), `ts` the provider's receive time in Unix
-//! seconds.
+//! seconds. A quote changes only when its book does, so a quiet contract's
+//! can be old and still current: `last_record` (Unix seconds, null before
+//! any) says whether the feed itself is live.
 
 use std::collections::{HashMap, HashSet};
 use std::mem::{offset_of, size_of};
@@ -164,10 +166,12 @@ fn yymmdd(d: &str) -> Option<String> {
 }
 
 async fn serve(State(hub): State<Arc<Hub>>, Query(ask): Query<Ask>) -> (StatusCode, Json<Value>) {
-    let wanted: Option<HashSet<String>> = ask
-        .symbols
-        .as_deref()
-        .map(|s| s.split(',').map(|x| compact(x).to_uppercase()).filter(|x| !x.is_empty()).collect());
+    let wanted: Option<HashSet<String>> = ask.symbols.as_deref().map(|s| {
+        s.split(',')
+            .map(|x| compact(x).to_uppercase())
+            .filter(|x| !x.is_empty())
+            .collect()
+    });
     let root = ask.underlying.as_deref().map(str::to_uppercase);
     if wanted.is_none() && root.is_none() {
         return (
@@ -198,7 +202,14 @@ async fn serve(State(hub): State<Arc<Hub>>, Query(ask): Query<Ask>) -> (StatusCo
     }
     (
         StatusCode::OK,
-        Json(json!({ "quotes": quotes, "as_of": crate::protocol::now_ns() as f64 / 1e9 })),
+        Json(json!({
+            "quotes": quotes,
+            "as_of": crate::protocol::now_ns() as f64 / 1e9,
+            "last_record": match hub.last_record_ns.load(std::sync::atomic::Ordering::Relaxed) {
+                0 => None,
+                ns => Some(ns as f64 / 1e9),
+            },
+        })),
     )
 }
 

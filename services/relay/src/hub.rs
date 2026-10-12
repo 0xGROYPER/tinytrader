@@ -172,6 +172,8 @@ pub struct Hub {
     /// Trade prices of the most active instruments, by symbol, for charts.
     /// One-minute bars of the relay's own symbols, for charts.
     pub bars: Arc<crate::bars::Bars>,
+    /// The latest quote of each instrument, for pricing chains.
+    pub quotes: crate::quotes::Quotes,
     pub series: Series,
     /// Who is connected, by connection.
     roster: Mutex<BTreeMap<u64, ClientInfo>>,
@@ -206,6 +208,7 @@ impl Hub {
             reference: Mutex::new(Reference::default()),
             series: Series::new(900, 1000, 6),
             bars: Arc::new(crate::bars::Bars::default()),
+            quotes: crate::quotes::Quotes::default(),
             events: Events::default(),
             clients: AtomicU64::new(0),
             roster: Mutex::new(BTreeMap::new()),
@@ -281,6 +284,7 @@ impl Hub {
         let mut reference = lock(&self.reference);
         reference.absorb(&plain);
         self.chart(&reference, &plain);
+        self.quotes.absorb(&plain);
         // No receivers is fine: nobody is listening right now.
         let _ = self.tx.send(plain);
         let _ = self.tx_cond.send(with_conditions);
@@ -335,6 +339,16 @@ impl Hub {
         let chunk: Chunk = bytes.into();
         let _ = self.tx.send(chunk.clone());
         let _ = self.tx_cond.send(chunk);
+    }
+
+    /// The latest quotes of the instruments whose compact symbols pass
+    /// `keep` (the reference lock first, as when publishing).
+    pub fn quotes_matching(
+        &self,
+        keep: impl Fn(&str) -> bool,
+    ) -> Vec<(String, crate::quotes::Quote)> {
+        let reference = lock(&self.reference);
+        self.quotes.matching(|id| reference.symbol(id), keep)
     }
 
     /// Reference records held for joining clients.
@@ -526,7 +540,8 @@ impl Hub {
                 Sent::Ok => last_write = Instant::now(),
                 Sent::Closed => return,
                 Sent::Stalled => {
-                    self.drop_slow(&mut out, "client stopped reading", &behind).await;
+                    self.drop_slow(&mut out, "client stopped reading", &behind)
+                        .await;
                     return;
                 }
             }
@@ -583,7 +598,10 @@ impl Behind {
             d.push_str(&format!(", last record given {lag:.1} s old"));
         }
         if let Some(w) = self.warned {
-            d.push_str(&format!(", warned {:.1} s before", w.elapsed().as_secs_f64()));
+            d.push_str(&format!(
+                ", warned {:.1} s before",
+                w.elapsed().as_secs_f64()
+            ));
         }
         if self.skipped > 0 {
             d.push_str(&format!(", {} chunks skipped", self.skipped));
@@ -926,6 +944,57 @@ mod tests {
         let points = recent["SPY 261016C00775000"].as_array().unwrap();
         assert_eq!(points.len(), 1);
         assert_eq!(points[0][1].as_f64(), Some(1.25));
+    }
+
+    #[test]
+    fn keeps_the_latest_quote_by_compact_symbol() {
+        use databento::dbn::{Cmbp1Msg, ConsolidatedBidAskPair, RecordRef};
+        let hub = Hub::new(metadata(), 8, Duration::from_secs(10));
+        let def = |id: u32, sym: &str| {
+            let mut d = InstrumentDefMsg {
+                hd: RecordHeader::new::<InstrumentDefMsg>(rtype::INSTRUMENT_DEF, 1, id, 0),
+                expiration: u64::MAX,
+                ..Default::default()
+            };
+            d.raw_symbol = databento::dbn::record::str_to_c_chars(sym).unwrap();
+            RecordRef::from(&d).as_ref().to_vec()
+        };
+        let quote = |id: u32, bid: i64, ask: i64, ts: u64| {
+            let mut m = Cmbp1Msg::default_for_schema(databento::dbn::Schema::Cmbp1);
+            m.hd = RecordHeader::new::<Cmbp1Msg>(rtype::CMBP_1, 1, id, ts);
+            m.action = b'A' as std::ffi::c_char;
+            m.ts_recv = ts;
+            m.levels = [ConsolidatedBidAskPair {
+                bid_px: bid,
+                ask_px: ask,
+                bid_sz: 5,
+                ask_sz: 7,
+                ..Default::default()
+            }];
+            RecordRef::from(&m).as_ref().to_vec()
+        };
+        let mut chunk = def(7, "SPY   261016C00775000");
+        chunk.extend(def(8, "SPY   261023P00700000"));
+        chunk.extend(quote(7, 1_200_000_000, 1_250_000_000, 1));
+        chunk.extend(quote(7, 1_210_000_000, 1_240_000_000, 2)); // the latest wins
+        chunk.extend(quote(8, UNDEF_PRICE, 300_000_000, 3)); // no bid
+        hub.publish(chunk, 5);
+        let mut got = hub.quotes_matching(|s| s.starts_with("SPY261016"));
+        assert_eq!(got.len(), 1);
+        let (sym, q) = got.pop().unwrap();
+        assert_eq!(sym, "SPY261016C00775000");
+        assert_eq!(
+            (q.bid, q.ask, q.bid_size, q.ask_size, q.ts),
+            (Some(1.21), Some(1.24), 5, 7, 2)
+        );
+        let all = hub.quotes_matching(|_| true);
+        let put = all
+            .iter()
+            .find(|(s, _)| s == "SPY261023P00700000")
+            .unwrap()
+            .1;
+        assert_eq!((put.bid, put.ask), (None, Some(0.3)));
+        assert_eq!(hub.quotes.len(), 2);
     }
 
     #[test]

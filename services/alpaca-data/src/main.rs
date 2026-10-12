@@ -12,7 +12,12 @@
 //! - `/chain?underlying=AAPL&from=YYYY-MM-DD&to=YYYY-MM-DD`: option contracts
 //!   with quotes, and IV and greeks computed here from them (`pricing`; never
 //!   Alpaca's), and per expiry the at-the-money IV and the
-//!   straddle as an implied move; by default the next 60 days.
+//!   straddle as an implied move; by default the next 60 days. For an
+//!   underlying an OPRA relay carries (`ALPACA_DATA_QUOTES`, `opra.rs`), the
+//!   quotes are Databento's consolidated OPRA ones while its feed is live:
+//!   `quotes` (`opra`, `mixed` or `indicative`) and `opra_quotes` say how
+//!   many, and each contract's `quote_src` which it has. The screener's scan
+//!   uses them too.
 //!
 //! - `/news?symbols=USO,XLE&limit=50`: recent stories on those symbols
 //!   (Benzinga, through Alpaca), in the news service's shape, newest first.
@@ -43,6 +48,7 @@
 
 mod cboe;
 mod chain;
+mod opra;
 mod pricing;
 mod screener;
 mod smile;
@@ -100,6 +106,10 @@ struct Args {
     /// anyone is looking, comma-separated.
     #[arg(long, env = "ALPACA_DATA_RECORD", default_value = "XSP,SPX,VIX")]
     record: String,
+    /// OPRA relays whose quotes replace the indicative feed's for their
+    /// underlyings: `SPY=http://relay-opra-spy:9110;XSP=...` (see `opra.rs`).
+    #[arg(long, env = "ALPACA_DATA_QUOTES", default_value = "")]
+    quotes: String,
 }
 
 struct App {
@@ -119,6 +129,8 @@ struct App {
     screen: Mutex<Screen>,
     /// Where index minutes are saved (`cboe`).
     dir: Option<PathBuf>,
+    /// OPRA relays by underlying, for real quotes.
+    relays: HashMap<String, String>,
 }
 
 /// The options screener's state, shared with its background scan.
@@ -136,6 +148,25 @@ struct Screen {
 }
 
 impl App {
+    /// Put the OPRA relay's quotes on an underlying's contracts, if a relay
+    /// carries it: the symbols that took them, or `None` without a relay.
+    async fn opra(
+        &self,
+        underlying: &str,
+        contracts: &mut [chain::Contract],
+        from: &str,
+        to: &str,
+    ) -> Option<std::collections::HashSet<String>> {
+        let base = self.relays.get(underlying)?;
+        match opra::fetch(&self.http, base, underlying, from, to).await {
+            Ok(v) => Some(opra::overlay(contracts, &v, unix_seconds())),
+            Err(e) => {
+                self.observer.record_error(&e);
+                Some(std::collections::HashSet::new())
+            }
+        }
+    }
+
     /// GET from Alpaca, within the rate limit.
     async fn get(
         &self,
@@ -851,6 +882,8 @@ async fn option_chain(AxState(app): AxState<Arc<App>>, Query(ask): Query<ChainAs
             }
             // By expiry, then strike, calls before puts.
             contracts.sort_by(|a, b| a.expiry.cmp(&b.expiry).then(a.strike.total_cmp(&b.strike)).then(b.call.cmp(&a.call)));
+            // Real quotes from the OPRA relay where one carries this underlying, before anything is priced.
+            let opra = a.opra(&underlying, &mut contracts, &from, &to).await.unwrap_or_default();
             // An index (XSP) has no stock quote: price it from its options.
             let (spot, spot_from) = match spot {
                 Some(s) => (Some(s), "trade"),
@@ -859,8 +892,13 @@ async fn option_chain(AxState(app): AxState<Arc<App>>, Query(ask): Query<ChainAs
             pricing::price(&mut contracts, spot, &|x| years_to_close(x, now));
             Ok(json!({
                 "underlying": underlying, "spot": spot, "spot_from": spot_from, "iv_from": "mid", "feed": a.options_feed, "from": from, "to": to,
+                "quotes": opra::label(opra.len(), contracts.len()), "opra_quotes": opra.len(),
                 "expiries": chain::expiries(&contracts, spot, &|x| years_to_close(x, now)),
-                "contracts": contracts.iter().map(chain::Contract::to_json).collect::<Vec<_>>(),
+                "contracts": contracts.iter().map(|c| {
+                    let mut j = c.to_json();
+                    j["quote_src"] = json!(if opra.contains(&c.symbol) { "opra" } else { "indicative" });
+                    j
+                }).collect::<Vec<_>>(),
                 "truncated": truncated,
             }))
         })
@@ -1211,6 +1249,13 @@ async fn near_chain(app: &App, sym: &str, spot: f64) {
     if contracts.is_empty() && m.note.is_none() {
         m.note = Some("no options quoted".into());
     }
+    app.opra(
+        sym,
+        &mut contracts,
+        &today,
+        &ny_date_time(now + 50 * 86_400).0,
+    )
+    .await;
     pricing::price(&mut contracts, Some(spot), &|x| years_to_close(x, now));
     let exps = chain::expiries(&contracts, Some(spot), &|x| years_to_close(x, now));
     let (iv, mv) = screener::pick(&exps, &today);
@@ -1264,6 +1309,7 @@ async fn main() {
         cache: Mutex::default(),
         screen: Mutex::default(),
         dir: args.dir,
+        relays: opra::parse(&args.quotes),
     });
     tokio::spawn(scan(app.clone()));
     let record: Vec<String> = args
