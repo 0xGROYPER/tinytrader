@@ -22,6 +22,7 @@ import '../widgets/jobs.js';
 import '../widgets/queue.js';
 import '../widgets/storage.js';
 import '../widgets/reminders.js';
+import '../widgets/search.js';
 import '../widgets/docs.js';
 import '../widgets/watchlist.js';
 import '../widgets/ivmap.js';
@@ -202,6 +203,8 @@ const LAYOUTS = {
 const THEMED = () => ({ dir: 'row', ratio: 0.5,
   a: { dir: 'col', ratio: 0.45, a: { tabs: ['watchlist', 'correlation'] }, b: { tabs: ['candles', 'ivmap'] } },
   b: { dir: 'col', ratio: 0.5, a: { view: 'news' }, b: { tabs: ['calendar', 'earnings'] } } });
+// A ticker searched on Search: its candles over its earnings, news beside them.
+const TICKER = () => ({ dir: 'row', ratio: 0.58, a: { dir: 'col', ratio: 0.6, a: { view: 'candles' }, b: { view: 'earnings' } }, b: { view: 'news' } });
 // Ready-made workspaces, each installed (or brought up to date) once per
 // version of it, so a new one never resets the others.
 /** @type {Record<string, [number, () => { tree: object, theme?: object }]>} */
@@ -223,7 +226,10 @@ const mounted = new Map(); // panel body → widget instance
 let pfSeq = 0;
 const call = (op, body, fn) => prof.on ? timed(op, body.dataset.view || '?', body.dataset.pfKey ||= `${body.dataset.view}#${++pfSeq}`, fn) : fn();
 function unmount(body) { const m = mounted.get(body); if (m?.dispose) call('dispose', body, () => m.dispose()); mounted.delete(body); }
+// Workspaces saved before Search was called that still say `home`.
+const viewOf = v => v === 'home' ? 'search' : v;
 function renderPanel(body, view) {
+  view = viewOf(view);
   unmount(body);
   body.dataset.view = view;
   const w = widget(view);
@@ -244,7 +250,7 @@ function refreshTiles() {
 function buildTree(tree) {
   const leaf = n => n.view || n.tabs;
   const first = n => leaf(n) ? n : first(n.a);
-  const add = (view, ref, dir) => dock.addPanel({ id: panelId(), component: 'view', params: { view }, title: VIEWS[view] || view, ...(ref ? { position: { referencePanel: ref, direction: dir } } : {}) });
+  const add = (view, ref, dir) => dock.addPanel({ id: panelId(), component: 'view', params: { view: viewOf(view) }, title: VIEWS[viewOf(view)] || view, ...(ref ? { position: { referencePanel: ref, direction: dir } } : {}) });
   const place = (n, ref, dir) => {
     const [v, ...more] = n.tabs || [n.view];
     const p = add(v, ref, dir);
@@ -452,7 +458,7 @@ const WS_MAX = 10;
 const wsNumber = i => i < 9 ? String(i + 1) : '0';
 // A new workspace, numbered next, with one panel to build on; it opens.
 /** @param {string} [name] @param {{ tree?: object, dock?: object, theme?: object }} [start] */
-function wsAdd(name, start = { tree: { view: 'docs' } }) {
+function wsAdd(name, start = { tree: { view: 'search' } }) {
   if (lay.list.length >= WS_MAX) return false;
   const base = name || `Workspace ${wsNumber(lay.list.length)}`;
   let n = base; for (let k = 2; lay.list.some(l => l.name === n); k++) n = `${base} ${k}`;
@@ -535,9 +541,16 @@ function updateLayoutNav() {
     const here = !docs && l.name === lay.current, n = wsNumber(i);
     return `<button type="button" class="wtab wtab-num" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 10 ? ` (⌥${n})` : ''}${here ? ' · click for all workspaces (⌥W)' : ''} · right-click to rename, duplicate or delete" aria-label="Workspace ${n}: ${esc(l.name)}"${here ? ' aria-current="page"' : ''}>${n}</button>`;
   }).join('')
-    + (lay.list.length < WS_MAX ? `<button type="button" class="wtab wtab-num" data-ws-add title="New workspace, opening on Docs (⌥${wsNumber(lay.list.length)})" aria-label="New workspace">+</button>` : '');
+    + (lay.list.length < WS_MAX ? `<button type="button" class="wtab wtab-num" data-ws-add title="New workspace, opening on Search (⌥${wsNumber(lay.list.length)})" aria-label="New workspace">+</button>` : '');
   if (box.innerHTML !== html) box.innerHTML = html;
 }
+// A ticker searched on Search opens a workspace named for it, whose theme is
+// that ticker: its candles, news and earnings follow the theme. The search
+// box learns whether it opened (ten workspaces at most).
+document.addEventListener('tt-open-ticker', e => {
+  const detail = /** @type {CustomEvent} */ (e).detail;
+  detail.opened = wsAdd(detail.symbol, { tree: TICKER(), theme: { symbols: [detail.symbol], keywords: [], layers: DEFAULT_LAYERS } });
+});
 // A document picked on the docs home opens in the docs pages.
 document.addEventListener('tt-open-doc', e => {
   if (!state.tab.startsWith('col:')) return;

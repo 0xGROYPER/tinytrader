@@ -196,16 +196,25 @@ pub fn merge(edgar: &[Value], av: &[Value]) -> Vec<Value> {
 /// "0", "1", ... in order of importance and can give one ticker to several
 /// companies (a new trust beside the operating company): the first wins.
 fn ticker_map(v: &Value) -> serde_json::Map<String, Value> {
+    by_ticker(v, "cik_str")
+}
+
+/// Ticker to company name (EDGAR's "title"), first company wins as above.
+fn ticker_titles(v: &Value) -> serde_json::Map<String, Value> {
+    by_ticker(v, "title")
+}
+
+fn by_ticker(v: &Value, field: &str) -> serde_json::Map<String, Value> {
     let mut rows: Vec<(u64, &str, &Value)> = v
         .as_object()
         .into_iter()
         .flatten()
-        .filter_map(|(k, c)| Some((k.parse().ok()?, c["ticker"].as_str()?, &c["cik_str"])))
+        .filter_map(|(k, c)| Some((k.parse().ok()?, c["ticker"].as_str()?, &c[field])))
         .collect();
     rows.sort_by_key(|r| r.0);
     let mut map = serde_json::Map::new();
-    for (_, ticker, cik) in rows {
-        map.entry(ticker.to_owned()).or_insert_with(|| cik.clone());
+    for (_, ticker, value) in rows {
+        map.entry(ticker.to_owned()).or_insert_with(|| value.clone());
     }
     map
 }
@@ -355,26 +364,48 @@ impl History {
         }
     }
 
-    /// EDGAR's company number for a ticker, from its ticker list (kept a week).
-    async fn cik(&self, symbol: &str, agent: &str, now: f64) -> Option<u64> {
+    /// EDGAR's ticker list, kept a week: company numbers and names by ticker.
+    /// A list kept before names were, or one that can't be fetched, is what's
+    /// used (none, if there's nothing at all).
+    async fn ticker_file(&self, agent: &str, now: f64) -> Option<Value> {
         let name = "edgar/tickers.json";
-        let mut list = self.load(name);
-        if list
-            .as_ref()
-            .is_none_or(|v| now - v["fetched_at"].as_f64().unwrap_or(0.0) > RECHECK)
-        {
-            let r = self
-                .http
-                .get("https://www.sec.gov/files/company_tickers.json")
-                .header("User-Agent", agent);
-            if let Ok(v) = self.get_json(r).await {
-                let map = ticker_map(&v);
-                let kept = json!({ "fetched_at": now, "ciks": map });
-                self.save(name, &kept);
-                list = Some(kept);
-            }
+        let list = self.load(name);
+        if list.as_ref().is_some_and(|v| {
+            now - v["fetched_at"].as_f64().unwrap_or(0.0) <= RECHECK && v.get("titles").is_some()
+        }) {
+            return list;
         }
-        list?["ciks"][symbol].as_u64()
+        let r = self
+            .http
+            .get("https://www.sec.gov/files/company_tickers.json")
+            .header("User-Agent", agent);
+        if let Ok(v) = self.get_json(r).await {
+            let kept = json!({ "fetched_at": now, "ciks": ticker_map(&v), "titles": ticker_titles(&v) });
+            self.save(name, &kept);
+            return Some(kept);
+        }
+        list
+    }
+
+    /// EDGAR's company number for a ticker, from its ticker list.
+    async fn cik(&self, symbol: &str, agent: &str, now: f64) -> Option<u64> {
+        self.ticker_file(agent, now).await?["ciks"][symbol].as_u64()
+    }
+
+    /// Every ticker EDGAR lists, with its company's name: { fetched_at, names }.
+    ///
+    /// # Errors
+    /// No SEC contact is configured, or the list can't be had.
+    pub async fn tickers(&self) -> Answer {
+        let Some(agent) = &self.sec_agent else {
+            return Err((StatusCode::SERVICE_UNAVAILABLE, "SEC_CONTACT is not set".into()));
+        };
+        let now = unix_seconds();
+        let file = self
+            .ticker_file(agent, now)
+            .await
+            .ok_or((StatusCode::BAD_GATEWAY, "EDGAR's ticker list is not available".to_owned()))?;
+        Ok(json!({ "fetched_at": file["fetched_at"], "names": file["titles"] }))
     }
 
     /// EDGAR's earnings releases for `symbol`, newest first (empty for a
@@ -513,6 +544,15 @@ mod tests {
             (r[1]["date"].as_str(), r[1]["when"].as_str()),
             (Some("2026-01-13"), Some("before-open"))
         );
+    }
+
+    #[test]
+    fn names_come_with_the_first_company() {
+        let v = json!({
+            "1": { "ticker": "ABC", "title": "Second Co", "cik_str": 2 },
+            "0": { "ticker": "ABC", "title": "First Co", "cik_str": 1 },
+        });
+        assert_eq!(ticker_titles(&v)["ABC"], "First Co");
     }
 
     #[test]

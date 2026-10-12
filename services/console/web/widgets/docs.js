@@ -34,7 +34,7 @@ const results = (list, q) => q.trim()
   : '<div class="dh-results" hidden></div>';
 
 /** The header's pixel wordmark, cropped to "tinytrader" (without ".io") and drawn large. */
-function mark() {
+export function mark() {
   const svg = /** @type {SVGSVGElement | null} */ (document.querySelector('svg.wordmark')?.cloneNode(true));
   if (!svg) return '<div class="dh-mark">tinytrader</div>';
   svg.setAttribute('viewBox', '0 0 37 5');

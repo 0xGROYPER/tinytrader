@@ -650,6 +650,13 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 .dh-mark { width: min(100%, 444px); height: auto; aspect-ratio: 37 / 5; color: var(--fg); }
 .dh-search { width: 100%; font: 15px var(--ui); padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
 .dh-search:focus { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+.hm-form { width: 100%; margin: 0; }
+.hm-form { position: relative; width: 100%; margin: 0; }
+.hm-sugg { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 5; margin: 0; padding: 4px; list-style: none; max-height: 320px; overflow-y: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgb(0 0 0 / 0.12); }
+.hm-sugg li { display: flex; align-items: baseline; gap: 12px; padding: 8px 12px; border-radius: 6px; cursor: pointer; font: 14px var(--ui); color: var(--fg); }
+.hm-sugg li b { font-weight: 600; min-width: 4.5em; }
+.hm-sugg li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.hm-sugg li[aria-selected="true"], .hm-sugg li:hover { background: var(--accent-soft); }
 .dh-results, .dh-start { width: 100%; }
 .dh-start h3 { margin: 6px 0 8px; font: 600 12px var(--ui); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 a.doc-card { text-decoration: none; }

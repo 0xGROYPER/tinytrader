@@ -153,7 +153,7 @@ async fn main() {
     observer.describe(json!({
         "role": "Scheduled US economic releases (BLS, BEA, jobless claims) and FOMC decisions, from the agencies' own schedules, and earnings dates compared across calendars.",
         "upstream": upstream,
-        "streams": { "econ": "/events", "earnings": "/earnings", "earnings_history": "/history" },
+        "streams": { "econ": "/events", "earnings": "/earnings", "earnings_history": "/history", "tickers": "/tickers" },
         "schedule": [{ "name": "Read the agencies' schedules and the earnings calendars", "kind": "interval", "every_seconds": args.refresh_hours * 3600, "when": format!("every {} h", args.refresh_hours) }],
     }));
     {
@@ -176,20 +176,33 @@ async fn main() {
             }
         });
     }
+    let history = Arc::new(history::History::new(
+        keys.alpha_vantage.clone(),
+        tinytrader_observe::secret("SEC_CONTACT").ok(),
+        args.cache.clone(),
+        budget.clone(),
+    ));
     let app = Router::new()
         .route("/events", get(events))
         .route("/earnings", get(earnings_list))
         .route(
             "/history",
             get({
-                let h = Arc::new(history::History::new(
-                    keys.alpha_vantage.clone(),
-                    tinytrader_observe::secret("SEC_CONTACT").ok(),
-                    args.cache.clone(),
-                    budget.clone(),
-                ));
+                let h = Arc::clone(&history);
                 move |Query(ask): Query<HistoryAsk>| async move {
                     match h.get(&ask.symbol).await {
+                        Ok(v) => Json(v).into_response(),
+                        Err((code, e)) => (code, Json(json!({ "error": e }))).into_response(),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/tickers",
+            get({
+                let h = Arc::clone(&history);
+                move || async move {
+                    match h.tickers().await {
                         Ok(v) => Json(v).into_response(),
                         Err((code, e)) => (code, Json(json!({ "error": e }))).into_response(),
                     }
