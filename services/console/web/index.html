@@ -746,6 +746,25 @@ a.doc-card { text-decoration: none; }
 .sb-buy { color: var(--ok); } .sb-sell { color: var(--crit); }
 .sb-add { margin-top: 6px; }
 .sb-msg { margin: 0; font-size: 12px; }
+.sc { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.sc-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sc-views { margin: 0; }
+.sc-field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.sc-field select { font: 13px var(--mono, monospace); padding: 2px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
+.sc-note, .sc-msg { margin: 0; font-size: 12px; }
+.sc-wrap { overflow-x: auto; }
+.sc-table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+.sc-table th { text-align: right; font-weight: 500; color: var(--muted); font-size: 11px; padding: 4px 6px; border-bottom: 1px solid var(--line); cursor: pointer; white-space: nowrap; user-select: none; }
+.sc-table th.sc-sorted { color: var(--fg); }
+.sc-table td { text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+.sc-table th:nth-child(-n+3), .sc-table td:nth-child(-n+3) { text-align: left; }
+.sc-table tbody tr { cursor: pointer; }
+.sc-table tbody tr:hover { background: var(--nav-hover); }
+.sc-name { display: block; max-width: 16em; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--muted); }
+.sc-sector { color: var(--fg-2); }
+.sc-up { color: var(--up); } .sc-down { color: var(--down); }
+.sc-hot { color: var(--warn); font-weight: 600; } .sc-cool { color: var(--muted); }
+.sc-e { display: inline-block; margin-left: 4px; padding: 0 3px; border-radius: 3px; font-size: 10px; font-weight: 600; background: var(--warn-soft); color: var(--warn); }
 .cd-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .cd-top .cd-bar { flex: 1 1 auto; min-width: 0; }
 .cd-search { margin: 0; }

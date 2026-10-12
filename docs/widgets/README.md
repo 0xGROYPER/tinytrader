@@ -11,6 +11,7 @@ A workspace is a set of panels, each showing one widget. These pages say what ea
 - [Earnings](earnings.md): Upcoming reports with what options expect against what has happened before, to judge whether the expected move is rich or cheap: the jump implied by the term structure, the straddle, and the company's past moves, EPS and surprises.
 - [Earnings week](earningsweek.md): The week's earnings reports as a grid, before the open and after the close, largest companies first.
 - [Spread builder](spreads.md): An options position from a structure and the live chain, with its payoff, price, breakevens and greeks.
+- [Options screener](screener.md): Stocks ranked by implied volatility, expected move (in percent and dollars of market value), IV over realized, the day's move and volume.
 - [Calendar](calendar.md): The market month: trading days, early closes and holidays, with scheduled economic releases, FOMC decisions and earnings as layers.
 - [News](news.md): Recent stories, newest first, filtered by symbol with the chips along the top.
 - [Prices](prices.md): One card per series the deployment's topology declares (the relays' trade prices), with the latest value, its change and a chart.

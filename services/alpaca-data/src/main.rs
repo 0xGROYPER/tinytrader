@@ -20,6 +20,16 @@
 //! - `/option_contracts?underlying=&from=&to=`: the contracts expiring between
 //!   two dates, expired ones included (from Alpaca's trading API, read only).
 //!
+//! - `/screener?min_cap=2e9&min_price=5&scan=150`: stocks with options,
+//!   ranked by what the options expect. The universe is Nasdaq's stock
+//!   screener (every US listing, with market capitalisation), filtered to the
+//!   size and price asked; the largest `scan` of them, the day's biggest
+//!   movers and most traded in it, and Alpaca's most-active and movers lists,
+//!   are scanned in the background for the at-the-money IV nearest 30 days,
+//!   the next expiry's implied move, 20-day realized volatility and average
+//!   volume. Each stock is rescanned every 15 minutes while asked for; until
+//!   scanned, its row has no option measures (`pending` counts them).
+//!
 //! Answers are kept briefly (snapshots 2 s, chains 15 s, bars a minute) and
 //! requests to Alpaca are held under its free plan's 200 a minute, so many
 //! panels asking at once don't multiply the load.
@@ -30,6 +40,7 @@
 //! `opra` with a subscription).
 
 mod chain;
+mod screener;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -54,6 +65,12 @@ const PER_MINUTE: usize = 180;
 /// Answers kept, at most, by their size as JSON (a long hourly history is
 /// thousands of bars, so a count alone isn't a bound).
 const CACHE_BYTES: usize = 40 * 1024 * 1024;
+/// Nasdaq's stock screener: every US listing, with market capitalisation.
+const NASDAQ: &str = "https://api.nasdaq.com/api/screener/stocks?tableonly=true&download=true";
+/// How long a screener measure is kept before the stock is scanned again.
+const RESCAN: Duration = Duration::from_secs(15 * 60);
+/// The background scan stops this long after the screener was last asked for.
+const SCAN_IDLE: Duration = Duration::from_secs(30 * 60);
 
 /// Serves stock snapshots, bars and option chains from Alpaca.
 #[derive(Parser, Debug)]
@@ -84,6 +101,22 @@ struct App {
     /// Answers kept briefly, by request.
     /// Answers kept briefly, by request: when, the answer, its size.
     cache: Mutex<HashMap<String, (Instant, Value, usize)>>,
+    /// The screener's universe, its scans and what it was last asked for.
+    screen: Mutex<Screen>,
+}
+
+/// The options screener's state, shared with its background scan.
+#[derive(Default)]
+struct Screen {
+    /// Nasdaq's listings, and when they were fetched.
+    universe: Option<(Instant, Arc<Vec<screener::Stock>>)>,
+    /// Stocks to scan (with their price), in order, and when last asked for.
+    wanted: Vec<(String, f64)>,
+    asked: Option<Instant>,
+    /// Option measures by stock, and when they were taken.
+    options: HashMap<String, (Instant, screener::Measures)>,
+    /// Realized volatility and average volume from daily bars, by stock.
+    daily: HashMap<String, (Instant, Option<f64>, Option<f64>)>,
 }
 
 impl App {
@@ -683,6 +716,304 @@ async fn option_chain(AxState(app): AxState<Arc<App>>, Query(ask): Query<ChainAs
     )
 }
 
+#[derive(Deserialize)]
+struct ScreenAsk {
+    min_cap: Option<f64>,
+    min_price: Option<f64>,
+    scan: Option<usize>,
+}
+
+/// Nasdaq's listings, fetched at most every 10 minutes (the last ones kept
+/// if Nasdaq doesn't answer).
+async fn universe(app: &App) -> Result<Arc<Vec<screener::Stock>>, (StatusCode, String)> {
+    let kept = lock(&app.screen).universe.clone();
+    if let Some((at, u)) = &kept
+        && at.elapsed() < Duration::from_secs(600)
+    {
+        return Ok(u.clone());
+    }
+    let fetched = async {
+        let r = app
+            .http
+            .get(NASDAQ)
+            // Nasdaq answers browsers only.
+            .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15")
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| e.without_url().to_string())?;
+        if !r.status().is_success() {
+            return Err(format!("answered {}", r.status()));
+        }
+        let v: Value = r.json().await.map_err(|e| e.without_url().to_string())?;
+        let list = screener::nasdaq(&v);
+        if list.len() < 1000 {
+            return Err(format!("only {} listings", list.len()));
+        }
+        Ok(list)
+    }
+    .await;
+    match (fetched, kept) {
+        (Ok(list), _) => {
+            let u = Arc::new(list);
+            lock(&app.screen).universe = Some((Instant::now(), u.clone()));
+            Ok(u)
+        }
+        (Err(e), Some((_, u))) => {
+            app.observer.record_error(&format!("Nasdaq's screener: {e}"));
+            Ok(u)
+        }
+        (Err(e), None) => Err((StatusCode::BAD_GATEWAY, format!("Nasdaq's screener: {e}"))),
+    }
+}
+
+/// Stocks ranked by what their options expect: `/screener?min_cap=&min_price=&scan=`.
+async fn screen(AxState(app): AxState<Arc<App>>, Query(ask): Query<ScreenAsk>) -> Response {
+    let min_cap = ask.min_cap.unwrap_or(2e9).max(0.0);
+    let min_price = ask.min_price.unwrap_or(5.0).max(0.0);
+    let scan_n = ask.scan.unwrap_or(150).clamp(10, 300);
+    let all = match universe(&app).await {
+        Ok(u) => u,
+        Err((code, e)) => return refuse(code, e),
+    };
+    // Alpaca's own lists (unfiltered: warrants and penny stocks crowd them);
+    // only what passes the filters is used, and the screener answers without them.
+    let a = app.clone();
+    let actives = app
+        .kept("screen|actives".into(), Duration::from_secs(300), || async move {
+            a.get("/v1beta1/screener/stocks/most-actives", &[("by", "volume".into()), ("top", "50".into())]).await
+        })
+        .await
+        .map(|v| screener::most_actives(&v))
+        .unwrap_or_default();
+    let a = app.clone();
+    let movers = app
+        .kept("screen|movers".into(), Duration::from_secs(300), || async move {
+            a.get("/v1beta1/screener/stocks/movers", &[("top", "50".into())]).await
+        })
+        .await
+        .map(|v| screener::movers(&v))
+        .unwrap_or_default();
+
+    let fits: Vec<&screener::Stock> = all
+        .iter()
+        .filter(|s| s.market_cap.unwrap_or(0.0) >= min_cap && s.price.unwrap_or(0.0) >= min_price)
+        .collect();
+    let by: HashMap<&str, &screener::Stock> = fits.iter().map(|s| (s.symbol.as_str(), *s)).collect();
+    // Each stock once, in the order first listed, with why it's listed.
+    let mut order: Vec<&str> = Vec::new();
+    let mut tags: HashMap<&str, Vec<&'static str>> = HashMap::new();
+    let mut add = |sym: &str, tag: &'static str| {
+        if let Some(s) = by.get(sym) {
+            let k = s.symbol.as_str();
+            let t = tags.entry(k).or_default();
+            if t.is_empty() {
+                order.push(k);
+            }
+            if !t.contains(&tag) {
+                t.push(tag);
+            }
+        }
+    };
+    let top = |key: &dyn Fn(&screener::Stock) -> f64, n: usize| {
+        let mut list = fits.clone();
+        list.sort_by(|a, b| key(b).total_cmp(&key(a)));
+        list.truncate(n);
+        list
+    };
+    for s in top(&|s| s.market_cap.unwrap_or(0.0), scan_n) {
+        add(&s.symbol, "large");
+    }
+    for s in top(&|s| s.change_pct.unwrap_or(0.0).abs(), 25) {
+        add(&s.symbol, "mover");
+    }
+    for s in top(&|s| s.volume.unwrap_or(0.0) * s.price.unwrap_or(0.0), 25) {
+        add(&s.symbol, "active");
+    }
+    for s in &actives {
+        add(s, "alpaca-active");
+    }
+    for (s, side) in &movers {
+        add(s, if *side == "gainer" { "alpaca-gainer" } else { "alpaca-loser" });
+    }
+
+    let today = ny_date_time(unix_seconds() as i64).0;
+    let mut sc = lock(&app.screen);
+    sc.wanted = order.iter().map(|k| ((*k).to_owned(), by[k].price.unwrap_or(0.0))).collect();
+    sc.asked = Some(Instant::now());
+    let mut pending = 0;
+    let rows: Vec<Value> = order
+        .iter()
+        .map(|k| {
+            let s = by[k];
+            let m = sc.options.get(*k).map(|x| &x.1);
+            pending += usize::from(m.is_none());
+            let (rv, avg) = sc.daily.get(*k).map_or((None, None), |x| (x.1, x.2));
+            let iv = m.and_then(|m| m.atm_iv_30d);
+            let move_expiry = m.and_then(|m| m.move_expiry.clone());
+            json!({
+                "symbol": s.symbol, "name": s.name, "sector": s.sector, "price": s.price,
+                "change_pct": s.change_pct, "volume": s.volume,
+                "dollar_volume": s.volume.zip(s.price).map(|(v, p)| v * p),
+                "avg_volume_20d": avg,
+                "rel_volume": s.volume.zip(avg).filter(|(_, a)| *a > 0.0).map(|(v, a)| v / a),
+                "market_cap": s.market_cap,
+                "atm_iv_30d": iv, "iv_expiry": m.and_then(|m| m.iv_expiry.clone()),
+                "implied_move": m.and_then(|m| m.implied_move),
+                "move_sessions": move_expiry.as_deref().and_then(|x| screener::sessions(&today, x)),
+                "move_expiry": move_expiry,
+                "rv_20d": rv,
+                "iv_rv": iv.zip(rv).filter(|(_, r)| *r > 0.0).map(|(i, r)| i / r),
+                "note": m.and_then(|m| m.note.clone()),
+                "sources": tags[k],
+            })
+        })
+        .collect();
+    Json(json!({
+        "as_of": unix_seconds() as i64, "universe_size": all.len(), "matched": fits.len(),
+        "min_cap": min_cap, "min_price": min_price, "pending": pending,
+        "options_feed": app.options_feed, "rows": rows,
+    }))
+    .into_response()
+}
+
+/// The screener's background scan, while it's being asked for: daily bars for
+/// the stocks it lists, in batches, then each stock's near option chain, one
+/// at a time. It uses at most a third of the request budget: the limit is
+/// the account's, shared with other services on the same key, and panels'
+/// own requests must still get through.
+async fn scan(app: Arc<App>) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        while lock(&app.sent).len() >= PER_MINUTE / 3 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        let (bars_due, chain_due) = {
+            let sc = lock(&app.screen);
+            if sc.asked.is_none_or(|t| t.elapsed() > SCAN_IDLE) {
+                (Vec::new(), None)
+            } else {
+                let stale = |t: &Instant| t.elapsed() >= RESCAN;
+                let bars: Vec<String> = sc
+                    .wanted
+                    .iter()
+                    .filter(|(s, _)| sc.daily.get(s).is_none_or(|x| stale(&x.0)))
+                    .map(|(s, _)| s.clone())
+                    .take(100)
+                    .collect();
+                let chain = sc
+                    .wanted
+                    .iter()
+                    .find(|(s, p)| *p > 0.0 && sc.options.get(s).is_none_or(|x| stale(&x.0)))
+                    .cloned();
+                (bars, chain)
+            }
+        };
+        if !bars_due.is_empty() {
+            daily_bars(&app, &bars_due).await;
+        } else if let Some((sym, spot)) = chain_due {
+            near_chain(&app, &sym, spot).await;
+        } else {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+}
+
+/// Realized volatility (the last 20 daily returns) and average volume (the 20
+/// sessions before the latest, which may still be trading) for `symbols`.
+async fn daily_bars(app: &App, symbols: &[String]) {
+    let now = unix_seconds() as i64;
+    let mut got: HashMap<String, Vec<(i64, f64, f64)>> = HashMap::new();
+    let mut token: Option<String> = None;
+    for _ in 0..10 {
+        let mut q = vec![
+            ("symbols", symbols.join(",")),
+            ("timeframe", "1Day".to_owned()),
+            ("start", rfc3339(now - 45 * 86_400)),
+            // The full market's history is free from 15 minutes back.
+            ("end", rfc3339(now - 16 * 60)),
+            ("limit", "10000".to_owned()),
+            ("adjustment", "split".to_owned()),
+            ("feed", app.history_feed.clone()),
+        ];
+        if let Some(t) = &token {
+            q.push(("page_token", t.clone()));
+        }
+        let v = match app.get("/v2/stocks/bars", &q).await {
+            Ok(v) => v,
+            // Over the limit: try again later. Otherwise, mark them scanned.
+            Err((StatusCode::TOO_MANY_REQUESTS, _)) => return,
+            Err(_) => break,
+        };
+        for (sym, bars) in v["bars"].as_object().into_iter().flatten() {
+            let list = got.entry(sym.clone()).or_default();
+            for b in bars.as_array().into_iter().flatten() {
+                if let (Some(t), Some(c), Some(vol)) = (b["t"].as_str().and_then(unix), b["c"].as_f64(), b["v"].as_f64()) {
+                    list.push((t, c, vol));
+                }
+            }
+        }
+        token = v["next_page_token"].as_str().map(str::to_owned);
+        if token.is_none() {
+            break;
+        }
+    }
+    let at = Instant::now();
+    let mut sc = lock(&app.screen);
+    for s in symbols {
+        let mut b = got.remove(s).unwrap_or_default();
+        b.sort_by_key(|x| x.0);
+        let closes: Vec<f64> = b.iter().rev().take(21).rev().map(|x| x.1).collect();
+        let before = b.len().saturating_sub(1);
+        let vols: Vec<f64> = b[before.saturating_sub(20)..before].iter().map(|x| x.2).collect();
+        sc.daily.insert(s.clone(), (at, screener::realized_vol(&closes), screener::mean(&vols)));
+    }
+}
+
+/// The at-the-money IV nearest 30 days and the next expiry's implied move,
+/// from the contracts within 15% of `spot` expiring in the next 50 days.
+async fn near_chain(app: &App, sym: &str, spot: f64) {
+    let now = unix_seconds() as i64;
+    let today = ny_date_time(now).0;
+    let mut contracts = Vec::new();
+    let mut token: Option<String> = None;
+    let mut m = screener::Measures::default();
+    for _ in 0..4 {
+        let mut q = vec![
+            ("feed", app.options_feed.clone()),
+            ("limit", "1000".to_owned()),
+            ("expiration_date_gte", today.clone()),
+            ("expiration_date_lte", ny_date_time(now + 50 * 86_400).0),
+            ("strike_price_gte", format!("{:.2}", spot * 0.85)),
+            ("strike_price_lte", format!("{:.2}", spot * 1.15)),
+        ];
+        if let Some(t) = &token {
+            q.push(("page_token", t.clone()));
+        }
+        match app.get(&format!("/v1beta1/options/snapshots/{sym}"), &q).await {
+            Ok(v) => {
+                contracts.extend(chain::contracts(&v));
+                token = v["next_page_token"].as_str().map(str::to_owned);
+            }
+            Err((StatusCode::TOO_MANY_REQUESTS, _)) => return,
+            Err((_, e)) => {
+                m.note = Some(e);
+                break;
+            }
+        }
+        if token.is_none() {
+            break;
+        }
+    }
+    if contracts.is_empty() && m.note.is_none() {
+        m.note = Some("no options quoted".into());
+    }
+    let (iv, mv) = screener::pick(&chain::expiries(&contracts, Some(spot)), &today);
+    (m.atm_iv_30d, m.iv_expiry) = iv.map_or((None, None), |(v, x)| (Some(v), Some(x)));
+    (m.implied_move, m.move_expiry) = mv.map_or((None, None), |(v, x)| (Some(v), Some(x)));
+    lock(&app.screen).options.insert(sym.to_owned(), (Instant::now(), m));
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -699,7 +1030,7 @@ async fn main() {
     observer.describe(json!({
         "role": "Market data for any symbol on request: stock snapshots, bars and option chains with IV and greeks, from Alpaca.",
         "upstream": [{ "id": "alpaca-data-api", "label": "Alpaca", "sub": format!("{} stocks, {} options", args.feed, args.options_feed), "kind": "flow", "via": "https" }],
-        "streams": { "bars": "/bars", "snapshots": "/snapshots", "chain": "/chain", "news_search": "/news", "option_bars": "/option_bars", "option_contracts": "/option_contracts" },
+        "streams": { "bars": "/bars", "snapshots": "/snapshots", "chain": "/chain", "news_search": "/news", "option_bars": "/option_bars", "option_contracts": "/option_contracts", "screener": "/screener" },
     }));
     let app = Arc::new(App {
         http: reqwest::Client::builder()
@@ -714,7 +1045,9 @@ async fn main() {
         observer: observer.clone(),
         sent: Mutex::default(),
         cache: Mutex::default(),
+        screen: Mutex::default(),
     });
+    tokio::spawn(scan(app.clone()));
     {
         let a = app.clone();
         observer.set_metrics(move |w| {
@@ -739,6 +1072,7 @@ async fn main() {
         .route("/news", get(news))
         .route("/option_bars", get(option_bars))
         .route("/option_contracts", get(option_contracts))
+        .route("/screener", get(screen))
         .with_state(app)
         .merge(observer.router());
     let listen = listen_address("ALPACA_DATA_LISTEN", "127.0.0.1:9123");
