@@ -55,7 +55,16 @@ pub struct Poller {
     catalogs: Mutex<HashMap<String, (Instant, Value)>>,
     /// Previous CPU totals per host: (busy seconds, all seconds).
     host_cpu: Mutex<HashMap<String, (f64, f64)>>,
+    /// Each container's inspect and stats details, with when they were
+    /// fetched and the state they were fetched in (see [`DETAILS_EVERY`]).
+    details: Mutex<HashMap<String, (Instant, Value, Value)>>,
 }
+
+/// How often a container's inspect and stats are fetched; the container list
+/// itself is read every poll. Per-container calls every two seconds (about 870
+/// a minute for 14 containers) kept Docker Desktop's backend growing by
+/// gigabytes over a couple of days.
+const DETAILS_EVERY: Duration = Duration::from_secs(30);
 
 impl Poller {
     #[must_use]
@@ -73,6 +82,7 @@ impl Poller {
             cpu: Mutex::new(HashMap::new()),
             catalogs: Mutex::new(HashMap::new()),
             host_cpu: Mutex::new(HashMap::new()),
+            details: Mutex::new(HashMap::new()),
         }
     }
 
@@ -817,26 +827,8 @@ async fn containers(app: &Poller, base: &str) -> Result<HashMap<String, Value>, 
                     .map(|n| n.trim_start_matches('/').to_owned())
             })
             .unwrap_or_else(|| id[..12.min(id.len())].to_owned());
-        let inspect: Value = get_json(app, &format!("{base}/containers/{id}/json"))
-            .await
-            .unwrap_or(Value::Null);
-        let running = c["State"].as_str() == Some("running");
-        let mut cpu_percent = Value::Null;
-        let mut mem = Value::Null;
-        if running
-            && let Ok(stats) = get_json::<Value>(
-                app,
-                &format!("{base}/containers/{id}/stats?stream=false&one-shot=true"),
-            )
-            .await
-        {
-            cpu_percent = cpu(app, id, &stats).map_or(Value::Null, Value::from);
-            let usage = stats["memory_stats"]["usage"].as_f64();
-            let limit = stats["memory_stats"]["limit"].as_f64();
-            if let Some(u) = usage {
-                mem = json!({ "usage_bytes": u, "limit_bytes": limit });
-            }
-        }
+        let d = details(app, base, id, &c["State"]).await;
+        let (inspect, cpu_percent, mem) = (&d["inspect"], &d["cpu_percent"], &d["memory"]);
         out.insert(
             name,
             json!({
@@ -856,7 +848,50 @@ async fn containers(app: &Poller, base: &str) -> Result<HashMap<String, Value>, 
     Ok(out)
 }
 
-/// CPU use since the previous poll, as a percentage of one core.
+/// A container's inspect and stats, fetched again only every [`DETAILS_EVERY`]
+/// or when its state changes.
+async fn details(app: &Poller, base: &str, id: &str, state: &Value) -> Value {
+    {
+        let cache = app
+            .details
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((at, was, d)) = cache.get(id)
+            && was == state
+            && at.elapsed() < DETAILS_EVERY
+        {
+            return d.clone();
+        }
+    }
+    let inspect: Value = get_json(app, &format!("{base}/containers/{id}/json"))
+        .await
+        .unwrap_or(Value::Null);
+    let mut cpu_percent = Value::Null;
+    let mut mem = Value::Null;
+    if state.as_str() == Some("running")
+        && let Ok(stats) = get_json::<Value>(
+            app,
+            &format!("{base}/containers/{id}/stats?stream=false&one-shot=true"),
+        )
+        .await
+    {
+        cpu_percent = cpu(app, id, &stats).map_or(Value::Null, Value::from);
+        let usage = stats["memory_stats"]["usage"].as_f64();
+        let limit = stats["memory_stats"]["limit"].as_f64();
+        if let Some(u) = usage {
+            mem = json!({ "usage_bytes": u, "limit_bytes": limit });
+        }
+    }
+    let d = json!({ "inspect": inspect, "cpu_percent": cpu_percent, "memory": mem });
+    let mut cache = app
+        .details
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.insert(id.to_owned(), (Instant::now(), state.clone(), d.clone()));
+    d
+}
+
+/// CPU use since the previous reading, as a percentage of one core.
 fn cpu(app: &Poller, id: &str, stats: &Value) -> Option<f64> {
     let total = stats["cpu_stats"]["cpu_usage"]["total_usage"].as_f64()?;
     let system = stats["cpu_stats"]["system_cpu_usage"].as_f64()?;
