@@ -131,7 +131,8 @@ impl Reference {
 
     /// One kind of statistic (`stat_type`, such as 9 for open interest) for
     /// the instruments whose symbol `keep` accepts: (symbol, quantity, the
-    /// day it refers to as `ts_ref` nanoseconds).
+    /// day it refers to: `ts_ref`, or the record's `ts_event` when that is
+    /// undefined, in nanoseconds).
     fn stats_matching(&self, kind: u16, keep: &impl Fn(&str) -> bool) -> Vec<(String, i64, u64)> {
         self.statistics
             .iter()
@@ -145,7 +146,13 @@ impl Reference {
                         .try_into()
                         .ok()?,
                 );
-                Some((s, q, u64_at(rec, offset_of!(StatMsg, ts_ref)).unwrap_or(0)))
+                // OPRA leaves `ts_ref` undefined for open interest: the record's own time then.
+                let ts_ref =
+                    u64_at(rec, offset_of!(StatMsg, ts_ref)).filter(|t| *t != UNDEF_TIMESTAMP);
+                let ts = ts_ref
+                    .or_else(|| u64_at(rec, offset_of!(RecordHeader, ts_event)))
+                    .unwrap_or(0);
+                Some((s, q, ts))
             })
             .collect()
     }
@@ -1060,6 +1067,20 @@ mod tests {
             )]
         );
         assert!(hub.stats_matching(9, |s| s.starts_with("QQQ")).is_empty());
+        // Without `ts_ref` (as OPRA sends it), the record's own time.
+        let mut undated = StatMsg {
+            hd: RecordHeader::new::<StatMsg>(rtype::STATISTICS, 1, 7, 1_791_800_000_000_000_000),
+            stat_type: 9,
+            quantity: 99,
+            update_action: 1,
+            ..Default::default()
+        };
+        undated.ts_ref = UNDEF_TIMESTAMP;
+        hub.publish(RecordRef::from(&undated).as_ref().to_vec(), 1);
+        assert_eq!(
+            hub.stats_matching(9, |_| true)[0].2,
+            1_791_800_000_000_000_000
+        );
     }
 
     #[test]
