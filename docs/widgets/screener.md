@@ -7,6 +7,7 @@ Stocks ranked by what their options expect: implied volatility, the expected mov
 - **IV 30d:** at-the-money implied volatility of the expiry nearest 30 days (Alpaca's indicative feed).
 - **Exp. move:** the at-the-money straddle's mid over the price, for the first expiry at least three sessions away (a straddle of a day or two is mostly noise, or one event). Ranked scaled to a week (five sessions), so names with only monthly expiries compare with weeklies. **E** marks an earnings report before that expiry: the move includes it.
 - **Exp. $ move:** the weekly expected move times market capitalisation: where the most value is expected to move.
+- **Skew:** the 25-delta risk reversal at the expiry nearest 30 days, from the chain's fitted smile: put less call implied volatility, in points. Positive: downside priced richer (usual for indexes); negative: upside richer. Blank when the chain is too thin to fit ([the method](../implied-distribution.md)).
 - **RV 20d:** realized volatility of the last 20 daily returns (annualised); **IV / RV** over it: above 1.5 (amber) options are priced well above recent moves, below 0.8 (grey) below them.
 - **Rel vol:** the day's volume over the 20-session average; 2× and over in amber.
 
@@ -14,6 +15,6 @@ Each stock is rescanned every 15 minutes while the screener is open; a first sca
 
 **Using it:**
 
-- Pick a view along the top (Highest IV, Expected move, Expected $ move, IV over realized, Top movers, Unusual volume, Most active), a minimum size, and a sector.
+- Pick a view along the top (Highest IV, Expected move, Expected $ move, Put skew, IV over realized, Top movers, Unusual volume, Most active), a minimum size, and a sector.
 - Click a column heading to sort by it (again to reverse); picking a view returns to its ranking.
 - Click a row to point the workspace's charts, IV heatmap and spread builder at that stock. Hover a row for why it's listed.

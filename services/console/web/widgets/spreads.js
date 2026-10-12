@@ -1,6 +1,8 @@
 // Spread builder: an options position from a structure and the live chain,
 // priced at the mid and crossing the spread, with its maximum profit and loss,
-// breakevens and chance of profit. "Show on chart" draws it on Candles (the
+// breakevens and chance of profit (from the expiry's implied distribution,
+// fitted to the whole chain by alpaca-data, unless the fit is poor; else
+// lognormal at the at-the-money volatility). "Show on chart" draws it on Candles (the
 // shared position, lib/position.js), where its strikes can be dragged.
 // Quotes and implied volatility come from a service serving option chains
 // (alpaca-data; Alpaca's indicative feed). The underlying is typed in, or
@@ -104,11 +106,23 @@ defineWidget('spreads', {
       const maxP = slopeHi > 1e-9 ? Infinity : Math.max(...pv), maxL = slopeHi < -1e-9 ? -Infinity : Math.min(...pv);
       const be = [];
       for (let i = 1; i < pv.length; i++) if ((pv[i - 1] < 0) !== (pv[i] < 0)) be.push(grid[i - 1] + (grid[i] - grid[i - 1]) * (-pv[i - 1]) / (pv[i] - pv[i - 1]));
-      // Chance of profit at expiry, lognormal at the at-the-money implied volatility.
-      const sd = atmIV() * Math.sqrt(t), cdf = x => x <= 0 ? 0 : N((Math.log(x / spot) + sd * sd / 2) / sd);
+      // Chance of profit at expiry: from the implied distribution when its fit
+      // is usable (linear between its CDF points), else lognormal at the
+      // at-the-money implied volatility.
+      const dist = expiries().find(x => x.expiry === my.expiry)?.distribution;
+      const pts = dist && dist.quality !== 'poor' && Array.isArray(dist.cdf) && dist.cdf.length > 2 ? dist.cdf : null;
+      const sd = atmIV() * Math.sqrt(t);
+      const cdf = pts ? x => {
+        if (x <= pts[0][0]) return pts[0][1] * Math.max(0, x / pts[0][0]);
+        const last = pts[pts.length - 1];
+        if (x >= last[0]) return 1 - (1 - last[1]) * Math.exp(-(x - last[0]) / Math.max(last[0] * 0.05, 1e-9));
+        let i = 1; while (pts[i][0] < x) i++;
+        const [k0, p0] = pts[i - 1], [k1, p1] = pts[i];
+        return p0 + (p1 - p0) * (x - k0) / (k1 - k0);
+      } : x => x <= 0 ? 0 : N((Math.log(x / spot) + sd * sd / 2) / sd);
       let pop = 0;
       for (let i = 1; i < grid.length; i++) if (pay((grid[i - 1] + grid[i]) / 2) > 0) pop += cdf(grid[i]) - cdf(grid[i - 1]);
-      return { net, cross, pay, maxP, maxL, be, pop, missing: ls.some(l => !l.q) };
+      return { net, cross, pay, maxP, maxL, be, pop, popFrom: pts ? `implied, ${dist.quality} fit` : 'lognormal', missing: ls.some(l => !l.q) };
     }
 
     const money = v => !isFinite(v) ? 'unlimited' : `${v < 0 ? '−' : ''}$${Math.abs(v * 100).toFixed(0)}`;
@@ -140,7 +154,7 @@ defineWidget('spreads', {
       $('.sb-sum').innerHTML = a ? [
         `${a.net >= 0 ? 'Debit' : 'Credit'} <b>$${Math.abs(a.net * 100).toFixed(0)}</b> <span class="muted">($${Math.abs(a.cross * 100).toFixed(0)} crossing)</span>`,
         `max profit <b>${money(a.maxP)}</b>`, `max loss <b>${money(a.maxL)}</b>`,
-        `breakeven <b>${a.be.length ? a.be.map(b => b.toFixed(2)).join(' / ') : '—'}</b>`, `chance <b>${(a.pop * 100).toFixed(0)}%</b>`,
+        `breakeven <b>${a.be.length ? a.be.map(b => b.toFixed(2)).join(' / ') : '—'}</b>`, `chance <b>${(a.pop * 100).toFixed(0)}%</b> <span class="muted">(${a.popFrom})</span>`,
       ].join(' · ') : '';
       $('.sb-msg').textContent = my.err || (a?.missing ? 'A leg has no quote on this expiry; it is priced from the at-the-money volatility.' : '') ||
         (my.chain ? 'Per position: 100 shares a contract. Alpaca indicative quotes.' + (position.shown ? ' Drag the strike lines on Candles to move legs.' : '') : 'Loading the chain…');

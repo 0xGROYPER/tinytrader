@@ -98,11 +98,17 @@ function combine(bars, size) {
 // linearly in time between the expiries either side (from zero before the
 // first, at the last expiry's rate beyond it), so a report inside the horizon
 // is included through the expiries after it. Shared by every Candles panel.
+// A band setting draws, instead of ±the straddle, the 68% or 95% range of the
+// expiry's implied distribution (fitted to the whole chain by alpaca-data:
+// asymmetric where the smile is skewed); for N days the range of the expiry
+// after the horizon, scaled by the square root of the variance ratio. A chain
+// too thin to fit falls back to the straddle, saying so.
 const IND_KEY = 'tinytrader-candles-indicators';
 const COLOURS = ['--accent', '--warn-mark', '--ok', '#4f7fd9', '#a865c9', '#2a9d8f'];
 /**
  * @typedef {{ type: 'days', n: number } | { type: 'expiry', expiry: string } | { type: 'earnings' } | { type: '0dte' }} Horizon
- * @typedef {{ id: string, kind: 'em', h: Horizon, colour: number, on: boolean }} Indicator
+ * @typedef {'straddle' | '68' | '95'} Band
+ * @typedef {{ id: string, kind: 'em', h: Horizon, colour: number, on: boolean, band?: Band }} Indicator
  */
 /** @returns {Indicator[]} */
 function loadIndicators() {
@@ -158,21 +164,34 @@ function expected(v, /** @type {Horizon} */ h, sym) {
     if (after === 0) w = exps[0].w * horizon / exps[0].t;
     else if (after > 0) { const a = exps[after - 1], b = exps[after]; w = a.w + (b.w - a.w) * (horizon - a.t) / (b.t - a.t); }
     else { const last = exps[exps.length - 1]; w = last.w * horizon / last.t; beyond = true; }
-    return { move: K * Math.sqrt(Math.max(w, 0)), name: `${h.n} trading day${h.n === 1 ? '' : 's'}${beyond ? ' (past the listed expiries)' : ''}`, short: `${h.n}d` };
+    // The distribution's shape from the expiry after the horizon (or the last), scaled to it.
+    const ref = exps[after >= 0 ? after : exps.length - 1];
+    return { move: K * Math.sqrt(Math.max(w, 0)), name: `${h.n} trading day${h.n === 1 ? '' : 's'}${beyond ? ' (past the listed expiries)' : ''}`, short: `${h.n}d`,
+      ref, scale: Math.sqrt(Math.max(w, 0) / ref.w), shape: ref.expiry };
   }
   if (h.type === 'expiry') {
     const e = exps.find(x => x.expiry === h.expiry);
-    return e ? { move: e.implied_move, name: `to ${dayLabel(e.expiry)}`, short: dayLabel(e.expiry) } : { none: `${dayLabel(h.expiry)} not listed` };
+    return e ? { move: e.implied_move, name: `to ${dayLabel(e.expiry)}`, short: dayLabel(e.expiry), ref: e, scale: 1 } : { none: `${dayLabel(h.expiry)} not listed` };
   }
   if (h.type === 'earnings') {
     const rep = nextReport(sym);
     if (!rep) return { none: 'no report ahead' };
     const e = exps.find(x => rep.when === 'after-close' ? x.expiry > rep.date : x.expiry >= rep.date);
-    return e ? { move: e.implied_move, name: `earnings ${dayLabel(rep.date)}, to ${dayLabel(e.expiry)}`, short: 'earnings' } : { none: 'no expiry after the report' };
+    return e ? { move: e.implied_move, name: `earnings ${dayLabel(rep.date)}, to ${dayLabel(e.expiry)}`, short: 'earnings', ref: e, scale: 1 } : { none: 'no expiry after the report' };
   }
   const todayNY = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   const z = exps.find(x => x.expiry === todayNY);
-  return z ? { move: z.implied_move, name: "to today's close (0DTE)", short: '0DTE' } : { none: 'no expiry today' };
+  return z ? { move: z.implied_move, name: "to today's close (0DTE)", short: '0DTE', ref: z, scale: 1 } : { none: 'no expiry today' };
+}
+/** A band's range from the implied distribution: { lo, hi, p } or { fallback }. */
+function range(e, /** @type {Band | undefined} */ band, spot) {
+  if (!band || band === 'straddle') return null;
+  const d = e.ref?.distribution, q = d?.quantiles;
+  if (!d || d.quality === 'poor' || !q) return { fallback: d?.reason || 'chain too thin to fit' };
+  const [a, b] = band === '95' ? [q.p2_5, q.p97_5] : [q.p16, q.p84];
+  if (!(a > 0 && b > 0)) return { fallback: 'no range' };
+  const at = x => spot * Math.exp(Math.log(x / spot) * (e.scale ?? 1));
+  return { lo: at(a), hi: at(b), p: band, quality: d.quality };
 }
 
 defineWidget('candles', {
@@ -310,10 +329,10 @@ defineWidget('candles', {
         const e = v ? expected(v, ind.h, symbol) : { none: chainService() ? 'no option chain' : 'no option chain service' };
         my.em[ind.id] = e;
         if (!ind.on || !e.move) continue;
-        const color = colourOf(ind.colour);
-        for (const sign of [1, -1]) my.emLines.push(my.candles.createPriceLine({
-          price: v.spot * (1 + sign * e.move), color, lineWidth: 1, lineStyle: my.L.LineStyle.Dashed, axisLabelVisible: true,
-          title: sign > 0 ? `${pct(e.move)} ${e.short}` : '',
+        const color = colourOf(ind.colour), r = e.r = range(e, ind.band, v.spot);
+        const lines = r?.lo ? [[r.hi, `${r.p}% ${e.short}`], [r.lo, '']] : [[v.spot * (1 + e.move), `${pct(e.move)} ${e.short}`], [v.spot * (1 - e.move), '']];
+        for (const [price, title] of lines) my.emLines.push(my.candles.createPriceLine({
+          price, color, lineWidth: 1, lineStyle: my.L.LineStyle.Dashed, axisLabelVisible: true, title,
         }));
       }
       legend();
@@ -327,11 +346,16 @@ defineWidget('candles', {
       const status = my.backing ? ' · loading older…' : my.pick && my.drawn.len && exhausted(service, my.pick.symbol, ask) ? ' · start of history' : '';
       const rows = my.ind.map(ind => {
         const e = my.em[ind.id] || {}, col = colourOf(ind.colour), h = ind.h;
-        const val = e.move ? `<b>${pct(e.move)}</b> <span class="muted">${(my.spot * (1 - e.move)).toFixed(2)} – ${(my.spot * (1 + e.move)).toFixed(2)}</span>` : `<span class="muted">${esc(e.none || '')}</span>`;
+        const r = e.r, inside = e.ref?.distribution?.quality !== 'poor' ? e.ref?.distribution?.p_inside_straddle : null;
+        const chg = x => `${x >= my.spot ? '+' : '−'}${Math.abs((x / my.spot - 1) * 100).toFixed(1)}%`;
+        const val = !e.move ? `<span class="muted">${esc(e.none || '')}</span>`
+          : r?.lo ? `<b>${r.p}%</b> ${r.lo.toFixed(2)} – ${r.hi.toFixed(2)} <span class="muted">${chg(r.lo)} / ${chg(r.hi)}${e.shape ? ` · shape of ${dayLabel(e.shape)}` : ''}${r.quality === 'rough' ? ' · rough fit' : ''}</span>`
+          : `<b>${pct(e.move)}</b> <span class="muted">${(my.spot * (1 - e.move)).toFixed(2)} – ${(my.spot * (1 + e.move)).toFixed(2)}${inside != null && e.scale === 1 ? ` · ${Math.round(inside * 100)}% inside` : ''}${r?.fallback ? ` · straddle: ${esc(r.fallback)}` : ''}</span>`;
         const set = my.open === ind.id ? `<div class="cd-lg-set" data-ind="${ind.id}">
             <select data-set="type" aria-label="Horizon">${[['days', 'Trading days'], ['expiry', 'To an expiry'], ['earnings', 'After earnings'], ['0dte', '0DTE']].map(([v, l]) => `<option value="${v}"${h.type === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
             ${h.type === 'days' ? `<input data-set="n" type="number" min="1" max="1260" value="${h.n}" aria-label="Trading days">` : ''}
             ${h.type === 'expiry' ? `<select data-set="expiry" aria-label="Expiry">${(my.expiries || []).map(x => `<option value="${x}"${h.expiry === x ? ' selected' : ''}>${dayLabel(x)}</option>`).join('')}</select>` : ''}
+            <select data-set="band" aria-label="Band">${[['straddle', 'Straddle'], ['68', '68% range'], ['95', '95% range']].map(([v, l]) => `<option value="${v}"${(ind.band || 'straddle') === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
             <span class="cd-lg-cols">${COLOURS.map((_, i) => `<button type="button" class="cd-lg-col" data-set="colour" data-v="${i}" aria-label="Colour ${i + 1}" aria-pressed="${ind.colour === i}" style="background:${colourOf(i)}"></button>`).join('')}</span>
           </div>` : '';
         return `<div class="cd-lg-row${ind.on ? '' : ' off'}" data-ind="${ind.id}"><span class="cd-sw" style="background:${col}"></span><span>Expected move <span class="muted">${esc(e.name || (h.type === 'days' ? `${h.n} trading days` : h.type))}</span></span> ${val}
@@ -362,6 +386,7 @@ defineWidget('candles', {
         ind.h = type === 'days' ? { type, n: 5 } : type === 'expiry' ? { type, expiry: my.expiries?.[0] || isoIn(7) } : /** @type {Horizon} */ ({ type });
       } else if (t.dataset.set === 'n') ind.h = { type: 'days', n: Math.max(1, Math.min(1260, Math.round(+t.value) || 1)) };
       else if (t.dataset.set === 'expiry') ind.h = { type: 'expiry', expiry: t.value };
+      else if (t.dataset.set === 'band') ind.band = /** @type {Band} */ (t.value);
       t.blur(); changedInd();
     });
     // Clicks on the legend aren't chart drags.

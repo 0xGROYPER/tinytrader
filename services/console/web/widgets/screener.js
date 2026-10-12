@@ -5,7 +5,8 @@
 // days, the next expiry's straddle (the implied move), realized volatility
 // and volume against its average. Views rank by IV, by the expected move in
 // percent or in dollars of market value, by IV over realized, by the day's
-// move and by volume. Click a row to point the workspace at the stock.
+// move and by volume, and by skew (the 30-day 25-delta risk reversal from the
+// chain's fitted smile). Click a row to point the workspace at the stock.
 import { defineWidget } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
@@ -23,6 +24,7 @@ const VIEWS = {
   'Highest IV': { key: r => r.atm_iv_30d, note: 'At-the-money implied volatility of the expiry nearest 30 days.' },
   'Expected move': { key: weekMove, note: 'The at-the-money straddle over the price, for the first expiry at least three sessions away, scaled to a week.' },
   'Expected $ move': { key: dollarMove, note: 'The expected weekly move times market capitalisation: where the most value is expected to change hands in price.' },
+  'Put skew': { key: r => r.skew, note: '25-delta risk reversal at the expiry nearest 30 days, from the fitted smile: put less call implied volatility, in points. High: downside priced richer; negative: upside richer. Blank when the chain is too thin to fit.' },
   'IV over realized': { key: r => r.iv_rv, note: '30-day implied volatility over 20-day realized: options priced rich (high) or cheap (low) against recent moves.' },
   'Top movers': { key: r => r.change_pct == null ? null : Math.abs(r.change_pct), note: 'The day\'s biggest moves either way, with what options expect next.' },
   'Unusual volume': { key: r => r.rel_volume, note: 'Shares traded against the 20-session average.' },
@@ -61,6 +63,7 @@ const COLS = [
     return `<span title="±${pct(r.implied_move, 2)} to ${esc(r.move_expiry)} (${r.move_sessions} sessions); about ±${pct(weekMove(r), 2)} a week">±${pct(r.implied_move)} <span class="muted">${short(r.move_expiry)}</span></span>${inside ? '<span class="sc-e" title="Reports before this expiry: the move includes earnings">E</span>' : ''}`;
   }],
   ['Exp. $ move', dollarMove, r => money(dollarMove(r))],
+  ['Skew', r => r.skew, r => r.skew == null ? '' : `<span title="25-delta risk reversal, 30 days: put less call implied volatility">${r.skew > 0 ? '+' : ''}${(r.skew * 100).toFixed(1)}</span>`],
   ['RV 20d', r => r.rv_20d, r => pct(r.rv_20d)],
   ['IV / RV', r => r.iv_rv, r => r.iv_rv == null ? '' : `<span class="${r.iv_rv >= 1.5 ? 'sc-hot' : r.iv_rv < 0.8 ? 'sc-cool' : ''}">${num(r.iv_rv)}</span>`],
   ['Earnings', (r, next) => next.get(r.symbol)?.date || null, (r, next) => { const e = next.get(r.symbol); return e ? `${short(e.date)}${e.when === 'before-open' ? ' am' : e.when === 'after-close' ? ' pm' : ''}` : ''; }],
