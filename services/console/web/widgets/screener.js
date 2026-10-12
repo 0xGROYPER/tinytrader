@@ -11,6 +11,7 @@ import { defineWidget } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { setFocus } from '../lib/theme.js';
+import { askRecommendation } from '../lib/position.js';
 
 const service = () => (fleet.topo?.services || []).find(s => s.screener)?.id || null;
 const SHOW = 50;
@@ -131,7 +132,13 @@ defineWidget('screener', {
       const th = t.closest('th[data-col]');
       if (th) { const i = +th.dataset.col; my.desc = my.sort === i ? !my.desc : i > 1; my.sort = i; render(); return; }
       const row = t.closest('tr[data-sym]');
-      if (row) { setFocus(row.dataset.sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: row.dataset.sym })); }
+      if (row) {
+        const sym = /** @type {HTMLElement} */ (row).dataset.sym, r = (my.data?.rows || []).find(x => x.symbol === sym);
+        // A suggested position in the Spread builder (opened if need be), and the symbol everywhere else.
+        askRecommendation({ sym, view: my.sort != null ? '' : my.view, row: r || null, earnings: reports().get(sym)?.date || null });
+        document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'spreads' }));
+        setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym }));
+      }
     });
     el.addEventListener('change', e => {
       const t = /** @type {HTMLSelectElement} */ (e.target);

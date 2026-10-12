@@ -2,17 +2,23 @@
 // priced at the mid and crossing the spread, with its maximum profit and loss,
 // breakevens and chance of profit (from the expiry's implied distribution,
 // fitted to the whole chain by alpaca-data, unless the fit is poor; else
-// lognormal at the at-the-money volatility). "Show on chart" draws it on Candles (the
-// shared position, lib/position.js), where its strikes can be dragged.
-// Quotes and implied volatility come from a service serving option chains
-// (alpaca-data; Alpaca's indicative feed). The underlying is typed in, or
-// follows the symbol picked elsewhere. Nothing is sent: it builds and prices.
-import { defineWidget } from '../lib/widgets.js';
+// lognormal at the at-the-money volatility). "Open on chart" draws it on
+// Candles (the shared position, lib/position.js). Quotes come from a service
+// serving option chains (alpaca-data; Alpaca's indicative feed), which
+// works out implied volatilities from them. The underlying is typed in, or
+// follows the symbol picked elsewhere; a stock clicked in the screener gets
+// a suggested position (lib/recommend.js) with the reason. An order for the
+// position goes to a paper account's order gateway as the console's trade
+// client (POST /api/orders/{account}) after a review step; the console's
+// working orders are listed with Cancel.
+import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { focused, theme, setFocus } from '../lib/theme.js';
-import { position, publish } from '../lib/position.js';
+import { position, publish, wanted } from '../lib/position.js';
+import { recommend } from '../lib/recommend.js';
 
+const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (_) { /* private mode */ } return null; };
 const chainService = () => (fleet.topo?.services || []).find(s => s.chain)?.id || null;
 const N = x => 0.5 * (1 + erf(x / Math.SQRT2));
 function erf(x) {
@@ -43,17 +49,25 @@ const STRUCTURES = {
 defineWidget('spreads', {
   title: 'Spread builder',
   mount(el) {
-    const my = { sym: focused() || theme()?.symbols?.[0] || 'SPY', chain: null, expiry: null, structure: 'Iron condor', width: 2, err: '', alive: true, at: 0 };
+    const my = { sym: focused() || theme()?.symbols?.[0] || 'SPY', chain: null, expiry: null, structure: 'Iron condor', width: 2, err: '', alive: true, at: 0,
+      // A suggestion waiting for its chain, and the one shown.
+      ask: /** @type {any} */ (null), why: '',
+      // The order ticket.
+      acct: store('tt-sb-account') || '', qty: 1, limit: /** @type {number | null} */ (null), review: false, sending: false, result: '',
+      orders: /** @type {any} */ (null), ordersAt: 0 };
     el.innerHTML = `<div class="sb">
       <div class="sb-top">
         <form class="sb-search"><input class="sb-ticker mono" name="t" placeholder="Ticker" maxlength="10" autocomplete="off" spellcheck="false" aria-label="Underlying"></form>
         <strong class="sb-sym mono"></strong><span class="sb-spot mono muted"></span>
         <select class="sb-exp mono" aria-label="Expiry"></select>
-        <button type="button" class="chip-btn sb-show" aria-pressed="false">Show on chart</button>
+        <button type="button" class="chip-btn sb-show" aria-pressed="false">Open on chart</button>
       </div>
       <div class="sb-structs chips"></div>
+      <p class="sb-why"></p>
       <ul class="sb-legs"></ul>
       <p class="sb-sum mono"></p>
+      <div class="sb-ticket"></div>
+      <div class="sb-orders"></div>
       <p class="sb-msg muted"></p></div>`;
     const $ = s => el.querySelector(s);
 
@@ -67,6 +81,7 @@ defineWidget('spreads', {
         if (!r.ok) throw new Error(v.error || `${r.status}`);
         if (!my.alive || sym !== my.sym) return;
         my.chain = v; my.at = Date.now(); my.err = '';
+        if (my.ask?.sym === sym) { suggest(my.ask); my.ask = null; render(); return; }
         const exps = expiries().map(e => e.expiry);
         if (!exps.includes(my.expiry)) { my.expiry = exps[0] || null; build(); }
         else if (!legs().length) build();
@@ -78,7 +93,7 @@ defineWidget('spreads', {
     const contracts = () => (my.chain?.contracts || []).filter(c => c.expiry === my.expiry);
     const strikesOf = type => [...new Set(contracts().filter(c => !type || c.type === type).map(c => c.strike))].sort((a, b) => a - b);
     const quote = (type, strike) => contracts().find(c => c.type === type && c.strike === strike) || null;
-    const atmIV = () => expiries().find(x => x.expiry === my.expiry)?.atm_iv || 0.2;
+    const atmIV = () => expiries().find(x => x.expiry === my.expiry)?.atm_iv || null;
     const years = () => Math.max((Date.parse(`${my.expiry}T20:00:00Z`) - Date.now()) / (365 * 86400e3), 1 / (365 * 24 * 12));
     const legs = () => position.sym === my.sym ? position.legs : [];
     const nearest = (ks, x) => ks.reduce((b, k) => Math.abs(k - x) < Math.abs(b - x) ? k : b, ks[0]);
@@ -95,7 +110,9 @@ defineWidget('spreads', {
       const spot = my.chain?.spot, t = years(), ls = legs().map(l => ({ ...l, q: quote(l.type, l.strike) }));
       if (!spot || !ls.length) return null;
       const mid = q => q && q.bid != null && q.ask ? (q.bid + q.ask) / 2 : null;
+      // A leg without a two-sided quote: at its own implied volatility, else the at-the-money one.
       const iv = l => l.q?.iv || atmIV();
+      if (ls.some(l => mid(l.q) == null && !iv(l))) return null;
       // Signed per-share prices: + paid, - received.
       const net = ls.reduce((s, l) => s + l.side * l.qty * (mid(l.q) ?? bs(l.type, spot, l.strike, t, iv(l))), 0);
       const cross = ls.reduce((s, l) => s + l.side * l.qty * (l.side > 0 ? (l.q?.ask ?? mid(l.q) ?? 0) : (l.q?.bid ?? mid(l.q) ?? 0)), 0);
@@ -111,7 +128,7 @@ defineWidget('spreads', {
       // at-the-money implied volatility.
       const dist = expiries().find(x => x.expiry === my.expiry)?.distribution;
       const pts = dist && dist.quality !== 'poor' && Array.isArray(dist.cdf) && dist.cdf.length > 2 ? dist.cdf : null;
-      const sd = atmIV() * Math.sqrt(t);
+      const sd = (atmIV() || 0.3) * Math.sqrt(t);
       const cdf = pts ? x => {
         if (x <= pts[0][0]) return pts[0][1] * Math.max(0, x / pts[0][0]);
         const last = pts[pts.length - 1];
@@ -140,8 +157,9 @@ defineWidget('spreads', {
       }
       if (my.expiry) sel.value = my.expiry;
       $('.sb-show').setAttribute('aria-pressed', String(position.shown));
+      $('.sb-why').innerHTML = my.why ? `<b>${esc(my.structure)}.</b> ${esc(my.why)}` : '';
       $('.sb-structs').innerHTML = Object.keys(STRUCTURES).map(n => `<button type="button" class="chip-btn" data-st="${esc(n)}" aria-pressed="${my.structure === n}">${esc(n)}</button>`).join('')
-        + (my.structure === 'Custom' ? '<span class="chip-btn" aria-pressed="true">Custom</span>' : '')
+        + (STRUCTURES[my.structure] ? '' : `<span class="chip-btn" aria-pressed="true">${esc(my.structure)}</span>`)
         + `<span class="sb-width muted">width <button type="button" class="chip-btn" data-w="-1" aria-label="Narrower">−</button><b class="mono">${my.width}</b><button type="button" class="chip-btn" data-w="1" aria-label="Wider">+</button></span>`;
       $('.sb-legs').innerHTML = legs().map((l, i) => { const q = quote(l.type, l.strike); return `<li data-i="${i}">
         <button type="button" class="chip-btn ${l.side > 0 ? 'sb-buy' : 'sb-sell'}" data-act="side">${l.side > 0 ? 'Buy' : 'Sell'}</button>
@@ -156,10 +174,88 @@ defineWidget('spreads', {
         `max profit <b>${money(a.maxP)}</b>`, `max loss <b>${money(a.maxL)}</b>`,
         `breakeven <b>${a.be.length ? a.be.map(b => b.toFixed(2)).join(' / ') : '—'}</b>`, `chance <b>${(a.pop * 100).toFixed(0)}%</b> <span class="muted">(${a.popFrom})</span>`,
       ].join(' · ') : '';
-      $('.sb-msg').textContent = my.err || (a?.missing ? 'A leg has no quote on this expiry; it is priced from the at-the-money volatility.' : '') ||
-        (my.chain ? 'Per position: 100 shares a contract. Alpaca indicative quotes.' + (position.shown ? ' Drag the strike lines on Candles to move legs.' : '') : 'Loading the chain…');
+      ticket(a);
+      $('.sb-msg').textContent = my.err || (a?.missing ? 'A leg has no quote on this expiry; it is priced from its implied volatility.' : '') ||
+        (my.chain ? 'Per position: 100 shares a contract. Alpaca indicative quotes; implied volatilities worked out from them.' : 'Loading the chain…');
     }
-    const switchTo = s => { my.sym = s; my.chain = null; my.expiry = null; position.legs = []; render(); loadChain(); };
+
+    // A suggested position for the stock asked about (from the screener).
+    function suggest(ask) {
+      const r = recommend({ chain: my.chain, view: ask.view, row: ask.row, earnings: ask.earnings });
+      if ('none' in r) { my.why = `No suggestion: ${r.none}.`; my.structure = 'Custom'; return; }
+      my.expiry = r.expiry; my.structure = r.label; my.why = r.why;
+      position.sym = my.sym; position.legs = r.legs; my.limit = null; my.review = false; my.result = '';
+    }
+
+    // The order ticket: account, quantity and limit, then a review before sending.
+    const symbolOf = l => quote(l.type, l.strike)?.symbol || null;
+    const cents = x => Math.round(x * 100) / 100;
+    function order(a) {
+      const ls = legs();
+      if (!a || !ls.length || ls.some(l => !symbolOf(l))) return null;
+      // Ratios in lowest terms; the quantity carries the rest.
+      const g = ls.reduce((x, l) => { let p = x, q = l.qty; while (q) [p, q] = [q, p % q]; return p; }, 0) || 1;
+      const limit = my.limit ?? cents(a.net / g);
+      return { legs: ls.map(l => ({ symbol: symbolOf(l), side: l.side > 0 ? 'buy' : 'sell', ratio: l.qty / g })), qty: my.qty * g, limit_price: limit, effect: 'open' };
+    }
+    function ticket(a) {
+      const box = $('.sb-ticket'), o = order(a), accts = my.orders?.accounts || [];
+      if (!my.orders) { box.innerHTML = ''; return; }
+      if (!my.orders.trading) { box.innerHTML = '<p class="muted sb-note">Sending orders needs the console\'s trade token for the paper gateways (operator: scripts/gateway-token GATEWAY_CONSOLE_TOKEN, then restart the gateways and the console).</p>'; return; }
+      if (!o) { box.innerHTML = ''; return; }
+      const usable = accts.filter(x => !x.error);
+      if (!usable.some(x => x.account === my.acct)) my.acct = usable[0]?.account || '';
+      const credit = o.limit_price < 0, single = o.legs.length === 1;
+      const unit = `${credit ? 'credit' : 'debit'} $${Math.abs(o.limit_price).toFixed(2)}`;
+      const total = Math.abs(o.limit_price) * 100 * o.qty;
+      const risk = isFinite(a.maxL) ? `max loss $${Math.abs(a.maxL * 100 * my.qty).toFixed(0)}` : 'loss unlimited';
+      if (my.review) {
+        const k = l => `${l.side > 0 ? 'Buy' : 'Sell'} ${l.qty * my.qty} ${my.sym} ${my.expiry} ${l.strike} ${l.type}`;
+        box.innerHTML = `<div class="sb-review"><p><b>Send to ${esc(my.acct)}</b> (paper) as ${single ? 'one order' : 'one combo order'}, limit ${unit}${single ? '' : ' per spread'} × ${o.qty}: ${credit ? 'receive' : 'pay'} $${total.toFixed(0)} at most${credit ? ' less' : ''}; ${risk}. Day order, opening.</p>
+          <ul class="mono">${legs().map(l => `<li>${esc(k(l))} <span class="muted">${esc(symbolOf(l))}</span></li>`).join('')}</ul>
+          <p><button type="button" class="btn primary" data-act="send"${my.sending ? ' disabled' : ''}>${my.sending ? 'Sending…' : 'Send order'}</button> <button type="button" class="btn" data-act="back">Back</button></p></div>`;
+        return;
+      }
+      box.innerHTML = `<div class="sb-tk">
+        <label>Account <select class="sb-acct">${accts.map(x => `<option value="${esc(x.account)}"${x.error ? ' disabled' : ''}${x.account === my.acct ? ' selected' : ''}>${esc(x.account)}${x.error ? ' (unreachable)' : x.state && x.state !== 'ready' ? ` (${esc(x.state)})` : ''}</option>`).join('')}</select></label>
+        <label>Qty <input class="sb-qty mono" type="number" min="1" max="100" value="${my.qty}"></label>
+        <label>Limit <input class="sb-limit mono" type="number" step="0.01" value="${o.limit_price.toFixed(2)}" title="Net per ${single ? 'contract' : 'spread'}: positive pays (debit), negative receives (credit)"></label>
+        <span class="muted mono">${unit} · ${risk}</span>
+        <button type="button" class="btn primary" data-act="review"${my.acct ? '' : ' disabled'}>Review order</button></div>
+        ${my.result ? `<p class="sb-result">${my.result}</p>` : ''}`;
+    }
+    function ordersList() {
+      const box = $('.sb-orders'), all = (my.orders?.accounts || []).flatMap(x => (x.orders || []).map(o => ({ ...o, account: x.account })));
+      paint(box, all.length ? `<p class="muted sb-note">Working orders from the console</p><ul class="sb-ol mono">${all.map(o => `<li>${esc(o.account)} · ${esc(o.client_order_id)} · ${esc(o.status || '')} · ${o.filled_qty || 0}/${esc(String(o.qty ?? '?'))} at ${esc(String(o.limit_price ?? '?'))}${o.legs?.length ? ` · ${o.legs.map(l => esc(l.symbol)).join(' ')}` : ''} <button type="button" class="chip-btn" data-cancel="${esc(o.account)}|${esc(o.client_order_id)}">Cancel</button></li>`).join('')}</ul>` : '');
+    }
+    async function loadOrders() {
+      try {
+        const r = await fetch('/api/orders', { cache: 'no-store' });
+        if (r.ok && my.alive) { my.orders = await r.json(); my.ordersAt = Date.now(); }
+      } catch (_) { /* shown as nothing */ }
+      if (my.alive) { if (!my.review) ticket(analyse()); ordersList(); }
+    }
+    async function send() {
+      const o = order(analyse()); if (!o || my.sending) return;
+      my.sending = true; ticket(analyse());
+      try {
+        const r = await fetch(`/api/orders/${encodeURIComponent(my.acct)}`, { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ confirm: my.acct, order: { legs: o.legs, qty: o.qty, limit_price: o.limit_price, effect: 'open' } }) });
+        const v = await r.json().catch(() => ({}));
+        my.result = outcome(v, r.ok);
+      } catch (e) { my.result = `Not known whether it was sent: ${esc(e.message)}. Check working orders before sending again.`; }
+      my.sending = false; my.review = false; render(); loadOrders();
+    }
+    function outcome(v, ok) {
+      if (!ok || v.error) return `<span class="sb-bad">Not sent: ${esc(v.error || 'error')}.</span>`;
+      const id = esc(v.client_order_id || v.current?.client_order_id || '');
+      if (v.outcome === 'accepted') return `<span class="sb-good">Accepted by the broker (${esc(v.status || 'new')}), ${id}. Not a fill yet: it's listed below until it fills or is cancelled.</span>`;
+      if (v.outcome === 'rejected') return `<span class="sb-bad">Rejected by the broker: ${esc(v.message || v.code || '')}.</span>`;
+      if (v.outcome === 'not_sent') return `<span class="sb-bad">Not sent (${esc(v.reason || '')}): ${esc(v.detail || '')}.</span>`;
+      if (v.outcome === 'unknown') return `<span class="sb-bad">Unknown (${esc(v.reason || '')}): it may have reached the broker. Don't send it again; the gateway is checking and it will show below if it did.</span>`;
+      return esc(JSON.stringify(v).slice(0, 200));
+    }
+    const switchTo = s => { my.sym = s; my.chain = null; my.expiry = null; my.why = ''; my.limit = null; my.review = false; my.result = ''; if (!STRUCTURES[my.structure]) my.structure = 'Iron condor'; position.legs = []; render(); loadChain(); };
 
     el.addEventListener('submit', e => {
       e.preventDefault();
@@ -168,9 +264,14 @@ defineWidget('spreads', {
     });
     el.addEventListener('change', e => {
       const t = /** @type {HTMLSelectElement} */ (e.target);
+      if (t.classList.contains('sb-acct')) { my.acct = t.value; store('tt-sb-account', t.value); return; }
+      if (t.classList.contains('sb-qty')) { my.qty = Math.max(1, Math.min(100, Math.round(+t.value) || 1)); render(); return; }
+      if (t.classList.contains('sb-limit')) { const v = Math.round(+t.value * 100) / 100; my.limit = v ? v : null; render(); return; }
       if (!t.classList.contains('sb-exp')) return;
+      my.limit = null;
       my.expiry = t.value;
-      if (my.structure !== 'Custom') build();
+      // A preset structure is rebuilt; a suggested or edited one keeps its strikes, moved to listed ones.
+      if (STRUCTURES[my.structure] && !my.why) build();
       else for (const l of legs()) l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike;
       render();
     });
@@ -178,13 +279,28 @@ defineWidget('spreads', {
       const b = /** @type {HTMLElement} */ (e.target).closest('button'); if (!b) return;
       if (b.classList.contains('sb-show')) {
         position.shown = !position.shown;
-        // Point Candles at this underlying.
-        if (position.shown && focused() !== my.sym) { setFocus(my.sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: my.sym })); }
+        // Point Candles at this underlying, opening it if it isn't in the workspace.
+        if (position.shown) {
+          if (focused() !== my.sym) { setFocus(my.sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: my.sym })); }
+          document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'candles' }));
+        }
         render(); return;
       }
-      if (b.dataset.st) { my.structure = b.dataset.st; build(); render(); return; }
-      if (b.dataset.w) { my.width = Math.max(1, Math.min(20, my.width + +b.dataset.w)); if (my.structure !== 'Custom') build(); render(); return; }
-      const act = b.dataset.act; if (!act) return;
+      if (b.dataset.cancel) {
+        const [acct, id] = b.dataset.cancel.split('|'); b.disabled = true;
+        fetch(`/api/orders/${encodeURIComponent(acct)}/${encodeURIComponent(id)}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+          .then(r => r.json()).then(v => { my.result = v.outcome === 'accepted' ? `Cancel sent for ${esc(id)}.` : `Cancel ${esc(v.outcome || v.error || '')}: ${esc(v.detail || v.message || '')}`; })
+          .catch(e => { my.result = `Cancel: ${esc(e.message)}`; }).finally(() => { render(); loadOrders(); });
+        return;
+      }
+      const act = b.dataset.act;
+      if (act === 'review') { my.review = true; my.result = ''; render(); return; }
+      if (act === 'back') { my.review = false; render(); return; }
+      if (act === 'send') { send(); return; }
+      my.review = false; my.limit = null; my.result = '';
+      if (b.dataset.st) { my.structure = b.dataset.st; my.why = ''; build(); render(); return; }
+      if (b.dataset.w) { my.width = Math.max(1, Math.min(20, my.width + +b.dataset.w)); if (STRUCTURES[my.structure]) build(); render(); return; }
+      if (!act) return;
       if (act === 'add') {
         const ks = strikesOf('call');
         if (ks.length) { position.sym = my.sym; position.legs = [...legs(), { type: 'call', strike: nearest(ks, my.chain?.spot || 0), side: 1, qty: 1 }]; }
@@ -195,26 +311,33 @@ defineWidget('spreads', {
         if (act === 'up' || act === 'down') { const ks = strikesOf(l.type), j = ks.indexOf(l.strike) + (act === 'up' ? 1 : -1); if (ks[j] != null) l.strike = ks[j]; }
         if (act === 'remove') legs().splice(i, 1);
       }
-      my.structure = 'Custom'; render();
+      my.structure = 'Custom'; my.why = ''; render();
     });
-    // A strike dragged on the chart.
-    const edited = (/** @type {Event} */ e) => {
-      const { i, strike } = /** @type {CustomEvent} */ (e).detail, l = legs()[i];
-      if (l) { l.strike = strike; my.structure = 'Custom'; render(); }
+    // A suggestion asked for from the screener: for this underlying once its chain is in.
+    const asked = () => {
+      const ask = wanted.ask; if (!ask) return;
+      wanted.ask = null;
+      if (ask.sym === my.sym && my.chain) { suggest(ask); render(); }
+      else { my.ask = ask; switchTo(ask.sym); }
     };
     const follow = (/** @type {Event} */ e) => {
       const s = /** @type {CustomEvent} */ (e).detail;
-      if (typeof s === 'string' && s !== my.sym) switchTo(s);
+      // A suggestion for it is on its way (the screener sends both).
+      if (typeof s === 'string' && s !== my.sym && wanted.ask?.sym !== s && my.ask?.sym !== s) switchTo(s);
     };
-    document.addEventListener('tt-position-edit', edited);
+    document.addEventListener('tt-recommend', asked);
     document.addEventListener('tt-focus', follow);
-    render(); loadChain();
-    const timer = setInterval(() => { if (Date.now() - my.at > 30e3) loadChain(); }, 5000);
+    if (wanted.ask) asked(); else { render(); loadChain(); }
+    loadOrders();
+    const timer = setInterval(() => {
+      if (Date.now() - my.at > 30e3) loadChain();
+      if (Date.now() - my.ordersAt > 10e3) loadOrders();
+    }, 5000);
     return {
       update() {},
       dispose() {
         my.alive = false; clearInterval(timer);
-        document.removeEventListener('tt-position-edit', edited); document.removeEventListener('tt-focus', follow);
+        document.removeEventListener('tt-recommend', asked); document.removeEventListener('tt-focus', follow);
         publish({ shown: false });
       },
     };

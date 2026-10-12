@@ -1,11 +1,14 @@
-//! The order gateways the console may act through, for the Accounts widget's
-//! Flatten and Resume buttons (`CONSOLE_GATEWAYS`, `CONSOLE_GATEWAY_TOKEN`).
+//! The order gateways the console may act through: the Accounts widget's
+//! Flatten and Resume buttons as the operator's admin client `ops`
+//! (`CONSOLE_GATEWAYS`, `CONSOLE_GATEWAY_TOKEN`), and the Spread builder's
+//! orders as the trade client `console`, whose order ids start `tt-`
+//! (`CONSOLE_TRADE_TOKEN`).
 //!
-//! Each request opens one connection to the account's gateway as the
-//! operator's admin client `ops` (tinytrader.gateway/1: NDJSON over TCP),
-//! sends `hello`, then the one request, and returns the gateway's response.
-//! An account without a gateway (a live account) gets none of this. The
-//! token is never logged or returned.
+//! Each request opens one connection to the account's gateway
+//! (tinytrader.gateway/1: NDJSON over TCP), sends `hello`, then the one
+//! request, and returns the gateway's response. An account without a
+//! gateway (a live account) gets none of this. Tokens are never logged or
+//! returned.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -15,12 +18,24 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
 
 const SCHEMA: &str = "tinytrader.gateway/1";
-const CLIENT: &str = "ops";
+/// The console's trade client and its order id prefix.
+pub const TRADER: &str = "console";
+pub const PREFIX: &str = "tt-";
+
+/// Which client a request goes as.
+#[derive(Clone, Copy)]
+pub enum As {
+    /// The operator's admin client (flatten, resume).
+    Ops,
+    /// The console's trade client (the Spread builder's orders).
+    Trade,
+}
 
 pub struct Gateways {
     /// Account name -> `host:port`.
     pub addrs: BTreeMap<String, String>,
     token: Option<String>,
+    trade_token: Option<String>,
 }
 
 impl Gateways {
@@ -32,13 +47,37 @@ impl Gateways {
         let token = tinytrader_observe::secret("CONSOLE_GATEWAY_TOKEN")
             .ok()
             .filter(|t| !t.is_empty());
-        Self { addrs, token }
+        let trade_token = tinytrader_observe::secret("CONSOLE_TRADE_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
+        Self {
+            addrs,
+            token,
+            trade_token,
+        }
     }
 
-    /// Connect and authenticate; then, with a request, send it and read its
-    /// response. Returns (welcome, response).
+    /// Whether the console can send orders (its trade token is configured).
+    #[must_use]
+    pub fn can_trade(&self) -> bool {
+        self.trade_token.is_some()
+    }
+
+    /// As the admin client: connect and authenticate; then, with a request,
+    /// send it and read its response. Returns (welcome, response).
     pub async fn call(
         &self,
+        account: &str,
+        request: Option<Value>,
+        wait: Duration,
+    ) -> Result<(Value, Option<Value>), String> {
+        self.call_as(As::Ops, account, request, wait).await
+    }
+
+    /// `call` as either client.
+    pub async fn call_as(
+        &self,
+        who: As,
         account: &str,
         request: Option<Value>,
         wait: Duration,
@@ -47,10 +86,20 @@ impl Gateways {
             .addrs
             .get(account)
             .ok_or("no gateway for this account")?;
-        let token = self
-            .token
-            .as_deref()
-            .ok_or("no gateway token configured (CONSOLE_GATEWAY_TOKEN)")?;
+        let (client, token) = match who {
+            As::Ops => (
+                "ops",
+                self.token
+                    .as_deref()
+                    .ok_or("no gateway token configured (CONSOLE_GATEWAY_TOKEN)")?,
+            ),
+            As::Trade => (
+                TRADER,
+                self.trade_token
+                    .as_deref()
+                    .ok_or("no trade token configured (CONSOLE_TRADE_TOKEN)")?,
+            ),
+        };
         let run = async {
             let stream = TcpStream::connect(addr)
                 .await
@@ -65,7 +114,7 @@ impl Gateways {
                     .await
                     .map_err(|e| format!("gateway {account}: {e}"))
             };
-            send(json!({ "schema": SCHEMA, "type": "hello", "client": CLIENT, "token": token, "resume_after_seq": null })).await?;
+            send(json!({ "schema": SCHEMA, "type": "hello", "client": client, "token": token, "resume_after_seq": null })).await?;
             let next = async |lines: &mut tokio::io::Lines<
                 BufReader<tokio::net::tcp::OwnedReadHalf>,
             >|
@@ -121,6 +170,78 @@ impl Gateways {
     }
 }
 
+/// A gateway order intent (tinytrader.gateway/1, section 6) from the
+/// Spread builder's order: `{legs: [{symbol, side, ratio?}], qty,
+/// limit_price, effect?}`, with `limit_price` the net per unit, + debit and
+/// − credit (a single leg's is its positive price). Options only; the id is
+/// given. The gateway checks everything again, with its caps.
+pub fn intent(order: &Value, id: &str) -> Result<Value, String> {
+    let legs = order["legs"].as_array().ok_or("legs: a list")?;
+    if !(1..=4).contains(&legs.len()) {
+        return Err("1 to 4 legs".into());
+    }
+    let effect = order["effect"].as_str().unwrap_or("open");
+    if !matches!(effect, "open" | "close") {
+        return Err("effect: open or close".into());
+    }
+    let qty = order["qty"]
+        .as_u64()
+        .filter(|q| (1..=100).contains(q))
+        .ok_or("qty: 1 to 100")?;
+    let price = order["limit_price"]
+        .as_f64()
+        .filter(|p| p.is_finite())
+        .ok_or("limit_price: a number")?;
+    let cents = (price * 100.0).round();
+    if cents == 0.0 || (price * 100.0 - cents).abs() > 1e-6 {
+        return Err("limit_price: non-zero, whole cents".into());
+    }
+    let mut out = Vec::new();
+    for l in legs {
+        let symbol = l["symbol"]
+            .as_str()
+            .filter(|s| occ_ok(s))
+            .ok_or("leg symbol: an OCC option symbol")?;
+        let side = l["side"]
+            .as_str()
+            .filter(|s| matches!(*s, "buy" | "sell"))
+            .ok_or("leg side: buy or sell")?;
+        let ratio = l["ratio"].as_u64().unwrap_or(1);
+        if !(1..=10).contains(&ratio) {
+            return Err("leg ratio: 1 to 10".into());
+        }
+        if out
+            .iter()
+            .any(|o: &Value| o["instrument"]["symbol"] == symbol)
+        {
+            return Err("legs must be distinct contracts".into());
+        }
+        out.push(json!({ "instrument": { "class": "option", "symbol": symbol }, "ratio": ratio, "side": side, "effect": effect }));
+    }
+    let price = format!("{:.2}", cents / 100.0);
+    Ok(if out.len() == 1 {
+        if cents < 0.0 {
+            return Err("a single leg's limit price is positive".into());
+        }
+        let l = &out[0];
+        json!({ "client_order_id": id, "shape": "single", "instrument": l["instrument"], "side": l["side"], "effect": effect,
+                "qty": qty, "type": "limit", "limit_price": price, "time_in_force": "day" })
+    } else {
+        json!({ "client_order_id": id, "shape": "combo", "legs": out, "qty": qty, "type": "limit", "limit_price": price, "time_in_force": "day" })
+    })
+}
+
+/// `^[A-Z]{1,6}\d{6}[CP]\d{8}$`
+fn occ_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    let n = b.len();
+    (16..=21).contains(&n)
+        && b[..n - 15].iter().all(u8::is_ascii_uppercase)
+        && b[n - 15..n - 9].iter().all(u8::is_ascii_digit)
+        && matches!(b[n - 9], b'C' | b'P')
+        && b[n - 8..].iter().all(u8::is_ascii_digit)
+}
+
 /// `account=host:port` entries separated by `;`; malformed ones are skipped.
 fn parse(text: &str) -> BTreeMap<String, String> {
     text.split(';')
@@ -141,5 +262,39 @@ mod tests {
         let g = parse("paper-1=h:7701; paper-3=h:7700;bad;=x");
         assert_eq!(g.keys().collect::<Vec<_>>(), ["paper-1", "paper-3"]);
         assert_eq!(g["paper-3"], "h:7700");
+    }
+
+    #[test]
+    fn builds_intents() {
+        let condor = json!({ "qty": 2, "limit_price": -1.25, "legs": [
+            { "symbol": "SAP261120C00300000", "side": "sell" }, { "symbol": "SAP261120C00310000", "side": "buy" },
+            { "symbol": "SAP261120P00260000", "side": "sell" }, { "symbol": "SAP261120P00250000", "side": "buy" },
+        ] });
+        let i = intent(&condor, "tt-1").unwrap();
+        assert_eq!(i["shape"], "combo");
+        assert_eq!(i["limit_price"], "-1.25");
+        assert_eq!(
+            i["legs"][0],
+            json!({ "instrument": { "class": "option", "symbol": "SAP261120C00300000" }, "ratio": 1, "side": "sell", "effect": "open" })
+        );
+        let one = json!({ "qty": 1, "limit_price": 2.1, "legs": [{ "symbol": "XSP261016C00780000", "side": "buy" }] });
+        let i = intent(&one, "tt-2").unwrap();
+        assert_eq!(
+            (
+                i["shape"].as_str(),
+                i["limit_price"].as_str(),
+                i["side"].as_str()
+            ),
+            (Some("single"), Some("2.10"), Some("buy"))
+        );
+        for bad in [
+            json!({ "qty": 1, "limit_price": 1.234, "legs": [{ "symbol": "SPY261016C00780000", "side": "buy" }] }),
+            json!({ "qty": 1, "limit_price": -1.0, "legs": [{ "symbol": "SPY261016C00780000", "side": "buy" }] }),
+            json!({ "qty": 0, "limit_price": 1.0, "legs": [{ "symbol": "SPY261016C00780000", "side": "buy" }] }),
+            json!({ "qty": 1, "limit_price": 1.0, "legs": [{ "symbol": "SPY", "side": "buy" }] }),
+            json!({ "qty": 1, "limit_price": 1.0, "legs": [{ "symbol": "SPY261016C00780000", "side": "buy" }, { "symbol": "SPY261016C00780000", "side": "sell" }] }),
+        ] {
+            assert!(intent(&bad, "tt-3").is_err(), "{bad}");
+        }
     }
 }

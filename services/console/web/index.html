@@ -759,6 +759,17 @@ a.doc-card { text-decoration: none; }
 .sb-buy { color: var(--ok); } .sb-sell { color: var(--crit); }
 .sb-sum { margin: 0; font-size: 13px; line-height: 1.7; }
 .sb-msg { margin: 0; font-size: 12px; }
+.sb-why { margin: 0; font-size: 13px; line-height: 1.5; max-width: 70ch; }
+.sb-why:empty, .sb-ticket:empty, .sb-orders:empty { display: none; }
+.sb-tk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+.sb-tk label { display: inline-flex; align-items: center; gap: 4px; }
+.sb-tk select, .sb-tk input { font: 13px var(--mono, monospace); padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
+.sb-qty { width: 4.5em; } .sb-limit { width: 6.5em; }
+.sb-review { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--surface); font-size: 13px; }
+.sb-review p { margin: 4px 0; } .sb-review ul { margin: 4px 0; padding-left: 18px; font-size: 12px; }
+.sb-note { margin: 0; font-size: 12px; } .sb-result { margin: 4px 0 0; font-size: 12px; }
+.sb-good { color: var(--ok); } .sb-bad { color: var(--crit); }
+.sb-ol { list-style: none; margin: 4px 0 0; padding: 0; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
 .pf-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 5px 12px calc(5px + env(safe-area-inset-bottom, 0px)); background: var(--surface, #fff); border-top: 1px solid var(--line); font: 12px var(--mono, monospace); color: var(--fg-2, var(--fg)); }
 .pf-bar b { color: var(--fg); } .pf-bar .pf-gap { flex: 1; }
 .pf-bar button { min-height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; cursor: pointer; }

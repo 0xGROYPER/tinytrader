@@ -54,6 +54,11 @@
 //!   `CONSOLE_GATEWAY_TOKEN` (or `_FILE`), the operator's admin token for them
 //!   (optional). `/api/accounts/{account}/flatten` and `.../resume` act through
 //!   the account's gateway; an account without one (live) can't be flattened.
+//!   With `CONSOLE_TRADE_TOKEN` (or `_FILE`), the console's trade client
+//!   `console` sends the Spread builder's orders: `GET /api/orders` (each
+//!   account's gateway state and the console's open orders), `POST
+//!   /api/orders/{account}` (`{order, confirm: account}`) and `POST
+//!   /api/orders/{account}/{client_order_id}/cancel`.
 //! - `CONSOLE_PAGE`: serve the page from this file, and its modules and
 //!   libraries from beside it, read on each request, instead of the copies
 //!   built in (optional; lets the page change without a rebuild).
@@ -235,6 +240,12 @@ async fn main() {
         )
         .route("/api/profiles/{id}", get(profiles_get))
         .route("/api/accounts/gateways", get(gateways_list))
+        .route("/api/orders", get(orders_list))
+        .route("/api/orders/{account}", axum::routing::post(order_submit))
+        .route(
+            "/api/orders/{account}/{id}/cancel",
+            axum::routing::post(order_cancel),
+        )
         .route(
             "/api/accounts/{account}/flatten",
             axum::routing::post(account_flatten),
@@ -632,6 +643,133 @@ async fn gateways_list(AxumState(app): AxumState<Arc<App>>) -> Response {
         out.push(state);
     }
     no_store(axum::Json(json!({ "gateways": out })))
+}
+
+/// For the Spread builder: whether the console can trade, and each paper
+/// account's gateway state with the console's own open orders (`tt-`).
+async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
+    let can = app.gateways.can_trade();
+    let mut out = Vec::new();
+    for account in app.gateways.addrs.keys() {
+        let who = if can {
+            gateways::As::Trade
+        } else {
+            gateways::As::Ops
+        };
+        let req = can.then(|| json!({ "type": "open_orders" }));
+        out.push(match app.gateways.call_as(who, account, req, Duration::from_secs(5)).await {
+            Ok((w, r)) => {
+                let mine: Vec<serde_json::Value> = r
+                    .as_ref()
+                    .and_then(|r| r["orders"].as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter(|o| o["client_order_id"].as_str().is_some_and(|i| i.starts_with(gateways::PREFIX)))
+                    .map(|o| json!({ "client_order_id": o["client_order_id"], "status": o["status"], "filled_qty": o["filled_qty"], "avg_price": o["avg_price"], "legs": o["legs"], "limit_price": o["broker_raw"]["limit_price"], "qty": o["broker_raw"]["qty"], "submitted_at": o["broker_raw"]["submitted_at"] }))
+                    .collect();
+                json!({ "account": account, "state": w["state"], "environment": w["environment"], "orders": mine })
+            }
+            Err(e) => json!({ "account": account, "error": e }),
+        });
+    }
+    no_store(axum::Json(
+        json!({ "trading": can, "prefix": gateways::PREFIX, "accounts": out }),
+    ))
+}
+
+/// Send one of the Spread builder's orders to a paper account's gateway as
+/// the console's trade client. The body names the account again in
+/// `confirm`; the id is made here. The gateway's answer is returned as is
+/// (`accepted` is not a fill).
+async fn order_submit(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(account): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    if ask["confirm"].as_str() != Some(account.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "confirm the account" })),
+        )
+            .into_response();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let id = format!(
+        "{}{}-{:05}",
+        gateways::PREFIX,
+        now.as_secs(),
+        now.subsec_nanos() % 100_000
+    );
+    let intent = match gateways::intent(&ask["order"], &id) {
+        Ok(i) => i,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": e }))).into_response();
+        }
+    };
+    trade_request(
+        &app,
+        &account,
+        json!({ "type": "submit", "intent": intent }),
+        30,
+    )
+    .await
+}
+
+/// Cancel one of the console's orders.
+async fn order_cancel(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path((account, id)): axum::extract::Path<(String, String)>,
+) -> Response {
+    if !id.starts_with(gateways::PREFIX) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "not one of the console's orders" })),
+        )
+            .into_response();
+    }
+    trade_request(
+        &app,
+        &account,
+        json!({ "type": "cancel", "client_order_id": id }),
+        15,
+    )
+    .await
+}
+
+async fn trade_request(
+    app: &App,
+    account: &str,
+    request: serde_json::Value,
+    wait: u64,
+) -> Response {
+    if !app.gateways.addrs.contains_key(account) {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({ "error": "this account has no order gateway" })),
+        )
+            .into_response();
+    }
+    match app
+        .gateways
+        .call_as(
+            gateways::As::Trade,
+            account,
+            Some(request),
+            Duration::from_secs(wait),
+        )
+        .await
+    {
+        Ok((_, Some(r))) => no_store(axum::Json(r)),
+        Ok((_, None)) => (
+            StatusCode::BAD_GATEWAY,
+            axum::Json(json!({ "error": "no response" })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, axum::Json(json!({ "error": e }))).into_response(),
+    }
 }
 
 /// Close every position of a paper account at market through its gateway:

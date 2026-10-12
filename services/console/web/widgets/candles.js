@@ -10,14 +10,14 @@
 // With the Spread builder's "Show on chart", the position is drawn too: its
 // strikes and breakevens as lines, where it profits or loses at expiry shaded
 // across the chart, and its payoff sideways at the right edge on the same
-// prices. Dragging a strike line moves that leg to the nearest listed strike.
+// prices. Legs are changed in the builder.
 // Times are New York time. Drawn with TradingView's Lightweight Charts
 // (Apache-2.0), loaded the first time a chart opens.
 import { defineWidget } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused } from '../lib/theme.js';
-import { position, dragLeg } from '../lib/position.js';
+import { position } from '../lib/position.js';
 import { held, latest, older, exhausted } from '../lib/bars.js';
 
 const LIB = '/vendor/lightweight-charts-5.2.1.min.js';
@@ -201,7 +201,7 @@ defineWidget('candles', {
       pick: null, size: 60, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true,
       drawn: { key: '', first: 0, len: 0 }, backing: false,
       ind: loadIndicators(), open: '', expiries: /** @type {string[]} */ ([]), em: /** @type {Record<string, any>} */ ({}), emLines: [], spot: 0, emAt: 0, emFor: '',
-      L: null, posLines: [], over: null, raf: 0, sig: '', hoverY: null, near: -1, drag: -1 };
+      L: null, posLines: [], over: null, raf: 0, sig: '', hoverY: null };
     el.innerHTML = '<div class="cd"><div class="cd-top"><form class="cd-search"><input class="cd-ticker mono" name="ticker" placeholder="Ticker" maxlength="10" autocomplete="off" spellcheck="false" aria-label="Show a ticker"></form><div class="cd-bar"></div></div><div class="cd-chart"><div class="cd-legend"></div></div><p class="cd-msg muted"></p></div>';
     const bar = el.querySelector('.cd-bar'), box = /** @type {HTMLElement} */ (el.querySelector('.cd-chart')), msg = el.querySelector('.cd-msg');
     const leg = /** @type {HTMLElement} */ (el.querySelector('.cd-legend'));
@@ -263,11 +263,12 @@ defineWidget('candles', {
       const vol = ([t, o, , , c, v]) => ({ time: t + nyOffset(t), value: v, color: faded(c >= o ? up : down) });
       const d = my.drawn, n = bars.length, first = bars[0]?.[0] ?? 0, ts = my.chart.timeScale();
       if (d.key === key && d.first === first && n >= d.len && n - d.len <= 50 && d.len) {
-        for (let i = d.len - 1; i < n; i++) { my.candles.update(candle(bars[i])); my.volume.update(vol(bars[i])); }
+        for (let i = d.len - 1; i < n; i++) { my.candles.update(candle(bars[i])); if (bars[i][5] > 0) my.volume.update(vol(bars[i])); }
       } else {
         const r = d.key === key ? ts.getVisibleLogicalRange() : null;
         const shift = r && d.first ? Math.max(0, bars.findIndex(b => b[0] === d.first)) : 0;
-        my.candles.setData(bars.map(candle)); my.volume.setData(bars.map(vol));
+        // Indexes have no volume: no histogram (or its "0" label) for them.
+        my.candles.setData(bars.map(candle)); my.volume.setData(bars.some(b => b[5] > 0) ? bars.map(vol) : []);
         if (r) ts.setVisibleLogicalRange({ from: r.from + shift, to: r.to + shift });
         else if (n) ts.setVisibleLogicalRange({ from: Math.max(0, n - OPEN_BARS), to: n + 3 });
       }
@@ -458,37 +459,6 @@ defineWidget('candles', {
         }
       }
     }
-    // Dragging a strike line: near one, the chart stops panning so the drag moves the leg.
-    const yOf = (/** @type {PointerEvent} */ e) => e.clientY - box.getBoundingClientRect().top;
-    const nearLeg = (/** @type {number} */ y) => {
-      if (!shownHere() || !my.candles) return -1;
-      let best = -1, dist = 7;
-      position.legs.forEach((l, i) => { const ly = my.candles.priceToCoordinate(l.strike); if (ly != null && Math.abs(ly - y) < dist) { dist = Math.abs(ly - y); best = i; } });
-      return best;
-    };
-    const pan = (/** @type {boolean} */ on) => my.chart?.applyOptions({ handleScroll: on, handleScale: on });
-    const onLegend = (/** @type {PointerEvent} */ e) => !!(/** @type {HTMLElement} */ (e.target)).closest?.('.cd-legend');
-    const down = (/** @type {PointerEvent} */ e) => {
-      if (onLegend(e)) return;
-      const i = nearLeg(yOf(e)); if (i < 0) return;
-      e.preventDefault(); e.stopPropagation();
-      my.drag = i; pan(false); box.setPointerCapture(e.pointerId);
-    };
-    const move = (/** @type {PointerEvent} */ e) => {
-      if (my.drag >= 0) {
-        e.stopPropagation();
-        const p = my.candles?.coordinateToPrice(yOf(e));
-        if (p != null) dragLeg(my.drag, p);
-        return;
-      }
-      const i = onLegend(e) ? -1 : nearLeg(yOf(e));
-      if (i !== my.near) { my.near = i; box.style.cursor = i >= 0 ? 'ns-resize' : ''; pan(i < 0); }
-    };
-    const up = () => { if (my.drag < 0) return; my.drag = -1; my.near = -1; box.style.cursor = ''; pan(true); };
-    box.addEventListener('pointerdown', down, true);
-    box.addEventListener('pointermove', move, true);
-    box.addEventListener('pointerup', up, true);
-    box.addEventListener('pointercancel', up, true);
     const changed = () => drawPosition();
     document.addEventListener('tt-position', changed);
     // The ticker box: any symbol, from the service with bars for any symbol.

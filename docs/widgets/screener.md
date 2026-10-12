@@ -17,4 +17,4 @@ Each stock is rescanned every 15 minutes while the screener is open; a first sca
 
 - Pick a view along the top (Highest IV, Expected move, Expected $ move, Put skew, IV over realized, Top movers, Unusual volume, Most active), a minimum size, and a sector.
 - Click a column heading to sort by it (again to reverse); picking a view returns to its ranking.
-- Click a row to point the workspace's charts, IV heatmap and spread builder at that stock. Hover a row for why it's listed.
+- Click a row to point the workspace's charts and IV heatmap at that stock and get a suggested position for it in the [Spread builder](spreads.md), opened if it isn't in the workspace. Hover a row for why it's listed.

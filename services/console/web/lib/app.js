@@ -345,6 +345,10 @@ function wsShow(view, where) {
   const position = !ref ? undefined : where === 'tab' ? { referencePanel: ref, direction: 'within' } : where === 'right' || where === 'below' ? { referencePanel: ref, direction: where } : { direction: where === 'column' ? 'right' : 'below' };
   dock.addPanel({ id: panelId(), component: 'view', params: { view }, title: VIEWS[view] || view, ...(position ? { position } : {}) });
 }
+// A widget asking for another to be shown (the screener for the Spread
+// builder, the builder for Candles): opened beside the active panel if it
+// isn't in the workspace.
+document.addEventListener('tt-show-view', e => { const v = /** @type {CustomEvent} */ (e).detail; if (state.tab === 'workspace' && VIEWS[v]) wsShow(v, 'right'); });
 function wsMaximise() { const p = activePanel(); if (p) p.api.isMaximized() ? p.api.exitMaximized() : p.api.maximize(); }
 document.addEventListener('keydown', e => {
   if (state.tab !== 'workspace' || pal.open || sw.open) return;
