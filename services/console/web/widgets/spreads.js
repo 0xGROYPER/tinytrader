@@ -53,7 +53,9 @@ defineWidget('spreads', {
       // A suggestion waiting for its chain, and the one shown.
       ask: /** @type {any} */ (null), why: '',
       // The order ticket.
-      acct: store('tt-sb-account') || '', payoff: store('tt-sb-payoff') === '1', qty: 1, limit: /** @type {number | null} */ (null), review: false, sending: false, result: '',
+      acct: store('tt-sb-account') || '', payoff: store('tt-sb-payoff') === '1',
+      // Limit (at the mid unless typed) or market (a limit crossing the spread); the price reviewed.
+      type: 'limit', reviewed: /** @type {number | null} */ (null), qty: 1, limit: /** @type {number | null} */ (null), review: false, sending: false, result: '',
       orders: /** @type {any} */ (null), ordersAt: 0 };
     el.innerHTML = `<div class="sb">
       <div class="sb-top">
@@ -266,12 +268,31 @@ defineWidget('spreads', {
     // The order ticket: account, quantity and limit, then a review before sending.
     const symbolOf = l => quote(l.type, l.strike)?.symbol || null;
     const cents = x => Math.round(x * 100) / 100;
+    // A market order is sent as a limit that crosses the spread at once: each
+    // leg at the far side (buys at the ask, sells at the bid), plus 5% or 2
+    // cents of room, rounded against you to the cent. It fills like a market
+    // order but never worse than the price reviewed, and the gateway's caps,
+    // which need a price, still apply. None when a sold leg has no bid or a
+    // bought leg no ask.
+    function marketPrice(g) {
+      let nat = 0;
+      for (const l of legs()) {
+        const q = quote(l.type, l.strike), far = l.side > 0 ? q?.ask : q?.bid;
+        if (!(far > 0)) return null;
+        nat += l.side * l.qty * far;
+      }
+      nat /= g;
+      const room = Math.max(0.02, Math.abs(nat) * 0.05), up = Math.ceil((nat + room) * 100 - 1e-6) / 100;
+      // A credit stays a credit, of at least a cent.
+      return nat < 0 ? Math.min(up, -0.01) : up;
+    }
     function order(a) {
       const ls = legs();
       if (!a || !ls.length || ls.some(l => !symbolOf(l))) return null;
       // Ratios in lowest terms; the quantity carries the rest.
       const g = ls.reduce((x, l) => { let p = x, q = l.qty; while (q) [p, q] = [q, p % q]; return p; }, 0) || 1;
-      const limit = my.limit ?? cents(a.net / g);
+      const limit = my.type === 'market' ? marketPrice(g) : my.limit ?? cents(a.net / g);
+      if (limit == null || limit === 0) return null;
       return { legs: ls.map(l => ({ symbol: symbolOf(l), side: l.side > 0 ? 'buy' : 'sell', ratio: l.qty / g })), qty: my.qty * g, limit_price: limit, effect: 'open' };
     }
     function ticket(a) {
@@ -279,7 +300,7 @@ defineWidget('spreads', {
       if (!my.orders) { box.innerHTML = ''; return; }
       if (my.orders.unavailable) { box.innerHTML = `<p class="muted sb-note">Orders: ${esc(my.orders.unavailable)}</p>`; return; }
       if (!my.orders.trading) { box.innerHTML = '<p class="muted sb-note">Sending orders needs the console\'s trade token for the paper gateways (operator: scripts/gateway-token GATEWAY_CONSOLE_TOKEN, then restart the gateways and the console).</p>'; return; }
-      if (!o) { box.innerHTML = ''; return; }
+      if (!o) { box.innerHTML = my.type === 'market' && legs().length ? '<p class="muted sb-note">Market: a leg has no price on the side it would trade at. <button type="button" class="chip-btn" data-type="limit">Use a limit</button></p>' : ''; return; }
       // A live account is never picked for you: the first paper one is the default.
       const usable = accts.filter(x => !x.error), isLive = x => x?.environment === 'live';
       if (!usable.some(x => x.account === my.acct)) my.acct = usable.find(x => !isLive(x))?.account || '';
@@ -288,9 +309,10 @@ defineWidget('spreads', {
       const unit = `${credit ? 'credit' : 'debit'} $${Math.abs(o.limit_price).toFixed(2)}`;
       const total = Math.abs(o.limit_price) * 100 * o.qty;
       const risk = isFinite(a.maxL) ? `max loss $${Math.abs(a.maxL * 100 * my.qty).toFixed(0)}` : 'loss unlimited';
+      const kind = my.type === 'market' ? `market (sent as a limit: fills at once for ${credit ? 'a credit of at least' : 'a debit of at most'} $${Math.abs(o.limit_price).toFixed(2)})` : `limit ${unit}`;
       if (my.review) {
         const k = l => `${l.side > 0 ? 'Buy' : 'Sell'} ${l.qty * my.qty} ${my.sym} ${my.expiry} ${l.strike} ${l.type}`;
-        box.innerHTML = `<div class="sb-review${live ? ' sb-live' : ''}">${live ? '<p class="sb-bad"><b>LIVE ACCOUNT: real money.</b></p>' : ''}<p><b>Send to ${esc(my.acct)}</b> (${live ? 'live' : 'paper'}) as ${single ? 'one order' : 'one combo order'}, limit ${unit}${single ? '' : ' per spread'} × ${o.qty}: ${credit ? `receive at least $${total.toFixed(0)}` : `pay at most $${total.toFixed(0)}`}; ${risk}. Day order, opening.</p>
+        box.innerHTML = `<div class="sb-review${live ? ' sb-live' : ''}">${live ? '<p class="sb-bad"><b>LIVE ACCOUNT: real money.</b></p>' : ''}<p><b>Send to ${esc(my.acct)}</b> (${live ? 'live' : 'paper'}) as ${single ? 'one order' : 'one combo order'}, ${kind}${single ? '' : ' per spread'} × ${o.qty}: ${credit ? `receive at least $${total.toFixed(0)}` : `pay at most $${total.toFixed(0)}`}; ${risk}. Day order, opening.</p>
           <ul class="mono">${legs().map(l => `<li>${esc(k(l))} <span class="muted">${esc(symbolOf(l))}</span></li>`).join('')}</ul>
           ${live ? `<p><label>Type <b class="mono">${esc(my.acct)}</b> to send: <input class="sb-confirm mono" autocomplete="off" spellcheck="false"></label></p>` : ''}
           <p><button type="button" class="btn primary" data-act="send"${my.sending || live ? ' disabled' : ''}>${my.sending ? 'Sending…' : live ? 'Send live order' : 'Send order'}</button> <button type="button" class="btn" data-act="back">Back</button></p></div>`;
@@ -299,7 +321,8 @@ defineWidget('spreads', {
       box.innerHTML = `<div class="sb-tk">
         <label>Account <select class="sb-acct">${accts.map(x => `<option value="${esc(x.account)}"${x.error ? ' disabled' : ''}${x.account === my.acct ? ' selected' : ''}>${esc(x.account)}${isLive(x) ? ' (LIVE: real money)' : ''}${x.error ? ' (unreachable)' : x.state && x.state !== 'ready' ? ` (${esc(x.state)})` : ''}</option>`).join('')}</select></label>
         <label>Qty <input class="sb-qty mono" type="number" min="1" max="100" value="${my.qty}"></label>
-        <label>Limit <input class="sb-limit mono" type="number" step="0.01" value="${o.limit_price.toFixed(2)}" title="Net per ${single ? 'contract' : 'spread'}: positive pays (debit), negative receives (credit)"></label>
+        <span class="sb-types"><button type="button" class="chip-btn" data-type="limit" aria-pressed="${my.type === 'limit'}">Limit</button><button type="button" class="chip-btn" data-type="market" aria-pressed="${my.type === 'market'}" title="Crosses the spread at once, as a limit with a little room: never worse than the price shown">Market</button></span>
+        <label>${my.type === 'market' ? (credit ? 'At least' : 'At most') : 'Limit'} <input class="sb-limit mono" type="number" step="0.01" value="${o.limit_price.toFixed(2)}"${my.type === 'market' ? ' readonly' : ''} title="Net per ${single ? 'contract' : 'spread'}: positive pays (debit), negative receives (credit)"></label>
         <span class="muted mono">${unit} · ${risk}</span>
         <button type="button" class="btn primary" data-act="review"${my.acct ? '' : ' disabled'}>Review ${live ? 'live ' : ''}order</button></div>
         ${my.result ? `<p class="sb-result">${my.result}</p>` : ''}`;
@@ -319,7 +342,15 @@ defineWidget('spreads', {
       if (my.alive) { if (!my.review) ticket(analyse()); ordersList(); }
     }
     async function send() {
-      const o = order(analyse()); if (!o || my.sending) return;
+      if (my.sending) return;
+      // A market price is worked out again from fresh quotes; if it's worse than the one
+      // reviewed, it goes back for review instead of being sent.
+      if (my.type === 'market') { my.at = 0; await loadChain(); }
+      const o = order(analyse()); if (!o) return;
+      if (my.reviewed != null && o.limit_price > my.reviewed + 1e-9) {
+        my.result = `<span class="sb-bad">The market moved: it's now ${o.limit_price < 0 ? 'a credit of' : 'a debit of'} $${Math.abs(o.limit_price).toFixed(2)}. Review it again.</span>`;
+        my.review = false; render(); return;
+      }
       const live = (my.orders?.accounts || []).find(x => x.account === my.acct)?.environment === 'live';
       const typed = /** @type {HTMLInputElement | null} */ (el.querySelector('.sb-confirm'))?.value.trim();
       if (live && typed !== my.acct) return;
@@ -388,7 +419,13 @@ defineWidget('spreads', {
         return;
       }
       const act = b.dataset.act;
-      if (act === 'review') { my.review = true; my.result = ''; render(); return; }
+      if (b.dataset.type) { my.type = b.dataset.type === 'market' ? 'market' : 'limit'; my.limit = null; my.review = false; my.result = ''; render(); return; }
+      if (act === 'review') {
+        // The price reviewed is the price sent: a limit at the mid stops following it.
+        const o = order(analyse()); if (!o) return;
+        my.reviewed = o.limit_price; if (my.type === 'limit') my.limit = o.limit_price;
+        my.review = true; my.result = ''; render(); return;
+      }
       if (act === 'back') { my.review = false; render(); return; }
       if (act === 'send') { send(); return; }
       my.review = false; my.limit = null; my.result = '';
