@@ -209,6 +209,8 @@ pub const ON_DEMAND: &[&str] = &[
     "option_contracts",
     "screener",
     "tickers",
+    "quotes",
+    "session",
 ];
 
 /// Why a service's events could not be fetched.
