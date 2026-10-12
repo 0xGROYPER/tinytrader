@@ -53,14 +53,14 @@ defineWidget('spreads', {
       // A suggestion waiting for its chain, and the one shown.
       ask: /** @type {any} */ (null), why: '',
       // The order ticket.
-      acct: store('tt-sb-account') || '', qty: 1, limit: /** @type {number | null} */ (null), review: false, sending: false, result: '',
+      acct: store('tt-sb-account') || '', payoff: store('tt-sb-payoff') === '1', qty: 1, limit: /** @type {number | null} */ (null), review: false, sending: false, result: '',
       orders: /** @type {any} */ (null), ordersAt: 0 };
     el.innerHTML = `<div class="sb">
       <div class="sb-top">
         <form class="sb-search"><input class="sb-ticker mono" name="t" placeholder="Ticker" maxlength="10" autocomplete="off" spellcheck="false" aria-label="Underlying"></form>
         <strong class="sb-sym mono"></strong><span class="sb-spot mono muted"></span>
         <select class="sb-exp mono" aria-label="Expiry"></select>
-        <button type="button" class="chip-btn sb-show" aria-pressed="false">Open on chart</button>
+        <span class="sb-views"><button type="button" class="chip-btn sb-paybtn" aria-pressed="false">Payoff</button><button type="button" class="chip-btn sb-show" aria-pressed="false">Open on chart</button></span>
       </div>
       <div class="sb-structs chips"></div>
       <p class="sb-why"></p>
@@ -160,6 +160,7 @@ defineWidget('spreads', {
       }
       if (my.expiry) sel.value = my.expiry;
       $('.sb-show').setAttribute('aria-pressed', String(position.shown));
+      $('.sb-paybtn').setAttribute('aria-pressed', String(my.payoff));
       $('.sb-why').innerHTML = my.why ? `<b>${esc(my.structure)}.</b> ${esc(my.why)}` : '';
       $('.sb-structs').innerHTML = Object.keys(STRUCTURES).map(n => `<button type="button" class="chip-btn" data-st="${esc(n)}" aria-pressed="${my.structure === n}">${esc(n)}</button>`).join('')
         + (STRUCTURES[my.structure] ? '' : `<span class="chip-btn" aria-pressed="true">${esc(my.structure)}</span>`)
@@ -209,7 +210,7 @@ defineWidget('spreads', {
     function payoff(a) {
       const box = /** @type {HTMLElement} */ ($('.sb-pay'));
       drawn = a;
-      if (!a) { box.innerHTML = ''; return; }
+      if (!a || !my.payoff) { box.innerHTML = ''; return; }
       const W = Math.max(280, box.clientWidth || 600), w = W - PAD.l - PAD.r, h = PH - PAD.t - PAD.b;
       // The strikes and the price, with a margin of 2.5 standard deviations or 60% of the strikes' spread.
       const kLo = Math.min(a.spot, ...a.strikes), kHi = Math.max(a.spot, ...a.strikes);
@@ -368,6 +369,8 @@ defineWidget('spreads', {
     });
     el.addEventListener('click', e => {
       const b = /** @type {HTMLElement} */ (e.target).closest('button'); if (!b) return;
+      // The payoff chart, shown on request (Candles has the overlay); remembered.
+      if (b.classList.contains('sb-paybtn')) { my.payoff = !my.payoff; store('tt-sb-payoff', my.payoff ? '1' : '0'); render(); return; }
       if (b.classList.contains('sb-show')) {
         position.shown = !position.shown;
         // Point Candles at this underlying, opening it if it isn't in the workspace.
