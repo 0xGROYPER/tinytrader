@@ -42,6 +42,7 @@
 
 mod chain;
 mod screener;
+mod smile;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -731,7 +732,7 @@ async fn option_chain(AxState(app): AxState<Arc<App>>, Query(ask): Query<ChainAs
             contracts.sort_by(|a, b| a.expiry.cmp(&b.expiry).then(a.strike.total_cmp(&b.strike)).then(b.call.cmp(&a.call)));
             Ok(json!({
                 "underlying": underlying, "spot": spot, "feed": a.options_feed, "from": from, "to": to,
-                "expiries": chain::expiries(&contracts, spot),
+                "expiries": chain::expiries(&contracts, spot, &|x| years_to_close(x, now)),
                 "contracts": contracts.iter().map(chain::Contract::to_json).collect::<Vec<_>>(),
                 "truncated": truncated,
             }))
@@ -887,6 +888,7 @@ async fn screen(AxState(app): AxState<Arc<App>>, Query(ask): Query<ScreenAsk>) -
                 "move_sessions": move_expiry.as_deref().and_then(|x| screener::sessions(&today, x)),
                 "move_expiry": move_expiry,
                 "rv_20d": rv,
+                "skew": m.and_then(|m| m.skew),
                 "iv_rv": iv.zip(rv).filter(|(_, r)| *r > 0.0).map(|(i, r)| i / r),
                 "note": m.and_then(|m| m.note.clone()),
                 "sources": tags[k],
@@ -994,6 +996,15 @@ async fn daily_bars(app: &App, symbols: &[String]) {
     }
 }
 
+/// Years from `now` to an expiry's 16:00 New York close; none once it has passed.
+fn years_to_close(expiry: &str, now: i64) -> Option<f64> {
+    let day = screener::days(expiry)?;
+    // 16:00 is 20:00 UTC in daylight saving time, else 21:00.
+    let close = [20, 21].into_iter().map(|h| day * 86_400 + h * 3600).find(|&t| ny_date_time(t).1 == "16:00")?;
+    let s = close - now;
+    (s > 0).then(|| s as f64 / (365.0 * 86_400.0))
+}
+
 /// The at-the-money IV nearest 30 days and the next expiry's implied move,
 /// from the contracts within 15% of `spot` expiring in the next 50 days.
 async fn near_chain(app: &App, sym: &str, spot: f64) {
@@ -1032,8 +1043,14 @@ async fn near_chain(app: &App, sym: &str, spot: f64) {
     if contracts.is_empty() && m.note.is_none() {
         m.note = Some("no options quoted".into());
     }
-    let (iv, mv) = screener::pick(&chain::expiries(&contracts, Some(spot)), &today);
+    let exps = chain::expiries(&contracts, Some(spot), &|x| years_to_close(x, now));
+    let (iv, mv) = screener::pick(&exps, &today);
     (m.atm_iv_30d, m.iv_expiry) = iv.map_or((None, None), |(v, x)| (Some(v), Some(x)));
+    // Skew at the 30-day expiry (25-delta risk reversal), when its implied distribution is usable.
+    m.skew = m.iv_expiry.as_deref().and_then(|x| {
+        let d = &exps.iter().find(|e| e["expiry"] == x)?["distribution"];
+        (d["quality"] != "poor").then(|| d["rr25"].as_f64()).flatten()
+    });
     (m.implied_move, m.move_expiry) = mv.map_or((None, None), |(v, x)| (Some(v), Some(x)));
     lock(&app.screen).options.insert(sym.to_owned(), (Instant::now(), m));
 }

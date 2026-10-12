@@ -1,6 +1,7 @@
 //! Option chains from Alpaca's option snapshots: each contract parsed from
-//! its OCC symbol, and a summary per expiry (at-the-money IV and the
-//! straddle's price as the implied move).
+//! its OCC symbol, and a summary per expiry (at-the-money IV, the straddle's
+//! price as the implied move, and the implied distribution from the whole
+//! chain: see `smile`).
 
 use std::collections::BTreeMap;
 
@@ -99,9 +100,10 @@ pub fn contracts(page: &Value) -> Vec<Contract> {
 
 /// Per expiry, from the strike nearest `spot`: the call and put IVs and their
 /// average, and the straddle's mid as an implied move (in dollars and as a
-/// fraction of `spot`).
+/// fraction of `spot`), and the implied distribution with `years` (the time
+/// to an expiry's close, in years) when it is given.
 #[must_use]
-pub fn expiries(contracts: &[Contract], spot: Option<f64>) -> Vec<Value> {
+pub fn expiries(contracts: &[Contract], spot: Option<f64>, years: &dyn Fn(&str) -> Option<f64>) -> Vec<Value> {
     let mut by: BTreeMap<&str, Vec<&Contract>> = BTreeMap::new();
     for c in contracts {
         by.entry(c.expiry.as_str()).or_default().push(c);
@@ -122,8 +124,12 @@ pub fn expiries(contracts: &[Contract], spot: Option<f64>) -> Vec<Value> {
                 (Some(a), Some(b)) => Some(a + b),
                 _ => None,
             };
+            let distribution = match (spot, years(expiry)) {
+                (Some(s), Some(t)) => crate::smile::distribution(&list, s, t, straddle),
+                _ => Value::Null,
+            };
             json!({
-                "expiry": expiry, "contracts": list.len(), "atm_strike": atm,
+                "expiry": expiry, "contracts": list.len(), "atm_strike": atm, "distribution": distribution,
                 "atm_iv": (!ivs.is_empty()).then(|| ivs.iter().sum::<f64>() / ivs.len() as f64),
                 "straddle": straddle,
                 "implied_move": straddle.zip(spot).map(|(x, s)| x / s),
@@ -160,7 +166,7 @@ mod tests {
         }});
         let cs = contracts(&page);
         assert_eq!(cs.len(), 4);
-        let e = expiries(&cs, Some(101.0));
+        let e = expiries(&cs, Some(101.0), &|_| None);
         assert_eq!(e.len(), 2);
         assert_eq!(e[0]["atm_strike"], 100.0);
         assert!((e[0]["atm_iv"].as_f64().unwrap() - 0.52).abs() < 1e-9);

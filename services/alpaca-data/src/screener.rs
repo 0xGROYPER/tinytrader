@@ -110,6 +110,9 @@ pub struct Measures {
     pub rv_20d: Option<f64>,
     /// Average daily volume over the 20 sessions before today.
     pub avg_volume_20d: Option<f64>,
+    /// The 30-day expiry's 25-delta risk reversal from its fitted smile: put
+    /// less call implied volatility (positive: downside priced richer).
+    pub skew: Option<f64>,
     /// Why a part is missing, when it is.
     pub note: Option<String>,
 }
