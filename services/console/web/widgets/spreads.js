@@ -180,7 +180,7 @@ defineWidget('spreads', {
           <td class="sb-asset"><span class="mono">${esc(q?.symbol || `${my.sym} ${l.strike}${l.type[0].toUpperCase()}`)}</span>
             <span class="sb-steps"><button type="button" class="sb-mini" data-act="down" aria-label="Lower strike" title="Lower strike">‹</button><button type="button" class="sb-mini" data-act="type" title="Switch call / put">${l.type === 'call' ? 'C' : 'P'}</button><button type="button" class="sb-mini" data-act="up" aria-label="Higher strike" title="Higher strike">›</button></span></td>
           <td class="num">${m == null ? '<span class="muted">no quote</span>' : usd(m)}<small class="muted">${q?.bid != null ? `${q.bid.toFixed(2)} × ${q.ask?.toFixed(2) ?? '—'}` : ''}</small></td>
-          <td class="num"><span class="sb-qty-cell"><button type="button" class="sb-mini" data-act="less" aria-label="One fewer">−</button><b class="mono">${n}</b><button type="button" class="sb-mini" data-act="more" aria-label="One more">+</button></span></td>
+          <td class="num"><span class="sb-qty-cell"><button type="button" class="sb-mini" data-act="less" aria-label="One fewer" title="One fewer (shift: the whole position one unit smaller)">−</button><b class="mono">${n}</b><button type="button" class="sb-mini" data-act="more" aria-label="One more" title="One more (shift: the whole position one unit bigger)">+</button></span></td>
           <td class="num">${value == null ? '—' : usd(value)}</td>
           <td class="num muted">${delta == null ? '—' : delta.toFixed(0)}</td>
           <td><button type="button" class="sb-x" data-act="remove" aria-label="Remove this leg" title="Remove">×</button></td></tr>`;
@@ -398,6 +398,14 @@ defineWidget('spreads', {
       if (act === 'add') {
         const ks = strikesOf('call');
         if (ks.length) { position.sym = my.sym; position.legs = [...legs(), { type: 'call', strike: nearest(ks, my.chain?.spot || 0), side: 1, qty: 1 }]; }
+      } else if (e.shiftKey && (act === 'more' || act === 'less')) {
+        // Shift-click sizes the whole position by one unit, keeping its ratios
+        // (1/1/1/1 to 2/2/2/2, +1/−2 to +2/−4); never below one unit or past 20 a leg.
+        const ls = legs(), gcd = (x, y) => y ? gcd(y, x % y) : x;
+        const unit = ls.reduce((g, l) => gcd(g, l.qty), 0) || 1, m = unit + (act === 'more' ? 1 : -1);
+        if (m < 1 || ls.some(l => l.qty / unit * m > 20)) return;
+        for (const l of ls) l.qty = l.qty / unit * m;
+        my.review = false; render(); return;
       } else {
         const i = +(/** @type {HTMLElement} */ (b.closest('[data-i]'))?.dataset.i), l = legs()[i]; if (!l) return;
         if (act === 'side') l.side = l.side > 0 ? -1 : 1;
