@@ -657,6 +657,12 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 .hm-sugg li b { font-weight: 600; min-width: 4.5em; }
 .hm-sugg li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .hm-sugg li[aria-selected="true"], .hm-sugg li:hover { background: var(--accent-soft); }
+/* The header's ticker search, left of the palette: the Search page's box, compact. */
+.top-search { position: relative; width: 240px; }
+.top-search .dh-search { height: 46px; padding: 0 12px; font-size: 14px; border-radius: 6px; }
+.top-search .hm-sugg { left: auto; right: 0; min-width: 340px; z-index: 20; }
+.top-err { position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; margin: 0; padding: 6px 10px; white-space: nowrap; font-size: 12px; color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn-line); border-radius: 6px; }
+@media (max-width: 700px) { .top-search { width: 130px; } .top-search .hm-sugg { min-width: 260px; } }
 .dh-results, .dh-start { width: 100%; }
 .dh-start h3 { margin: 6px 0 8px; font: 600 12px var(--ui); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 a.doc-card { text-decoration: none; }
@@ -867,6 +873,13 @@ body.pf-on { padding-bottom: 40px; }
     <nav class="wtabs" id="wtabs" aria-label="Workspaces"></nav>
   </div>
   <div class="top-right">
+    <div class="top-search">
+      <form class="hm-form" role="search" autocomplete="off">
+        <input class="dh-search" type="search" name="ticker" placeholder="Search a ticker  /" aria-label="Search a ticker" aria-autocomplete="list" aria-controls="top-sugg" aria-expanded="false" spellcheck="false">
+        <ul class="hm-sugg" id="top-sugg" role="listbox" aria-label="Tickers" hidden></ul>
+      </form>
+      <p class="hm-err top-err" hidden></p>
+    </div>
     <select class="palette" id="palette" aria-label="Palette" title="Palette">
       <option value="frost">Frost</option><option value="spruce">Spruce</option><option value="pbj">PB&amp;J</option><option value="amber">Amber</option><option value="swiss">Swiss Signal</option><option value="pbj2">PB&amp;J v2</option><option value="harbor">Harbor Fog</option><option value="dusk">Dusk</option>
     </select>

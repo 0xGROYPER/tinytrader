@@ -22,7 +22,7 @@ import '../widgets/jobs.js';
 import '../widgets/queue.js';
 import '../widgets/storage.js';
 import '../widgets/reminders.js';
-import '../widgets/search.js';
+import { bindSearch } from '../widgets/search.js';
 import '../widgets/docs.js';
 import '../widgets/watchlist.js';
 import '../widgets/ivmap.js';
@@ -543,6 +543,17 @@ function updateLayoutNav() {
   }).join('')
     + (lay.list.length < WS_MAX ? `<button type="button" class="wtab wtab-num" data-ws-add title="New workspace, opening on Search (⌥${wsNumber(lay.list.length)})" aria-label="New workspace">+</button>` : '');
   if (box.innerHTML !== html) box.innerHTML = html;
+}
+// The header's ticker search, the same as the Search page's; / focuses it
+// from anywhere but a text field.
+{
+  const box = /** @type {HTMLElement | null} */ (document.querySelector('.top-search'));
+  if (box) bindSearch(box);
+  document.addEventListener('keydown', e => {
+    const t = /** @type {HTMLElement} */ (e.target);
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey || t.closest('input, textarea, select, [contenteditable="true"]')) return;
+    e.preventDefault(); box?.querySelector('input')?.focus();
+  });
 }
 // A ticker searched on Search opens a workspace named for it, whose theme is
 // that ticker: its candles, news and earnings follow the theme. The search

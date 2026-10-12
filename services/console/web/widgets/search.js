@@ -1,5 +1,5 @@
 // Search: the console's front page, laid out like the docs' home: the mark and
-// a search box, here for a ticker. As you type, a menu narrows the tickers the
+// a search box, here for a ticker (the header has the same box: bindSearch). As you type, a menu narrows the tickers the
 // console knows (earnings calendar companies with their names, the relays'
 // symbols, symbols in recent news): exact, then by symbol, then by name.
 // Arrow keys choose, Enter opens, Escape closes. Picking a ticker opens a
@@ -57,6 +57,88 @@ function suggest(q) {
   return hits.slice(0, MAX).map(({ s, name }) => /** @type {[string, string]} */ ([s, name]));
 }
 
+/**
+ * A ticker search box: as you type, a menu of matching tickers; arrow keys
+ * choose, Enter or a click opens a workspace on the ticker (lib/app.js), and
+ * Escape closes. Used by the Search page and the header's search box.
+ * @param {HTMLElement} root holds the form, menu and error line
+ * @returns {() => void} removes its listeners
+ */
+export function bindSearch(root) {
+  const form = /** @type {HTMLFormElement} */ (root.querySelector('form'));
+  const input = /** @type {HTMLInputElement} */ (root.querySelector('input[type="search"]'));
+  const list = /** @type {HTMLElement} */ (root.querySelector('.hm-sugg'));
+  const err = /** @type {HTMLElement} */ (root.querySelector('.hm-err'));
+  /** @type {[string, string][]} */
+  let shown = [];
+  let active = -1;
+
+  const close = () => { list.hidden = true; list.innerHTML = ''; shown = []; active = -1; input.setAttribute('aria-expanded', 'false'); };
+  const paintList = () => {
+    list.innerHTML = shown.map(([s, name], i) => `<li role="option" data-sym="${esc(s)}" aria-selected="${i === active}"><b>${esc(s)}</b>${name ? `<span class="muted">${esc(name)}</span>` : ''}</li>`).join('');
+    list.hidden = !shown.length;
+    input.setAttribute('aria-expanded', String(!list.hidden));
+  };
+  const show = () => { err.hidden = true; shown = suggest(input.value); active = -1; paintList(); };
+  // The full list may arrive after the box is used: the menu then refreshes.
+  const typedFirst = () => loadDirectory().then(() => { if (input.value.trim() && document.activeElement === input) show(); });
+
+  // Opens a workspace on the ticker; the search box learns whether it did.
+  const open = symbol => {
+    input.value = '';
+    close();
+    err.hidden = true;
+    const detail = { symbol, opened: false };
+    root.dispatchEvent(new CustomEvent('tt-open-ticker', { bubbles: true, detail }));
+    if (!detail.opened) { err.textContent = 'All ten workspaces are in use. Close one first.'; err.hidden = false; }
+    else input.blur();
+  };
+  const submit = e => {
+    e.preventDefault();
+    const symbol = parseSymbols(input.value)[0];
+    if (!symbol) { err.textContent = 'Type a ticker, such as SPY or NVDA.'; err.hidden = false; input.focus(); return; }
+    open(symbol);
+  };
+  const key = e => {
+    if (e.target !== input) return;
+    if (e.key === 'Escape') { close(); err.hidden = true; return; }
+    if (!shown.length) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      // Positions 0 (none) to shown.length, wrapping; active is the position less one.
+      const n = shown.length + 1;
+      active = ((active + 1 + (e.key === 'ArrowDown' ? 1 : -1)) % n + n) % n - 1;
+      paintList();
+    } else if (e.key === 'Enter' && active >= 0) {
+      e.preventDefault();
+      open(shown[active][0]);
+    }
+  };
+  const pick = e => {
+    const item = /** @type {HTMLElement | null} */ (/** @type {HTMLElement} */ (e.target).closest?.('[data-sym]'));
+    if (item) open(item.dataset.sym || '');
+  };
+  // Typing narrows the menu and redraws only it, so the box keeps its focus.
+  const typed = e => { if (e.target === input) { show(); typedFirst(); } };
+  const blur = e => { if (!root.contains(/** @type {Node | null} */ (e.relatedTarget))) { close(); err.hidden = true; } };
+  const hold = e => e.preventDefault(); // keeps the box focused for the click
+
+  form.addEventListener('submit', submit);
+  root.addEventListener('keydown', key);
+  root.addEventListener('input', typed);
+  list.addEventListener('mousedown', hold);
+  list.addEventListener('click', pick);
+  root.addEventListener('focusout', blur);
+  return () => {
+    form.removeEventListener('submit', submit);
+    root.removeEventListener('keydown', key);
+    root.removeEventListener('input', typed);
+    list.removeEventListener('mousedown', hold);
+    list.removeEventListener('click', pick);
+    root.removeEventListener('focusout', blur);
+  };
+}
+
 defineWidget('search', {
   title: 'Search',
   mount(el) {
@@ -68,75 +150,7 @@ defineWidget('search', {
       </form>
       <p class="muted hm-err" style="margin:0" hidden></p>
     </div>`;
-    const input = /** @type {HTMLInputElement} */ (el.querySelector('.dh-search'));
-    const list = /** @type {HTMLElement} */ (el.querySelector('.hm-sugg'));
-    const err = /** @type {HTMLElement} */ (el.querySelector('.hm-err'));
-    /** @type {[string, string][]} */
-    let shown = [];
-    let active = -1;
-
-    const close = () => { list.hidden = true; list.innerHTML = ''; shown = []; active = -1; input.setAttribute('aria-expanded', 'false'); };
-    const paintList = () => {
-      list.innerHTML = shown.map(([s, name], i) => `<li role="option" data-sym="${esc(s)}" aria-selected="${i === active}"><b>${esc(s)}</b>${name ? `<span class="muted">${esc(name)}</span>` : ''}</li>`).join('');
-      list.hidden = !shown.length;
-      input.setAttribute('aria-expanded', String(!list.hidden));
-    };
-    const show = () => { shown = suggest(input.value); active = -1; paintList(); };
-    // The full list may arrive after the box is used: the menu then refreshes.
-    loadDirectory().then(() => { if (input.value.trim()) show(); });
-
-    // Opens a workspace on the ticker; the search box learns whether it did.
-    const open = symbol => {
-      input.value = '';
-      close();
-      err.hidden = true;
-      const detail = { symbol, opened: false };
-      el.dispatchEvent(new CustomEvent('tt-open-ticker', { bubbles: true, detail }));
-      if (!detail.opened) { err.textContent = 'All ten workspaces are in use. Close one first.'; err.hidden = false; }
-    };
-    const submit = e => {
-      e.preventDefault();
-      const symbol = parseSymbols(input.value)[0];
-      if (!symbol) { err.textContent = 'Type a ticker, such as SPY or NVDA.'; err.hidden = false; input.focus(); return; }
-      open(symbol);
-    };
-    const key = e => {
-      if (e.target !== input) return;
-      if (e.key === 'Escape') { close(); return; }
-      if (!shown.length) return;
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        // Positions 0 (none) to shown.length, wrapping; active is the position less one.
-        const n = shown.length + 1;
-        active = ((active + 1 + (e.key === 'ArrowDown' ? 1 : -1)) % n + n) % n - 1;
-        paintList();
-      } else if (e.key === 'Enter' && active >= 0) {
-        e.preventDefault();
-        open(shown[active][0]);
-      }
-    };
-    const pick = e => {
-      const item = /** @type {HTMLElement | null} */ (/** @type {HTMLElement} */ (e.target).closest?.('[data-sym]'));
-      if (item) open(item.dataset.sym || '');
-    };
-    // Typing narrows the menu and redraws only it, so the box keeps its focus.
-    const typed = e => { if (e.target === input) show(); };
-    const blur = e => { if (!el.contains(e.relatedTarget)) close(); };
-
-    el.querySelector('form').addEventListener('submit', submit);
-    el.addEventListener('keydown', key);
-    el.addEventListener('input', typed);
-    list.addEventListener('mousedown', e => e.preventDefault()); // keeps the box focused for the click
-    list.addEventListener('click', pick);
-    el.addEventListener('focusout', blur);
-    return {
-      dispose() {
-        el.querySelector('form')?.removeEventListener('submit', submit);
-        el.removeEventListener('keydown', key);
-        el.removeEventListener('input', typed);
-        el.removeEventListener('focusout', blur);
-        list.removeEventListener('click', pick);
-      },
-    };
+    const unbind = bindSearch(el);
+    return { dispose: unbind };
   },
 });
