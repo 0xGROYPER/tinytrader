@@ -183,16 +183,16 @@ defineWidget('spreads', {
         return `<tr data-i="${i}">
           <td class="sb-asset">${q?.symbol ? `<button type="button" class="sb-occ mono" data-occ="${esc(q.symbol)}" title="Chart today's mid on Candles (SPY and XSP options, from Databento)">${esc(q.symbol)}</button>` : `<span class="mono">${esc(`${my.sym} ${l.strike}${l.type[0].toUpperCase()}`)}</span>`}
             <span class="sb-steps"><button type="button" class="sb-mini" data-act="down" aria-label="Lower strike" title="Lower strike">‹</button><button type="button" class="sb-mini" data-act="type" title="Switch call / put">${l.type === 'call' ? 'C' : 'P'}</button><button type="button" class="sb-mini" data-act="up" aria-label="Higher strike" title="Higher strike">›</button></span></td>
-          <td class="num">${m == null ? '<span class="muted">no quote</span>' : usd(m)}<small class="muted">${q?.bid != null ? `${q.bid.toFixed(2)} × ${q.ask?.toFixed(2) ?? '—'}` : ''}</small></td>
-          <td class="num"><span class="sb-qty-cell"><button type="button" class="sb-mini" data-act="less" aria-label="One fewer" title="One fewer (shift: the whole position one unit smaller)">−</button><b class="mono">${n}</b><button type="button" class="sb-mini" data-act="more" aria-label="One more" title="One more (shift: the whole position one unit bigger)">+</button></span></td>
-          <td class="num">${value == null ? '—' : usd(value)}</td>
-          <td class="num muted">${delta == null ? '—' : delta.toFixed(0)}</td>
-          <td><button type="button" class="sb-x" data-act="remove" aria-label="Remove this leg" title="Remove">×</button></td></tr>`;
+          <td class="num sb-c-price" data-label="Price">${m == null ? '<span class="muted">no quote</span>' : usd(m)}<small class="muted">${q?.bid != null ? `${q.bid.toFixed(2)} × ${q.ask?.toFixed(2) ?? '—'}` : ''}</small></td>
+          <td class="num sb-c-qty" data-label="Qty"><span class="sb-qty-cell"><button type="button" class="sb-mini" data-act="less" aria-label="One fewer" title="One fewer (shift: the whole position one unit smaller)">−</button><b class="mono">${n}</b><button type="button" class="sb-mini" data-act="more" aria-label="One more" title="One more (shift: the whole position one unit bigger)">+</button></span></td>
+          <td class="num sb-c-value" data-label="Value">${value == null ? '—' : usd(value)}</td>
+          <td class="num muted sb-c-delta" data-label="Δ">${delta == null ? '—' : delta.toFixed(0)}</td>
+          <td class="sb-c-x"><button type="button" class="sb-x" data-act="remove" aria-label="Remove this leg" title="Remove">×</button></td></tr>`;
       }).join('');
       $('.sb-legs').innerHTML = `<thead><tr><th>Asset</th><th class="num">Price</th><th class="num">Qty</th><th class="num">Market value</th><th class="num" title="Delta in shares">Δ</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
         <tfoot><tr><td><button type="button" class="chip-btn" data-act="add">Add leg</button></td><td></td><td></td>
-          <td class="num"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr></tfoot>`;
+          <td class="num" data-label="Net"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted" data-label="Δ">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr></tfoot>`;
       payoff(a);
       $('.sb-sum').innerHTML = a ? [
         `${a.net >= 0 ? 'Debit' : 'Credit'} <b>$${Math.abs(a.net * 100).toFixed(0)}</b> <span class="muted">($${Math.abs(a.cross * 100).toFixed(0)} crossing)</span>`,

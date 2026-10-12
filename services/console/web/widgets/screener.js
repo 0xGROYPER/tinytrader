@@ -39,6 +39,9 @@ const money = v => v == null ? '' : v >= 1e12 ? `$${(v / 1e12).toFixed(2)}T` : v
 const num = (x, d = 2) => x == null ? '' : x.toFixed(d);
 const short = d => d ? new Date(d + 'T12:00:00Z').toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
 
+/** Each view's own column, kept on a narrow table. */
+const VIEW_COL = { 'Highest IV': 'IV 30d', 'Expected move': 'Exp. move', 'Expected $ move': 'Exp. $ move', 'Put skew': 'Skew', 'IV over realized': 'IV / RV', 'Top movers': 'Day', 'Unusual volume': 'Rel vol', 'Most active': '$ volume' };
+
 /** Next earnings report per symbol, from the economic calendar service. */
 function reports() {
   const e = Object.values(fleet.snap?.services || {}).map(s => s?.earnings).find(x => Array.isArray(x?.reports));
@@ -118,8 +121,12 @@ defineWidget('screener', {
         .map(r => ({ r, k: key(r) }))
         .sort((a, b) => Number(a.k == null) - Number(b.k == null) || (typeof a.k === 'string' ? a.k.localeCompare(b.k) : a.k - b.k) * (my.desc ? -1 : 1));
       const shown = my.all ? list : list.slice(0, SHOW);
-      $('.sc-table').innerHTML = `<thead><tr><th>#</th>${COLS.map(([l], i) => `<th data-col="${i}" class="${my.sort === i ? 'sc-sorted' : ''}">${l}${my.sort === i ? (my.desc ? ' ↓' : ' ↑') : ''}</th>`).join('')}</tr></thead>
-        <tbody>${shown.map(({ r }, i) => `<tr data-sym="${esc(r.symbol)}" title="${esc(r.name)} · listed for ${esc(r.sources.join(', '))}"><td class="muted">${i + 1}</td>${COLS.map(c => `<td>${c[2](r, next)}</td>`).join('')}</tr>`).join('')}</tbody>`;
+      // Columns kept when the table is narrow (a phone): the symbol, price and day,
+      // the view's own measure or the sorted column, and IV over realized.
+      const keep = new Set(['Symbol', 'Price', 'Day', VIEW_COL[my.view], 'IV / RV', my.sort != null ? COLS[my.sort][0] : null]);
+      const k = (/** @type {string} */ l) => keep.has(l) ? 'sc-k' : '';
+      $('.sc-table').innerHTML = `<thead><tr><th>#</th>${COLS.map(([l], i) => `<th data-col="${i}" class="${my.sort === i ? 'sc-sorted' : ''} ${k(l)}">${l}${my.sort === i ? (my.desc ? ' ↓' : ' ↑') : ''}</th>`).join('')}</tr></thead>
+        <tbody>${shown.map(({ r }, i) => `<tr data-sym="${esc(r.symbol)}" title="${esc(r.name)} · listed for ${esc(r.sources.join(', '))}"><td class="muted">${i + 1}</td>${COLS.map(c => `<td class="${k(c[0])}">${c[2](r, next)}</td>`).join('')}</tr>`).join('')}</tbody>`;
       const more = list.length - shown.length;
       const at = new Date(v.as_of * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
       $('.sc-msg').innerHTML = `${more > 0 ? `<button type="button" class="chip-btn sc-more">Show ${more} more</button> ` : ''}${rows.length} stocks of ${v.matched.toLocaleString()} listed at this size and over $${v.min_price}${v.pending ? `; scanning options for ${v.pending}` : ''}. As of ${at}; options from Alpaca's ${esc(v.options_feed)} feed.${my.err ? ` ${esc(my.err)}` : ''}`;
