@@ -33,6 +33,8 @@ import '../widgets/terminal.js';
 import '../widgets/earningsweek.js';
 import '../widgets/spreads.js';
 import '../widgets/screener.js';
+import '../widgets/day.js';
+import '../widgets/heatmap.js';
 import { setTheme, PRESETS, parseSymbols, parseKeywords, LAYERS, DEFAULT_LAYERS } from './theme.js';
 const state = { openGroups: new Set(), navKey: '', tab: 'workspace', lastOk: 0, collections: [], doc: null };
 /** An element by ID, typed loosely enough for forms and buttons alike. @type {(id: string) => HTMLInputElement} */
@@ -210,6 +212,8 @@ const TICKER = () => ({ dir: 'row', ratio: 0.58, a: { dir: 'col', ratio: 0.6, a:
 /** @type {Record<string, [number, () => { tree: object, theme?: object }]>} */
 const READY = {
   'Oil & Iran': [1, () => ({ tree: THEMED(), theme: PRESETS['Oil & Iran'] })],
+  // A watchlist (lib/watchlists.js) with a chart of the symbol clicked, and news on the list.
+  Watchlist: [1, () => ({ tree: { dir: 'row', ratio: 0.45, a: { dir: 'col', ratio: 0.55, a: { view: 'watchlist' }, b: { view: 'candles' } }, b: { view: 'news' } } })],
   Earnings: [1, () => ({ tree: { dir: 'row', ratio: 0.6, a: { view: 'earnings' }, b: { dir: 'col', ratio: 0.45, a: { view: 'calendar' }, b: { tabs: ['ivmap', 'candles'] } } } })],
   Notebook: [1, () => ({ tree: { dir: 'row', ratio: 0.72, a: { view: 'notebook' }, b: { dir: 'col', ratio: 0.5, a: { tabs: ['watchlist', 'earnings'] }, b: { tabs: ['candles', 'ivmap'] } } } })],
 };
@@ -279,6 +283,8 @@ function mountWorkspace() {
       return {
         element: body,
         init(p) {
+          // A panel's arguments (a Day tab's day) reach its widget as data-args.
+          if (p.params.args) body.dataset.args = JSON.stringify(p.params.args);
           panelBody.set(p.api.id, body); renderPanel(body, p.params.view);
           // A tab brought into view shows the latest at once, not at the next
           // poll. (Not on becoming active: a click inside a panel does that,
@@ -330,12 +336,43 @@ function mountWorkspace() {
       else dock.addPanel({ id: panelId(), component: 'view', params: { view: 'docs' }, title: VIEWS.docs });
     });
   });
-  dock.onDidActivePanelChange(e => { wsFocus = (e?.panel || e)?.id ?? null; });
-  dock.onDidLayoutChange(() => { clearTimeout(layoutSaveTimer); layoutSaveTimer = setTimeout(laySave, 300); drawCharts(); });
+  dock.onDidActivePanelChange(e => { wsFocus = (e?.panel || e)?.id ?? null; wsnDraw(); });
+  dock.onDidAddPanel(() => wsnDraw());
+  dock.onDidLayoutChange(() => { clearTimeout(layoutSaveTimer); layoutSaveTimer = setTimeout(laySave, 300); drawCharts(); wsnDraw(); });
   laySave();
   // Charts measure their panels, so draw them once the layout has settled.
   requestAnimationFrame(() => requestAnimationFrame(drawCharts));
 }
+// A widget asking for a tab beside itself (the Calendar's day, opened as a
+// Day tab): one such tab per workspace, reused and pointed at the new
+// arguments, else added to the asking panel's group.
+document.addEventListener('tt-open-tab', e => {
+  const { view, args, title, from } = /** @type {CustomEvent} */ (e).detail || {};
+  if (!dock || !VIEWS[view]) return;
+  const ask = [...panelBody].find(([, b]) => b === from || b.contains(from))?.[0];
+  const ref = dock.panels.find(p => p.id === ask) || activePanel();
+  const open = dock.panels.find(p => p.params?.view === view);
+  if (open) {
+    open.api.updateParameters({ ...open.params, args });
+    open.api.setTitle(title || VIEWS[view]);
+    const body = panelBody.get(open.id);
+    if (body) { body.dataset.args = JSON.stringify(args || {}); renderPanel(body, view); }
+    open.api.setActive();
+  } else {
+    dock.addPanel({ id: panelId(), component: 'view', params: { view, args }, title: title || VIEWS[view], ...(ref ? { position: { referencePanel: ref, direction: 'within' } } : {}) });
+  }
+  laySave();
+});
+// A tab's widget changing its own arguments (a Day tab stepping a day), kept in the layout.
+document.addEventListener('tt-tab-args', e => {
+  const { args, title } = /** @type {CustomEvent} */ (e).detail || {};
+  const id = [...panelBody].find(([, b]) => b.contains(/** @type {Node} */ (e.target)))?.[0], p = dock?.panels.find(x => x.id === id);
+  if (!p) return;
+  p.api.updateParameters({ ...p.params, args });
+  if (title) p.api.setTitle(title);
+  const body = panelBody.get(id); if (body) body.dataset.args = JSON.stringify(args || {});
+  laySave();
+});
 // Show a view: activate it if open; otherwise put it in the active panel,
 // beside it, as a tab with it, or along an edge of the whole workspace.
 function wsShow(view, where) {
@@ -377,7 +414,7 @@ function wsCommands() {
   out.push({ label: activePanel()?.api.isMaximized() ? 'Restore all panels' : 'Maximise this panel', run: wsMaximise });
   if ((dock?.panels.length || 0) > 1) out.push({ label: 'Close this panel', run: () => activePanel()?.api.close() });
   for (const [name, make] of Object.entries(LAYOUTS)) out.push({ label: `Apply template: ${name}`, run: () => { dock.clear(); buildTree(make()); } });
-  for (const [name, [, make]] of Object.entries(READY)) out.push({ label: `New workspace: ${name}`, run: () => wsAdd(name, make()) });
+  for (const [name, [, make]] of Object.entries(READY)) out.push({ label: `New view in this folder: ${name}`, run: () => wsAdd(name, make()) });
   return out;
 }
 const matching = q => { const words = q.toLowerCase().split(/\s+/).filter(Boolean); return [...layoutCommands(q), ...wsCommands()].filter(c => c.always || words.every(w => c.label.toLowerCase().includes(w))); };
@@ -410,7 +447,49 @@ document.addEventListener('click', e => {
 
 // Saved workspaces: { name, group, dock (Dockview's layout) or tree }.
 const LS = { list: 'tinytrader-workspaces', current: 'tinytrader-workspace-current' };
-const lay = { list: [], current: null };
+const lay = { list: [], current: null, reset: false };
+// The ready-made views' folders: market views together, operations together.
+const HOME = { Market: 'Market', Watchlist: 'Market', 'Oil & Iran': 'Market', Earnings: 'Market', Operations: 'Operations', Data: 'Operations' };
+// The side pane's settings and folders (below).
+const WSN = { folders: 'tinytrader-folders', expanded: 'tinytrader-folders-open' };
+const lsGet = k => { try { return localStorage.getItem(k); } catch (_) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
+const parseList = k => { try { const v = JSON.parse(lsGet(k) || '[]'); return Array.isArray(v) ? v : []; } catch (_) { return []; } };
+// It lies over the workspace, so it starts hidden.
+const wsn = { open: false, folders: parseList(WSN.folders), expanded: new Set(parseList(WSN.expanded)),
+  /** @type {null | { kind: 'new' | 'rename', path: string, value: string }} */ edit: null, html: '',
+  // The row picked with the keys.
+  sel: '',
+  /** @type {null | { kind: 'folder' | 'view', name: string }} */ confirm: null };
+const folderUp = p => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
+const leafOf = p => p.slice(p.lastIndexOf('/') + 1);
+const joinPath = (a, b) => a ? `${a}/${b}` : b;
+const under = (p, f) => p === f || p.startsWith(f + '/');
+// Every folder: the ones made, and any a workspace is filed in, with their parents.
+function allFolders() {
+  const out = [];
+  const add = p => { if (!p || out.includes(p)) return; add(folderUp(p)); out.push(p); };
+  for (const f of wsn.folders) add(f);
+  for (const l of lay.list) add(groupOf(l));
+  return out;
+}
+// Wiping: every saved view and folder in this browser goes. "defaults"
+// brings the ready-made views back; "blank" leaves one empty view, Home, and
+// marks the ready-made ones as installed so they don't return. Also from a
+// link: /#wipe-views (blank), so each device can be wiped by opening it.
+const VIEW_KEYS = [LS.list, LS.current, 'tinytrader-ready', 'tinytrader-tree', 'tinytrader-ws-open', WSN.folders, WSN.expanded];
+function wipeViews(how) {
+  lay.reset = true; clearTimeout(layoutSaveTimer);
+  for (const k of VIEW_KEYS) { try { localStorage.removeItem(k); } catch (_) {} }
+  wsn.folders = []; wsn.expanded.clear();
+  if (how === 'blank') {
+    lsSet(LS.list, JSON.stringify([{ name: 'Home', group: 'Home', tree: { view: 'search' } }]));
+    lsSet(LS.current, 'Home');
+    lsSet('tinytrader-ready', JSON.stringify(Object.fromEntries(Object.entries(READY).map(([n, [v]]) => [n, v]))));
+    lsSet('tinytrader-tree', '1');
+  }
+}
+if (location.hash === '#wipe-views') { wipeViews('blank'); lay.reset = false; try { history.replaceState(null, '', '/'); } catch (_) {} }
 (() => {
   try { lay.list = JSON.parse(localStorage.getItem(LS.list)) || []; lay.current = localStorage.getItem(LS.current); } catch (_) {}
   if (!lay.list.length) lay.list = Object.entries(LAYOUTS).map(([name, make]) => ({ name, tree: make() }));
@@ -426,14 +505,32 @@ const lay = { list: [], current: null };
       if ((had[name] || 0) >= version) continue;
       const fresh = { name, ...make() }, i = lay.list.findIndex(l => l.name === name);
       if (i >= 0) lay.list[i] = { ...fresh, group: lay.list[i].group };
-      else if (lay.list.length < 10) lay.list.push(fresh);
+      else if (lay.list.length < 100) lay.list.push(fresh);
       had[name] = version; changed = true;
     }
     if (changed) { localStorage.setItem('tinytrader-ready', JSON.stringify(had)); localStorage.setItem(LS.list, JSON.stringify(lay.list)); }
   } catch (_) {}
   if (!lay.list.some(l => l.name === lay.current)) lay.current = lay.list[0].name;
 })();
-function layStore() { try { localStorage.setItem(LS.list, JSON.stringify(lay.list)); localStorage.setItem(LS.current, lay.current ?? ''); } catch (_) {} updateLayoutNav(); }
+// Once: the ready-made views filed in shared folders, where each was given
+// a folder of its own (by name) before.
+if (lsGet('tinytrader-tree') == null) {
+  for (const l of lay.list) if (HOME[l.name] && l.group === l.name) l.group = HOME[l.name];
+  lsSet('tinytrader-tree', '1');
+}
+homeless();
+{ const f = lay.list.find(l => l.name === lay.current)?.group || ''; for (let p = f; p; p = folderUp(p)) wsn.expanded.add(p); }
+// Every view lives in a workspace: one found loose (from before workspaces,
+// a ready-made one, or moved out of a deleted workspace) gets a workspace of
+// its own name.
+function homeless() { for (const l of lay.list) if (!l.group) l.group = HOME[l.name] || l.name.replace(/\//g, '-'); }
+function layStore() {
+  if (lay.reset) return;
+  // Kept in the tree's order, so ⌥↑/⌥↓ follow what the side pane shows.
+  homeless(); wsn.folders = allFolders(); lay.list = treeOrder();
+  try { localStorage.setItem(LS.list, JSON.stringify(lay.list)); localStorage.setItem(LS.current, lay.current ?? ''); localStorage.setItem(WSN.folders, JSON.stringify(wsn.folders)); } catch (_) {}
+  updateLayoutNav();
+}
 function laySave() {
   const cur = lay.list.find(l => l.name === lay.current);
   if (cur && dock && !dock.narrow && state.tab === 'workspace') { cur.dock = dock.toJSON(); delete cur.tree; }
@@ -442,7 +539,10 @@ function laySave() {
 function laySwitch(name) {
   if (!lay.list.some(l => l.name === name)) return;
   if (dock && state.tab === 'workspace') laySave();
-  lay.current = name; layStore();
+  lay.current = name;
+  // Its folder opens in the side pane.
+  for (let f = groupOf(lay.list.find(l => l.name === name)); f; f = folderUp(f)) wsn.expanded.add(f);
+  wsnKeep(); layStore();
   state.tab = 'workspace'; state.doc = null;
   try { history.replaceState(null, '', '/#w-' + encodeURIComponent(name)); } catch (_) {}
   state.navigated = true; render(); window.scrollTo(0, 0);
@@ -452,17 +552,15 @@ const groupOf = l => l?.group || '';
 const groups = () => [...new Set(lay.list.map(groupOf))];
 const inGroup = g => lay.list.filter(l => groupOf(l) === g);
 const layViews = l => l.dock ? Object.values(l.dock.panels || {}).map(p => p.params?.view) : (function leaves(n) { return n ? (n.view ? [n.view] : n.tabs ? n.tabs : [...leaves(n.a), ...leaves(n.b)]) : []; })(l.tree);
-// Header: every workspace as a number, 1–9 then 0 (⌥1–⌥0), then 11 on.
-// At most ten: 1–9 then 0.
-const WS_MAX = 10;
-const wsNumber = i => i < 9 ? String(i + 1) : '0';
+// Views are listed in the side pane; the header names the open one.
+const WS_MAX = 100;
 // A new workspace, numbered next, with one panel to build on; it opens.
 /** @param {string} [name] @param {{ tree?: object, dock?: object, theme?: object }} [start] */
-function wsAdd(name, start = { tree: { view: 'search' } }) {
+function wsAdd(name, start = { tree: { view: 'search' } }, folder = groupOf(lay.list.find(l => l.name === lay.current))) {
   if (lay.list.length >= WS_MAX) return false;
-  const base = name || `Workspace ${wsNumber(lay.list.length)}`;
+  const base = name || `View ${lay.list.length + 1}`;
   let n = base; for (let k = 2; lay.list.some(l => l.name === n); k++) n = `${base} ${k}`;
-  lay.list.push({ name: n, group: groupOf(lay.list.find(l => l.name === lay.current)) || undefined, ...JSON.parse(JSON.stringify(start)) });
+  lay.list.push({ name: n, group: folder || undefined, ...JSON.parse(JSON.stringify(start)) });
   layStore(); laySwitch(n); return true;
 }
 // A workspace number's menu (right-click): rename, duplicate or delete it.
@@ -499,6 +597,8 @@ function wmTheme(l) {
 }
 function wmClose() { $('wm')?.remove(); }
 document.addEventListener('contextmenu', e => {
+  const p = near(e, '.wsn-ws[data-wsn-ws]');
+  if (p) { e.preventDefault(); wmOpen(p.dataset.wsnWs, e.clientX, e.clientY + 4); return; }
   const b = near(e, '#wtabs [data-layout]'); if (!b) return;
   e.preventDefault(); const r = b.getBoundingClientRect(); wmOpen(b.dataset.layout, r.left, r.bottom + 6);
 });
@@ -528,22 +628,242 @@ document.addEventListener('click', e => {
   }
   if (act === 'keep') return wmDraw(l, false);
   wmClose();
-  if (act === 'delete-yes') { layDelete(l.name); updateLayoutNav(); }
+  if (act === 'delete-yes') { deleteView(l.name); updateLayoutNav(); }
   else if (act === 'duplicate') { if (dock && state.tab === 'workspace' && l.name === lay.current) laySave(); wsAdd(l.name + ' copy', l.dock ? { dock: l.dock } : { tree: l.tree }); }
   else if (act === 'rename') { if (l.name !== lay.current) laySwitch(l.name); palOpen('rename '); }
 }, true);
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('wm')) wmClose(); });
 
 function updateLayoutNav() {
+  wsnDraw();
   const box = $('wtabs'); if (!box) return;
   const docs = state.tab.startsWith('col:');
-  const html = lay.list.map((l, i) => {
-    const here = !docs && l.name === lay.current, n = wsNumber(i);
-    return `<button type="button" class="wtab wtab-num" data-layout="${esc(l.name)}" title="${esc(l.name)}${i < 10 ? ` (⌥${n})` : ''}${here ? ' · click for all workspaces (⌥W)' : ''} · right-click to rename, duplicate or delete" aria-label="Workspace ${n}: ${esc(l.name)}"${here ? ' aria-current="page"' : ''}>${n}</button>`;
-  }).join('')
-    + (lay.list.length < WS_MAX ? `<button type="button" class="wtab wtab-num" data-ws-add title="New workspace, opening on Search (⌥${wsNumber(lay.list.length)})" aria-label="New workspace">+</button>` : '');
+  const where = groupOf(lay.list.find(l => l.name === lay.current));
+  const html = docs ? '' : `<button type="button" class="wtab wtab-name" data-wsn-toggle title="Views (⌥B) · ⌥↑ ⌥↓ the views in this folder" aria-label="Folder ${esc(where || 'top level')}, view ${esc(lay.current || '')}">${where && where !== lay.current ? `<span class="muted">${esc(where.split('/').join(' / '))} ›</span>&nbsp;` : ''}${esc(lay.current || '')}</button>`;
   if (box.innerHTML !== html) box.innerHTML = html;
 }
+// The side pane (⌥B, or ☰ in the header): a tree of folders (parents) and
+// views (leaves). A view is one saved layout (`lay.list`, called a workspace
+// in the code), with its tabs under it; a folder is a path in each layout's
+// `group` ("Market/Options"), nested as deep as you like and kept when empty.
+// Every view is in a folder. ⌥↑/⌥↓ walk the views under the current
+// top-level folder. Drag a view onto a folder to file it there, onto another
+// view to put it before that one, or onto the pane's title for a folder of
+// its own; folders drag the same way. Right-click a view for its menu. It
+// slides over the page (nothing under it moves) and goes away on a pick, Esc
+// or a click outside it.
+const kids = (fs, p) => fs.filter(f => folderUp(f) === p);
+// Workspaces in the tree's order: a folder's own, then its folders', depth first.
+function treeOrder() {
+  const fs = allFolders(), out = [];
+  const walk = p => { out.push(...lay.list.filter(l => groupOf(l) === p)); for (const f of kids(fs, p)) walk(f); };
+  walk('');
+  return out;
+}
+function wsnKeep() { lsSet(WSN.expanded, JSON.stringify([...wsn.expanded])); }
+function wsnOpen(name) { if (name !== lay.current) laySwitch(name); }
+// A note beside the header's name for a moment (⌥↑ with nowhere to go).
+let hintTimer = 0;
+function wsnHint(text) {
+  const box = $('wtabs'); if (!box) return;
+  box.querySelector('.wtab-hint')?.remove();
+  box.insertAdjacentHTML('beforeend', `<span class="wtab-hint muted">${esc(text)}</span>`);
+  clearTimeout(hintTimer); hintTimer = setTimeout(() => box.querySelector('.wtab-hint')?.remove(), 3500);
+}
+// Move or rename a folder (and everything in it) to a new path.
+function moveFolder(from, to) {
+  if (!to || from === to || under(to, from)) return;
+  const re = p => under(p, from) ? to + p.slice(from.length) : p;
+  for (const l of lay.list) if (groupOf(l) && under(groupOf(l), from)) l.group = re(groupOf(l));
+  wsn.folders = [...new Set(wsn.folders.map(re))];
+  wsn.expanded = new Set([...wsn.expanded].map(re)); wsn.expanded.add(to); wsnKeep();
+  layStore();
+}
+// Delete a folder and everything in it (asked first in its row); a view's
+// folder goes with its last view. At least one view always stays.
+function deleteFolder(f) {
+  const left = lay.list.filter(l => !under(groupOf(l), f));
+  if (!left.length) return false;
+  lay.list = left;
+  wsn.folders = wsn.folders.filter(x => !under(x, f));
+  for (const x of [...wsn.expanded]) if (under(x, f)) wsn.expanded.delete(x);
+  wsnKeep();
+  if (!lay.list.some(l => l.name === lay.current)) { lay.current = lay.list[0].name; layStore(); if (state.tab === 'workspace') { state.navigated = true; render(); } }
+  else layStore();
+  return true;
+}
+function deleteView(name) {
+  const l = lay.list.find(x => x.name === name); if (!l || lay.list.length < 2) return false;
+  const f = groupOf(l), last = !lay.list.some(x => x !== l && under(groupOf(x), f));
+  layDelete(name);
+  if (last && !wsn.folders.some(x => x !== f && under(x, f))) { wsn.folders = wsn.folders.filter(x => x !== f); layStore(); }
+  return true;
+}
+function wsnToggle(open = !wsn.open) {
+  wsn.open = open;
+  document.body.classList.toggle('wsn-open', open);
+  $('wsn-toggle')?.setAttribute('aria-expanded', String(open));
+  wsnDraw();
+}
+/** @returns {any[]} */
+function wsnRows() {
+  const fs = allFolders(), rows = [];
+  const walk = (p, d) => {
+    for (const l of lay.list.filter(x => groupOf(x) === p)) rows.push({ kind: 'ws', l, d });
+    for (const f of kids(fs, p)) {
+      const open = wsn.expanded.has(f), n = lay.list.filter(x => groupOf(x) && under(groupOf(x), f)).length;
+      rows.push({ kind: 'folder', f, d, open, n });
+      if (wsn.edit?.kind === 'new' && wsn.edit.path === f && open) rows.push({ kind: 'edit', d: d + 1 });
+      if (open) walk(f, d + 1);
+    }
+  };
+  if (wsn.edit?.kind === 'new' && !wsn.edit.path) rows.push({ kind: 'edit', d: 0 });
+  walk('', 0);
+  return rows;
+}
+function wsnDraw() {
+  const box = $('wsnav'); if (!box) return;
+  document.body.classList.toggle('wsn-open', wsn.open);
+  if (!wsn.open) return;
+  const input = v => `<input class="wsn-in" id="wsn-in" value="${esc(v)}" placeholder="Folder name, then Enter" autocomplete="off" spellcheck="false">`;
+  const rows = wsnRows().map(r => {
+    const key = rowKey(r), sel = key === wsn.sel;
+    const pad = `style="--d:${r.d}" data-key="${esc(key)}" tabindex="${sel ? 0 : -1}"${sel ? ' data-sel' : ''}`;
+    if (r.kind === 'edit') return `<li class="wsn-row" ${pad}>${input(wsn.edit?.value || '')}</li>`;
+    const asking = wsn.confirm && ((r.kind === 'folder' && wsn.confirm.kind === 'folder' && wsn.confirm.name === r.f) || (r.kind === 'ws' && wsn.confirm.kind === 'view' && wsn.confirm.name === r.l.name));
+    if (asking) {
+      const views = r.kind === 'folder' ? lay.list.filter(l => under(groupOf(l), r.f)).length : 1, all = views >= lay.list.length;
+      const what = r.kind === 'folder' ? `“${esc(leafOf(r.f))}” and ${views === 1 ? 'its view' : `its ${views} views`}` : `the view “${esc(r.l.name)}”`;
+      return `<li class="wsn-row wsn-confirm" ${pad}><span>${all ? `Can't delete ${what}: it would leave no views.` : `Delete ${what}?`}</span>${all ? '' : '<button type="button" class="btn small danger" data-wsn-act="yes">Delete</button>'}<button type="button" class="btn small" data-wsn-act="no">${all ? 'OK' : 'Keep'}</button></li>`;
+    }
+    if (r.kind === 'folder') {
+      if (wsn.edit?.kind === 'rename' && wsn.edit.path === r.f) return `<li class="wsn-row" ${pad}>${input(wsn.edit.value)}</li>`;
+      return `<li class="wsn-row wsn-folder" ${pad} data-wsn-folder="${esc(r.f)}" draggable="true" role="treeitem" aria-expanded="${r.open}"><span class="wsn-tw">${r.open ? '▾' : '▸'}</span><span class="wsn-name">${esc(leafOf(r.f))}</span><em>${r.n}</em>
+        <span class="wsn-acts"><button type="button" data-wsn-act="add" title="New view in this folder" aria-label="New view in ${esc(r.f)}">+</button><button type="button" data-wsn-act="sub" title="New folder inside this one" aria-label="New folder in ${esc(r.f)}">⊞</button><button type="button" data-wsn-act="rename" title="Rename" aria-label="Rename ${esc(r.f)}">✎</button><button type="button" data-wsn-act="delete" title="Delete this folder and the views in it" aria-label="Delete ${esc(r.f)}">×</button></span></li>`;
+    }
+    const here = state.tab === 'workspace' && r.l.name === lay.current;
+    return `<li class="wsn-row wsn-ws${here ? ' current' : ''}" ${pad} data-wsn-ws="${esc(r.l.name)}" draggable="true" role="treeitem" title="${esc(r.l.name)}: ${esc(layViews(r.l).map(v => VIEWS[viewOf(v)] || v).join(', '))} · right-click to rename, theme, duplicate or delete"${here ? ' aria-current="page"' : ''}><span class="wsn-dot" aria-hidden="true"></span><span class="wsn-name">${esc(r.l.name)}</span><span class="wsn-acts"><button type="button" data-wsn-act="delete-view" title="Delete this view" aria-label="Delete ${esc(r.l.name)}">×</button></span></li>`;
+  }).join('');
+  const html = `<div class="wsn-head" data-wsn-root title="Drop here for the top level"><b>Views</b>
+      <span class="wsn-acts on"><button type="button" data-wsn-act="folder" title="New folder" aria-label="New folder">⊞</button><button type="button" data-wsn-toggle title="Hide (⌥B)" aria-label="Hide the side pane">×</button></span></div>
+    <ul class="wsn-tree" role="tree" aria-label="Views">${rows}</ul>
+    <p class="wsn-opt">⌥B picks a view here: ↑↓, → ← open and close folders, Enter opens, Esc goes back · ⌥↑ ⌥↓ the views in this folder · ⌥← ⌥→ the next folder</p>`;
+  if (html === wsn.html) return;
+  // Not while typing a folder's name.
+  if (document.activeElement?.id === 'wsn-in' && wsn.edit) return;
+  const had = box.contains(document.activeElement);
+  box.innerHTML = html; wsn.html = html;
+  if ($('wsn-in')) $('wsn-in').focus();
+  else if (had) /** @type {HTMLElement | null} */ (box.querySelector('[data-sel]'))?.focus();
+}
+const rowKey = r => r.kind === 'ws' ? 'ws:' + r.l.name : r.kind === 'folder' ? 'folder:' + r.f : 'edit';
+// ⌥B: into the pane, on the open view; leaving puts it away.
+function wsnEnter() {
+  if (!wsn.open) wsnToggle(true);
+  wsn.sel = 'ws:' + lay.current; wsn.html = ''; wsnDraw();
+  /** @type {HTMLElement | null} */ ($('wsnav')?.querySelector('[data-sel]'))?.focus();
+}
+function wsnLeave() {
+  /** @type {HTMLElement} */ (document.activeElement)?.blur?.();
+  wsnToggle(false);
+}
+document.addEventListener('keydown', e => {
+  const box = $('wsnav'); if (!box || !box.contains(document.activeElement) || tgt(e).id === 'wsn-in' || e.altKey || e.metaKey || e.ctrlKey) return;
+  const rows = wsnRows().filter(r => r.kind !== 'edit'), i = Math.max(0, rows.findIndex(r => rowKey(r) === wsn.sel)), r = rows[i];
+  const go = j => { wsn.sel = rowKey(rows[Math.max(0, Math.min(rows.length - 1, j))]); wsnDraw(); };
+  const k = e.key;
+  if (k === 'ArrowDown' || k === 'ArrowUp') { e.preventDefault(); go(i + (k === 'ArrowDown' ? 1 : -1)); }
+  else if (k === 'Home' || k === 'End') { e.preventDefault(); go(k === 'Home' ? 0 : rows.length - 1); }
+  else if (k === 'ArrowRight' && r?.kind === 'folder') { e.preventDefault(); if (!r.open) { wsn.expanded.add(r.f); wsnKeep(); wsnDraw(); } else go(i + 1); }
+  else if (k === 'ArrowLeft') {
+    e.preventDefault();
+    if (r?.kind === 'folder' && r.open) { wsn.expanded.delete(r.f); wsnKeep(); wsnDraw(); }
+    else { const up = r?.kind === 'folder' ? folderUp(r.f) : r?.kind === 'ws' ? groupOf(r.l) : ''; if (up) { wsn.sel = 'folder:' + up; wsnDraw(); } }
+  }
+  else if (k === 'Enter' || k === ' ') {
+    e.preventDefault();
+    if (r?.kind === 'folder') { r.open ? wsn.expanded.delete(r.f) : wsn.expanded.add(r.f); wsnKeep(); wsnDraw(); }
+    else if (r?.kind === 'ws') { wsnLeave(); wsnOpen(r.l.name); }
+  }
+  else if (k === 'F2' && r?.kind === 'folder') { e.preventDefault(); wsn.edit = { kind: 'rename', path: r.f, value: leafOf(r.f) }; wsn.html = ''; wsnDraw(); }
+  else if (k === 'Escape') { e.preventDefault(); wsnLeave(); }
+});
+function wsnCommit() {
+  const e = wsn.edit; wsn.edit = null; if (!e) return wsnDraw();
+  const name = e.value.replace(/\//g, '-').trim().slice(0, 40);
+  if (name && e.kind === 'new') {
+    const p = joinPath(e.path, name), fresh = !allFolders().includes(p);
+    if (fresh) wsn.folders.push(p);
+    for (let f = p; f; f = folderUp(f)) wsn.expanded.add(f);
+    wsnKeep();
+    // A new folder opens on a first view, named after it.
+    if (fresh) { wsn.edit = null; wsAdd(name, undefined, p); wsnToggle(false); return; }
+    layStore();
+  }
+  else if (name && e.kind === 'rename') moveFolder(e.path, joinPath(folderUp(e.path), name));
+  wsn.html = ''; wsnDraw();
+}
+document.addEventListener('click', e => {
+  if (near(e, '[data-wsn-toggle]')) { wsnToggle(); return; }
+  // A click anywhere else (but a menu it opened) puts it away.
+  if (wsn.open && !$('wsnav')?.contains(tgt(e)) && !near(e, '#wm')) { wsnToggle(false); return; }
+  const box = $('wsnav'); if (!box || !box.contains(tgt(e))) return;
+  const key = near(e, '[data-key]')?.dataset.key; if (key) wsn.sel = key;
+  const act = near(e, '[data-wsn-act]')?.dataset.wsnAct, folder = near(e, '[data-wsn-folder]')?.dataset.wsnFolder;
+  if (act === 'folder') { wsn.edit = { kind: 'new', path: '', value: '' }; wsn.html = ''; wsnDraw(); return; }
+  if (act === 'yes' || act === 'no') {
+    const c = wsn.confirm; wsn.confirm = null;
+    if (act === 'yes' && c) c.kind === 'folder' ? deleteFolder(c.name) : deleteView(c.name);
+    wsn.html = ''; wsnDraw(); return;
+  }
+  if (act === 'delete-view') { const n = near(e, '[data-wsn-ws]')?.dataset.wsnWs; if (n) wsn.confirm = { kind: 'view', name: n }; wsn.html = ''; wsnDraw(); return; }
+  if (folder != null && act) {
+    if (act === 'add') { wsAdd(undefined, undefined, folder); wsnToggle(false); return; }
+    else if (act === 'sub') { wsn.expanded.add(folder); wsn.edit = { kind: 'new', path: folder, value: '' }; }
+    else if (act === 'rename') wsn.edit = { kind: 'rename', path: folder, value: leafOf(folder) };
+    else if (act === 'delete') wsn.confirm = { kind: 'folder', name: folder };
+    wsn.html = ''; wsnDraw(); return;
+  }
+  if (folder != null) { wsn.expanded.has(folder) ? wsn.expanded.delete(folder) : wsn.expanded.add(folder); wsnKeep(); wsnDraw(); return; }
+  const ws = near(e, '[data-wsn-ws]')?.dataset.wsnWs;
+  if (ws) { wsnOpen(ws); wsnToggle(false); }
+});
+document.addEventListener('keydown', e => {
+  if (tgt(e).id !== 'wsn-in' || !wsn.edit) return;
+  if (e.key === 'Enter') { e.preventDefault(); wsn.edit.value = tgt(e).value; wsnCommit(); }
+  else if (e.key === 'Escape') { e.preventDefault(); wsn.edit = null; wsn.html = ''; wsnDraw(); }
+}, true);
+document.addEventListener('focusout', e => { if (tgt(e).id === 'wsn-in' && wsn.edit) { wsn.edit.value = tgt(e).value; setTimeout(wsnCommit); } });
+// Drag and drop within the pane.
+document.addEventListener('dragstart', e => {
+  const r = near(e, '#wsnav [data-wsn-ws], #wsnav [data-wsn-folder]'); if (!r) return;
+  e.dataTransfer.setData('text/x-wsn', r.dataset.wsnWs != null ? 'ws:' + r.dataset.wsnWs : 'folder:' + r.dataset.wsnFolder);
+  e.dataTransfer.effectAllowed = 'move';
+});
+document.addEventListener('dragover', e => {
+  const t = near(e, '#wsnav [data-wsn-ws], #wsnav [data-wsn-folder], #wsnav [data-wsn-root]');
+  if (!t || !e.dataTransfer.types.includes('text/x-wsn')) return;
+  e.preventDefault();
+  document.querySelectorAll('#wsnav .drop').forEach(x => x.classList.remove('drop')); t.classList.add('drop');
+});
+document.addEventListener('dragend', () => document.querySelectorAll('#wsnav .drop').forEach(x => x.classList.remove('drop')));
+document.addEventListener('drop', e => {
+  const t = near(e, '#wsnav [data-wsn-ws], #wsnav [data-wsn-folder], #wsnav [data-wsn-root]'); if (!t) return;
+  const src = e.dataTransfer.getData('text/x-wsn'); if (!src) return;
+  e.preventDefault();
+  const [kind, name] = [src.slice(0, src.indexOf(':')), src.slice(src.indexOf(':') + 1)];
+  // Where it goes: into a folder, beside a workspace (its folder), or the top level.
+  const dest = t.dataset.wsnFolder ?? (t.dataset.wsnWs != null ? groupOf(lay.list.find(l => l.name === t.dataset.wsnWs)) : '');
+  if (kind === 'ws') {
+    const l = lay.list.find(x => x.name === name); if (!l || name === t.dataset.wsnWs) return;
+    lay.list.splice(lay.list.indexOf(l), 1);
+    l.group = dest || undefined;
+    const before = t.dataset.wsnWs != null ? lay.list.findIndex(x => x.name === t.dataset.wsnWs) : -1;
+    if (before >= 0) lay.list.splice(before, 0, l); else lay.list.push(l);
+    if (dest) wsn.expanded.add(dest);
+    wsnKeep(); layStore();
+  } else if (kind === 'folder') moveFolder(name, joinPath(dest, leafOf(name)));
+});
 // The header's ticker search, the same as the Search page's; / focuses it
 // from anywhere but a text field.
 {
@@ -555,12 +875,22 @@ function updateLayoutNav() {
     e.preventDefault(); box?.querySelector('input')?.focus();
   });
 }
-// A ticker searched on Search opens a workspace named for it, whose theme is
-// that ticker: its candles, news and earnings follow the theme. The search
-// box learns whether it opened (ten workspaces at most).
+// A ticker searched in the header: its results in the view's Search panel,
+// else in a new one beside the active panel. "Open as a view" (from the
+// results) makes a view named for it, whose theme is that ticker: its
+// candles, news and earnings follow the theme.
 document.addEventListener('tt-open-ticker', e => {
   const detail = /** @type {CustomEvent} */ (e).detail;
-  detail.opened = wsAdd(detail.symbol, { tree: TICKER(), theme: { symbols: [detail.symbol], keywords: [], layers: DEFAULT_LAYERS } });
+  if (state.tab !== 'workspace' || !dock) { state.tab = 'workspace'; state.navigated = true; render(); }
+  if (!dock) return;
+  const open = dock.panels.find(p => p.params?.view === 'search'), body = open && panelBody.get(open.id);
+  if (open && body) { open.api.setActive(); document.dispatchEvent(new CustomEvent('tt-search-show', { detail: { panel: body, symbol: detail.symbol } })); }
+  else { const ref = activePanel(); dock.addPanel({ id: panelId(), component: 'view', params: { view: 'search', args: { symbol: detail.symbol } }, title: `Search · ${detail.symbol}`, ...(ref ? { position: { referencePanel: ref, direction: 'within' } } : {}) }); }
+  detail.opened = true;
+});
+document.addEventListener('tt-open-ticker-view', e => {
+  const { symbol } = /** @type {CustomEvent} */ (e).detail;
+  wsAdd(symbol, { tree: TICKER(), theme: { symbols: [symbol], keywords: [], layers: DEFAULT_LAYERS } }, symbol);
 });
 // A document picked on the docs home opens in the docs pages.
 document.addEventListener('tt-open-doc', e => {
@@ -581,25 +911,25 @@ document.addEventListener('click', e => {
   const b = near(e, '[data-layout]');
   if (b) { if (b.getAttribute('aria-current') === 'page') swOpen(); else laySwitch(b.dataset.layout); }
 });
-// Keys: ⌥↑/⌥↓ (or ⌃↑/⌃↓) within the group, ⌥←/⌥→ between groups, ⌥1–⌥9 and ⌥0 the numbered workspaces, ⌥W the switcher.
+// Keys: ⌥↑/⌥↓ (or ⌃↑/⌃↓) the previous or next view under this top-level folder, ⌥←/⌥→ the next top-level folder, ⌥W the switcher, ⌥B the side pane (to pick a view anywhere).
 document.addEventListener('keydown', e => {
   if (pal.open || sw.open || e.metaKey) return;
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
-  const cur = lay.list.find(l => l.name === lay.current), g = groupOf(cur), tabs = inGroup(g), gs = groups();
+  const cur = lay.list.find(l => l.name === lay.current), g = groupOf(cur);
   if (e.altKey && e.code === 'KeyW') { e.preventDefault(); swOpen(); return; }
-  if (e.altKey && /^Digit[0-9]$/.test(e.code)) {
-    const d = +e.code.slice(5), i = d === 0 ? 9 : d - 1, l = lay.list[i];
-    e.preventDefault();
-    if (l) laySwitch(l.name); else if (i === lay.list.length) wsAdd();
+  if (e.altKey && e.code === 'KeyB') { e.preventDefault(); $('wsnav')?.contains(document.activeElement) ? wsnLeave() : wsnEnter(); return; }
+  // ⌥↑/⌥↓: every view under this top-level folder, nested ones included, in
+  // the pane's order (depth first). ⌥←/⌥→: the first view of the next root.
+  const root = g.split('/')[0], roots = [...new Set(lay.list.map(l => groupOf(l).split('/')[0]))];
+  if ((e.ctrlKey || e.altKey) && ['ArrowUp', 'ArrowDown'].includes(e.key)) {
+    const views = lay.list.filter(l => under(groupOf(l), root)), n = views.length, i = views.indexOf(cur); e.preventDefault();
+    if (n > 1) wsnOpen(views[(i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n].name);
+    else wsnHint(`${cur?.name || 'This'} is the only view in ${root || 'its folder'}: add one with + in the pane (⌥B), or drag one in`);
     return;
   }
-  if ((e.ctrlKey || e.altKey) && ['ArrowUp', 'ArrowDown'].includes(e.key)) {
-    const i = tabs.indexOf(cur), n = tabs.length; e.preventDefault();
-    laySwitch(tabs[(i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n].name); return;
-  }
-  if (e.altKey && ['ArrowLeft', 'ArrowRight'].includes(e.key) && gs.length > 1) {
-    const i = gs.indexOf(g), next = gs[(i + (e.key === 'ArrowRight' ? 1 : -1) + gs.length) % gs.length];
-    e.preventDefault(); laySwitch(inGroup(next)[0].name);
+  if (e.altKey && ['ArrowLeft', 'ArrowRight'].includes(e.key) && roots.length > 1) {
+    const next = roots[(roots.indexOf(root) + (e.key === 'ArrowRight' ? 1 : -1) + roots.length) % roots.length];
+    e.preventDefault(); const first = lay.list.find(l => under(groupOf(l), next)); if (first) wsnOpen(first.name);
   }
 });
 // Palette commands for workspaces: save, rename, group, duplicate, delete, switch.
@@ -615,6 +945,11 @@ function layoutCommands(q) {
     if (verb === 'group') out.unshift({ label: `Move “${lay.current}” to the group “${arg}”`, always: true, run: () => { if (cur) { cur.group = arg; layStore(); } } });
   } else out.push({ label: 'Save these panels as a new workspace… (type: save <name>)', run: () => {} }, { label: 'Rename this workspace… (type: rename <name>)', run: () => {} }, { label: 'Move this workspace to a group… (type: group <name>)', run: () => {} });
   out.push({ label: 'Open the workspace switcher (⌥W)', run: swOpen });
+  // Start over: every saved view and folder in this browser goes, and the ready-made ones come back.
+  if (/^\s*reset views now\s*$/i.test(q)) out.unshift({ label: 'Yes: delete every saved view and folder in this browser, and start from the defaults', always: true, run: () => { wipeViews('defaults'); location.href = '/'; } });
+  else if (/^\s*wipe views now\s*$/i.test(q)) out.unshift({ label: 'Yes: delete every saved view and folder in this browser, and start with one blank view', always: true, run: () => { wipeViews('blank'); location.href = '/'; } });
+  else out.push({ label: 'Reset views to the defaults… (type: reset views now)', run: () => palOpen('reset views now') },
+    { label: 'Wipe all views, starting blank… (type: wipe views now)', run: () => palOpen('wipe views now') });
   out.push(prof.on ? { label: 'Profile mode: turn off', run: stopProfile } : { label: 'Profile mode: turn on (measure everything on this page)', run: startProfile });
   if (lay.list.length > 1) out.push({ label: `Delete this workspace: ${lay.current}`, run: () => layDelete(lay.current) });
   return out;
@@ -622,17 +957,11 @@ function layoutCommands(q) {
 function layDelete(name) {
   if (lay.list.length < 2) return;
   const i = lay.list.findIndex(l => l.name === name); if (i < 0) return;
-  lay.list.splice(i, 1);
-  const wasCurrent = lay.current === name;
-  // Workspaces still under their default name ("Workspace 5") take their new number.
-  const renamed = new Map();
-  lay.list.forEach((l, k) => { if (/^Workspace \d+$/.test(l.name) && l.name !== `Workspace ${wsNumber(k)}`) renamed.set(l, `Workspace ${wsNumber(k)}`); });
-  for (const [l, n] of renamed) {
-    if (lay.list.some(o => o !== l && o.name === n && !renamed.has(o))) continue;
-    if (lay.current === l.name) lay.current = n;
-    l.name = n;
-  }
-  if (wasCurrent) { lay.current = lay.list[Math.max(0, i - 1)].name; layStore(); state.navigated = true; render(); } else layStore();
+  const [gone] = lay.list.splice(i, 1);
+  const wasCurrent = lay.current === name, g = groupOf(gone);
+  // From the open view to a neighbour in its workspace, if it has one.
+  const sib = lay.list.filter(l => groupOf(l) === g);
+  if (wasCurrent) { lay.current = (sib.find((l, k) => lay.list.indexOf(l) >= i || k === sib.length - 1) || lay.list[Math.max(0, i - 1)]).name; layStore(); state.navigated = true; render(); } else layStore();
 }
 
 // The switcher (⌥W): every workspace as a tree of groups. ↑↓ move, →/Tab
@@ -676,8 +1005,8 @@ function swDraw() {
   box.querySelector('.sw-pv').innerHTML = l ? `<div class="pv">${preview(l)}</div><div class="sw-cap">${esc(l.name)} · ${layViews(l).length} widgets</div>` : '';
   box.querySelector('.sw-foot').innerHTML = sw.confirm
     ? `<b>Delete “${esc(sw.confirm)}”?</b><span class="sw-btns"><button type="button" class="btn" data-sw-act="keep">Keep</button><button type="button" class="btn danger" data-sw-act="really-delete">Delete</button></span>`
-    : sw.edit?.kind === 'new' ? '<input class="sw-in" id="sw-in" placeholder="New workspace name, then Enter" autocomplete="off">'
-    : `${lay.list.length < WS_MAX ? '<button type="button" class="btn" data-sw-act="new">+ New workspace</button>' : '<span>Ten workspaces, the most there can be.</span>'}<span>↑↓ move · Enter go · F2 rename · D duplicate · G group · ⌫ delete</span>`;
+    : sw.edit?.kind === 'new' ? '<input class="sw-in" id="sw-in" placeholder="New view name, then Enter" autocomplete="off">'
+    : `${lay.list.length < WS_MAX ? '<button type="button" class="btn" data-sw-act="new">+ New view</button>' : `<span>${WS_MAX} workspaces, the most there can be.</span>`}<span>↑↓ move · Enter go · F2 rename · D duplicate · G group · ⌫ delete</span>`;
   $('sw-in')?.focus();
 }
 function swOpen() {

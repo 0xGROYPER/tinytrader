@@ -2,6 +2,7 @@ import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { theme, LAYERS, DEFAULT_LAYERS } from '../lib/theme.js';
+import { dayTitle } from './day.js';
 
 // The US market calendar, from the first service that serves one.
 // The market calendar as a month: one widget that reads well as a page or
@@ -92,8 +93,9 @@ function draw(my) {
 `;
 }
 
-// A day in full, shown over the month while the day is hovered (or pinned
-// by a click): its session, scheduled releases and earnings reports.
+// A day's card, shown over the month while the day is hovered (or pinned
+// by a click): its session, scheduled releases and earnings reports. A hard
+// click, double-click or long press opens the day hour by hour (Day).
 function dayCard(day, cell) {
   const label = new Date(day + 'T12:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC', weekday: 'long', month: 'long', day: 'numeric' });
   const { hours = '', evs = [], reps = [] } = cell || {};
@@ -139,6 +141,21 @@ defineWidget('calendar', {
       pop.style.top = `${Math.max(lo, Math.min(c.top - h.top + el.scrollTop, hi))}px`;
     };
     const update = () => { paint(el, draw(my)); card(); };
+    // A day expanded, hour by hour, as a Day tab beside this one: a hard click
+    // (Safari on a Force Touch trackpad), a double-click, or a long press.
+    const dayAt = e => /** @type {HTMLElement | null} */ (e.target.closest?.('[data-day]'))?.dataset.day || null;
+    const expand = day => { my.pin = null; my.hover = null; card(); el.dispatchEvent(new CustomEvent('tt-open-tab', { bubbles: true, detail: { view: 'day', args: { day }, title: dayTitle(day), from: el } })); };
+    const force = e => { const d = dayAt(e); if (d) { e.preventDefault(); expand(d); } };
+    const forceWill = e => { if (dayAt(e)) e.preventDefault(); };
+    let press = 0, pressed = false;
+    const last = { day: '', at: 0, x: 0, y: 0 };
+    const down = e => {
+      if (e.pointerType !== 'touch') return;
+      const d = dayAt(e); if (!d) return;
+      pressed = false; clearTimeout(press);
+      press = setTimeout(() => { pressed = true; expand(d); }, 500);
+    };
+    const up = () => clearTimeout(press);
     const over = e => {
       if (e.target.closest('.cal-pop')) return;
       const day = e.target.closest('[data-day]')?.dataset.day || null;
@@ -146,10 +163,18 @@ defineWidget('calendar', {
     };
     const leave = () => { if (my.hover) { my.hover = null; card(); } };
     const click = e => {
+      // The click ending a long press isn't also a pin.
+      if (pressed) { pressed = false; return; }
+      // A second click at the same spot soon after expands the day, even if
+      // the card the first one pinned now covers it.
+      if (last.day && e.timeStamp - last.at < 450 && Math.abs(e.clientX - last.x) < 8 && Math.abs(e.clientY - last.y) < 8) { const d = last.day; last.day = ''; expand(d); return; }
       if (e.target.closest('.cal-pop')) return;
       const layer = e.target.closest('[data-cal-layer]');
       if (layer) { const id = layer.dataset.calLayer; if (my.layers.has(id)) my.layers.delete(id); else my.layers.add(id); update(); return; }
       const day = e.target.closest('[data-day]');
+      // Two clicks on a day in quick succession expand it (the first's redraw
+      // replaces the cell, so the browser never sees a double-click).
+      if (day) Object.assign(last, { day: day.dataset.day, at: e.timeStamp, x: e.clientX, y: e.clientY });
       // A click pins the day's card (for touch, or to read it at length); again unpins.
       if (day) { my.pin = my.pin === day.dataset.day ? null : day.dataset.day; update(); return; }
       if (my.pin && !e.target.closest('[data-cal-nav]')) { my.pin = null; update(); return; }
@@ -159,10 +184,10 @@ defineWidget('calendar', {
       else { const [y, m] = my.month.split('-').map(Number), d = new Date(Date.UTC(y, m - 1 + dir, 1)); my.month = d.toISOString().slice(0, 7); }
       update();
     };
-    el.addEventListener('click', click);
-    el.addEventListener('mouseover', over);
-    el.addEventListener('mouseleave', leave);
+    /** @type {[string, (e: any) => void][]} */
+    const events = [['click', click], ['mouseover', over], ['mouseleave', leave], ['webkitmouseforcedown', force], ['webkitmouseforcewillbegin', forceWill], ['pointerdown', down], ['pointerup', up], ['pointercancel', up], ['pointermove', up]];
+    for (const [k, f] of events) el.addEventListener(k, f);
     update();
-    return { update, dispose: () => { el.removeEventListener('click', click); el.removeEventListener('mouseover', over); el.removeEventListener('mouseleave', leave); document.removeEventListener('tt-theme', themed); } };
+    return { update, dispose: () => { for (const [k, f] of events) el.removeEventListener(k, f); document.removeEventListener('tt-theme', themed); } };
   },
 });

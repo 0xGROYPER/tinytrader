@@ -35,6 +35,30 @@ workspaces are a flat list that won't scale.
 - **Only the open workspace runs.** Its panels render and refresh; others are
   saved layouts, which is all the switcher's previews read.
 
+**Amended 2026-10-12: a tree of folders and views, in a side pane, in place
+of the numbers.** The console's layouts become a tree: *folders* are the
+parents and *views* the leaves, each view one saved layout with its tabs (the
+code still calls a layout a workspace; its `group` holds its folder's path,
+`Market/Options`). Folders nest as deep as you like and are kept when empty.
+Every view is in a folder: one found loose (saved before folders, or
+ready-made) gets a folder of its own name, and a new folder opens on a first
+view of its name. The tree is in a side pane on the left (☰ in the header,
+or ⌥B), which slides over the page rather than taking room from it and goes
+away when you pick something, press Esc or click outside it. You arrange it:
+views and folders are dragged into a folder or beside a view (a view dropped
+on the pane's title gets a folder of its own); nothing nests by itself.
+Deleting a folder deletes the views in it, and a view's folder goes with
+its last view (each asked first, in its row; at least one view stays).  The
+ready-made views start filed together (Market, Oil & Iran and Earnings in
+Market; Operations and Data in Operations), and the palette's "Reset views to
+the defaults" starts a browser over. Keys: ⌥↑/⌥↓ walk every view under the current
+top-level folder, nested ones included, in the pane's order; ⌥←/⌥→ go to the
+next top-level folder; ⌥B moves into the pane to pick a view anywhere (↑↓,
+→ and ← to open and close, Enter opens, Esc goes back). The header's numbers
+(1–9, 0 and ⌥1–⌥0) go: the header shows the folder and view
+(`devops / deployment › Operations`), and clicking it opens the pane. The cap
+of ten goes too (100 views now).
+
 ## Consequences
 
 - The hand-written tiling goes; saved tile trees convert to Dockview layouts

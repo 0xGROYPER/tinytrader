@@ -4,7 +4,7 @@ A workspace is a set of panels, each showing one widget. These pages say what ea
 
 ## Markets
 
-- [Watchlist](watchlist.md): The workspace theme's symbols with price and the day's change, refreshed every few seconds while shown.
+- [Watchlist](watchlist.md): Named lists of symbols (nuclear, oil, value…) with price and the day's change; News follows the list picked.
 - [Candles](candles.md): Candlesticks and volume for a symbol, with TradingView-style ranges (1D, 5D, 1M, 6M, 1Y, 5Y) and bar sizes (1m, 5m, 15m, 1h, 1D).
 - [IV heatmap](ivmap.md): An underlying's implied volatility by strike (rows) and expiry (columns), on the usual heatmap scale from blue (low) through green and yellow to red (high).
 - [Correlation](correlation.md): How the theme's symbols move together: Pearson correlation of daily log returns over the last 20, 60, 120 or 250 trading days, as a matrix from blue (−1) through white (0) to red (+1), with each symbol's annualised realised volatility.
@@ -12,6 +12,8 @@ A workspace is a set of panels, each showing one widget. These pages say what ea
 - [Earnings week](earningsweek.md): The week's earnings reports as a grid, before the open and after the close, largest companies first.
 - [Spread builder](spreads.md): An options position from a structure and the live chain, priced, with Show on chart to draw it on Candles and drag its strikes.
 - [Options screener](screener.md): Stocks ranked by implied volatility, expected move (in percent and dollars of market value), IV over realized, the day's move and volume.
+- [Day](day.md): One market day hour by hour, 04:00 to 20:00 New York time: releases at their times and earnings before the open and after the close; opened from the Calendar.
+- [Sector heatmap](heatmap.md): The screener's large companies as a treemap by sector, sized by market value and coloured by the change over a day, a week or a month.
 - [Calendar](calendar.md): The market month: trading days, early closes and holidays, with scheduled economic releases, FOMC decisions and earnings as layers.
 - [News](news.md): Recent stories, newest first, filtered by symbol with the chips along the top.
 - [Prices](prices.md): One card per series the deployment's topology declares (the relays' trade prices), with the latest value, its change and a chart.
@@ -33,6 +35,7 @@ A workspace is a set of panels, each showing one widget. These pages say what ea
 
 ## Workspace tools
 
+- [Search](search.md): A ticker search whose results (price, options, earnings, news) take the panel's place.
 - [Docs](docs.md): The documentation's home: the tinytrader mark, a search over every document's title and path, and where to start.
 - [Reminders](reminders.md): Reminders after iOS Reminders: lists on the left (with All, Flagged and Completed), the chosen list's items on the right.
 - [Notebook](notebook.md): The deployment's notebook server (JupyterLab), embedded.
