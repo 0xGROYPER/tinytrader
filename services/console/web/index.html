@@ -236,6 +236,7 @@ tr.today td { background: var(--accent-soft); }
 .pos-tbl { font-size: 13px; } .pos-tbl td, .pos-tbl th { white-space: nowrap; }
 .pos-tbl th { padding: 6px 8px; font-size: 11px; } .pos-tbl td { padding: 6px 8px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .pos-tbl th:not(:first-child), .pos-tbl td:not(:first-child) { text-align: right; }
+.acct-orders td { vertical-align: top; } .acct-orders td:first-child { white-space: normal; }
 .acct-payoffs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 @media (max-width: 640px) {
   .scroll > .pos-tbl th:nth-child(3), .scroll > .pos-tbl td:nth-child(3) { display: none; }
@@ -799,8 +800,7 @@ a.doc-card { text-decoration: none; }
 .sb-exp { font: 13px var(--mono, monospace); padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
 .sb-views { margin-left: auto; display: inline-flex; gap: 6px; }
 .sb-pay:empty { display: none; }
-.sb-structs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 0; }
-.sb-width { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; font-size: 12px; }
+.sb-st { font: 13px var(--ui); padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); max-width: 14em; }
 .sb-table { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
 .sb-legs { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
 .sb-legs th { text-align: left; font: 500 13px var(--ui); text-transform: none; letter-spacing: normal; color: var(--muted); padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -844,7 +844,11 @@ a.doc-card { text-decoration: none; }
   .sb-tk .btn.primary, .sb-review .btn { flex: 1 1 100%; min-height: 44px; }
   .sb-review p:last-child { display: flex; flex-wrap: wrap; gap: 8px; }
   .sb-confirm { min-height: 40px; font-size: 16px; }
+  .sb-st, .sb-exp { min-height: 40px; font-size: 16px; }
+  .sb-trade { flex: 1 1 100%; min-height: 44px; }
 }
+.sb-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sb-bar .sb-sum { flex: 1 1 auto; min-width: 0; cursor: help; }
 .sb-pay svg { display: block; max-width: 100%; height: auto; }
 .pc-win { fill: var(--ok-soft); } .pc-lose { fill: var(--crit-soft); }
 .pc-band { fill: var(--accent-soft); opacity: .45; }
@@ -859,18 +863,16 @@ a.doc-card { text-decoration: none; }
 .pc-k { display: inline-block; width: 16px; height: 0; border-top: 2px solid var(--fg); margin-left: 6px; }
 .pc-k-today { border-top: 2px dashed var(--accent); } .pc-k-band { height: 10px; border: 0; background: var(--accent-soft); }
 .sb-payread { margin-left: auto; color: var(--fg); }
-.sb-k { min-width: 4.5em; text-align: center; font-size: 13px; }
 .sb-buy { color: var(--ok); } .sb-sell { color: var(--crit); }
 .sb-sum { margin: 0; font-size: 13px; line-height: 1.7; }
 .sb-msg { margin: 0; font-size: 12px; }
 .sb-why { margin: 0; font-size: 13px; line-height: 1.5; max-width: 70ch; }
 .sb-why:empty, .sb-ticket:empty, .sb-orders:empty { display: none; }
+.sb-why { font-size: 12px; }
 .sb-tk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
 .sb-tk label { display: inline-flex; align-items: center; gap: 4px; }
 .sb-tk select, .sb-tk input { font: 13px var(--mono, monospace); padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
-.sb-qty { width: 4.5em; } .sb-limit { width: 6.5em; }
-.sb-types { display: inline-flex; gap: 4px; } .sb-types .chip-btn { min-height: 28px; }
-.sb-limit[readonly] { color: var(--muted); }
+.sb-limit { width: 6.5em; }
 .sb-review { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--surface); font-size: 13px; }
 .sb-review p { margin: 4px 0; } .sb-review ul { margin: 4px 0; padding-left: 18px; font-size: 12px; }
 .sb-note { margin: 0; font-size: 12px; } .sb-result { margin: 4px 0 0; font-size: 12px; }
