@@ -87,6 +87,8 @@ interface Account {
   updated_at?: number;
   account?: Record<string, any>;
   positions?: Record<string, any>[];
+  /** Open orders as the broker has them, however placed; null when they couldn't be read. */
+  orders?: Record<string, any>[] | null;
 }
 
 interface Topology {

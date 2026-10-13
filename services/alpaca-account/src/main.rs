@@ -10,8 +10,15 @@
 //!   { "name": "paper-1", "label": "Paper 1", "environment": "paper", "updated_at": 1759700000.0,
 //!     "account": { "status": "ACTIVE", "currency": "USD", "equity": 100000.0,
 //!                  "last_equity": 99500.0, "cash": 50000.0, "buying_power": 200000.0, ... },
-//!     "positions": [{ "symbol": "SPY", "qty": 10.0, "market_value": 6690.0, ... }] } ] }
+//!     "positions": [{ "symbol": "SPY", "qty": 10.0, "market_value": 6690.0, ... }],
+//!     "orders": [{ "client_order_id": "tt-...", "status": "new", "order_class": "mleg",
+//!                  "qty": 1.0, "limit_price": -0.54, "created_at": "...",
+//!                  "legs": [{ "symbol": "SPY261012C00777000", "side": "sell", "ratio_qty": 1.0 }] }] } ] }
 //! ```
+//!
+//! `orders` are the account's open orders, however they were placed (the
+//! console, another client, Alpaca's app), replacements included; `null`
+//! when they couldn't be read.
 //!
 //! Also serves `/calendar`, the US market clock and trading sessions from
 //! a week ago to six weeks ahead (`{ "clock": { "is_open", "next_open",
@@ -19,7 +26,7 @@
 //! times in New York), refreshed every ten minutes.
 //!
 //! Numeric fields are numbers, not Alpaca's strings. Account numbers and
-//! ids are never served. Each account's equity is kept as a series at
+//! Alpaca's ids are never served (an order's own client id is). Each account's equity is kept as a series at
 //! `/recent` (keyed by its label), and position changes are a live tail at
 //! `/events`.
 //!
@@ -76,6 +83,24 @@ const POSITION_FIELDS: &[&str] = &[
     "unrealized_intraday_plpc",
     "change_today",
 ];
+
+const ORDER_FIELDS: &[&str] = &[
+    "client_order_id",
+    "created_at",
+    "updated_at",
+    "symbol",
+    "side",
+    "qty",
+    "filled_qty",
+    "type",
+    "order_class",
+    "time_in_force",
+    "limit_price",
+    "stop_price",
+    "status",
+];
+
+const LEG_FIELDS: &[&str] = &["symbol", "side", "ratio_qty", "status"];
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Environment {
@@ -487,6 +512,19 @@ async fn read_one(
         Ok((account, positions)) => {
             a.polls.fetch_add(1, Ordering::Relaxed);
             update(shared, a, &account, &positions);
+            // Open orders, however placed; a failure here leaves them unknown, not empty.
+            let orders = get_json(
+                http,
+                a.env,
+                &a.key,
+                &a.secret,
+                "/v2/orders?status=open&nested=true&limit=100",
+            )
+            .await;
+            if let Err(e) = &orders {
+                eprintln!("alpaca-account: {}: {e}", a.label);
+            }
+            lock(&a.doc)["orders"] = orders.map_or(Value::Null, |o| open_orders(&o));
             if !a.history.load(Ordering::Relaxed) {
                 load_history(shared, a, http).await;
             }
@@ -647,7 +685,9 @@ fn pick(v: &Value, fields: &[&str]) -> Value {
     for f in fields {
         let x = &v[*f];
         let x = match x.as_str().map(str::parse::<f64>) {
-            Some(Ok(n)) if !matches!(*f, "symbol" | "status" | "currency") => json!(n),
+            Some(Ok(n)) if !matches!(*f, "symbol" | "status" | "currency" | "client_order_id") => {
+                json!(n)
+            }
             _ => x.clone(),
         };
         if !x.is_null() {
@@ -655,6 +695,24 @@ fn pick(v: &Value, fields: &[&str]) -> Value {
         }
     }
     Value::Object(out)
+}
+
+/// Open orders, oldest first, each with its legs (a multi-leg order's).
+fn open_orders(orders: &Value) -> Value {
+    let mut out: Vec<Value> = orders
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|o| {
+            let mut v = pick(o, ORDER_FIELDS);
+            if let Some(legs) = o["legs"].as_array().filter(|l| !l.is_empty()) {
+                v["legs"] = json!(legs.iter().map(|l| pick(l, LEG_FIELDS)).collect::<Vec<_>>());
+            }
+            v
+        })
+        .collect();
+    out.sort_by(|a, b| a["created_at"].as_str().cmp(&b["created_at"].as_str()));
+    json!(out)
 }
 
 /// Store a fresh reading, record equity, and announce position changes.
@@ -744,5 +802,24 @@ mod tests {
             changes(&before, &after),
             ["opened QQQ: 1", "SPY: 10 → 4", "closed AAPL"]
         );
+    }
+
+    #[test]
+    fn open_orders_keep_legs_and_drop_alpaca_ids() {
+        let o = open_orders(&json!([
+            { "id": "b", "client_order_id": "c2", "created_at": "2026-10-12T17:00:00Z", "symbol": "SPY",
+              "side": "buy", "qty": "1", "limit_price": "0.5", "status": "new", "legs": null },
+            { "id": "a", "client_order_id": "tt-1", "created_at": "2026-10-12T16:00:00Z", "symbol": "",
+              "order_class": "mleg", "qty": "2", "limit_price": "-0.54", "status": "new",
+              "legs": [{ "id": "l", "symbol": "SPY261012C00777000", "side": "sell", "ratio_qty": "1" }] }
+        ]));
+        assert_eq!(o[0]["client_order_id"], "tt-1");
+        assert_eq!(o[0]["limit_price"], -0.54);
+        assert_eq!(
+            o[0]["legs"],
+            json!([{ "symbol": "SPY261012C00777000", "side": "sell", "ratio_qty": 1.0 }])
+        );
+        assert!(o[0].get("id").is_none() && o[1].get("legs").is_none());
+        assert_eq!(o[1]["qty"], 1.0);
     }
 }

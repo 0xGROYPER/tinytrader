@@ -1,5 +1,6 @@
 // Accounts: a card per brokerage account (live first) with equity, the day's
-// change, balances, an equity chart and the largest positions. A paper
+// change, balances, an equity chart, the largest positions and every open
+// order however it was placed (the console's can be cancelled here). A paper
 // account with an order gateway also gets Flatten (close every position at
 // market, through the gateway, after typing the account's name) and, while
 // its gateway halts opens, Resume opening.
@@ -79,6 +80,28 @@ function flattenPanel(a) {
   return buttons;
 }
 
+// Open orders, from the account itself: the console's (ids tt-) with Cancel,
+// others marked as placed elsewhere (another client, Alpaca's app).
+const cancelling = {};
+function ordersPanel(a) {
+  const orders = a.orders, name = a.name;
+  if (orders === undefined) return '';
+  if (orders === null) return '<p class="neg" style="margin:0;font-size:12px">Open orders couldn\'t be read: check the broker before sending more.</p>';
+  if (!orders.length) return '<p class="muted" style="margin:0;font-size:12px">No open orders.</p>';
+  const age = t => { const s = (Date.now() - Date.parse(t)) / 1000; return isFinite(s) ? duration(s) : ''; };
+  const legsOf = o => o.legs?.length
+    ? o.legs.map(l => `${l.side === 'sell' ? '−' : '+'}${(l.ratio_qty || 1) * (o.qty || 1)} ${esc(l.symbol)}`).join('<br>')
+    : `${o.side === 'sell' ? '−' : '+'}${o.qty ?? '?'} ${esc(o.symbol)}`;
+  const rows = orders.map(o => {
+    const id = o.client_order_id || '', ours = id.startsWith('tt-'), c = cancelling[`${name}|${id}`];
+    return `<tr><td style="color:var(--fg);text-align:left">${legsOf(o)}</td>
+      <td>${o.limit_price != null ? (o.limit_price < 0 ? `cr ${(-o.limit_price).toFixed(2)}` : o.limit_price.toFixed(2)) : esc(o.type || '')}</td>
+      <td>${o.filled_qty || 0}/${o.qty ?? '?'}</td><td>${esc(o.status || '')}</td><td>${esc(age(o.created_at))}</td>
+      <td>${ours ? `<button type="button" class="btn small" data-cancel-order="${esc(name)}|${esc(id)}"${c ? ' disabled' : ''}>${c ? esc(c) : 'Cancel'}</button>` : '<span class="muted" title="Not placed by the console: change or cancel it where it was placed">elsewhere</span>'}</td></tr>`;
+  }).join('');
+  return `<div class="scroll"><table class="pos-tbl acct-orders"><thead><tr><th>Open order</th><th>Limit</th><th>Filled</th><th>Status</th><th>Age</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
 // Every service that serves an `account` stream gets a card: live accounts first.
 function accountsView(withHeading = true) {
   // Every account of every service that serves an `accounts` stream.
@@ -120,6 +143,7 @@ function accountCard(svc, a) {
     <div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2"></div>
     ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Symbol</th><th>Qty</th><th>Value</th><th>Unrealized</th><th>Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted" style="margin:0;font-size:13px">No open positions.</p>'}
     ${(() => { const g = optionGroups(a.name || a.label || svc.id, pos); return g.length ? `<div class="acct-payoffs">${g.map(x => `<button type="button" class="chip-btn" data-held="${esc(x.key)}" title="Load these legs into the Spread builder at their entry prices">Payoff: ${esc(x.sym)} ${esc(dayLabel(x.expiry))} · ${x.legs.length} leg${x.legs.length > 1 ? 's' : ''}</button>`).join('')}</div>` : ''; })()}
+    ${ordersPanel(a)}
     <div class="foot">${pos.length > 8 ? `${pos.length} positions, largest 8 shown · ` : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
     ${flattenPanel(a)}
   </article>`;
@@ -142,6 +166,13 @@ function mount(el) {
       const g = heldGroups.get(d.held); if (!g) return;
       askHeld(g); document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'spreads' }));
       return;
+    }
+    if (d.cancelOrder) {
+      const [name, id] = d.cancelOrder.split('|');
+      cancelling[d.cancelOrder] = 'Cancelling…'; update();
+      try { const v = await post(`/api/orders/${encodeURIComponent(name)}/${encodeURIComponent(id)}/cancel`, {}); cancelling[d.cancelOrder] = v.outcome === 'accepted' ? 'Cancel sent' : `Cancel ${v.outcome || 'failed'}`; }
+      catch (err) { cancelling[d.cancelOrder] = 'Cancel failed'; console.warn(err); }
+      update(); return;
     }
     if (d.flatOpen) { flat[d.flatOpen] = { stage: 'confirm', typed: '' }; update(); el.querySelector(`[data-flat-typed="${CSS.escape(d.flatOpen)}"]`)?.focus(); }
     else if (d.flatCancel) { delete flat[d.flatCancel]; update(); }
