@@ -34,8 +34,10 @@
 //!   movers and most traded in it, and Alpaca's most-active and movers lists,
 //!   are scanned in the background for the at-the-money IV nearest 30 days,
 //!   the next expiry's implied move, 20-day realized volatility and average
-//!   volume. Each stock is rescanned every 15 minutes while asked for; until
-//!   scanned, its row has no option measures (`pending` counts them).
+//!   volume, and the change over a week and a month (`change_5d` and
+//!   `change_21d`: the price against the close 5 and 21 sessions back). Each
+//!   stock is rescanned every 15 minutes while asked for; until scanned, its
+//!   row has no option measures (`pending` counts them).
 //!
 //! Answers are kept briefly (snapshots 2 s, chains 15 s, bars a minute) and
 //! requests to Alpaca are held under its free plan's 200 a minute, so many
@@ -143,8 +145,8 @@ struct Screen {
     asked: Option<Instant>,
     /// Option measures by stock, and when they were taken.
     options: HashMap<String, (Instant, screener::Measures)>,
-    /// Realized volatility and average volume from daily bars, by stock.
-    daily: HashMap<String, (Instant, Option<f64>, Option<f64>)>,
+    /// Realized volatility, average volume and past closes from daily bars, by stock.
+    daily: HashMap<String, Daily>,
 }
 
 impl App {
@@ -1087,12 +1089,15 @@ async fn screen(AxState(app): AxState<Arc<App>>, Query(ask): Query<ScreenAsk>) -
             let s = by[k];
             let m = sc.options.get(*k).map(|x| &x.1);
             pending += usize::from(m.is_none());
-            let (rv, avg) = sc.daily.get(*k).map_or((None, None), |x| (x.1, x.2));
+            let d = sc.daily.get(*k);
+            let (rv, avg) = d.map_or((None, None), |x| (x.rv, x.avg));
+            let back = d.map_or([None, None], |x| x.back);
             let iv = m.and_then(|m| m.atm_iv_30d);
             let move_expiry = m.and_then(|m| m.move_expiry.clone());
             json!({
                 "symbol": s.symbol, "name": s.name, "sector": s.sector, "price": s.price,
                 "change_pct": s.change_pct, "volume": s.volume,
+                "change_5d": change_since(s.price, back[0]), "change_21d": change_since(s.price, back[1]),
                 "dollar_volume": s.volume.zip(s.price).map(|(v, p)| v * p),
                 "avg_volume_20d": avg,
                 "rel_volume": s.volume.zip(avg).filter(|(_, a)| *a > 0.0).map(|(v, a)| v / a),
@@ -1137,7 +1142,7 @@ async fn scan(app: Arc<App>) {
                 let bars: Vec<String> = sc
                     .wanted
                     .iter()
-                    .filter(|(s, _)| sc.daily.get(s).is_none_or(|x| stale(&x.0)))
+                    .filter(|(s, _)| sc.daily.get(s).is_none_or(|x| stale(&x.at)))
                     .map(|(s, _)| s.clone())
                     .take(100)
                     .collect();
@@ -1159,8 +1164,29 @@ async fn scan(app: Arc<App>) {
     }
 }
 
-/// Realized volatility (the last 20 daily returns) and average volume (the 20
-/// sessions before the latest, which may still be trading) for `symbols`.
+/// What the screener keeps from a stock's daily bars.
+struct Daily {
+    at: Instant,
+    /// Annualised realized volatility of the last 20 daily returns.
+    rv: Option<f64>,
+    /// Average volume of the 20 sessions before the latest.
+    avg: Option<f64>,
+    /// The close 5 and 21 sessions before today (a week and a month back),
+    /// for the change over each against the current price.
+    back: [Option<f64>; 2],
+}
+
+/// The change from a past close to the current price.
+fn change_since(price: Option<f64>, then: Option<f64>) -> Option<f64> {
+    price
+        .zip(then)
+        .filter(|(_, c)| *c > 0.0)
+        .map(|(p, c)| p / c - 1.0)
+}
+
+/// Realized volatility (the last 20 daily returns), average volume (the 20
+/// sessions before the latest, which may still be trading) and the closes a
+/// week and a month back, for `symbols`.
 async fn daily_bars(app: &App, symbols: &[String]) {
     let now = unix_seconds() as i64;
     let mut got: HashMap<String, Vec<(i64, f64, f64)>> = HashMap::new();
@@ -1203,10 +1229,18 @@ async fn daily_bars(app: &App, symbols: &[String]) {
         }
     }
     let at = Instant::now();
+    let today = ny_date_time(now).0;
     let mut sc = lock(&app.screen);
     for s in symbols {
         let mut b = got.remove(s).unwrap_or_default();
         b.sort_by_key(|x| x.0);
+        // Sessions before today: the 5th and 21st from the end closed a week and a month back.
+        let past: Vec<f64> = b
+            .iter()
+            .filter(|x| ny_date_time(x.0).0 < today)
+            .map(|x| x.1)
+            .collect();
+        let back = [5, 21].map(|n| past.len().checked_sub(n).map(|i| past[i]));
         let closes: Vec<f64> = b.iter().rev().take(21).rev().map(|x| x.1).collect();
         let before = b.len().saturating_sub(1);
         let vols: Vec<f64> = b[before.saturating_sub(20)..before]
@@ -1215,7 +1249,12 @@ async fn daily_bars(app: &App, symbols: &[String]) {
             .collect();
         sc.daily.insert(
             s.clone(),
-            (at, screener::realized_vol(&closes), screener::mean(&vols)),
+            Daily {
+                at,
+                rv: screener::realized_vol(&closes),
+                avg: screener::mean(&vols),
+                back,
+            },
         );
     }
 }
