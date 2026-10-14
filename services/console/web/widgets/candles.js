@@ -258,9 +258,19 @@ defineWidget('candles', {
   mount(el) {
     const my = { typed: [],
       pick: null, size: 60, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true,
-      drawn: { key: '', first: 0, len: 0 }, backing: false,
+      drawn: { key: '', first: 0, len: 0, lastT: 0 }, backing: false, edgeTimer: 0,
       ind: loadIndicators(), open: '', expiries: /** @type {string[]} */ ([]), em: /** @type {Record<string, any>} */ ({}), emLines: [], spot: 0, emAt: 0, emFor: '',
-      L: null, posLines: [], over: null, raf: 0, sig: '', hoverY: null };
+      L: null, posLines: [], over: null, raf: 0, sig: '', hoverY: null,
+      // Linked: follows the symbol picked elsewhere (a watchlist, Search, the
+      // builder). A ticker typed into this chart's box pins it to that ticker.
+      // Kept in the panel's layout, with the symbol and bar size, so several
+      // charts can each watch their own.
+      linked: true, want: /** @type {string | null} */ (null) };
+    { let args = {}; try { args = JSON.parse(el.dataset.args || '{}'); } catch (_) {}
+      if (args.linked === false) my.linked = false;
+      if (SIZES.some(([, z]) => z === args.size)) my.size = args.size;
+      if (typeof args.symbol === 'string' && args.symbol) { my.want = args.symbol; if (!my.typed.includes(args.symbol)) my.typed.push(args.symbol); } }
+    const keep = () => el.dispatchEvent(new CustomEvent('tt-tab-args', { bubbles: true, detail: { args: { symbol: my.pick?.symbol || my.want || null, size: my.size, linked: my.linked } } }));
     el.innerHTML = '<div class="cd"><div class="cd-top"><form class="cd-search"><input class="cd-ticker mono" name="ticker" placeholder="Ticker or option" maxlength="21" autocomplete="off" spellcheck="false" aria-label="Show a ticker"></form><div class="cd-bar"></div></div><div class="cd-chart"><div class="cd-legend"></div></div><p class="cd-msg muted"></p></div>';
     const bar = el.querySelector('.cd-bar'), box = /** @type {HTMLElement} */ (el.querySelector('.cd-chart')), msg = el.querySelector('.cd-msg');
     const leg = /** @type {HTMLElement} */ (el.querySelector('.cd-legend'));
@@ -280,10 +290,12 @@ defineWidget('candles', {
     const source = () => { const any = anyService(), service = OCC.test(my.pick.symbol) ? my.pick.service : any || my.pick.service; return { service, ask: service === any ? my.size : 60 }; };
     const head = () => {
       const list = offered();
-      if (!my.pick || !list.some(c => c.service === my.pick.service && c.symbol === my.pick.symbol)) my.pick = list.find(c => c.symbol === focused()) || list[0] || null;
+      if (my.want) { const c = list.find(x => x.symbol === my.want); if (c) { my.pick = c; my.want = null; } }
+      if (!my.pick || !list.some(c => c.service === my.pick.service && c.symbol === my.pick.symbol)) my.pick = (!my.linked && list.find(c => c.symbol === my.want)) || list.find(c => c.symbol === focused()) || list[0] || null;
       bar.innerHTML = list.length
         ? `<span class="chips">${list.map(c => `<button type="button" class="chip-btn" data-cd-pick="${esc(c.service)}|${esc(c.symbol)}" aria-pressed="${my.pick?.service === c.service && my.pick?.symbol === c.symbol}">${esc(c.symbol)}</button>`).join('')}</span>
-           <span class="chips">${SIZES.map(([l, z]) => `<button type="button" class="chip-btn" data-cd-size="${z}" aria-pressed="${my.size === z}">${l}</button>`).join('')}</span>`
+           <span class="chips">${SIZES.map(([l, z]) => `<button type="button" class="chip-btn" data-cd-size="${z}" aria-pressed="${my.size === z}">${l}</button>`).join('')}</span>
+           <button type="button" class="chip-btn cd-link" data-cd-link aria-pressed="${my.linked}" title="${my.linked ? 'Linked: follows the symbol picked in a watchlist, Search or the Spread builder. Click to pin it to this symbol.' : 'Pinned to this symbol. Click to follow the symbol picked elsewhere again.'}">${my.linked ? '⛓ Linked' : '📌 Pinned'}</button>`
         : '';
       msg.textContent = !list.length ? (theme() ? 'No service serves bars for the theme’s symbols.' : 'No relay serves bars yet.') : my.err ? my.err : my.note || '';
     };
@@ -314,7 +326,7 @@ defineWidget('candles', {
     // added at the start, or opening on the latest bars for a new series.
     function draw(raw) {
       const size = my.size, { service, ask } = source(), key = `${service}|${my.pick.symbol}|${size}`;
-      const bars = ask < size ? combine(raw, size) : raw;
+      const bars = withEdge(ask < size ? combine(raw, size) : raw, size);
       // Outside 09:30-16:00 New York (intraday bars only), faded.
       const extended = t => { if (size >= 86400) return false; const m = Math.floor(((t + nyOffset(t)) % 86400 + 86400) % 86400 / 60); return m < 570 || m >= 960; };
       const up = css('--ok'), down = css('--crit');
@@ -326,7 +338,9 @@ defineWidget('candles', {
       };
       const vol = ([t, o, , , c, v]) => ({ time: t + nyOffset(t), value: v, color: faded(c >= o ? up : down) });
       const d = my.drawn, n = bars.length, first = bars[0]?.[0] ?? 0, ts = my.chart.timeScale();
-      if (d.key === key && d.first === first && n >= d.len && n - d.len <= 50 && d.len) {
+      // Incrementally only when the bar drawn last is still where it was (a
+      // live-edge bar can be followed by a late real one before it).
+      if (d.key === key && d.first === first && n >= d.len && n - d.len <= 50 && d.len && bars[d.len - 1]?.[0] === d.lastT) {
         for (let i = d.len - 1; i < n; i++) { my.candles.update(candle(bars[i])); if (bars[i][5] > 0) my.volume.update(vol(bars[i])); }
       } else {
         const r = d.key === key ? ts.getVisibleLogicalRange() : null;
@@ -336,11 +350,52 @@ defineWidget('candles', {
         if (r) ts.setVisibleLogicalRange({ from: r.from + shift, to: r.to + shift });
         else if (n) ts.setVisibleLogicalRange({ from: Math.max(0, n - OPEN_BARS), to: n + 3 });
       }
-      my.drawn = { key, first, len: n };
+      my.drawn = { key, first, len: n, lastT: bars[n - 1]?.[0] ?? 0 };
       const lastBar = bars[n - 1];
       my.last = !lastBar ? 'no trades yet' : size >= 86400
         ? `${lastBar[4].toFixed(2)} · ${new Date((lastBar[0] + 43200) * 1000).toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short', day: 'numeric' })}`
         : `${lastBar[4].toFixed(2)} · ${new Date(lastBar[0] * 1000).toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' })} ET`;
+    }
+    // The live edge: bars arrive a finished minute at a time (and are kept a
+    // minute), so every 2 s the latest trade (a stock snapshot, IEX, the same
+    // prints as the Tape) is folded into the bar forming now, or starts the
+    // next one, until the real bar replaces it. Intraday sizes and today's
+    // daily bar; not options or indexes, which have no snapshot.
+    /** @type {null | { sym: string, size: number, t: number, o: number, h: number, l: number, c: number }} */
+    let edge = null;
+    const nyDate = t => new Date(t * 1000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    function withEdge(bars, size) {
+      const e = edge, n = bars.length;
+      if (!e || e.sym !== my.pick?.symbol || e.size !== size || !n) return bars;
+      const last = bars[n - 1];
+      if (e.t < last[0]) { edge = null; return bars; }
+      const out = bars.slice();
+      if (e.t === last[0]) out[n - 1] = [last[0], last[1], Math.max(last[2], e.h), Math.min(last[3], e.l), e.c, last[5]];
+      else out.push([e.t, e.o, e.h, e.l, e.c, 0]);
+      return out;
+    }
+    async function liveEdge() {
+      if (!my.pick || !my.alive || !my.candles || document.hidden || el.offsetParent === null) return;
+      const { symbol } = my.pick, size = my.size, svc = (fleet.topo?.services || []).find(x => x.snapshots)?.id;
+      if (!svc || OCC.test(symbol) || size > 86400 || !my.drawn.len) return;
+      let snap;
+      try {
+        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/snapshots?symbols=${encodeURIComponent(symbol)}`, { cache: 'no-store' });
+        snap = (await r.json()).snapshots?.find(x => x.symbol === symbol);
+      } catch (_) { return; }
+      const px = snap?.price, at = snap?.at;
+      if (!(px > 0) || !at || my.pick?.symbol !== symbol || my.size !== size || !my.candles) return;
+      const { service, ask } = source(), raw = held(service, symbol, ask);
+      const bars = ask < size ? combine(raw, size) : raw, last = bars[bars.length - 1];
+      if (!last) return;
+      // The bar the trade belongs to: its minute (or 5, 15, 60), or today's day.
+      const t = size >= 86400 ? (nyDate(at) === nyDate(last[0] + 43200) ? last[0] : null) : Math.floor(at / size) * size;
+      if (t == null || t < last[0]) return;
+      const e = edge && edge.sym === symbol && edge.size === size && edge.t === t ? edge
+        : { sym: symbol, size, t, o: t === last[0] ? last[1] : last[4], h: t === last[0] ? last[2] : px, l: t === last[0] ? last[3] : px, c: px };
+      e.h = Math.max(e.h, px); e.l = Math.min(e.l, px); e.c = px;
+      edge = e;
+      draw(raw); head(); legend();
     }
     async function load() {
       if (!my.pick || !my.alive) return;
@@ -487,7 +542,7 @@ defineWidget('candles', {
     // Clicks on the legend aren't chart drags.
     leg.addEventListener('pointerdown', e => e.stopPropagation());
 
-    const fresh = () => { my.chart?.remove(); my.over?.remove(); my.chart = my.candles = my.volume = my.over = null; my.emLines = []; my.posLines = []; my.sig = ''; my.emFor = ''; my.last = ''; my.drawn = { key: '', first: 0, len: 0 }; head(); legend(); load(); };
+    const fresh = () => { my.chart?.remove(); my.over?.remove(); my.chart = my.candles = my.volume = my.over = null; my.emLines = []; my.posLines = []; my.sig = ''; my.emFor = ''; my.last = ''; my.drawn = { key: '', first: 0, len: 0, lastT: 0 }; head(); legend(); load(); keep(); };
     // The builder's position, when shown and on this chart's symbol.
     const shownHere = () => !!(position.shown && position.pay && position.legs.length && position.sym === my.pick?.symbol);
     const money = (/** @type {number} */ v) => `${v < 0 ? '−' : '+'}$${Math.abs(v * 100).toFixed(0)}`;
@@ -566,17 +621,20 @@ defineWidget('candles', {
       if (!any && !OCC.test(symbol)) { my.err = 'Typing a ticker needs a service with bars for any symbol (alpaca-data).'; head(); return; }
       if (!my.typed.includes(symbol)) my.typed.push(symbol);
       my.pick = offered().find(c => c.symbol === symbol) || { service: optionRelay(symbol) || any, symbol };
+      my.linked = false; input.value = '';
       fresh();
     });
     const click = e => {
       const p = e.target.closest('[data-cd-pick]');
       if (p) { const [service, symbol] = p.dataset.cdPick.split('|'); my.pick = { service, symbol }; fresh(); return; }
       const z = e.target.closest('[data-cd-size]');
-      if (z) { my.size = +z.dataset.cdSize; fresh(); }
+      if (z) { my.size = +z.dataset.cdSize; fresh(); return; }
+      if (e.target.closest('[data-cd-link]')) { my.linked = !my.linked; if (my.linked) { const f = focused(), c = f && offered().find(x => x.symbol === f); if (c) { my.pick = c; fresh(); return; } } head(); keep(); }
     };
     el.addEventListener('click', click);
     // The symbol picked in a watchlist, or a new theme.
     const follow = (/** @type {Event} */ e) => {
+      if (!my.linked) return;
       const sym = /** @type {CustomEvent} */ (e).detail, any = anyService();
       if (typeof sym === 'string' && any && !offered().some(x => x.symbol === sym)) my.typed.push(sym);
       const c = typeof sym === 'string' && offered().find(x => x.symbol === sym);
@@ -586,7 +644,7 @@ defineWidget('candles', {
     // A contract to chart (the Spread builder's legs): today's mid from its relay.
     const chart = (/** @type {Event} */ e) => {
       const symbol = /** @type {CustomEvent} */ (e).detail, relay = typeof symbol === 'string' ? optionRelay(symbol) : null;
-      if (!relay) return;
+      if (!relay || !my.linked) return;
       if (!my.typed.includes(symbol)) my.typed.push(symbol);
       my.pick = { service: relay, symbol }; fresh();
     };
@@ -596,10 +654,11 @@ defineWidget('candles', {
     // Minute bars change once a minute: refresh them every 5 s, longer ones every minute.
     let ticks = 0;
     my.timer = setInterval(() => { if (my.size === 60 || ++ticks % 12 === 0) load(); }, 5000);
+    my.edgeTimer = setInterval(liveEdge, 2000);
     return {
       // The fleet's polls only matter for which symbols are offered.
       update() { if (!my.pick) { head(); load(); } },
-      dispose() { my.alive = false; clearInterval(my.timer); cancelAnimationFrame(my.raf); document.removeEventListener('tt-position', changed); my.chart?.remove(); el.removeEventListener('click', click); document.removeEventListener('tt-focus', follow); document.removeEventListener('tt-chart', chart); document.removeEventListener('tt-theme', follow); },
+      dispose() { my.alive = false; clearInterval(my.timer); clearInterval(my.edgeTimer); cancelAnimationFrame(my.raf); document.removeEventListener('tt-position', changed); my.chart?.remove(); el.removeEventListener('click', click); document.removeEventListener('tt-focus', follow); document.removeEventListener('tt-chart', chart); document.removeEventListener('tt-theme', follow); },
     };
   },
 });

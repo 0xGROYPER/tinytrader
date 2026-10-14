@@ -4,9 +4,10 @@ import { esc, duration } from '../lib/format.js';
 import { theme, LAYERS, DEFAULT_LAYERS } from '../lib/theme.js';
 import { dayTitle } from './day.js';
 
-// The US market calendar, from the first service that serves one.
-// The market calendar as a month: one widget that reads well as a page or
-// in a narrow tile (it sizes itself to its container, not the window).
+// The US market calendar, from the first service that serves one, as a
+// month of weekdays (markets don't trade weekends): one header line (the
+// month, its steps, whether the market is open, the layers), then a grid
+// that fills its panel, its cells shrinking to markers when short.
 // Short names for scheduled releases, for the month's small cells.
 const SHORT = [['Consumer Price Index', 'CPI'], ['Producer Price Index', 'PPI'], ['Employment Situation', 'Jobs'], ['Job Openings and Labor Turnover', 'JOLTS'], ['FOMC decision', 'FOMC'], ['FOMC minutes', 'Minutes'], ['GDP', 'GDP'], ['Gross Domestic Product', 'GDP'], ['Personal Income and Outlays', 'PCE'], ['Employment Cost Index', 'ECI'], ['Initial jobless claims', 'Claims'], ['U.S. International Trade', 'Trade'], ['U.S. Import and Export Price', 'Import px'], ['Productivity and Costs', 'Productivity'], ['EIA Weekly Petroleum', 'EIA crude'], ['EIA Weekly Natural Gas', 'EIA gas'], ['API weekly', 'API'], ['Baker Hughes', 'Rigs']];
 const short = title => SHORT.find(([p]) => title.startsWith(p))?.[1] || title.split(/[,(]/)[0].trim();
@@ -48,8 +49,8 @@ function draw(my) {
     if (d) { c.is_open = true; c.next_close = `${d.date}T${d.close}:00${c.next_open.slice(19)}`; }
   }
   const now = c.is_open
-    ? `<span class="pill p-ok" title="Closes ${esc(ny(c.next_close))}">Open</span><span class="muted">closes in ${until(c.next_close)}</span>`
-    : `<span class="pill p-idle" title="Opens ${esc(ny(c.next_open))}">Closed</span><span class="muted">opens in ${until(c.next_open)}</span>`;
+    ? `<span class="mcal-open" title="Closes ${esc(ny(c.next_close))}">Open · closes in ${until(c.next_close)}</span>`
+    : `<span class="mcal-closed" title="Opens ${esc(ny(c.next_open))}">Closed · opens in ${until(c.next_open)}</span>`;
   const sessions = new Map(cal.days.map(d => [d.date, d]));
   const firstDay = cal.days[0].date, lastDay = cal.days[cal.days.length - 1].date;
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -62,14 +63,18 @@ function draw(my) {
   if (month > months[1]) month = months[1];
   my.month = month;
   const [y, m] = month.split('-').map(Number);
-  const lead = new Date(Date.UTC(y, m - 1, 1)).getUTCDay(), count = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  const cells = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => `<div class="mcal-dow">${d}</div>`);
+  const first = new Date(Date.UTC(y, m - 1, 1)).getUTCDay(), count = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  // Monday to Friday: the first weekday's column (a month starting on a weekend starts on Monday).
+  const lead = first === 0 || first === 6 ? 0 : first - 1;
+  const cells = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].map(d => `<div class="mcal-dow">${d}</div>`);
   for (let i = 0; i < lead; i++) cells.push('<div class="cal-day blank"></div>');
   my.layers ||= new Set(theme()?.layers || DEFAULT_LAYERS);
   const rel = releases(my.layers);
   my.cells = new Map();
   for (let d = 1; d <= count; d++) {
-    const date = `${month}-${String(d).padStart(2, '0')}`, wd = (lead + d - 1) % 7, k = kind(date, wd), sess = sessions.get(date);
+    const wd = (first + d - 1) % 7;
+    if (wd === 0 || wd === 6) continue;
+    const date = `${month}-${String(d).padStart(2, '0')}`, k = kind(date, wd), sess = sessions.get(date);
     // Only what differs from a normal session is written: closed, or an early close.
     const hrs = k === 'holiday' ? 'Closed' : k === 'early' ? `Closes ${sess.close}` : '';
     const evs = rel.by.get(date) || [], reps = rel.reports.get(date) || [];
@@ -79,15 +84,15 @@ function draw(my) {
     const tags = evs.slice(0, 2).map(e => `<i class="evt ${esc(e.importance)}">${esc(short(e.title))}</i>`).join('') + (evs.length > 2 ? `<i class="evt more">+${evs.length - 2}</i>` : '')
       + (reps.length ? `<i class="evt earn">${esc(reps[0].symbol)}${reps.length > 1 ? ` +${reps.length - 1}` : ''}</i>` : '');
     my.cells.set(date, { hours: hrs || (k === 'open' ? `${sess.open}–${sess.close} ET` : k === 'weekend' ? 'Weekend' : ''), evs, reps });
-    cells.push(`<div class="cal-day k-${k}${date === today ? ' is-today' : ''}${date < today ? ' past' : ''}${date === my.pin ? ' picked' : ''}" data-day="${date}" aria-label="${esc(title)}"><span class="n">${d}</span>${hrs ? `<span class="hrs">${esc(hrs)}</span>` : ''}${tags ? `<span class="evts">${tags}</span>` : ''}</div>`);
+    cells.push(`<div class="cal-day k-${k}${tags ? ' has-ev' : ''}${date === today ? ' is-today' : ''}${date < today ? ' past' : ''}${date === my.pin ? ' picked' : ''}" data-day="${date}" aria-label="${esc(title)}"><span class="n">${d}</span>${hrs ? `<span class="hrs">${esc(hrs)}</span>` : ''}${tags ? `<span class="evts">${tags}</span>` : ''}</div>`);
   }
-  while (cells.length % 7) cells.push('<div class="cal-day blank"></div>');
+  while ((cells.length - 5) % 5) cells.push('<div class="cal-day blank"></div>');
   const label = new Date(Date.UTC(y, m - 1, 15)).toLocaleDateString(undefined, { timeZone: 'UTC', month: 'long', year: 'numeric' });
   const nav = (dir, text, off) => `<button type="button" class="tile-btn" data-cal-nav="${dir}"${off ? ' disabled' : ''} aria-label="${text}" title="${text}">${dir < 0 ? '‹' : '›'}</button>`;
-  const weeks = cells.length / 7 - 1;
+  const weeks = cells.length / 5 - 1;
+  const layers = rel.present.size ? `<span class="mcal-layers">${LAYERS.filter(([id]) => rel.present.has(id)).map(([id, label]) => `<button type="button" data-cal-layer="${id}" aria-pressed="${my.layers.has(id)}" title="Show ${label.toLowerCase()} events">${label}</button>`).join('')}</span>` : '';
   return head + `<div class="mcal">
-      <div class="mcal-head"><h2>${esc(label)}</h2><span class="mcal-now">${now}</span><span class="mcal-nav">${nav(-1, 'Previous month', month <= months[0])}<button type="button" class="btn small" data-cal-nav="0"${month === today.slice(0, 7) ? ' disabled' : ''}>Today</button>${nav(1, 'Next month', month >= months[1])}</span></div>
-      ${rel.present.size ? `<div class="mcal-layers chips">${LAYERS.filter(([id]) => rel.present.has(id)).map(([id, label]) => `<button type="button" class="chip-btn" data-cal-layer="${id}" aria-pressed="${my.layers.has(id)}">${label}</button>`).join('')}</div>` : ''}
+      <div class="mcal-head">${nav(-1, 'Previous month', month <= months[0])}<h2>${esc(label)}</h2>${nav(1, 'Next month', month >= months[1])}${month === today.slice(0, 7) ? '' : '<button type="button" class="mcal-today" data-cal-nav="0">Today</button>'}<span class="mcal-now">${now}</span>${layers}</div>
       <div class="mcal-grid" style="--weeks:${weeks}">${cells.join('')}</div>
     </div>
 `;
@@ -140,7 +145,10 @@ defineWidget('calendar', {
       const lo = el.scrollTop + 4, hi = el.scrollTop + el.clientHeight - pop.offsetHeight - 4;
       pop.style.top = `${Math.max(lo, Math.min(c.top - h.top + el.scrollTop, hi))}px`;
     };
-    const update = () => { paint(el, draw(my)); card(); };
+    // Rows too short for tags show a dot instead.
+    const fit = () => { const cell = /** @type {HTMLElement | null} */ (el.querySelector('.cal-day[data-day]')); el.querySelector('.mcal')?.classList.toggle('tight', !!cell && cell.clientHeight < 46); };
+    const update = () => { paint(el, draw(my)); fit(); card(); };
+    const resized = new ResizeObserver(fit); resized.observe(el);
     // A day expanded, hour by hour, as a Day tab beside this one: a hard click
     // (Safari on a Force Touch trackpad), a double-click, or a long press.
     const dayAt = e => /** @type {HTMLElement | null} */ (e.target.closest?.('[data-day]'))?.dataset.day || null;
@@ -156,12 +164,18 @@ defineWidget('calendar', {
       press = setTimeout(() => { pressed = true; expand(d); }, 500);
     };
     const up = () => clearTimeout(press);
+    // A day's card shows once the mouse has rested on it (0.7 s), so passing
+    // over the month never covers it; a click shows it at once and pins it.
+    let rest = 0, waiting = /** @type {string | null} */ (null);
     const over = e => {
       if (e.target.closest('.cal-pop')) return;
       const day = e.target.closest('[data-day]')?.dataset.day || null;
-      if (day !== my.hover) { my.hover = day; card(); }
+      if (day === my.hover || day === waiting) return;
+      clearTimeout(rest); waiting = day;
+      if (my.hover) { my.hover = null; card(); }
+      if (day) rest = setTimeout(() => { waiting = null; my.hover = day; card(); }, 700);
     };
-    const leave = () => { if (my.hover) { my.hover = null; card(); } };
+    const leave = () => { clearTimeout(rest); waiting = null; if (my.hover) { my.hover = null; card(); } };
     const click = e => {
       // The click ending a long press isn't also a pin.
       if (pressed) { pressed = false; return; }
@@ -174,7 +188,7 @@ defineWidget('calendar', {
       const day = e.target.closest('[data-day]');
       // Two clicks on a day in quick succession expand it (the first's redraw
       // replaces the cell, so the browser never sees a double-click).
-      if (day) Object.assign(last, { day: day.dataset.day, at: e.timeStamp, x: e.clientX, y: e.clientY });
+      if (day) { Object.assign(last, { day: day.dataset.day, at: e.timeStamp, x: e.clientX, y: e.clientY }); clearTimeout(rest); waiting = null; }
       // A click pins the day's card (for touch, or to read it at length); again unpins.
       if (day) { my.pin = my.pin === day.dataset.day ? null : day.dataset.day; update(); return; }
       if (my.pin && !e.target.closest('[data-cal-nav]')) { my.pin = null; update(); return; }
@@ -188,6 +202,6 @@ defineWidget('calendar', {
     const events = [['click', click], ['mouseover', over], ['mouseleave', leave], ['webkitmouseforcedown', force], ['webkitmouseforcewillbegin', forceWill], ['pointerdown', down], ['pointerup', up], ['pointercancel', up], ['pointermove', up]];
     for (const [k, f] of events) el.addEventListener(k, f);
     update();
-    return { update, dispose: () => { for (const [k, f] of events) el.removeEventListener(k, f); document.removeEventListener('tt-theme', themed); } };
+    return { update, dispose: () => { for (const [k, f] of events) el.removeEventListener(k, f); resized.disconnect(); clearTimeout(rest); document.removeEventListener('tt-theme', themed); } };
   },
 });

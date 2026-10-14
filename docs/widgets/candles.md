@@ -2,10 +2,11 @@
 
 Candlesticks and volume for a symbol at the bar size you pick (1m, 5m, 15m, 1h, 1D, 1W), with as much history as you scroll back to, and indicators listed over the chart as on TradingView. Times are New York time.
 
-**Data:** A relay's bars where a relay carries the symbol and no service has bars for any symbol (minutes from its session, combined into larger bars); otherwise alpaca-data's: consolidated (SIP) history, with only the last 15 minutes from IEX. Bars are kept in the page: switching symbol or bar size and coming back costs a refresh of the latest bars, not the history.
+**Data:** A relay's bars where a relay carries the symbol and no service has bars for any symbol (minutes from its session, combined into larger bars); otherwise alpaca-data's: consolidated (SIP) history, with only the last 15 minutes from IEX. Bars are kept in the page: switching symbol or bar size and coming back costs a refresh of the latest bars, not the history. Finished bars arrive a minute at a time (and alpaca-data keeps them a minute), so the bar forming now is drawn live: every 2 seconds the latest trade (a stock snapshot, IEX, the same prints as the [Tape](tape.md)) moves its close, high and low, or starts the next bar, until the real bar replaces it. That's for intraday sizes and today's daily bar; options and indexes have no snapshot and wait for their bars.
 
 **Using it:**
 
+- Several charts can share a view (add another from the palette or a panel's +). Each is **Linked** (it follows the symbol picked in a watchlist, Search or the Spread builder) until a ticker is typed into its own box, which pins it (**Pinned**) to that ticker; click the button to switch. Each chart keeps its symbol, bar size and link in the view's layout.
 - Pick a bar size. The chart opens on the latest bars; drag it right, scroll back, or zoom out, and older bars load a chunk at a time until the source has no more ("start of history" in the legend).
 - In a themed workspace it shows the theme's symbols; it follows the watchlist's selection.
 - **Ticker box:** type any symbol and press Enter to chart it (needs a service with bars for any symbol, alpaca-data). Type an option in compact OCC form, such as `SPY261012C00777000`, to chart **today's mid** of that contract from its OPRA relay (SPY and XSP options; Databento's intraday replay, one-minute quotes). Clicking a contract in the Spread builder's legs does the same. Clicking a ticker in another widget (Watchlist, Options screener, Earnings week) charts it too.

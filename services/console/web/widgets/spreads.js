@@ -15,6 +15,8 @@ import { esc } from '../lib/format.js';
 import { focused, theme } from '../lib/theme.js';
 import { position, publish, wanted } from '../lib/position.js';
 import { recommend } from '../lib/recommend.js';
+import { STRUCTURES, structureOptions, identify, whatIs } from '../lib/structures.js';
+import { notSentText } from '../lib/orders.js';
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (_) { /* private mode */ } return null; };
 // Each account's open orders as the broker has them (alpaca-account), however placed: null if unknown.
@@ -38,19 +40,6 @@ function bs(type, S, K, t, v) {
   const call = S * N(d1) - K * N(d2);
   return type === 'call' ? call : call - S + K;
 }
-
-// Structures: legs relative to the at-the-money strike index and the width
-// in listed strikes (w). side +1 buys, -1 sells.
-const STRUCTURES = {
-  'Iron condor': w => [['call', w, -1, 1], ['put', -w, -1, 1], ['call', 2 * w, 1, 1], ['put', -2 * w, 1, 1]],
-  'Iron fly': w => [['call', 0, -1, 1], ['put', 0, -1, 1], ['call', w, 1, 1], ['put', -w, 1, 1]],
-  'Strangle': w => [['call', w, -1, 1], ['put', -w, -1, 1]],
-  'Straddle': w => [['call', 0, 1, 1], ['put', 0, 1, 1]],
-  'Call spread': w => [['call', 0, 1, 1], ['call', w, -1, 1]],
-  'Put spread': w => [['put', 0, 1, 1], ['put', -w, -1, 1]],
-  'Call': w => [['call', 0, 1, 1]],
-  'Put': w => [['put', 0, 1, 1]],
-};
 
 defineWidget('spreads', {
   title: 'Spread builder',
@@ -177,11 +166,16 @@ defineWidget('spreads', {
       $('.sb-paybtn').setAttribute('aria-pressed', String(my.payoff));
       // The structure: a preset, or what the legs came from (a suggestion, held, edited).
       const preset = !!STRUCTURES[my.structure] && !my.why;
-      $('.sb-st').innerHTML = (preset ? '' : `<option selected>${esc(my.structure)}</option>`)
-        + Object.keys(STRUCTURES).map(n => `<option${preset && n === my.structure ? ' selected' : ''}>${esc(n)}</option>`).join('');
+      // Edited legs keep a name when their shape has one (a bull call spread
+      // with its strikes moved is still one), so you can see what you built.
+      const shape = my.structure === 'Custom' ? identify(legs()) : null;
+      const label = my.structure === 'Custom' ? (shape ? `${shape} (edited)` : 'Custom') : my.structure;
+      $('.sb-st').innerHTML = (preset ? '' : `<option selected>${esc(label)}</option>`)
+        + structureOptions(preset ? my.structure : '', esc);
       // Held legs: the ticket is away until none are left (an order for them would open more).
       const heldNote = a?.held ? `${my.held ? `Your positions on ${esc(my.held.account)}` : 'Includes positions held'}, at their entry prices. Change a strike or type to try an adjustment.` : '';
-      $('.sb-why').innerHTML = my.why ? `<b>${esc(my.structure)}.</b> ${esc(my.why)}` : heldNote;
+      const shapeNote = shape ? `<b>${esc(shape)}.</b> ${esc(whatIs(shape).replace(/ w /g, ' ').replace(/ 2w /g, ' ') || 'Its legs, as you set them.')}` : '';
+      $('.sb-why').innerHTML = my.why ? `<b>${esc(my.structure)}.</b> ${esc(my.why)}` : heldNote || shapeNote;
       // The legs as a positions table, like the broker's: each contract, its mid,
       // signed quantity (− sells), market value and delta in shares; the strike
       // steps with ‹ ›, C/P switches type, the quantity steps through zero to flip side.
@@ -392,7 +386,7 @@ defineWidget('spreads', {
       const id = esc(v.client_order_id || v.current?.client_order_id || '');
       if (v.outcome === 'accepted') return `<span class="sb-good">Accepted by the broker (${esc(v.status || 'new')}), ${id}. Not a fill yet: it's listed below until it fills or is cancelled.</span>`;
       if (v.outcome === 'rejected') return `<span class="sb-bad">Rejected by the broker: ${esc(v.message || v.code || '')}.</span>`;
-      if (v.outcome === 'not_sent') return `<span class="sb-bad">Not sent (${esc(v.reason || '')}): ${esc(v.detail || '')}.</span>`;
+      if (v.outcome === 'not_sent') return `<span class="sb-bad">Not sent: ${esc(notSentText(v.reason || '', v.detail))}.</span>`;
       if (v.outcome === 'unknown') return `<span class="sb-bad">Unknown (${esc(v.reason || '')}): it may have reached the broker. Don't send it again; the gateway is checking and it will show below if it did.</span>`;
       return esc(JSON.stringify(v).slice(0, 200));
     }
@@ -489,6 +483,9 @@ defineWidget('spreads', {
     document.addEventListener('tt-recommend', asked);
     document.addEventListener('tt-held', heldAsked);
     document.addEventListener('tt-focus', follow);
+    // Opened from an account's card: that account for the Trade review.
+    const acctAsked = e => { const n = /** @type {CustomEvent} */ (e).detail; if (typeof n === 'string' && n) { my.acct = n; my.typed = ''; render(); } };
+    document.addEventListener('tt-sb-account', acctAsked);
     if (wanted.held) heldAsked(); else if (wanted.ask) asked(); else { render(); loadChain(); }
     loadOrders();
     resized.observe(el);
@@ -500,7 +497,7 @@ defineWidget('spreads', {
       update() {},
       dispose() {
         my.alive = false; clearInterval(timer); resized.disconnect();
-        document.removeEventListener('tt-recommend', asked); document.removeEventListener('tt-held', heldAsked); document.removeEventListener('tt-focus', follow);
+        document.removeEventListener('tt-recommend', asked); document.removeEventListener('tt-held', heldAsked); document.removeEventListener('tt-focus', follow); document.removeEventListener('tt-sb-account', acctAsked);
         publish({ shown: false });
       },
     };

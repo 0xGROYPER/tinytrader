@@ -5,14 +5,15 @@
 // Arrow keys choose, Enter opens, Escape closes. Picking a ticker shows its
 // results in the same panel: price and the day's change, what the screener
 // knows of it (sector, size, options), its next earnings and recent news,
-// with buttons to chart it, build options on it, add it to a watchlist or
-// open it as a view of its own. A search in the header shows its results in
-// the view's Search panel, or a new one beside the active panel (lib/app.js).
+// with buttons to chart it, build options on it, add it to a watchlist, set
+// price alerts on it (lib/alerts.js) or open it as a view of its own. A search in the header opens a view on the
+// ticker instead, in the Tickers folder (lib/app.js).
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, newsItems } from '../lib/fleet.js';
 import { parseSymbols, setFocus } from '../lib/theme.js';
 import { esc, ago, unentity } from '../lib/format.js';
 import { watchlists, addSymbols } from '../lib/watchlists.js';
+import { alertsFor, alertForm } from '../lib/alerts.js';
 import { mark } from './docs.js';
 
 const MAX = 8;
@@ -65,7 +66,7 @@ function suggest(q) {
  * A ticker search box: as you type, a menu of matching tickers; arrow keys
  * choose, Enter or a click picks it, and Escape closes. Used by the Search
  * widget (which shows the results itself) and the header's box (which asks
- * the shell to: `tt-open-ticker`).
+ * the shell for a view on it: `tt-open-ticker`).
  * @param {HTMLElement} root holds the form, menu and error line
  * @param {(symbol: string) => void} [onPick] what picking does; else `tt-open-ticker`
  * @returns {() => void} removes its listeners
@@ -170,7 +171,7 @@ async function results(sym) {
   };
 }
 
-function resultsView(sym, res) {
+function resultsView(sym, res, alerting = false) {
   const name = res?.row?.name || universe().get(sym) || '';
   if (!res) return `<div class="sr"><div class="sr-head"><h2 class="mono">${esc(sym)}</h2><span class="muted">${esc(name)}</span></div><p class="muted">Looking it up…</p></div>`;
   const { quote: qt, row, next, stories } = res, c = qt?.change_pct;
@@ -187,8 +188,10 @@ function resultsView(sym, res) {
     <div class="sr-head"><h2 class="mono">${esc(sym)}</h2><span class="sr-name">${esc(name)}</span></div>
     <div class="sr-quote">${qt?.price != null ? `<span class="big mono">${qt.price.toFixed(2)}</span><span class="mono ${c > 0 ? 'pos' : c < 0 ? 'neg' : ''}">${qt.change != null ? `${qt.change >= 0 ? '+' : '−'}${Math.abs(qt.change).toFixed(2)}` : ''} (${pct(c)}) today</span>` : '<span class="muted">No price for it.</span>'}</div>
     <div class="sr-acts"><button type="button" class="btn small" data-sr="chart">Chart</button><button type="button" class="btn small" data-sr="options">Options</button>
-      <select class="sr-list" aria-label="Add to a watchlist"><option value="">Add to watchlist…</option>${watchlists().map(l => `<option value="${esc(l.name)}"${l.symbols.includes(sym) ? ' disabled' : ''}>${esc(l.name)}${l.symbols.includes(sym) ? ' (in it)' : ''}</option>`).join('')}</select>
+      <select class="sr-list" aria-label="Add to a watchlist"><option value="">+ Add to watchlist…</option>${watchlists().map(l => `<option value="${esc(l.name)}"${l.symbols.includes(sym) ? ' disabled' : ''}>${esc(l.name)}${l.symbols.includes(sym) ? ' (in it)' : ''}</option>`).join('')}</select>
+      <button type="button" class="btn small" data-sr="alert" aria-pressed="${alerting}" title="Price alerts for ${esc(sym)}">Alert${alertsFor(sym).length ? ` (${alertsFor(sym).length})` : ''}</button>
       <button type="button" class="btn small" data-sr="view" title="A view of its own, with its chart, news and earnings">Open as a view</button></div>
+    ${alerting ? alertForm(sym, qt?.price, 'data-sr="alert"') : ''}
     ${stats ? `<div class="sr-stats">${stats}</div>` : ''}
     ${next ? `<p class="sr-earn">Next earnings <b>${esc(next.date)}</b>${when[next.when] ? `, ${when[next.when]}` : ''}${next.eps_estimate != null ? ` · EPS estimate ${next.eps_estimate}` : ''}</p>` : ''}
     <h3>News</h3>
@@ -203,7 +206,7 @@ defineWidget('search', {
   mount(el) {
     // A symbol to show from the start (the header's search, opening this panel).
     let args = {}; try { args = JSON.parse(el.dataset.args || '{}'); } catch (_) {}
-    const my = { sym: /** @type {string | null} */ (args.symbol || null), res: /** @type {any} */ (null), alive: true };
+    const my = { sym: /** @type {string | null} */ (args.symbol || null), res: /** @type {any} */ (null), alive: true, alert: false };
     const box = (compact) => `<div class="${compact ? 'sr-search' : 'docs-home'}">
       ${compact ? `<button type="button" class="tile-btn" data-sr="back" title="Back to Search" aria-label="Back to Search">‹</button>` : mark()}
       <form class="hm-form" role="search" autocomplete="off">
@@ -218,10 +221,10 @@ defineWidget('search', {
     const draw = () => {
       // The box is rebuilt only when it changes shape, so it keeps what's typed.
       if (compact !== !!my.sym) { compact = !!my.sym; unbind(); top.innerHTML = box(compact); unbind = bindSearch(top, show); }
-      paint(main, my.sym ? resultsView(my.sym, my.res) : '');
+      if (!main.querySelector('.al-form')?.contains(document.activeElement)) paint(main, my.sym ? resultsView(my.sym, my.res, my.alert) : '');
     };
     const show = sym => {
-      my.sym = sym; my.res = null; draw();
+      my.sym = sym; my.res = null; my.alert = false; draw();
       el.dispatchEvent(new CustomEvent('tt-tab-args', { bubbles: true, detail: { args: { symbol: sym }, title: `Search · ${sym}` } }));
       results(sym).then(r => { if (my.alive && my.sym === sym) { my.res = r; draw(); } });
     };
@@ -234,6 +237,7 @@ defineWidget('search', {
         setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym }));
         document.dispatchEvent(new CustomEvent('tt-show-view', { detail: a === 'chart' ? 'candles' : 'spreads' }));
       }
+      if (a === 'alert') { my.alert = !my.alert; draw(); /** @type {HTMLInputElement | null} */ (main.querySelector('.al-form input'))?.focus(); }
       if (a === 'view') el.dispatchEvent(new CustomEvent('tt-open-ticker-view', { bubbles: true, detail: { symbol: sym } }));
     };
     const change = e => {
@@ -243,9 +247,9 @@ defineWidget('search', {
     // The header's search, asking this panel to show a ticker.
     const asked = e => { const d = /** @type {CustomEvent} */ (e).detail; if (d?.panel === el) show(d.symbol); };
     el.addEventListener('click', click); el.addEventListener('change', change);
-    document.addEventListener('tt-search-show', asked);
+    document.addEventListener('tt-search-show', asked); document.addEventListener('tt-alerts', draw); document.addEventListener('tt-watchlist', draw);
     draw();
     if (my.sym) show(my.sym);
-    return { dispose: () => { my.alive = false; unbind(); el.removeEventListener('click', click); el.removeEventListener('change', change); document.removeEventListener('tt-search-show', asked); } };
+    return { dispose: () => { my.alive = false; unbind(); el.removeEventListener('click', click); el.removeEventListener('change', change); document.removeEventListener('tt-search-show', asked); document.removeEventListener('tt-alerts', draw); document.removeEventListener('tt-watchlist', draw); } };
   },
 });

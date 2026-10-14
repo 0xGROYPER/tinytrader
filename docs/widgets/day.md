@@ -1,6 +1,6 @@
 # Day
 
-One market day hour by hour, in New York time from 04:00 to 20:00: the pre-market, the session and after-hours shaded apart, each scheduled release at its time, and the day's earnings where they land.
+One market day hour by hour, in New York time within 04:00 to 20:00 and only as far as something happens (from the first hour with a release, the open, earnings or now, to the last), with three or more quiet hours in a row folded to one line: the pre-market, the session and after-hours shaded apart, each scheduled release at its time, and the day's earnings where they land.
 
 **Data:** releases and earnings from the economic calendar service (its merged calendars); the session's hours from the market calendar.
 

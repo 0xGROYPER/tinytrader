@@ -32,9 +32,16 @@ import '../widgets/notebook.js';
 import '../widgets/terminal.js';
 import '../widgets/earningsweek.js';
 import '../widgets/spreads.js';
+import '../widgets/alerts.js';
+import '../widgets/tape.js';
+import { watch as watchAlerts, unseen, alerts as priceAlerts, describe as alertText, markSeen, alertForm, alertsFor } from './alerts.js';
 import '../widgets/screener.js';
 import '../widgets/day.js';
 import '../widgets/heatmap.js';
+import '../widgets/crossasset.js';
+import '../widgets/observations.js';
+import '../widgets/relations.js';
+import { watchlists, addList, addSymbols } from './watchlists.js';
 import { setTheme, PRESETS, parseSymbols, parseKeywords, LAYERS, DEFAULT_LAYERS } from './theme.js';
 const state = { openGroups: new Set(), navKey: '', tab: 'workspace', lastOk: 0, collections: [], doc: null };
 /** An element by ID, typed loosely enough for forms and buttons alike. @type {(id: string) => HTMLInputElement} */
@@ -254,10 +261,11 @@ function refreshTiles() {
 function buildTree(tree) {
   const leaf = n => n.view || n.tabs;
   const first = n => leaf(n) ? n : first(n.a);
-  const add = (view, ref, dir) => dock.addPanel({ id: panelId(), component: 'view', params: { view: viewOf(view) }, title: VIEWS[viewOf(view)] || view, ...(ref ? { position: { referencePanel: ref, direction: dir } } : {}) });
+  // A leaf may carry its panel's arguments (`args`: a watchlist's list).
+  const add = (view, ref, dir, args) => dock.addPanel({ id: panelId(), component: 'view', params: { view: viewOf(view), ...(args ? { args } : {}) }, title: VIEWS[viewOf(view)] || view, ...(ref ? { position: { referencePanel: ref, direction: dir } } : {}) });
   const place = (n, ref, dir) => {
     const [v, ...more] = n.tabs || [n.view];
-    const p = add(v, ref, dir);
+    const p = add(v, ref, dir, n.args);
     for (const m of more) add(m, p, 'within');
     if (more.length) p.api.setActive();
     return p;
@@ -323,6 +331,12 @@ function mountWorkspace() {
     try { if (cur?.dock) dock.fromJSON(cur.dock); else buildTree(cur?.tree || LAYOUTS.Market()); }
     catch (e) { dock.clear(); buildTree(cur?.tree || LAYOUTS.Market()); }
   }
+  // Panels copied or moved here from another view (the palette's "Copy this
+  // panel to…"), added along the right on arriving.
+  if (cur?.add?.length) {
+    for (const a of cur.add) dock.addPanel({ id: panelId(), component: 'view', params: { view: a.view, ...(a.args ? { args: a.args } : {}) }, title: a.title || VIEWS[a.view] || a.view, position: { direction: 'right' } });
+    delete cur.add; setTimeout(laySave);
+  }
   if (state.focusView) { dock.panels.find(p => p.params?.view === state.focusView)?.api.setActive(); state.focusView = null; }
   const mine = dock;
   dock.onDidRemovePanel(p => {
@@ -343,6 +357,19 @@ function mountWorkspace() {
   // Charts measure their panels, so draw them once the layout has settled.
   requestAnimationFrame(() => requestAnimationFrame(drawCharts));
 }
+// A watchlist made later gets its view; one renamed takes its view's name along.
+document.addEventListener('tt-watchlist', () => { if (watchViews()) layStore(); watchHome(); });
+document.addEventListener('tt-watchlist-renamed', e => {
+  const { from, to } = /** @type {CustomEvent} */ (e).detail;
+  const v = lay.list.find(x => x.watch === from); if (!v) return;
+  v.watch = to;
+  if (v.name === from && !lay.list.some(x => x.name === to)) { if (lay.current === from) lay.current = to; v.name = to; }
+  // The list it shows, in its saved layout.
+  const re = JSON.stringify(v.dock || v.tree).replaceAll(`"list":${JSON.stringify(from)}`, `"list":${JSON.stringify(to)}`);
+  if (v.dock) v.dock = JSON.parse(re); else v.tree = JSON.parse(re);
+  const seeded = new Set(parseList(SEEDED)); seeded.add(to); lsSet(SEEDED, JSON.stringify([...seeded]));
+  layStore();
+});
 // A widget asking for a tab beside itself (the Calendar's day, opened as a
 // Day tab): one such tab per workspace, reused and pointed at the new
 // arguments, else added to the asking panel's group.
@@ -375,9 +402,12 @@ document.addEventListener('tt-tab-args', e => {
 });
 // Show a view: activate it if open; otherwise put it in the active panel,
 // beside it, as a tab with it, or along an edge of the whole workspace.
-function wsShow(view, where) {
+// Added from the palette or a panel's +, a widget is added even when the view
+// has one (several charts); asked for by another widget (reuse), the one
+// there is shown instead.
+function wsShow(view, where, reuse = false) {
   if (!dock) return;
-  const open = dock.panels.find(p => p.params?.view === view);
+  const open = reuse && dock.panels.find(p => p.params?.view === view);
   if (open) { open.api.setActive(); return; }
   const ref = activePanel();
   if (where === 'here' && ref) {
@@ -391,7 +421,7 @@ function wsShow(view, where) {
 // A widget asking for another to be shown (the screener for the Spread
 // builder, the builder for Candles): opened beside the active panel if it
 // isn't in the workspace.
-document.addEventListener('tt-show-view', e => { const v = /** @type {CustomEvent} */ (e).detail; if (state.tab === 'workspace' && VIEWS[v]) wsShow(v, 'right'); });
+document.addEventListener('tt-show-view', e => { const v = /** @type {CustomEvent} */ (e).detail; if (state.tab === 'workspace' && VIEWS[v]) wsShow(v, 'right', true); });
 function wsMaximise() { const p = activePanel(); if (p) p.api.isMaximized() ? p.api.exitMaximized() : p.api.maximize(); }
 document.addEventListener('keydown', e => {
   if (state.tab !== 'workspace' || pal.open || sw.open) return;
@@ -412,6 +442,18 @@ function wsCommands() {
     out.push({ label: `Add ${label} as a row along the bottom`, run: () => wsShow(v, 'row') });
   }
   out.push({ label: activePanel()?.api.isMaximized() ? 'Restore all panels' : 'Maximise this panel', run: wsMaximise });
+  // This panel into another view (with its settings): a copy, or moved.
+  const ap = activePanel();
+  if (ap) for (const l of lay.list) {
+    if (l.name === lay.current) continue;
+    const send = move => () => {
+      l.add = [...(l.add || []), { view: ap.params.view, args: ap.params.args, title: ap.api.title }];
+      if (move && (dock?.panels.length || 0) > 1) ap.api.close();
+      layStore(); wsnHint(`${ap.api.title || 'The panel'} ${move ? 'moved' : 'copied'} to ${l.name}`);
+    };
+    const where = `“${l.name}”${groupOf(l) && groupOf(l) !== l.name ? ` (${groupOf(l).split('/').join(' / ')})` : ''}`;
+    out.push({ label: `Copy this panel to ${where}`, run: send(false) }, { label: `Move this panel to ${where}`, run: send(true) });
+  }
   if ((dock?.panels.length || 0) > 1) out.push({ label: 'Close this panel', run: () => activePanel()?.api.close() });
   for (const [name, make] of Object.entries(LAYOUTS)) out.push({ label: `Apply template: ${name}`, run: () => { dock.clear(); buildTree(make()); } });
   for (const [name, [, make]] of Object.entries(READY)) out.push({ label: `New view in this folder: ${name}`, run: () => wsAdd(name, make()) });
@@ -448,8 +490,10 @@ document.addEventListener('click', e => {
 // Saved workspaces: { name, group, dock (Dockview's layout) or tree }.
 const LS = { list: 'tinytrader-workspaces', current: 'tinytrader-workspace-current' };
 const lay = { list: [], current: null, reset: false };
+// A saved workspace's folder.
+const groupOf = l => l?.group || '';
 // The ready-made views' folders: market views together, operations together.
-const HOME = { Market: 'Market', Watchlist: 'Market', 'Oil & Iran': 'Market', Earnings: 'Market', Operations: 'Operations', Data: 'Operations' };
+const HOME = { Market: 'Market', Watchlist: 'Market/Watchlists', 'Oil & Iran': 'Market', Earnings: 'Market', Operations: 'Operations', Data: 'Operations' };
 // The side pane's settings and folders (below).
 const WSN = { folders: 'tinytrader-folders', expanded: 'tinytrader-folders-open' };
 const lsGet = k => { try { return localStorage.getItem(k); } catch (_) { return null; } };
@@ -461,6 +505,10 @@ const wsn = { open: false, folders: parseList(WSN.folders), expanded: new Set(pa
   // The row picked with the keys.
   sel: '',
   /** @type {null | { kind: 'folder' | 'view', name: string }} */ confirm: null };
+// Where ⌥ and the arrows are in the tree (below): the folder, what's picked in it.
+const nav = { level: /** @type {string | null} */ (null), pick: /** @type {null | { kind: 'view' | 'folder', name: string }} */ (null), at: '',
+  // The view last open in each folder.
+  last: new Map(), timer: 0 };
 const folderUp = p => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
 const leafOf = p => p.slice(p.lastIndexOf('/') + 1);
 const joinPath = (a, b) => a ? `${a}/${b}` : b;
@@ -518,7 +566,54 @@ if (lsGet('tinytrader-tree') == null) {
   for (const l of lay.list) if (HOME[l.name] && l.group === l.name) l.group = HOME[l.name];
   lsSet('tinytrader-tree', '1');
 }
+// Once: the ready-made Watchlist view moves into its own folder, Market › Watchlists.
+if (lsGet('tinytrader-tree-2') == null) {
+  for (const l of lay.list) if (l.name === 'Watchlist' && l.group === 'Market') l.group = 'Market/Watchlists';
+  lsSet('tinytrader-tree-2', '1');
+}
 homeless();
+// A view for each watchlist, in a Watchlists folder inside the market
+// folder (Market, or Markets if that's what yours is called): the list, a
+// chart of the symbol picked and its news, so ⌥↑/⌥↓ step through the lists.
+// Once the folder has been moved, new lists' views follow it there. A list
+// gets its view once (when first seen); deleting the view doesn't bring it
+// back, and a list renamed keeps its view, renamed with it.
+const SEEDED = 'tinytrader-watch-views';
+const watchView = name => ({ dir: 'row', ratio: 0.45, a: { dir: 'col', ratio: 0.55, a: { view: 'watchlist', args: { list: name } }, b: { view: 'candles' } }, b: { view: 'news' } });
+function marketRoot() {
+  const roots = allFolders().filter(f => !f.includes('/') && /^markets?$/i.test(f));
+  // One of yours (with views of its own) before the ready-made Market.
+  return roots.find(f => lay.list.some(l => under(groupOf(l), f) && !l.watch)) || roots[0] || 'Market';
+}
+function watchFolder() {
+  const had = lay.list.find(v => v.watch);
+  return had ? groupOf(had) : `${marketRoot()}/Watchlists`;
+}
+// The Watchlists folder left in a Market of its own, beside a Markets of
+// yours: moved into yours.
+function watchHome() {
+  const f = watchFolder(), root = f.split('/')[0], want = marketRoot();
+  if (f !== `${root}/Watchlists` || root === want || !/^markets?$/i.test(root)) return;
+  if (lay.list.some(l => under(groupOf(l), root) && !under(groupOf(l), f))) return;
+  moveFolder(f, `${want}/Watchlists`);
+  wsn.folders = wsn.folders.filter(x => x !== root); wsn.expanded.delete(root); wsnKeep(); layStore();
+}
+function watchViews() {
+  const seeded = new Set(parseList(SEEDED)), into = watchFolder();
+  let added = false;
+  for (const l of watchlists()) {
+    if (seeded.has(l.name)) continue;
+    seeded.add(l.name);
+    if (lay.list.some(v => v.watch === l.name)) continue;
+    let n = l.name; for (let k = 2; lay.list.some(v => v.name === n); k++) n = `${l.name} ${k}`;
+    lay.list.push({ name: n, group: into, watch: l.name, tree: watchView(l.name) });
+    added = true;
+  }
+  lsSet(SEEDED, JSON.stringify([...seeded]));
+  if (added) for (let f = into; f; f = folderUp(f)) wsn.expanded.add(f);
+  return added;
+}
+watchViews();
 { const f = lay.list.find(l => l.name === lay.current)?.group || ''; for (let p = f; p; p = folderUp(p)) wsn.expanded.add(p); }
 // Every view lives in a workspace: one found loose (from before workspaces,
 // a ready-made one, or moved out of a deleted workspace) gets a workspace of
@@ -543,12 +638,12 @@ function laySwitch(name) {
   // Its folder opens in the side pane.
   for (let f = groupOf(lay.list.find(l => l.name === name)); f; f = folderUp(f)) wsn.expanded.add(f);
   wsnKeep(); layStore();
+  nav.last.set(groupOf(lay.list.find(l => l.name === name)), name);
   state.tab = 'workspace'; state.doc = null;
   try { history.replaceState(null, '', '/#w-' + encodeURIComponent(name)); } catch (_) {}
   state.navigated = true; render(); window.scrollTo(0, 0);
 }
 // Groups, in order of first appearance; ungrouped workspaces form their own.
-const groupOf = l => l?.group || '';
 const groups = () => [...new Set(lay.list.map(groupOf))];
 const inGroup = g => lay.list.filter(l => groupOf(l) === g);
 const layViews = l => l.dock ? Object.values(l.dock.panels || {}).map(p => p.params?.view) : (function leaves(n) { return n ? (n.view ? [n.view] : n.tabs ? n.tabs : [...leaves(n.a), ...leaves(n.b)]) : []; })(l.tree);
@@ -639,9 +734,41 @@ function updateLayoutNav() {
   const box = $('wtabs'); if (!box) return;
   const docs = state.tab.startsWith('col:');
   const where = groupOf(lay.list.find(l => l.name === lay.current));
-  const html = docs ? '' : `<button type="button" class="wtab wtab-name" data-wsn-toggle title="Views (⌥B) · ⌥↑ ⌥↓ the views in this folder" aria-label="Folder ${esc(where || 'top level')}, view ${esc(lay.current || '')}">${where && where !== lay.current ? `<span class="muted">${esc(where.split('/').join(' / '))} ›</span>&nbsp;` : ''}${esc(lay.current || '')}</button>`;
+  const html = docs ? '' : `<button type="button" class="wtab wtab-name" data-wsn-toggle title="Views (⌥B) · ⌥↑⌥↓ this folder · ⌥→ into a folder · ⌥← up a level" aria-label="Folder ${esc(where || 'top level')}, view ${esc(lay.current || '')}">${where && where !== lay.current ? `<span class="muted">${esc(where.split('/').join(' / '))} ›</span>&nbsp;` : ''}${esc(lay.current || '')}</button>${tickerTools()}`;
   if (box.innerHTML !== html) box.innerHTML = html;
 }
+// A view on one ticker (a header search's) gets, beside its name, a menu
+// to add the ticker to a watchlist and a button for its price alerts.
+const viewTicker = () => { const t = lay.list.find(l => l.name === lay.current)?.theme; return t?.symbols?.length === 1 ? t.symbols[0] : ''; };
+function tickerTools() {
+  const sym = viewTicker(); if (!sym) return '';
+  const lists = watchlists(), n = alertsFor(sym).length;
+  return `<select class="wtab-wl" data-tk-list aria-label="Add ${esc(sym)} to a watchlist"><option value="">+ Watchlist</option>${lists.map(l => `<option value="${esc(l.name)}"${l.symbols.includes(sym) ? ' disabled' : ''}>${esc(l.name)}${l.symbols.includes(sym) ? ' ✓' : ''}</option>`).join('')}<option value="__new__">New list…</option></select>`
+    + `<button type="button" class="wtab wtab-al${n ? ' on' : ''}" data-tk-alert aria-expanded="${!!$('tk-pop')}" title="Price alerts for ${esc(sym)}">${n ? `Alerts ${n}` : 'Alert'}</button>`;
+}
+function tkPop(open) {
+  $('tk-pop')?.remove();
+  if (open) {
+    const b = /** @type {HTMLElement} */ (document.querySelector('[data-tk-alert]')); if (!b) return;
+    const r = b.getBoundingClientRect(), sym = viewTicker();
+    document.body.insertAdjacentHTML('beforeend', `<div class="tk-pop" id="tk-pop" style="top:${r.bottom + 6}px;left:${Math.max(8, Math.min(r.left, innerWidth - 380))}px">${alertForm(sym, null, 'data-tk-done')}</div>`);
+    /** @type {HTMLElement | null} */ ($('tk-pop')?.querySelector('input'))?.focus();
+  }
+  updateLayoutNav();
+}
+document.addEventListener('tt-alerts', () => { const p = $('tk-pop'); if (p) { p.innerHTML = alertForm(viewTicker(), null, 'data-tk-done'); } updateLayoutNav(); });
+document.addEventListener('tt-watchlist', () => updateLayoutNav());
+document.addEventListener('change', e => {
+  const s = /** @type {HTMLSelectElement} */ (e.target); if (!s.matches?.('[data-tk-list]') || !s.value) return;
+  const sym = viewTicker();
+  if (s.value === '__new__') addList('New list', [sym]); else addSymbols(s.value, [sym]);
+  wsnHint(`${sym} added to ${s.value === '__new__' ? '“New list” (rename it in its Watchlist)' : s.value}`);
+});
+document.addEventListener('click', e => {
+  if (near(e, '[data-tk-alert]')) { tkPop(!$('tk-pop')); return; }
+  if (near(e, '[data-tk-done]') || ($('tk-pop') && !near(e, '#tk-pop'))) tkPop(false);
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('tk-pop')) tkPop(false); });
 // The side pane (⌥B, or ☰ in the header): a tree of folders (parents) and
 // views (leaves). A view is one saved layout (`lay.list`, called a workspace
 // in the code), with its tabs under it; a folder is a path in each layout's
@@ -747,7 +874,7 @@ function wsnDraw() {
   const html = `<div class="wsn-head" data-wsn-root title="Drop here for the top level"><b>Views</b>
       <span class="wsn-acts on"><button type="button" data-wsn-act="folder" title="New folder" aria-label="New folder">⊞</button><button type="button" data-wsn-toggle title="Hide (⌥B)" aria-label="Hide the side pane">×</button></span></div>
     <ul class="wsn-tree" role="tree" aria-label="Views">${rows}</ul>
-    <p class="wsn-opt">⌥B picks a view here: ↑↓, → ← open and close folders, Enter opens, Esc goes back · ⌥↑ ⌥↓ the views in this folder · ⌥← ⌥→ the next folder</p>`;
+    <p class="wsn-opt">↑↓ pick · → ← open and close folders · Enter opens (a folder: its last view) · N a folder inside · F2 rename · Esc · Hover a folder for + (view), ⊞ (folder inside), ✎, ×; drag a folder onto another to nest it. Anywhere: ⌥↑⌥↓ this folder, ⌥→ into a folder, ⌥← up a level.</p>`;
   if (html === wsn.html) return;
   // Not while typing a folder's name.
   if (document.activeElement?.id === 'wsn-in' && wsn.edit) return;
@@ -780,11 +907,15 @@ document.addEventListener('keydown', e => {
     if (r?.kind === 'folder' && r.open) { wsn.expanded.delete(r.f); wsnKeep(); wsnDraw(); }
     else { const up = r?.kind === 'folder' ? folderUp(r.f) : r?.kind === 'ws' ? groupOf(r.l) : ''; if (up) { wsn.sel = 'folder:' + up; wsnDraw(); } }
   }
+  else if (k === ' ' && r?.kind === 'folder') { e.preventDefault(); r.open ? wsn.expanded.delete(r.f) : wsn.expanded.add(r.f); wsnKeep(); wsnDraw(); }
   else if (k === 'Enter' || k === ' ') {
+    // Enter opens what's picked and puts the pane away; on a folder, the view
+    // last open in it, else its first.
     e.preventDefault();
-    if (r?.kind === 'folder') { r.open ? wsn.expanded.delete(r.f) : wsn.expanded.add(r.f); wsnKeep(); wsnDraw(); }
-    else if (r?.kind === 'ws') { wsnLeave(); wsnOpen(r.l.name); }
+    const v = r?.kind === 'ws' ? r.l : r?.kind === 'folder' ? (lay.list.find(l => l.name === nav.last.get(r.f) && under(groupOf(l), r.f)) || lay.list.find(l => under(groupOf(l), r.f))) : null;
+    if (v) { wsnLeave(); wsnOpen(v.name); }
   }
+  else if ((k === 'n' || k === 'N') && r) { e.preventDefault(); const f = r.kind === 'folder' ? r.f : groupOf(r.l); wsn.expanded.add(f); wsn.edit = { kind: 'new', path: f, value: '' }; wsn.html = ''; wsnDraw(); }
   else if (k === 'F2' && r?.kind === 'folder') { e.preventDefault(); wsn.edit = { kind: 'rename', path: r.f, value: leafOf(r.f) }; wsn.html = ''; wsnDraw(); }
   else if (k === 'Escape') { e.preventDefault(); wsnLeave(); }
 });
@@ -804,7 +935,8 @@ function wsnCommit() {
   wsn.html = ''; wsnDraw();
 }
 document.addEventListener('click', e => {
-  if (near(e, '[data-wsn-toggle]')) { wsnToggle(); return; }
+  // Opened with a click, the keys work in it too.
+  if (near(e, '[data-wsn-toggle]')) { wsn.open ? wsnLeave() : wsnEnter(); return; }
   // A click anywhere else (but a menu it opened) puts it away.
   if (wsn.open && !$('wsnav')?.contains(tgt(e)) && !near(e, '#wm')) { wsnToggle(false); return; }
   const box = $('wsnav'); if (!box || !box.contains(tgt(e))) return;
@@ -875,23 +1007,19 @@ document.addEventListener('drop', e => {
     e.preventDefault(); box?.querySelector('input')?.focus();
   });
 }
-// A ticker searched in the header: its results in the view's Search panel,
-// else in a new one beside the active panel. "Open as a view" (from the
-// results) makes a view named for it, whose theme is that ticker: its
-// candles, news and earnings follow the theme.
+// A ticker searched in the header opens a view on it (its chart, news and
+// earnings, the theme its symbol), in the Tickers folder; one already open
+// for it is reused. The Search widget shows its results in place instead.
+const tickerView = symbol => {
+  const had = lay.list.find(l => l.name === symbol && l.theme?.symbols?.[0] === symbol);
+  if (had) { laySwitch(had.name); return true; }
+  return wsAdd(symbol, { tree: TICKER(), theme: { symbols: [symbol], keywords: [], layers: DEFAULT_LAYERS } }, 'Tickers');
+};
 document.addEventListener('tt-open-ticker', e => {
   const detail = /** @type {CustomEvent} */ (e).detail;
-  if (state.tab !== 'workspace' || !dock) { state.tab = 'workspace'; state.navigated = true; render(); }
-  if (!dock) return;
-  const open = dock.panels.find(p => p.params?.view === 'search'), body = open && panelBody.get(open.id);
-  if (open && body) { open.api.setActive(); document.dispatchEvent(new CustomEvent('tt-search-show', { detail: { panel: body, symbol: detail.symbol } })); }
-  else { const ref = activePanel(); dock.addPanel({ id: panelId(), component: 'view', params: { view: 'search', args: { symbol: detail.symbol } }, title: `Search · ${detail.symbol}`, ...(ref ? { position: { referencePanel: ref, direction: 'within' } } : {}) }); }
-  detail.opened = true;
+  detail.opened = tickerView(detail.symbol);
 });
-document.addEventListener('tt-open-ticker-view', e => {
-  const { symbol } = /** @type {CustomEvent} */ (e).detail;
-  wsAdd(symbol, { tree: TICKER(), theme: { symbols: [symbol], keywords: [], layers: DEFAULT_LAYERS } }, symbol);
-});
+document.addEventListener('tt-open-ticker-view', e => { tickerView(/** @type {CustomEvent} */ (e).detail.symbol); });
 // A document picked on the docs home opens in the docs pages.
 document.addEventListener('tt-open-doc', e => {
   if (!state.tab.startsWith('col:')) return;
@@ -911,26 +1039,78 @@ document.addEventListener('click', e => {
   const b = near(e, '[data-layout]');
   if (b) { if (b.getAttribute('aria-current') === 'page') swOpen(); else laySwitch(b.dataset.layout); }
 });
-// Keys: ⌥↑/⌥↓ (or ⌃↑/⌃↓) the previous or next view under this top-level folder, ⌥←/⌥→ the next top-level folder, ⌥W the switcher, ⌥B the side pane (to pick a view anywhere).
+// Keys, one level of the tree at a time, as in a file manager: ⌥↑/⌥↓ (or
+// ⌃↑/⌃↓) step through what's in this folder, its views and then its
+// folders; landing on a view opens it, landing on a folder only picks it.
+// ⌥→ goes into the picked folder (to the view last open there, else its
+// first); ⌥← goes up a level, picking the folder it came out of. A card
+// shows the level when a folder is picked or the level changes; stepping
+// between views shows none. ⌥W the switcher, ⌥B the side pane.
+// What's in a folder, in the pane's order.
+const navItems = f => [...lay.list.filter(l => groupOf(l) === f).map(l => ({ kind: /** @type {'view'} */ ('view'), name: l.name })),
+  ...kids(allFolders(), f).map(x => ({ kind: /** @type {'folder'} */ ('folder'), name: x }))];
+function navSync() {
+  // Opened some other way since: start from where that view is.
+  if (nav.level != null && nav.at === lay.current) return;
+  nav.level = groupOf(lay.list.find(l => l.name === lay.current)); nav.pick = { kind: 'view', name: lay.current || '' }; nav.at = lay.current || '';
+}
+// Stepping onto a view just opens it (the header names it); the card shows
+// only when a folder is picked or the level changes.
+function navGo(item, card = item.kind === 'folder') {
+  nav.pick = item;
+  if (item.kind === 'view') { nav.last.set(nav.level, item.name); wsnOpen(item.name); nav.at = lay.current || ''; }
+  if (card) navCard(); else navHide();
+}
+function navCard(hold = false) {
+  const items = navItems(nav.level), crumbs = nav.level ? nav.level.split('/') : [];
+  const row = it => {
+    const on = nav.pick?.kind === it.kind && nav.pick.name === it.name, here = it.kind === 'view' && it.name === lay.current;
+    const n = it.kind === 'folder' ? lay.list.filter(l => under(groupOf(l), it.name)).length : 0;
+    return `<li class="nav-i${on ? ' on' : ''}${here ? ' here' : ''}${it.kind === 'folder' ? ' dir' : ''}">${it.kind === 'folder' ? `<span>▸</span><b>${esc(leafOf(it.name))}/</b><em>${n}</em>${on ? '<kbd>⌥→</kbd>' : ''}` : `<span>${here ? '●' : '○'}</span>${esc(it.name)}`}</li>`;
+  };
+  const html = `<p class="nav-path">${['Views', ...crumbs].map(esc).join(' <i>›</i> ')}</p><ul>${items.map(row).join('') || '<li class="muted">Empty</li>'}</ul>
+    <p class="nav-keys">⌥↑⌥↓ this folder · ⌥→ into a folder · Enter its first view · ⌥← up a level${nav.level ? '' : ' (top)'}</p>`;
+  let box = $('navcard');
+  if (!box) { document.body.insertAdjacentHTML('beforeend', '<div class="navcard" id="navcard" role="status" aria-live="polite"></div>'); box = $('navcard'); }
+  box.innerHTML = html; box.hidden = false;
+  clearTimeout(nav.timer); if (!hold) nav.timer = setTimeout(navHide, 2600);
+}
+function navHide() { clearTimeout(nav.timer); const b = $('navcard'); if (b) b.hidden = true; }
+// Enter (with ⌥ or without) while the card shows a folder picked: its first
+// view (the first under it, depth first, if it has only folders).
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter' || e.metaKey || e.ctrlKey || $('navcard')?.hidden !== false || nav.pick?.kind !== 'folder') return;
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+  const f = nav.pick.name, first = navItems(f).find(x => x.kind === 'view')?.name || lay.list.find(l => under(groupOf(l), f))?.name;
+  if (!first) return;
+  // Before ⌥Enter's maximise.
+  e.preventDefault(); e.stopImmediatePropagation();
+  nav.level = groupOf(lay.list.find(l => l.name === first)); navGo({ kind: 'view', name: first });
+}, true);
+document.addEventListener('keyup', e => { if (e.key === 'Alt' && $('navcard') && !$('navcard').hidden) { clearTimeout(nav.timer); nav.timer = setTimeout(navHide, 900); } });
 document.addEventListener('keydown', e => {
   if (pal.open || sw.open || e.metaKey) return;
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
-  const cur = lay.list.find(l => l.name === lay.current), g = groupOf(cur);
   if (e.altKey && e.code === 'KeyW') { e.preventDefault(); swOpen(); return; }
-  if (e.altKey && e.code === 'KeyB') { e.preventDefault(); $('wsnav')?.contains(document.activeElement) ? wsnLeave() : wsnEnter(); return; }
-  // ⌥↑/⌥↓: every view under this top-level folder, nested ones included, in
-  // the pane's order (depth first). ⌥←/⌥→: the first view of the next root.
-  const root = g.split('/')[0], roots = [...new Set(lay.list.map(l => groupOf(l).split('/')[0]))];
-  if ((e.ctrlKey || e.altKey) && ['ArrowUp', 'ArrowDown'].includes(e.key)) {
-    const views = lay.list.filter(l => under(groupOf(l), root)), n = views.length, i = views.indexOf(cur); e.preventDefault();
-    if (n > 1) wsnOpen(views[(i + (e.key === 'ArrowDown' ? 1 : -1) + n) % n].name);
-    else wsnHint(`${cur?.name || 'This'} is the only view in ${root || 'its folder'}: add one with + in the pane (⌥B), or drag one in`);
+  if (e.altKey && e.code === 'KeyB') { e.preventDefault(); navHide(); $('wsnav')?.contains(document.activeElement) ? wsnLeave() : wsnEnter(); return; }
+  const k = e.key, vert = (e.ctrlKey || e.altKey) && (k === 'ArrowUp' || k === 'ArrowDown'), horiz = e.altKey && (k === 'ArrowLeft' || k === 'ArrowRight');
+  if (!vert && !horiz) return;
+  e.preventDefault(); navSync();
+  const items = navItems(nav.level), i = items.findIndex(x => x.kind === nav.pick?.kind && x.name === nav.pick.name);
+  if (vert) {
+    if (items.length) navGo(items[((i < 0 ? 0 : i + (k === 'ArrowDown' ? 1 : -1)) + items.length) % items.length]);
     return;
   }
-  if (e.altKey && ['ArrowLeft', 'ArrowRight'].includes(e.key) && roots.length > 1) {
-    const next = roots[(roots.indexOf(root) + (e.key === 'ArrowRight' ? 1 : -1) + roots.length) % roots.length];
-    e.preventDefault(); const first = lay.list.find(l => under(groupOf(l), next)); if (first) wsnOpen(first.name);
+  if (k === 'ArrowRight') {
+    if (nav.pick?.kind !== 'folder') { navCard(); return; }
+    const inside = navItems(nav.pick.name); if (!inside.length) { navCard(); return; }
+    nav.level = nav.pick.name;
+    const back = nav.last.get(nav.level);
+    navGo(inside.find(x => x.kind === 'view' && x.name === back) || inside.find(x => x.kind === 'view') || inside[0], true);
+    return;
   }
+  if (nav.level) { nav.pick = { kind: 'folder', name: nav.level }; nav.level = folderUp(nav.level); }
+  navCard();
 });
 // Palette commands for workspaces: save, rename, group, duplicate, delete, switch.
 function layoutCommands(q) {
@@ -1114,21 +1294,25 @@ function render() {
   if (window.scrollY !== scrollY) window.scrollTo(0, scrollY);
 }
 // Alerts: the bell beside the theme button. Its count is the services down
-// or needing attention; the list says which and why, and opens each one.
+// or needing attention, and price alerts fired since it was last opened
+// (lib/alerts.js); the list says which and why, and opens each service.
 function alerts() {
   return (fleet.topo?.services || []).map(s => ({ s, st: statusOf({ ...s, kind: 'svc' }) })).filter(x => x.st === 'crit' || x.st === 'warn')
     .sort((a, b) => (a.st === 'crit' ? 0 : 1) - (b.st === 'crit' ? 0 : 1));
 }
 function updateHeaderStatus() {
   if (!fleet.topo) return;
-  const list = alerts(), n = $('bell-n'), crit = list.some(x => x.st === 'crit');
-  n.hidden = !list.length; n.textContent = String(list.length); n.classList.toggle('crit', crit);
-  $('bell').title = list.length ? `${list.length} alert${list.length === 1 ? '' : 's'}` : 'No alerts';
+  const list = alerts(), n = $('bell-n'), crit = list.some(x => x.st === 'crit'), count = list.length + unseen().length;
+  n.hidden = !count; n.textContent = String(count); n.classList.toggle('crit', crit);
+  $('bell').title = count ? `${count} alert${count === 1 ? '' : 's'}` : 'No alerts';
   if (!$('bell-pop').hidden) bellDraw();
 }
 function bellDraw() {
   const list = alerts();
-  const html = '<h3>Alerts</h3>' + (list.length
+  const fired = priceAlerts().filter(a => a.fired).sort((a, b) => b.fired - a.fired), armed = priceAlerts().filter(a => !a.fired).length;
+  const when = t => new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const prices = fired.map(a => `<div class="bell-item bell-price${a.seen ? '' : ' new'}"><i class="warn"></i><b><button type="button" class="linkish mono" data-alert-sym="${esc(a.symbol)}">${esc(a.symbol)}</button> ${a.price?.toFixed(2) ?? ''}</b><span>${esc(alertText(a))} · ${esc(when(a.fired))} <button type="button" class="chip-btn" data-al-rearm="${esc(a.id)}">Re-arm</button><button type="button" class="chip-btn" data-al-rm="${esc(a.id)}">Remove</button></span></div>`).join('');
+  const html = '<h3>Alerts</h3>' + prices + (armed ? `<p class="bell-none">${armed} price alert${armed === 1 ? '' : 's'} armed (the Alerts widget lists them).</p>` : '') + (list.length
     ? list.map(x => `<button type="button" class="bell-item" data-alert="${esc(x.s.id)}"><i class="${x.st}"></i><b>${esc(x.s.id)} ${x.st === 'crit' ? 'is down' : 'needs attention'}</b><span>${esc(subOf({ ...x.s, kind: 'svc' }))}</span></button>`).join('')
     : '<p class="bell-none">Every service is running or off schedule.</p>');
   if ($('bell-pop').innerHTML !== html) $('bell-pop').innerHTML = html;
@@ -1136,9 +1320,16 @@ function bellDraw() {
 function bellToggle(open) {
   $('bell-pop').hidden = !open; $('bell').setAttribute('aria-expanded', open);
   if (open) { const r = $('bell').getBoundingClientRect(); $('bell-pop').style.top = r.bottom + 6 + 'px'; bellDraw(); }
+  // Looked at: the count goes, the list stays (until removed or re-armed).
+  else markSeen();
 }
+watchAlerts(() => (fleet.topo?.services || []).find(s => s.snapshots)?.id || null);
+document.addEventListener('tt-alerts', () => { updateHeaderStatus(); if (!$('bell-pop').hidden) bellDraw(); });
 $('bell').addEventListener('click', e => { e.stopPropagation(); bellToggle($('bell-pop').hidden); });
 document.addEventListener('click', e => {
+  const sym = near(e, '[data-alert-sym]');
+  if (near(e, '#bell-pop [data-al-rearm], #bell-pop [data-al-rm]')) return;
+  if (sym) { bellToggle(false); document.dispatchEvent(new CustomEvent('tt-open-ticker-view', { detail: { symbol: sym.dataset.alertSym } })); return; }
   const a = near(e, '[data-alert]');
   if (a) { bellToggle(false); const home = lay.list.find(l => layViews(l).includes('overview')); if (home) { laySwitch(home.name); showNode(a.dataset.alert); } return; }
   if (!$('bell-pop').hidden && !near(e, '.bell-wrap')) bellToggle(false);
@@ -1260,6 +1451,7 @@ $('theme-btn').addEventListener('click', () => {
 // Profile mode first, so the first mounts are measured too.
 if (profileWanted()) startProfile();
 (async () => {
+  watchHome();
   await loadCollections();
   const h = location.hash.slice(1), hc = state.collections.find(c => h === c.id || h.startsWith(c.id + '-'));
   if (location.pathname.startsWith('/docs') && !hc && state.collections[0]) { state.tab = 'col:' + state.collections[0].id; state.doc = null; state.navigated = true; }

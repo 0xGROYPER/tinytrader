@@ -50,11 +50,18 @@ on the pane's title gets a folder of its own); nothing nests by itself.
 Deleting a folder deletes the views in it, and a view's folder goes with
 its last view (each asked first, in its row; at least one view stays).  The
 ready-made views start filed together (Market, Oil & Iran and Earnings in
-Market; Operations and Data in Operations), and the palette's "Reset views to
-the defaults" starts a browser over. Keys: ⌥↑/⌥↓ walk every view under the current
-top-level folder, nested ones included, in the pane's order; ⌥←/⌥→ go to the
-next top-level folder; ⌥B moves into the pane to pick a view anywhere (↑↓,
-→ and ← to open and close, Enter opens, Esc goes back). The header's numbers
+Market, the Watchlist view in Market › Watchlists; Operations and Data in
+Operations), and the palette's "Reset views to
+the defaults" starts a browser over. Keys move one level at a time, as in a
+file manager (amended 2026-10-13, replacing ⌥↑/⌥↓ over every view under the
+top-level folder): ⌥↑/⌥↓ step through what's in the current folder, its
+views and then its folders; landing on a view opens it, landing on a folder
+only picks it. ⌥→ goes into the picked folder, to the view last open there
+(else its first), and Enter (⌥ held or not) opens its first view; ⌥← goes up a level with the folder it came out of picked.
+A card in the middle of the page shows the level when a folder is picked or the level changes; stepping from view to view shows none (the header names the view). ⌥B moves
+into the pane to pick a view anywhere (↑↓, → and ← to open and close, Enter
+opens the view, or a folder's last view, and puts the pane away; N a folder
+inside; Esc goes back); the pane opened with a click takes the keys too. The header's numbers
 (1–9, 0 and ⌥1–⌥0) go: the header shows the folder and view
 (`devops / deployment › Operations`), and clicking it opens the pane. The cap
 of ten goes too (100 views now).

@@ -2,13 +2,21 @@
 // service serving stock snapshots (alpaca-data), every few seconds while
 // shown. The lists are kept in this browser (lib/watchlists.js): pick one,
 // make, rename or delete one, add symbols (several at once) or remove them.
-// The open view's theme, when it has symbols, is a list of its own. The News
-// widget follows the list picked. Clicking a symbol makes it the one charts
-// follow; the % heading sorts by the day's change.
+// The open view's theme, when it has symbols, is a list of its own. Each
+// Watchlist panel keeps the list it shows (in its layout), so views can show
+// different lists; the News widget in the view follows it. A list shown
+// (the view opening, or another list picked) points the view's charts at its
+// first symbol, unless they're already on one of its symbols. Clicking a
+// symbol makes it the one charts follow and narrows the view's News to it
+// (clicking it again widens it); ↑/↓ step through the list the same way
+// once a row has been clicked (or the table tabbed to). The bell on a row
+// sets price alerts for it (lib/alerts.js); the % heading sorts by the day's
+// change.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused, setFocus, parseSymbols } from '../lib/theme.js';
+import { alertsFor, alertForm, describe } from '../lib/alerts.js';
 import { watchlists, picked, setPicked, symbolsOf, addList, renameList, deleteList, addSymbols, removeSymbol, THEME_LIST } from '../lib/watchlists.js';
 
 const EVERY = 5000;
@@ -40,27 +48,51 @@ function draw(my) {
   if (my.sort) order = [...syms].sort((a, b) => my.sort * ((by.get(b)?.change_pct ?? -Infinity) - (by.get(a)?.change_pct ?? -Infinity)));
   const rows = order.map(s => {
     const r = by.get(s), c = r?.change_pct, cls = c == null ? '' : c >= 0 ? 'up' : 'down';
-    return `<tr data-wl="${esc(s)}"${s === f ? ' aria-current="true"' : ''}><td class="wl-sym">${esc(s)}</td><td class="num">${esc(num(r?.price))}</td>`
+    const al = alertsFor(s), bell = al.some(a => a.fired) ? 'fired' : al.length ? 'set' : '';
+    return `<tr data-wl="${esc(s)}"${s === f ? ' aria-current="true"' : ''}><td class="wl-sym">${esc(s)}<button type="button" class="wl-bell ${bell}" data-wl-alert="${esc(s)}" title="${al.length ? esc(al.map(describe).join('; ')) : 'Set an alert'}" aria-label="Alerts for ${esc(s)}">${bell ? '●' : '○'}</button></td><td class="num">${esc(num(r?.price))}</td>`
       + `<td class="num ${cls}">${esc(r?.change == null ? '' : (r.change >= 0 ? '+' : '−') + Math.abs(r.change).toFixed(2))}</td>`
       + `<td class="num ${cls}">${esc(pct(c))}</td>${mine ? `<td class="wl-x"><button type="button" class="sb-x" data-wl-rm="${esc(s)}" aria-label="Remove ${esc(s)}" title="Remove from the list">×</button></td>` : ''}</tr>`;
   }).join('');
   const arrow = my.sort > 0 ? ' ↓' : my.sort < 0 ? ' ↑' : '';
-  return [bar, `<table class="wl"><thead><tr><th>Symbol</th><th class="num">Last</th><th class="num">Change</th><th class="num"><button type="button" class="wl-sort" data-wl-act="sort" title="Sort by the day's change">%${arrow}</button></th>${mine ? '<th></th>' : ''}</tr></thead><tbody>${rows}</tbody></table>
+  return [bar, `<table class="wl" tabindex="0" aria-label="Symbols: ↑↓ to step through"><thead><tr><th>Symbol</th><th class="num">Last</th><th class="num">Change</th><th class="num"><button type="button" class="wl-sort" data-wl-act="sort" title="Sort by the day's change">%${arrow}</button></th>${mine ? '<th></th>' : ''}</tr></thead><tbody>${rows}</tbody></table>
     <p class="muted wl-foot">${my.err ? esc(my.err) : my.at ? `IEX prices, updated ${new Date(my.at).toLocaleTimeString()}` : 'Loading…'}</p>`];
 }
 
 defineWidget('watchlist', {
   title: 'Watchlist',
   mount(el) {
-    const my = { rows: null, err: null, at: 0, alive: true, edit: /** @type {string} */ (''), sort: 0, asked: '' };
+    const my = { rows: null, err: null, at: 0, alive: true, edit: /** @type {string} */ (''), sort: 0, asked: '', alertFor: '' };
+    // The list this panel shows, from its layout; it becomes the one picked while the view is open.
+    let args = {}; try { args = JSON.parse(el.dataset.args || '{}'); } catch (_) {}
+    if (args.list && (watchlists().some(l => l.name === args.list) || args.list === THEME_LIST)) setPicked(args.list);
+    const keep = () => el.dispatchEvent(new CustomEvent('tt-tab-args', { bubbles: true, detail: { args: { list: picked(!!theme()?.symbols.length) } } }));
     // The bar and the table are painted apart, so a price refresh never
     // replaces a box being typed in.
-    el.innerHTML = '<div class="wl-top"></div><div class="wl-main"></div>';
-    const top = /** @type {HTMLElement} */ (el.querySelector('.wl-top')), main = /** @type {HTMLElement} */ (el.querySelector('.wl-main'));
+    el.innerHTML = '<div class="wl-top"></div><div class="wl-al"></div><div class="wl-main"></div>';
+    const top = /** @type {HTMLElement} */ (el.querySelector('.wl-top')), main = /** @type {HTMLElement} */ (el.querySelector('.wl-main')), alBox = /** @type {HTMLElement} */ (el.querySelector('.wl-al'));
     const update = () => {
       const [bar, body] = draw(my);
       if (paint(top, bar)) /** @type {HTMLInputElement | null} */ (top.querySelector('[data-wl-form="new"] input, [data-wl-form="rename"] input'))?.focus();
-      paint(main, body);
+      const hadKeys = main.contains(document.activeElement);
+      if (paint(main, body) && hadKeys) /** @type {HTMLElement | null} */ (main.querySelector('table.wl'))?.focus({ preventScroll: true });
+      // Its own box: prices refreshing never replace what's being typed.
+      if (!alBox.contains(document.activeElement) || !my.alertFor) paint(alBox, my.alertFor ? alertForm(my.alertFor, (my.rows || []).find(r => r.symbol === my.alertFor)?.price, 'data-wl-act="alert-close"') : '');
+    };
+    // A symbol picked: the charts follow it and the news narrows to it (toggle: a click on it again widens).
+    const pick = (s, toggle) => {
+      setFocus(s);
+      document.dispatchEvent(new CustomEvent('tt-focus', { detail: s }));
+      document.dispatchEvent(new CustomEvent('tt-news-symbol', { detail: toggle ? s : { symbol: s } }));
+      update();
+      /** @type {HTMLElement | null} */ (main.querySelector(`[data-wl="${CSS.escape(s)}"]`))?.scrollIntoView({ block: 'nearest' });
+    };
+    const keys = e => {
+      if (!(e.key === 'ArrowDown' || e.key === 'ArrowUp') || e.altKey || e.metaKey || e.ctrlKey || !main.contains(/** @type {Node} */ (e.target))) return;
+      const rows = [...main.querySelectorAll('[data-wl]')].map(r => /** @type {HTMLElement} */ (r).dataset.wl || '');
+      if (!rows.length) return;
+      e.preventDefault();
+      const i = rows.indexOf(focused() || '');
+      pick(rows[i < 0 ? 0 : Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))], false);
     };
     const name = () => picked(!!theme()?.symbols.length) || '';
     const current = () => symbolsOf(name(), theme()?.symbols || []);
@@ -76,12 +108,26 @@ defineWidget('watchlist', {
       } catch (e) { my.err = `Prices unavailable: ${e.message}`; }
       if (my.alive) update();
     }
-    const changed = () => { update(); if (current().join(',') !== my.asked) load(); };
+    // The charts follow the list shown: its first symbol, unless already on one of them.
+    let shown = '';
+    const point = () => {
+      const n = name(), syms = current();
+      if (n === shown || !syms.length) return;
+      shown = n;
+      const f = focused();
+      if (f && syms.includes(f)) return;
+      setFocus(syms[0]); document.dispatchEvent(new CustomEvent('tt-focus', { detail: syms[0] }));
+    };
+    const changed = () => { point(); update(); if (current().join(',') !== my.asked) load(); };
     const click = e => {
       const t = /** @type {HTMLElement} */ (e.target);
       const rm = /** @type {HTMLElement | null} */ (t.closest('[data-wl-rm]'));
       if (rm) { removeSymbol(name(), rm.dataset.wlRm || ''); return; }
+      const bell = /** @type {HTMLElement | null} */ (t.closest('[data-wl-alert]'))?.dataset.wlAlert;
+      if (bell) { my.alertFor = my.alertFor === bell ? '' : bell; alBox.innerHTML = ''; update(); /** @type {HTMLInputElement | null} */ (alBox.querySelector('input'))?.focus(); return; }
+      if (t.closest('[data-al-rm], [data-al-rearm]')) return;
       const act = /** @type {HTMLElement | null} */ (t.closest('[data-wl-act]'))?.dataset.wlAct;
+      if (act === 'alert-close') { my.alertFor = ''; update(); return; }
       if (act) {
         if (act === 'sort') my.sort = my.sort > 0 ? -1 : my.sort < 0 ? 0 : 1;
         else if (act === 'delete-yes') { deleteList(name()); my.edit = ''; }
@@ -90,31 +136,33 @@ defineWidget('watchlist', {
         update(); return;
       }
       const row = /** @type {HTMLElement | null} */ (t.closest('[data-wl]')); if (!row) return;
-      setFocus(row.dataset.wl || null);
-      document.dispatchEvent(new CustomEvent('tt-focus', { detail: row.dataset.wl }));
-      update();
+      // Then ↑/↓ carry on from it.
+      /** @type {HTMLElement | null} */ (main.querySelector('table.wl'))?.focus({ preventScroll: true });
+      pick(row.dataset.wl || '', true);
     };
     const submit = e => {
       const form = /** @type {HTMLFormElement} */ (e.target), kind = form.dataset.wlForm; if (!kind) return;
       e.preventDefault();
       const v = /** @type {HTMLInputElement} */ (form.elements.namedItem('v')).value;
       if (kind === 'add') { const syms = parseSymbols(v); if (syms.length) addSymbols(name(), syms); return; }
-      if (kind === 'new' && v.trim()) addList(v);
-      if (kind === 'rename' && v.trim()) renameList(name(), v);
+      if (kind === 'new' && v.trim()) { addList(v); keep(); }
+      if (kind === 'rename' && v.trim() && renameList(name(), v)) keep();
       my.edit = ''; update();
     };
-    const change = e => { const s = /** @type {HTMLSelectElement} */ (e.target); if (s.classList.contains('wl-pick')) setPicked(s.value); };
-    el.addEventListener('click', click); el.addEventListener('submit', submit); el.addEventListener('change', change);
+    const change = e => { const s = /** @type {HTMLSelectElement} */ (e.target); if (s.classList.contains('wl-pick')) { setPicked(s.value); keep(); } };
+    el.addEventListener('click', click); el.addEventListener('submit', submit); el.addEventListener('change', change); el.addEventListener('keydown', keys);
+    document.addEventListener('tt-alerts', update);
     const themed = () => { my.rows = null; my.at = 0; changed(); };
     document.addEventListener('tt-theme', themed);
     document.addEventListener('tt-watchlist', changed);
     const timer = setInterval(load, EVERY);
-    update(); load();
+    point(); update(); load();
     return {
       update,
       dispose() {
         my.alive = false; clearInterval(timer);
-        el.removeEventListener('click', click); el.removeEventListener('submit', submit); el.removeEventListener('change', change);
+        el.removeEventListener('click', click); el.removeEventListener('submit', submit); el.removeEventListener('change', change); el.removeEventListener('keydown', keys);
+        document.removeEventListener('tt-alerts', update);
         document.removeEventListener('tt-theme', themed); document.removeEventListener('tt-watchlist', changed);
       },
     };

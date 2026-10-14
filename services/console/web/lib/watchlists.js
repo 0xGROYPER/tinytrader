@@ -56,7 +56,9 @@ export function addList(name, symbols = []) {
 export function renameList(from, to) {
   const l = lists.find(x => x.name === from), n = to.trim().slice(0, 40);
   if (!l || !n || lists.some(x => x.name === n)) return false;
-  l.name = n; if (pick === from) pick = n; save(); return true;
+  l.name = n; if (pick === from) pick = n; save();
+  document.dispatchEvent(new CustomEvent('tt-watchlist-renamed', { detail: { from, to: n } }));
+  return true;
 }
 /** @param {string} name */
 export function deleteList(name) {

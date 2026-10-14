@@ -3,11 +3,18 @@
 // order however it was placed (the console's can be cancelled here). A paper
 // account with an order gateway also gets Flatten (close every position at
 // market, through the gateway, after typing the account's name) and, while
-// its gateway halts opens, Resume opening.
+// its gateway halts opens, Resume opening. An account with an order gateway
+// gets an order ticket (Close… on each option group, New order on the card):
+// up to four option legs as one order, priced from each leg's bid and ask,
+// starting at the marketable (natural) price for a close, reviewed and sent
+// as the console's trade client (POST /api/orders/{account}). A new order
+// is built in the Spread builder: Spread builder on a card opens it with
+// that account picked for its Trade review.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { askHeld } from '../lib/position.js';
+import { notSentText } from '../lib/orders.js';
 
 /** An account's option positions by underlying and expiry, for the Spread builder's payoff. */
 const heldGroups = new Map();
@@ -142,26 +149,217 @@ function accountCard(svc, a) {
     <div class="acct-stats">${stats.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('')}</div>
     <div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2"></div>
     ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Symbol</th><th>Qty</th><th>Value</th><th>Unrealized</th><th>Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted" style="margin:0;font-size:13px">No open positions.</p>'}
-    ${(() => { const g = optionGroups(a.name || a.label || svc.id, pos); return g.length ? `<div class="acct-payoffs">${g.map(x => `<button type="button" class="chip-btn" data-held="${esc(x.key)}" title="Load these legs into the Spread builder at their entry prices">Payoff: ${esc(x.sym)} ${esc(dayLabel(x.expiry))} · ${x.legs.length} leg${x.legs.length > 1 ? 's' : ''}</button>`).join('')}</div>` : ''; })()}
+    ${(() => { const g = optionGroups(a.name || a.label || svc.id, pos), can = tradable(a.name); return g.length || can ? `<div class="acct-payoffs">${g.map(x => `<button type="button" class="chip-btn" data-held="${esc(x.key)}" title="Load these legs into the Spread builder at their entry prices">Payoff: ${esc(x.sym)} ${esc(dayLabel(x.expiry))} · ${x.legs.length} leg${x.legs.length > 1 ? 's' : ''}</button>${can ? `<button type="button" class="chip-btn" data-ot-close="${esc(x.key)}" title="An order closing these legs, priced to fill (natural)">Close…</button>` : ''}`).join('')}${can ? `<button type="button" class="chip-btn" data-sb-open="${esc(a.name)}" title="Build an order in the Spread builder, with this account picked for it">Spread builder</button>` : ''}</div>` : ''; })()}
     ${ordersPanel(a)}
     <div class="foot">${pos.length > 8 ? `${pos.length} positions, largest 8 shown · ` : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
     ${flattenPanel(a)}
   </article>`;
 }
 
+// The order ticket: one at a time, above the cards. Up to four option legs
+// (OCC symbols, side, ratio) as one order, opening or closing; each leg's bid
+// and ask from the chain service, every few seconds while it's open. The net
+// is per unit (the quantity multiplies it): + pays (debit), − receives
+// (credit); a single leg's limit is its own price. Natural pays the ask on
+// buys and takes the bid on sells, so it's the marketable price, and a close
+// starts there; an open starts at the mid. Review shows the account (a live
+// one never picked for you), every contract and what it can cost, then Send.
+/** Order routing as the console has it: {trading, accounts: [{account, environment, error, state}]}, or {unavailable}. */
+let routing = /** @type {any} */ (null), routingAt = 0;
+async function readRouting(update) {
+  if (Date.now() - routingAt < 15000) return;
+  routingAt = Date.now();
+  try {
+    const r = await fetch('/api/orders', { cache: 'no-store' });
+    routing = r.ok ? await r.json() : { unavailable: r.status === 404 ? 'this console has no order routing yet (it needs redeploying).' : `the console answered ${r.status}.` };
+  } catch (e) { routing = { unavailable: `the console can't be reached (${e.message}).` }; }
+  update();
+}
+const tradable = name => !!name && !!routing?.trading && (routing.accounts || []).some(x => x.account === name && !x.error);
+const OCC = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/;
+const gcd = (a, b) => { while (b) [a, b] = [b, a % b]; return a; };
+const r2 = x => Math.round(x * 100) / 100;
+/** @type {null | { acct: string, from: string, legs: { symbol: string, side: 'buy' | 'sell', ratio: number }[], qty: number, effect: 'open' | 'close', limit: number | null, quotes: Map<string, any>, qErr: string, qAt: number, review: boolean, typed: string, sending: boolean, result: string, title: string }} */
+let tk = null;
+const blankLeg = () => ({ symbol: '', side: /** @type {'buy' | 'sell'} */ ('buy'), ratio: 1 });
+function openTicket(acct, legs, qty, effect, title) {
+  tk = { acct, from: acct, legs, qty, effect, limit: null, quotes: new Map(), qErr: '', qAt: 0, review: false, typed: '', sending: false, result: '', title };
+}
+// A held group, closed: each leg reversed, ratios in lowest terms, the quantity the rest.
+function closeTicket(g) {
+  const g0 = g.legs.reduce((x, l) => gcd(x, l.qty), 0) || 1;
+  const legs = g.legs.map(l => ({ symbol: occOf(g.sym, g.expiry, l.type, l.strike), side: /** @type {'buy' | 'sell'} */ (l.side > 0 ? 'sell' : 'buy'), ratio: l.qty / g0 }));
+  openTicket(g.account, legs, g0, 'close', `Close ${g.sym} ${dayLabel(g.expiry)}`);
+}
+const occOf = (root, expiry, type, strike) => `${root}${expiry.slice(2, 4)}${expiry.slice(5, 7)}${expiry.slice(8, 10)}${type === 'call' ? 'C' : 'P'}${String(Math.round(strike * 1000)).padStart(8, '0')}`;
+// Bid and ask for every leg, one chain read per underlying and expiry.
+async function readQuotes(update) {
+  if (!tk) return;
+  const svc = (fleet.topo?.services || []).find(s => s.chain)?.id;
+  if (!svc) { tk.qErr = 'No service serves option chains (alpaca-data), so there are no quotes.'; update(); return; }
+  const me = tk, want = new Map();
+  for (const l of me.legs) {
+    const m = OCC.exec(l.symbol); if (!m) continue;
+    const expiry = `20${m[2]}-${m[3]}-${m[4]}`; want.set(`${m[1]}|${expiry}`, [m[1], expiry]);
+  }
+  me.qAt = Date.now();
+  const errs = [];
+  await Promise.all([...want.values()].map(async ([root, expiry]) => {
+    try {
+      const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/chain?underlying=${encodeURIComponent(root)}&from=${expiry}&to=${expiry}`, { cache: 'no-store' });
+      const v = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(v.error || `${r.status}`);
+      for (const c of v.contracts || []) if (c.symbol) me.quotes.set(c.symbol, c);
+    } catch (e) { errs.push(`${root} ${expiry}: ${e.message}`); }
+  }));
+  if (tk !== me) return;
+  me.qErr = errs.length ? `Quotes couldn't be read (${errs.join('; ')}).` : '';
+  update();
+}
+/** The prices: per leg, and the net mid and natural (per unit, signed: + debit), or null where a quote is missing. */
+function pricing(t) {
+  const legs = t.legs.map(l => { const q = t.quotes.get(l.symbol); const bid = q?.bid ?? null, ask = q?.ask || null; return { ...l, bid, ask, mid: bid != null && ask ? (bid + ask) / 2 : null }; });
+  const sum = f => legs.every(l => f(l) != null) ? legs.reduce((s, l) => s + (l.side === 'buy' ? 1 : -1) * l.ratio * f(l), 0) : null;
+  return { legs, mid: sum(l => l.mid), natural: sum(l => l.side === 'buy' ? l.ask : l.bid) };
+}
+const single = t => t.legs.length === 1;
+// The limit as sent: a single leg's is its positive price; else the signed net.
+const sentLimit = (t, net) => net == null ? null : single(t) ? r2(Math.abs(net)) : r2(net);
+// As a signed net, whatever the shape (a single sell is a credit).
+const asNet = (t, limit) => single(t) && t.legs[0].side === 'sell' ? -limit : limit;
+function limitOf(t, p) { return t.limit ?? sentLimit(t, t.effect === 'close' ? p.natural : p.mid); }
+const legsOk = t => t.legs.length >= 1 && t.legs.length <= 4 && t.legs.every(l => OCC.test(l.symbol) && l.ratio >= 1 && l.ratio <= 10) && new Set(t.legs.map(l => l.symbol)).size === t.legs.length && t.qty >= 1 && t.qty <= 100;
+// The account's open orders, as its account service has them (null if unknown, undefined if not read).
+function openOrdersOf(name) {
+  for (const s of (fleet.topo?.services || []).filter(x => x.accounts)) for (const a of svcState(s.id).accounts?.accounts || []) if (a.name === name) return a.orders;
+  return undefined;
+}
+const usd = v => `$${Math.abs(v).toFixed(2)}`;
+function ticketView() {
+  const t = tk; if (!t) return '';
+  const p = pricing(t), limit = limitOf(t, p), money = x => x == null ? '—' : x.toFixed(2);
+  const netNote = x => x == null ? '—' : single(t) ? usd(x) : `${x < 0 ? 'cr ' : ''}${Math.abs(x).toFixed(2)}`;
+  const head = `<div class="ot-head"><b>${esc(t.title)}</b><span class="muted">${esc(t.acct)} · ${t.effect === 'close' ? 'closing' : 'opening'}</span><button type="button" class="btn small" data-ot="close" aria-label="Close the ticket">×</button></div>`;
+  const result = t.result ? `<p class="ot-result">${t.result}</p>` : '';
+  if (!routing) return `<div class="ot">${head}<p class="muted">Loading the accounts…</p></div>`;
+  if (routing.unavailable) return `<div class="ot">${head}<p class="muted">Orders: ${esc(routing.unavailable)}</p></div>`;
+  if (!routing.trading) return `<div class="ot">${head}<p class="muted">Sending orders needs the console's trade token (operator: scripts/gateway-token GATEWAY_CONSOLE_TOKEN, then restart the gateways and the console).</p></div>`;
+  const rows = p.legs.map((l, i) => `<tr data-ot-i="${i}">
+      <td>${t.review ? `<span class="mono">${esc(l.symbol)}</span>` : `<input class="ot-sym mono" value="${esc(l.symbol)}" placeholder="SPY261120C00600000" spellcheck="false" autocomplete="off" aria-label="Leg ${i + 1} OCC symbol">`}</td>
+      <td>${t.review ? (l.side === 'buy' ? 'Buy' : 'Sell') : `<select class="ot-side" aria-label="Leg ${i + 1} side"><option value="buy"${l.side === 'buy' ? ' selected' : ''}>Buy</option><option value="sell"${l.side === 'sell' ? ' selected' : ''}>Sell</option></select>`}</td>
+      <td class="num">${t.review ? `${l.ratio * t.qty}` : `<input class="ot-ratio mono" type="number" min="1" max="10" value="${l.ratio}" aria-label="Leg ${i + 1} ratio">`}</td>
+      <td class="num mono">${money(l.bid)} × ${money(l.ask)}</td><td class="num mono">${money(l.mid)}</td>
+      <td>${t.review || t.legs.length < 2 ? '' : '<button type="button" class="sb-x" data-ot="remove" aria-label="Remove this leg" title="Remove">×</button>'}</td></tr>`).join('');
+  const table = `<div class="scroll"><table class="pos-tbl ot-legs"><thead><tr><th>Contract</th><th>Side</th><th class="num">${t.review ? 'Contracts' : 'Ratio'}</th><th class="num">Bid × ask</th><th class="num">Mid</th><th></th></tr></thead><tbody>${rows}</tbody>
+    ${t.review || t.legs.length >= 4 ? '' : '<tfoot><tr><td colspan="6"><button type="button" class="chip-btn" data-ot="add">Add leg</button></td></tr></tfoot>'}</table></div>`;
+  // How far the limit is from the natural (marketable at or past it) and the mid.
+  let where = '';
+  if (limit != null && p.natural != null) {
+    const n = asNet(t, limit), off = r2(n - p.natural), fromMid = p.mid == null ? null : r2(n - p.mid);
+    where = `${off >= 0 ? '<b class="sb-good">Marketable</b>' : `<b>${usd(off)} short of natural</b>`}${fromMid != null ? ` · ${fromMid === 0 ? 'at the mid' : `${usd(fromMid)} ${fromMid > 0 ? 'past' : 'inside'} the mid, toward ${fromMid > 0 ? 'filling' : 'waiting'}`}` : ''}`;
+  }
+  const price = `<div class="ot-price">
+      <span>Natural <b class="mono">${netNote(p.natural)}</b></span><span>Mid <b class="mono">${netNote(p.mid)}</b></span>
+      <label>Limit <input class="ot-limit mono" type="number" step="0.01" value="${limit == null ? '' : limit.toFixed(2)}" title="${single(t) ? 'The price per contract' : 'Net per unit: positive pays (debit), negative receives (credit)'}"></label>
+      ${t.review ? '' : `<span class="ot-steps"><button type="button" class="chip-btn" data-ot="natural">Natural</button><button type="button" class="chip-btn" data-ot="mid">Mid</button>${[-0.05, -0.01, 0.01, 0.05].map(d => `<button type="button" class="chip-btn mono" data-ot-step="${d}">${d > 0 ? '+' : '−'}${Math.abs(d).toFixed(2)}</button>`).join('')}</span>`}
+      ${t.review ? '' : `<label>Qty <input class="ot-qty mono" type="number" min="1" max="100" value="${t.qty}"></label><label>Effect <select class="ot-effect"><option value="close"${t.effect === 'close' ? ' selected' : ''}>Close</option><option value="open"${t.effect === 'open' ? ' selected' : ''}>Open</option></select></label>`}
+    </div><p class="ot-where muted">${where || (t.qErr ? esc(t.qErr) : p.legs.some(l => OCC.test(l.symbol)) ? 'Waiting for quotes…' : 'Type each leg as an OCC symbol.')}</p>`;
+  if (!t.review) {
+    const ok = legsOk(t) && limit != null && limit !== 0 && !(single(t) && limit < 0);
+    return `<div class="ot">${head}${table}${price}<p class="ot-acts"><button type="button" class="btn primary" data-ot="review"${ok ? '' : ' disabled'}>Review</button><button type="button" class="btn" data-ot="close">Cancel</button>${ok ? '' : `<span class="muted">${!legsOk(t) ? 'One to four distinct OCC contracts, ratios 1 to 10, quantity 1 to 100.' : 'Set a limit.'}</span>`}</p>${result}</div>`;
+  }
+  // The review: the account, what's working on it, every contract, and what it can cost.
+  const accts = routing.accounts || [], isLive = x => x?.environment === 'live';
+  if (!accts.some(x => x.account === t.acct && !x.error)) t.acct = accts.find(x => !x.error && !isLive(x))?.account || '';
+  const live = isLive(accts.find(x => x.account === t.acct));
+  const net = asNet(t, limit), credit = net < 0, total = Math.abs(net) * 100 * t.qty;
+  const mine = openOrdersOf(t.acct), desc = x => x.legs?.length ? x.legs.map(l => `${l.side === 'sell' ? '−' : '+'}${(l.ratio_qty || 1) * (x.qty || 1)} ${l.symbol}`).join(' ') : `${x.side === 'sell' ? '−' : '+'}${x.qty} ${x.symbol}`;
+  const already = mine === null ? `<p class="sb-bad">${esc(t.acct)}'s open orders couldn't be read: check the broker first.</p>`
+    : mine?.length ? `<p class="sb-bad"><b>${esc(t.acct)} already has ${mine.length} open order${mine.length > 1 ? 's' : ''}:</b></p><ul class="mono">${mine.map(x => `<li>${esc(desc(x))} @ ${x.limit_price ?? x.type} <span class="muted">${esc(x.status || '')}${(x.client_order_id || '').startsWith('tt-') ? '' : ', placed outside the console'}</span></li>`).join('')}</ul>` : '';
+  const other = t.acct !== t.from ? `<p class="sb-bad">Not the account these legs came from (${esc(t.from)}).</p>` : '';
+  return `<div class="ot sb-review${live ? ' sb-live' : ''}">${head}${live ? '<p class="sb-bad"><b>LIVE ACCOUNT: real money.</b></p>' : ''}
+    <p class="sb-tk"><label>Account <select class="ot-acct">${accts.map(x => `<option value="${esc(x.account)}"${x.error ? ' disabled' : ''}${x.account === t.acct ? ' selected' : ''}>${esc(x.account)}${isLive(x) ? ' (LIVE: real money)' : ''}${x.error ? ' (unreachable)' : x.state && x.state !== 'ready' ? ` (${esc(x.state)})` : ''}</option>`).join('')}</select></label></p>
+    ${other}${already}${table}${price}
+    <p>${credit ? `Receive at least $${total.toFixed(0)}` : `Pay at most $${total.toFixed(0)}`}${t.qty > 1 ? ` (${t.qty} × ${usd(Math.abs(net))})` : ''}. ${t.legs.length === 1 ? 'One order' : 'One combo order'}, limit, day, ${t.effect === 'close' ? 'closing' : 'opening'}.</p>
+    ${live ? `<p><label>Type <b class="mono">${esc(t.acct)}</b> to send: <input class="ot-confirm mono" autocomplete="off" spellcheck="false" value="${esc(t.typed)}"></label></p>` : ''}
+    <p class="ot-acts"><button type="button" class="btn primary" data-ot="send"${!t.acct || t.sending || (live && t.typed.trim() !== t.acct) ? ' disabled' : ''}>${t.sending ? 'Sending…' : live ? 'Send live order' : 'Send order'}</button><button type="button" class="btn" data-ot="back"${t.sending ? ' disabled' : ''}>Back</button></p></div>${result}`;
+}
+function outcome(v, ok) {
+  if (!ok || v.error) return `<span class="sb-bad">Not sent: ${esc(v.error || 'error')}.</span>`;
+  const id = esc(v.client_order_id || v.current?.client_order_id || '');
+  if (v.outcome === 'accepted') return `<span class="sb-good">Accepted by the broker (${esc(v.status || 'new')}), ${id}. Not a fill yet: it's listed with the account's open orders until it fills or is cancelled.</span>`;
+  if (v.outcome === 'rejected') return `<span class="sb-bad">Rejected by the broker: ${esc(v.message || v.code || '')}.</span>`;
+  if (v.outcome === 'not_sent') return `<span class="sb-bad">Not sent: ${esc(notSentText(v.reason || '', v.detail))}.</span>`;
+  if (v.outcome === 'unknown') return `<span class="sb-bad">Unknown (${esc(v.reason || '')}): it may have reached the broker. Don't send it again; the gateway is checking and it will show with the account's open orders if it did.</span>`;
+  return esc(JSON.stringify(v).slice(0, 200));
+}
+async function sendTicket(update) {
+  const t = tk; if (!t || t.sending) return;
+  const live = (routing?.accounts || []).find(x => x.account === t.acct)?.environment === 'live';
+  if (live && t.typed.trim() !== t.acct) { t.result = `<span class="sb-bad">Type ${esc(t.acct)} to send a live order.</span>`; update(true); return; }
+  const limit = limitOf(t, pricing(t));
+  if (!legsOk(t) || limit == null || !limit) { t.result = '<span class="sb-bad">Not sent: the legs or the limit aren\'t complete.</span>'; t.review = false; update(true); return; }
+  t.sending = true; update(true);
+  try {
+    const r = await fetch(`/api/orders/${encodeURIComponent(t.acct)}`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ confirm: t.acct, live, order: { legs: t.legs.map(l => ({ symbol: l.symbol, side: l.side, ratio: l.ratio })), qty: t.qty, limit_price: limit, effect: t.effect } }) });
+    const v = await r.json().catch(() => ({}));
+    t.result = outcome(v, r.ok);
+  } catch (e) { t.result = `<span class="sb-bad">Not known whether it was sent: ${esc(e.message)}. Check the account's open orders before sending again.</span>`; }
+  t.sending = false; t.review = false; t.typed = '';
+  update(true);
+}
+
 const draw = () => `<div><h1>Accounts</h1><p class="muted" style="margin:0">Balances and positions of every brokerage account this deployment reads. Paper accounts with an order gateway can be flattened.</p></div>` + (accountsView(false) || '<p class="muted">No account service is running.</p>');
 
 // Redraws on every update, keeping the scroll position, but not while the
-// operator is typing a confirmation.
+// operator is typing a confirmation. The ticket has its own box, redrawn
+// with its quotes, and not while one of its fields has focus.
 function mount(el) {
-  const update = () => {
-    if (el.contains(document.activeElement) && document.activeElement.matches('.acct-flat-input')) return;
-    paint(el, draw());
-    readGateways(update);
+  el.innerHTML = '<div class="ot-box"></div><div class="acct-main"></div>';
+  const box = /** @type {HTMLElement} */ (el.querySelector('.ot-box')), main = /** @type {HTMLElement} */ (el.querySelector('.acct-main'));
+  let qTimer = 0;
+  const ticket = (force = false) => {
+    const f = document.activeElement;
+    if (!force && f && box.contains(f) && f.matches('input, select')) return;
+    paint(box, ticketView());
+    clearTimeout(qTimer);
+    if (tk) qTimer = setTimeout(() => readQuotes(ticket), 5000);
   };
+  const update = (force = false) => {
+    if (!(el.contains(document.activeElement) && document.activeElement.matches('.acct-flat-input'))) paint(main, draw());
+    ticket(force === true);
+    readGateways(update); readRouting(update);
+  };
+  const show = () => { ticket(true); readQuotes(ticket); box.scrollIntoView({ block: 'nearest' }); };
   const click = async e => {
     const t = e.target.closest('button'); if (!t) return;
     const d = t.dataset;
+    if (d.sbOpen) {
+      // The Spread builder, with this account picked for its Trade review.
+      try { localStorage.setItem('tt-sb-account', d.sbOpen); } catch (_) {}
+      document.dispatchEvent(new CustomEvent('tt-sb-account', { detail: d.sbOpen }));
+      document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'spreads' }));
+      return;
+    }
+    if (d.otClose) {
+      const g = heldGroups.get(d.otClose); if (!g) return;
+      if (g.legs.length > 4) { openTicket(g.account, [], 1, 'close', `Close ${g.sym} ${dayLabel(g.expiry)}`); tk.result = '<span class="sb-bad">More than four legs: close them as two orders (New order).</span>'; ticket(true); return; }
+      closeTicket(g); show(); return;
+    }
+    if (d.otStep && tk) { const l = limitOf(tk, pricing(tk)); if (l != null) tk.limit = r2(l + +d.otStep); ticket(true); return; }
+    if (d.ot && tk) {
+      const i = +(/** @type {HTMLElement | null} */ (t.closest('[data-ot-i]'))?.dataset.otI ?? -1), p = pricing(tk);
+      if (d.ot === 'close') { tk = null; clearTimeout(qTimer); ticket(true); return; }
+      if (d.ot === 'natural') tk.limit = sentLimit(tk, p.natural);
+      else if (d.ot === 'mid') tk.limit = sentLimit(tk, p.mid);
+      else if (d.ot === 'add' && tk.legs.length < 4) tk.legs.push(blankLeg());
+      else if (d.ot === 'remove' && i >= 0) { tk.legs.splice(i, 1); tk.limit = null; }
+      else if (d.ot === 'review') { tk.review = true; tk.result = ''; tk.limit = limitOf(tk, p); }
+      else if (d.ot === 'back') tk.review = false;
+      else if (d.ot === 'send') { sendTicket(ticket); return; }
+      ticket(true); return;
+    }
     if (d.held) {
       const g = heldGroups.get(d.held); if (!g) return;
       askHeld(g); document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'spreads' }));
@@ -189,14 +387,38 @@ function mount(el) {
     }
   };
   const input = e => {
+    if (tk && e.target.classList?.contains('ot-confirm')) {
+      tk.typed = e.target.value;
+      const send = /** @type {HTMLButtonElement | null} */ (box.querySelector('[data-ot="send"]'));
+      if (send) send.disabled = tk.sending || tk.typed.trim() !== tk.acct;
+      return;
+    }
+    if (tk && box.contains(e.target)) { keep(e, false); return; }
     const name = e.target.dataset?.flatTyped; if (!name || !flat[name]) return;
     flat[name].typed = e.target.value;
     const go = el.querySelector(`[data-flat-go="${CSS.escape(name)}"]`);
     if (go) go.disabled = e.target.value !== name;
   };
-  el.addEventListener('click', click); el.addEventListener('input', input);
+  // The ticket's fields are kept as typed and redrawn a moment after they
+  // change (Enter or leaving them), so a click on a button isn't lost to the redraw.
+  const keep = (e, redraw) => {
+    const f = e.target; if (!tk || !box.contains(f)) return;
+    const i = +(f.closest('[data-ot-i]')?.dataset.otI ?? -1), leg = tk.legs[i];
+    if (f.classList.contains('ot-sym') && leg) { leg.symbol = f.value.trim().toUpperCase().replace(/\s+/g, ''); tk.limit = null; }
+    else if (f.classList.contains('ot-side') && leg) { leg.side = f.value === 'sell' ? 'sell' : 'buy'; tk.limit = null; }
+    else if (f.classList.contains('ot-ratio') && leg) leg.ratio = Math.max(1, Math.min(10, Math.round(+f.value) || 1));
+    else if (f.classList.contains('ot-qty')) tk.qty = Math.max(1, Math.min(100, Math.round(+f.value) || 1));
+    else if (f.classList.contains('ot-effect')) { tk.effect = f.value === 'open' ? 'open' : 'close'; tk.limit = null; }
+    else if (f.classList.contains('ot-limit')) { const v = r2(+f.value); if (f.value === '') tk.limit = null; else if (isFinite(v) && v) tk.limit = v; }
+    else if (f.classList.contains('ot-acct')) { tk.acct = f.value; tk.typed = ''; }
+    else return;
+    if (redraw) setTimeout(() => ticket(true), 250);
+  };
+  const change = e => { keep(e, true); if (tk && e.target.classList?.contains('ot-sym')) readQuotes(ticket); };
+  const key = e => { if (e.key === 'Enter' && e.target.matches?.('.ot input')) { e.preventDefault(); e.target.blur(); } };
+  el.addEventListener('click', click); el.addEventListener('input', input); el.addEventListener('change', change); el.addEventListener('keydown', key);
   update();
-  return { update, dispose: () => { el.removeEventListener('click', click); el.removeEventListener('input', input); } };
+  return { update, dispose: () => { clearTimeout(qTimer); el.removeEventListener('click', click); el.removeEventListener('input', input); el.removeEventListener('change', change); el.removeEventListener('keydown', key); } };
 }
 
 defineWidget('accounts', { title: 'Accounts and equity', mount });

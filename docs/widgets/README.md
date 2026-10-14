@@ -1,6 +1,6 @@
 # Widgets
 
-A workspace is a set of panels, each showing one widget. These pages say what each widget shows, where its data comes from, and how to use it. Widgets that need a service show a note when none is running.
+A workspace is a set of panels, each showing one widget. A widget can be added more than once (several charts); the palette's **Copy this panel to…** and **Move this panel to…** put the active panel, with its settings, into another view. These pages say what each widget shows, where its data comes from, and how to use it. Widgets that need a service show a note when none is running.
 
 ## Markets
 
@@ -12,9 +12,14 @@ A workspace is a set of panels, each showing one widget. These pages say what ea
 - [Earnings week](earningsweek.md): The week's earnings reports as a grid, before the open and after the close, largest companies first.
 - [Spread builder](spreads.md): An options position from a structure and the live chain, priced, with Show on chart to draw it on Candles and drag its strikes.
 - [Options screener](screener.md): Stocks ranked by implied volatility, expected move (in percent and dollars of market value), IV over realized, the day's move and volume.
-- [Day](day.md): One market day hour by hour, 04:00 to 20:00 New York time: releases at their times and earnings before the open and after the close; opened from the Calendar.
+- [Day](day.md): One market day hour by hour (04:00 to 20:00 New York time, trimmed to what happens): releases at their times and earnings before the open and after the close; opened from the Calendar.
+- [Cross-asset](crossasset.md): Rates, the dollar and FX, commodities, volatility, world markets, crypto and US indexes: each with its change over a day, week and month, its side of the 20-, 50- and 200-day averages and its 52-week range.
+- [Observations](observations.md): Trend breaks, new highs and lows, streaks and unusual moves across the Cross-asset board and the watchlists, in plain sentences, ranked.
+- [Relationships](relations.md): Matplotlib-style line charts: the rolling correlation of pairs (stocks and bonds, oil and energy…), or performance indexed to 100.
 - [Sector heatmap](heatmap.md): The screener's large companies as a treemap by sector, sized by market value and coloured by the change over a day, a week or a month.
-- [Calendar](calendar.md): The market month: trading days, early closes and holidays, with scheduled economic releases, FOMC decisions and earnings as layers.
+- [Calendar](calendar.md): The market month's weekdays: trading days, early closes and holidays, with scheduled economic releases, FOMC decisions and earnings as layers.
+- [Alerts](alerts.md): Price alerts per symbol (a price to rise or fall to, or a move on the day), checked while a console page is open; fired ones go under the bell and to a notification.
+- [Tape](tape.md): Time and sales from the IEX relay (SPY, QQQ): each trade's price and size, marked a buy at the ask or a sell at the bid, with the window's buy and sell volume and VWAP.
 - [News](news.md): Recent stories, newest first, filtered by symbol with the chips along the top.
 - [Prices](prices.md): One card per series the deployment's topology declares (the relays' trade prices), with the latest value, its change and a chart.
 

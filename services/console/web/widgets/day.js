@@ -1,5 +1,8 @@
-// Day: one market day hour by hour, New York time, from 04:00 to 20:00:
-// pre-market, the session and after-hours shaded apart, each scheduled
+// Day: one market day hour by hour, New York time, within 04:00 to 20:00
+// and only as far as something happens (the first and last hours with a
+// release, the open or close, earnings or now), with three or more quiet
+// hours in a row folded to one line: pre-market, the session and
+// after-hours shaded apart, each scheduled
 // release at its time, and the day's earnings where they land: before the
 // open in the pre-market, after the close in after-hours, and those whose
 // time isn't given apart. Opened from the Calendar (a hard click on a day in
@@ -51,8 +54,17 @@ function draw(my) {
   const now = day === nyToday() ? nyNow() : null, open = s.open, close = s.close;
   const phase = h => open == null ? 'closed' : h * 60 < open ? 'pre' : h * 60 >= close ? 'post' : 'rth';
   const off = evs.filter(e => { const m = mins(e.time); return m == null || m < FIRST * 60 || m >= LAST * 60; });
+  // Hours with something in them; the rest trimmed from the ends and folded in between.
+  const busy = new Set();
+  for (const e of evs) { const m = mins(e.time); if (m != null && m >= FIRST * 60 && m < LAST * 60) busy.add(Math.floor(m / 60)); }
+  if (open != null) { busy.add(Math.floor(open / 60)); busy.add(Math.floor(close / 60)); if (pre.length) busy.add(Math.floor((open - 1) / 60)); }
+  if (now != null && now >= FIRST * 60 && now < LAST * 60) busy.add(Math.floor(now / 60));
+  const from = busy.size ? Math.min(...busy) : FIRST, to = busy.size ? Math.max(...busy) + 1 : FIRST;
+  const hh = h => `${String(h).padStart(2, '0')}:00`;
   const rows = [];
-  for (let h = FIRST; h < LAST; h++) {
+  for (let h = from; h < to; h++) {
+    let q = h; while (q < to && !busy.has(q)) q++;
+    if (q - h >= 3) { rows.push(`<div class="dy-hour dy-fold dy-${phase(h)}"><span class="dy-h mono">${hh(h)}</span><div class="dy-slot muted">nothing until ${hh(q)}</div></div>`); h = q - 1; continue; }
     const here = evs.filter(e => { const m = mins(e.time); return m != null && m >= h * 60 && m < (h + 1) * 60; });
     const marks = [];
     if (open != null && open >= h * 60 && open < (h + 1) * 60) marks.push(`<li class="dy-mark">${String(Math.floor(open / 60)).padStart(2, '0')}:${String(open % 60).padStart(2, '0')} open</li>`);
@@ -70,7 +82,7 @@ function draw(my) {
       <button type="button" class="btn small" data-dy-today${day === nyToday() ? ' disabled' : ''}>Today</button><button type="button" class="tile-btn" data-dy-step="1" aria-label="Next day" title="Next day">›</button></div>
     ${loaded ? '' : '<p class="muted">The economic calendar service isn\'t serving releases or earnings.</p>'}
     ${off.length ? `<div class="dy-off"><h4>Outside 04:00–20:00</h4><ul>${off.map(rel).join('')}</ul></div>` : ''}
-    <div class="dy-grid">${rows.join('')}</div>
+    ${rows.length ? `<div class="dy-grid">${rows.join('')}</div>` : '<p class="muted">Nothing scheduled.</p>'}
     ${closedEarn}${block('Earnings, time not given', unknown)}
   </div>`;
 }
