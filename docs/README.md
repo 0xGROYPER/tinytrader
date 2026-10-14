@@ -11,3 +11,4 @@ format.
 - **[Market data relay API](relay-api.md)**: the stream protocol and every HTTP endpoint, including today's replay of one option contract (`/session`).
 - **Decisions** record why it is built the way it is.
 - [Dataset names](datasets.md) lists the data it knows.
+- [Recovering a deployment](recovery.md) inventories how state survives a lost disk, and who decides each part.
