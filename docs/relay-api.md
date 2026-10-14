@@ -97,6 +97,13 @@ Each contract's **open interest**, from the day's `statistics` the relay holds f
 
 `date` is the trading day the figure is for. alpaca-data puts it on SPY and XSP chain contracts (`open_interest`, and the chain's `open_interest_date`), which Candles' GEX levels use.
 
+### `GET /tape`
+
+Time and sales for the relay's own stock symbols (IEX's `mbp-1`; OPRA's quotes aren't kept): the last 4,000 trades and 4,000 changes to the top of book of each, in memory.
+
+- `?symbol=SPY&after=<seq>` for the ticks after a sequence number, or `?symbol=SPY&limit=<n>` (at most 1000, default 500) for the latest.
+- `{"symbol", "ticks": [{s, t, k, b, a, bz, az, p?, z?}], "last", "symbols", "last_record"}`, oldest first: `s` the sequence number, `t` the event time, `k` `T` (a trade, with `p` and `z`, its price and size) or `Q` (a quote change); `b`, `a`, `bz`, `az` the book, before the trade for a trade. `last` is the newest sequence number held, for the next `after`; a smaller one than before means the relay restarted.
+
 ### `GET /session`: today's replay of one contract
 
 ```

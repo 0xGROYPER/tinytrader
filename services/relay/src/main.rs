@@ -26,6 +26,7 @@ mod hours;
 mod hub;
 mod protocol;
 mod quotes;
+mod tape;
 mod session;
 mod source;
 
@@ -190,7 +191,7 @@ async fn run(args: Args) -> Result<(), String> {
     observer.describe(json!({
         "role": format!("Relays {dataset} {schema_name} for {} to local clients ({}).", args.symbols.join(", "), protocol::PROTOCOL),
         "upstream": [{ "id": provider_id, "label": provider_id, "sub": dataset, "kind": "flow", "via": via }],
-        "streams": { "events": "/events", "series": "/recent", "bars": "/bars", "quotes": "/quotes", "stats": "/stats", "session": "/session", "clients": "/clients" },
+        "streams": { "events": "/events", "series": "/recent", "bars": "/bars", "quotes": "/quotes", "stats": "/stats", "tape": "/tape", "session": "/session", "clients": "/clients" },
         "panels": [{ "heading": format!("{dataset} {}", args.symbols.join(", ")), "note": "Trade prices of the most active instruments, sampled once per second", "decimals": 2 }],
         "relay": { "protocol": protocol::PROTOCOL, "listen": args.listen, "symbols": args.symbols },
         // Relays carrying the same feed on the same hours are one line on a schedule.
@@ -222,6 +223,7 @@ async fn run(args: Args) -> Result<(), String> {
             session.clone(),
         ))
         .merge(quotes::router(hub.clone()))
+        .merge(tape::router(hub.clone()))
         .merge(session.clone().map(session::router).unwrap_or_default())
         .merge({
             let hub = hub.clone();

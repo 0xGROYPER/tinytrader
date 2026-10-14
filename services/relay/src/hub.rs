@@ -202,6 +202,8 @@ pub struct Hub {
     pub bars: Arc<crate::bars::Bars>,
     /// The latest quote of each instrument, for pricing chains.
     pub quotes: crate::quotes::Quotes,
+    /// The latest trades and quote changes of the relay's own stock symbols, for the tape.
+    pub tape: crate::tape::Tape,
     pub series: Series,
     /// Who is connected, by connection.
     roster: Mutex<BTreeMap<u64, ClientInfo>>,
@@ -237,6 +239,7 @@ impl Hub {
             series: Series::new(900, 1000, 6),
             bars: Arc::new(crate::bars::Bars::default()),
             quotes: crate::quotes::Quotes::default(),
+            tape: crate::tape::Tape::default(),
             events: Events::default(),
             clients: AtomicU64::new(0),
             roster: Mutex::new(BTreeMap::new()),
@@ -313,6 +316,7 @@ impl Hub {
         reference.absorb(&plain);
         self.chart(&reference, &plain);
         self.quotes.absorb(&plain);
+        self.tape.absorb(&plain, |id| reference.symbol(id));
         // No receivers is fine: nobody is listening right now.
         let _ = self.tx.send(plain);
         let _ = self.tx_cond.send(with_conditions);
