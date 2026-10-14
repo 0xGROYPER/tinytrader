@@ -64,6 +64,9 @@
 //!   built in (optional; lets the page change without a rebuild).
 //! - `CONSOLE_PROFILES`: where profile-mode recordings are kept
 //!   (`/api/profiles`); by default `profiles/` beside `CONSOLE_REMINDERS`.
+//! - `CONSOLE_PREFS`: a JSON file of the page's settings that follow the user
+//!   between devices (`/api/prefs`); by default `prefs.json` beside
+//!   `CONSOLE_REMINDERS`.
 //! - `CONSOLE_REMINDERS`: a JSON file for the roadmap's reminders, which the
 //!   console edits (`/api/reminders`); `CONSOLE_REMINDERS_SEED`: a Markdown
 //!   roadmap to start it from (optional).
@@ -72,6 +75,7 @@ mod collections;
 mod delta;
 mod gateways;
 mod notify;
+mod prefs;
 mod profiles;
 mod reminders;
 
@@ -103,6 +107,8 @@ struct App {
     /// The store's base URL, for approving drives.
     store: Option<String>,
     /// The roadmap's reminders, if configured.
+    /// Settings that follow the user between devices (`/api/prefs`).
+    prefs: Option<prefs::Prefs>,
     reminders: Option<reminders::Reminders>,
     /// Profile-mode recordings uploaded by pages, if a directory is configured.
     profiles: Option<profiles::Profiles>,
@@ -172,6 +178,22 @@ async fn main() {
                     })
             })
             .map(profiles::Profiles::new),
+        // Beside the reminders unless named.
+        prefs: std::env::var("CONSOLE_PREFS")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var("CONSOLE_REMINDERS")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|r| {
+                        std::path::Path::new(&r)
+                            .parent()
+                            .map(|d| d.join("prefs.json"))
+                    })
+            })
+            .map(prefs::Prefs::open),
         reminders: std::env::var("CONSOLE_REMINDERS")
             .ok()
             .filter(|s| !s.is_empty())
@@ -230,6 +252,8 @@ async fn main() {
             axum::routing::post(store_approve),
         )
         .route("/api/reminders", get(reminders_get).post(reminders_post))
+        .route("/api/prefs", get(prefs_get))
+        .route("/api/prefs/{key}", axum::routing::put(prefs_put))
         .route(
             "/api/profiles",
             get(profiles_list)
@@ -485,6 +509,27 @@ async fn collection_doc(
             || (StatusCode::NOT_FOUND, "no such document").into_response(),
             |d| no_store(axum::Json(d)),
         )
+}
+
+async fn prefs_get(AxumState(app): AxumState<Arc<App>>) -> Response {
+    match &app.prefs {
+        Some(p) => no_store(axum::Json(p.get())),
+        None => (StatusCode::NOT_FOUND, "no settings file configured").into_response(),
+    }
+}
+
+async fn prefs_put(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(key): axum::extract::Path<String>,
+    axum::Json(value): axum::Json<serde_json::Value>,
+) -> Response {
+    let Some(p) = &app.prefs else {
+        return (StatusCode::NOT_FOUND, "no settings file configured").into_response();
+    };
+    match p.put(&key, value) {
+        Ok(()) => no_store(axum::Json(json!({ "ok": true }))),
+        Err(e) => (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": e }))).into_response(),
+    }
 }
 
 async fn reminders_get(AxumState(app): AxumState<Arc<App>>) -> Response {

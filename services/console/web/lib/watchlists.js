@@ -1,7 +1,9 @@
-// Watchlists: named lists of symbols, kept in this browser, with one picked
-// at a time; the Watchlist and News widgets follow the pick (`tt-watchlist`).
+// Watchlists: named lists of symbols, kept by the console and shared between
+// devices (lib/prefs.js), with one picked at a time (per device); the Watchlist and News widgets follow the pick (`tt-watchlist`).
 // A first visit starts with a few to edit. The open view's theme, when it
 // has symbols, is offered as a list of its own ("This view").
+
+import './prefs.js'; // settings shared between devices, read first
 
 /** @typedef {{ name: string, symbols: string[] }} Watchlist */
 

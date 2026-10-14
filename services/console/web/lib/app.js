@@ -1,6 +1,8 @@
 // The console's shell: the header (workspace numbers, the bell, themes),
 // workspaces on Dockview, the palette and the switcher, the docs pages, and
 // polling the fleet. The widgets are modules under ../widgets (decision 0010).
+// Settings shared between devices: read before anything here runs.
+import './prefs.js';
 import { esc, bytes, duration, fmt, ago } from './format.js';
 import { fleet, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf, newsItems } from './fleet.js';
 import { widget, widgetNames } from './widgets.js';

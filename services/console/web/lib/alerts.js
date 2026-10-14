@@ -1,10 +1,13 @@
-// Price alerts: per symbol, kept in this browser. Each is a price to cross
+// Price alerts: per symbol, kept by the console and shared between devices
+// (lib/prefs.js). Each is a price to cross
 // (above or below) or a move on the day (up or down by at least a percent).
 // While a console page is open, armed alerts are checked against stock
 // snapshots (alpaca-data, IEX prices) every 15 seconds; one that's met fires
 // once: it's listed under the bell, and shown as a notification when the
 // browser allows them. Re-arming it starts it again. Several tabs share the
 // alerts (and fire each once); nothing watches with every page closed.
+
+import './prefs.js'; // settings shared between devices, read first
 
 /** @typedef {{ id: string, symbol: string, kind: 'above' | 'below' | 'move', value: number, made: number,
  *   fired: number | null, price: number | null, change: number | null, seen: boolean }} Alert */

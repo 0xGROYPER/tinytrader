@@ -45,3 +45,5 @@ A workspace is a set of panels, each showing one widget. A widget can be added m
 - [Reminders](reminders.md): Reminders after iOS Reminders: lists on the left (with All, Flagged and Completed), the chosen list's items on the right.
 - [Notebook](notebook.md): The deployment's notebook server (JupyterLab), embedded.
 - [Terminal](terminal.md): A terminal program in the browser, such as Emacs, embedded in a panel.
+
+Settings follow you between devices: watchlists, views and folders, alerts, the Cross-asset board, the palette and theme are kept by the console (`/api/prefs`) as well as in each browser. What stays per device is which view is open, which folders are open, the watchlist picked and panel sizes. The first time a device syncs, its own watchlists and alerts are merged in; its views, if different, are set aside in `tinytrader-workspaces-before-sync`.

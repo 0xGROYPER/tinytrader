@@ -7,6 +7,8 @@
 // highs and lows, the streak of up or down days, and how unusual the day's
 // move is against the last 20.
 
+import './prefs.js'; // settings shared between devices, read first
+
 /** @typedef {{ s: string, label?: string }} Row */
 /** @typedef {{ name: string, rows: Row[] }} Group */
 
