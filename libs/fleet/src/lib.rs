@@ -58,7 +58,17 @@ pub struct Poller {
     /// Each container's inspect and stats details, with when they were
     /// fetched and the state they were fetched in (see [`DETAILS_EVERY`]).
     details: Mutex<HashMap<String, (Instant, Value, Value)>>,
+    /// The last container list Docker gave, and when (see [`GRACE`]).
+    last_containers: Mutex<Option<(Instant, HashMap<String, Value>)>>,
+    /// Each service's last answered health, and when (see [`GRACE`]).
+    last_health: Mutex<HashMap<String, (Instant, Value)>>,
 }
+
+/// How long a missed answer (Docker's container list, a service's health) is
+/// covered by the last one, marked stale, before it's reported as an error.
+/// One poll timing out while the machine is busy (a build, an image load)
+/// isn't an outage, and shouldn't blank the page's panels.
+const GRACE: Duration = Duration::from_secs(20);
 
 /// How often a container's inspect and stats are fetched; the container list
 /// itself is read every poll. Per-container calls every two seconds (about 870
@@ -83,6 +93,8 @@ impl Poller {
             catalogs: Mutex::new(HashMap::new()),
             host_cpu: Mutex::new(HashMap::new()),
             details: Mutex::new(HashMap::new()),
+            last_containers: Mutex::new(None),
+            last_health: Mutex::new(HashMap::new()),
         }
     }
 
@@ -201,6 +213,7 @@ impl Poller {
 /// Streams a page asks a service for on demand, through the console.
 pub const ON_DEMAND: &[&str] = &[
     "bars",
+    "daily",
     "snapshots",
     "chain",
     "news_search",
@@ -212,6 +225,7 @@ pub const ON_DEMAND: &[&str] = &[
     "quotes",
     "session",
     "stats",
+    "tape",
 ];
 
 /// Why a service's events could not be fetched.
@@ -684,12 +698,22 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
             );
         }
     };
-    let (containers, docker_error) = match &app.config.docker {
+    // A missed container list is covered by the last for a while (marked
+    // with its age), so a slow Docker doesn't blank every panel at once.
+    let (containers, docker_error, docker_stale) = match &app.config.docker {
         Some(base) => match containers(app, base).await {
-            Ok(c) => (c, None),
-            Err(e) => (HashMap::new(), Some(e)),
+            Ok(c) => {
+                *lock(&app.last_containers) = Some((Instant::now(), c.clone()));
+                (c, None, None)
+            }
+            Err(e) => match &*lock(&app.last_containers) {
+                Some((at, c)) if at.elapsed() < GRACE => {
+                    (c.clone(), None, Some(at.elapsed().as_secs()))
+                }
+                _ => (HashMap::new(), Some(e), None),
+            },
         },
-        None => (HashMap::new(), None),
+        None => (HashMap::new(), None, None),
     };
     let addressed: Vec<Value> = overrides["services"]
         .as_array()
@@ -728,13 +752,21 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
                 Ok(r) => {
                     let code = r.status().as_u16();
                     let body = r.json::<Value>().await.unwrap_or(Value::Null);
-                    entry.insert(
-                        "health".into(),
-                        json!({ "http_status": code, "body": body }),
-                    );
+                    let h = json!({ "http_status": code, "body": body });
+                    lock(&app.last_health).insert(id.to_owned(), (Instant::now(), h.clone()));
+                    entry.insert("health".into(), h);
                 }
+                // No answer: the last one, a while, marked stale.
                 Err(e) => {
-                    entry.insert("health".into(), json!({ "error": short_error(&e) }));
+                    let h = match lock(&app.last_health).get(id) {
+                        Some((at, h)) if at.elapsed() < GRACE => {
+                            let mut h = h.clone();
+                            h["stale_seconds"] = json!(at.elapsed().as_secs());
+                            h
+                        }
+                        _ => json!({ "error": short_error(&e) }),
+                    };
+                    entry.insert("health".into(), h);
                 }
             }
         }
@@ -802,7 +834,7 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
     let snapshot = json!({
         "generated_at": unix_seconds(),
         "hosts": hosts,
-        "docker": { "configured": app.config.docker.is_some(), "error": docker_error },
+        "docker": { "configured": app.config.docker.is_some(), "error": docker_error, "stale_seconds": docker_stale },
         "services": services,
     });
     let problem = docker_error.map(|e| format!("docker api: {e}"));
