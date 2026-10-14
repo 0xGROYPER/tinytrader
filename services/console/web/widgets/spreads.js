@@ -15,7 +15,7 @@ import { esc } from '../lib/format.js';
 import { focused, theme } from '../lib/theme.js';
 import { position, publish, wanted } from '../lib/position.js';
 import { recommend } from '../lib/recommend.js';
-import { STRUCTURES, structureOptions, identify, whatIs } from '../lib/structures.js';
+import { GROUPS, STRUCTURES, structureOptions, identify, whatIs } from '../lib/structures.js';
 import { notSentText } from '../lib/orders.js';
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (_) { /* private mode */ } return null; };
@@ -198,7 +198,7 @@ defineWidget('spreads', {
       }).join('');
       $('.sb-legs').innerHTML = `<thead><tr><th>Asset</th><th class="num">Price</th><th class="num">Qty</th><th class="num">Market value</th><th class="num" title="Delta in shares">Δ</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
-        <tfoot><tr><td><button type="button" class="chip-btn" data-act="add">Add leg</button></td><td></td><td></td>
+        <tfoot><tr><td><span class="sb-adds"><button type="button" class="chip-btn" data-act="add">Add leg</button><select class="sb-addsp" aria-label="Add a spread" title="Add a vertical spread to these legs (a credit spread goes one width out of the money, a debit spread at the money)"><option value="">+ Add spread…</option>${Object.keys(GROUPS[0].items).map(n => `<option>${esc(n)}</option>`).join('')}</select></span></td><td></td><td></td>
           <td class="num" data-label="Net"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted" data-label="Δ">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr></tfoot>`;
       payoff(a);
       // The summary: what it costs, what it can lose and make, and the chance; the rest on hover.
@@ -404,8 +404,28 @@ defineWidget('spreads', {
       const send = /** @type {HTMLButtonElement | null} */ (el.querySelector('[data-act="send"]'));
       if (send) send.disabled = my.sending || my.typed.trim() !== my.acct;
     });
+    // A vertical added to the legs there are: a credit spread's short strike
+    // one width out of the money (calls above, puts below), a debit spread's
+    // long strike at the money. Legs on the same contract net out.
+    function addSpread(name) {
+      const ks = strikesOf(), spot = my.chain?.spot, make = STRUCTURES[name];
+      if (!ks.length || !spot || !make) return;
+      const shape = make(my.width), credit = /credit/.test(name), calls = shape[0][0] === 'call';
+      const a = ks.indexOf(nearest(ks, spot)) + (credit ? (calls ? my.width : -my.width) : 0);
+      const out = legs().map(l => ({ ...l }));
+      for (const [type, o, side, qty] of shape) {
+        const strike = ks[Math.max(0, Math.min(ks.length - 1, a + o))];
+        const had = out.find(l => l.type === type && l.strike === strike);
+        if (!had) { out.push({ type, strike, side, qty }); continue; }
+        const n = had.side * had.qty + side * qty;
+        had.side = n >= 0 ? 1 : -1; had.qty = Math.abs(n); delete had.cost;
+      }
+      position.sym = my.sym; position.legs = out.filter(l => l.qty > 0);
+      my.structure = 'Custom'; my.why = ''; my.limit = null; my.review = false;
+    }
     el.addEventListener('change', e => {
       const t = /** @type {HTMLSelectElement} */ (e.target);
+      if (t.classList.contains('sb-addsp')) { if (t.value) { addSpread(t.value); render(); } return; }
       if (t.classList.contains('sb-st')) { my.review = false; my.limit = null; my.result = ''; my.structure = t.value; my.why = ''; my.held = null; build(); render(); return; }
       if (t.classList.contains('sb-acct')) { my.acct = t.value; my.typed = ''; store('tt-sb-account', t.value); render(); return; }
       if (t.classList.contains('sb-limit')) { const v = Math.round(+t.value * 100) / 100; if (v) my.limit = v; t.blur(); render(); return; }
