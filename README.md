@@ -1,6 +1,6 @@
 # tinytrader
 
-A platform for running small trading and research operations: services,
+A platform for running trading and research operations: services,
 deployment modules and an operator console. Services run under NixOS, under
 systemd on any Linux with Nix, or as Docker containers on any operating
 system.
