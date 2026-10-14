@@ -19,6 +19,14 @@
 //!   many, and each contract's `quote_src` which it has. The screener's scan
 //!   uses them too.
 //!
+//! - `/daily?symbols=SPY,TLT,TNX,BTC/USD&days=300`: daily closes for a mix
+//!   of symbols in one request, `{ "series": { SYMBOL: { "source",
+//!   "closes": [[t, c], ...], "error" } } }`, `t` each session's New York
+//!   midnight: stocks and ETFs from Alpaca (split-adjusted, up to 16 minutes
+//!   ago), crypto pairs (`BTC/USD`) from Alpaca's crypto data, Cboe's indexes
+//!   (VIX and its terms, and Treasury yields: IRX, FVX, TNX, TYX, ten times
+//!   the percentage) from Cboe. `days` counts sessions (calendar days for
+//!   crypto), at most 400; at most 200 symbols. Kept ten minutes.
 //! - `/news?symbols=USO,XLE&limit=50`: recent stories on those symbols
 //!   (Benzinga, through Alpaca), in the news service's shape, newest first.
 //!
@@ -597,6 +605,164 @@ struct BarAsk {
     /// traded that day: what option strikes of the time refer to), or `all`
     /// (splits and dividends).
     adjustment: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DailyAsk {
+    symbols: String,
+    days: Option<u64>,
+}
+
+/// A crypto pair as Alpaca names it: two to six capitals, a slash, two to six.
+fn pair_ok(s: &str) -> bool {
+    s.split_once('/').is_some_and(|(a, b)| {
+        [a, b]
+            .iter()
+            .all(|x| (2..=6).contains(&x.len()) && x.bytes().all(|c| c.is_ascii_uppercase()))
+    })
+}
+
+/// Daily closes for stocks, crypto pairs and Cboe's indexes, in one answer.
+async fn daily(AxState(app): AxState<Arc<App>>, Query(ask): Query<DailyAsk>) -> Response {
+    let mut symbols: Vec<String> = ask
+        .symbols
+        .split(',')
+        .map(|s| s.trim().to_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    symbols.dedup();
+    if symbols.is_empty() || symbols.len() > 200 {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "symbols: 1 to 200, comma-separated",
+        );
+    }
+    if let Some(bad) = symbols.iter().find(|s| !symbol_ok(s) && !pair_ok(s)) {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            format!("symbols: {bad} is not a stock symbol or a crypto pair"),
+        );
+    }
+    let days = ask.days.unwrap_or(300).clamp(2, 400);
+    let mut key = symbols.clone();
+    key.sort();
+    let a = app.clone();
+    answer(
+        app.kept(
+            format!("daily|{}|{days}", key.join(",")),
+            Duration::from_secs(600),
+            || async move {
+                let now = unix_seconds() as i64;
+                let start = ny_date_time(now - (days as i64 * 7 / 5 + 7) * 86_400).0;
+                let mut series = serde_json::Map::new();
+                let (indexes, rest): (Vec<_>, Vec<_>) =
+                    symbols.iter().cloned().partition(|s| cboe::is_index(s));
+                let (pairs, stocks): (Vec<_>, Vec<_>) =
+                    rest.into_iter().partition(|s| s.contains('/'));
+                for s in &indexes {
+                    let v = index_bars(&a, s.clone(), 86_400, days, None).await;
+                    series.insert(
+                        s.clone(),
+                        match v {
+                            Ok(v) => json!({ "source": "cboe", "closes": closes(&v["bars"]) }),
+                            Err((_, e)) => json!({ "source": "cboe", "closes": [], "error": e }),
+                        },
+                    );
+                }
+                // Stocks and crypto: many symbols a request, paged.
+                for (path, list, feed, source) in [
+                    (
+                        "/v2/stocks/bars",
+                        &stocks,
+                        Some(a.history_feed.clone()),
+                        "alpaca",
+                    ),
+                    ("/v1beta3/crypto/us/bars", &pairs, None, "crypto"),
+                ] {
+                    if list.is_empty() {
+                        continue;
+                    }
+                    let mut got: HashMap<String, Vec<Value>> = HashMap::new();
+                    let mut error = None;
+                    for chunk in list.chunks(50) {
+                        let mut token: Option<String> = None;
+                        for _ in 0..40 {
+                            let mut q = vec![
+                                ("symbols", chunk.join(",")),
+                                ("timeframe", "1Day".to_owned()),
+                                ("start", start.clone()),
+                                ("limit", "10000".to_owned()),
+                            ];
+                            if let Some(f) = &feed {
+                                // The full market's history is free from 15 minutes back.
+                                q.extend([
+                                    ("feed", f.clone()),
+                                    ("adjustment", "split".to_owned()),
+                                    ("end", rfc3339(now - 16 * 60)),
+                                ]);
+                            }
+                            if let Some(t) = &token {
+                                q.push(("page_token", t.clone()));
+                            }
+                            let v = match a.get(path, &q).await {
+                                Ok(v) => v,
+                                Err((_, e)) => {
+                                    error = Some(e);
+                                    break;
+                                }
+                            };
+                            for (sym, bars) in v["bars"].as_object().into_iter().flatten() {
+                                let list = got.entry(sym.clone()).or_default();
+                                for b in bars.as_array().into_iter().flatten() {
+                                    if let (Some(t), Some(c)) =
+                                        (b["t"].as_str().and_then(unix), b["c"].as_f64())
+                                    {
+                                        // A session by its New York date's midnight, as Cboe's are.
+                                        let day = ny_date_time(t).0;
+                                        let ymd: Vec<i64> =
+                                            day.split('-').filter_map(|x| x.parse().ok()).collect();
+                                        let t = if let [y, m, d] = ymd[..] {
+                                            tinytrader_schedule::ny_to_unix(y, m, d, 0, 0)
+                                        } else {
+                                            t
+                                        };
+                                        list.push(json!([t, c]));
+                                    }
+                                }
+                            }
+                            token = v["next_page_token"].as_str().map(str::to_owned);
+                            if token.is_none() {
+                                break;
+                            }
+                        }
+                    }
+                    for s in list {
+                        let mut c = got.remove(s).unwrap_or_default();
+                        c.sort_by_key(|x| x[0].as_i64().unwrap_or(0));
+                        c.dedup_by_key(|x| x[0].as_i64().unwrap_or(0));
+                        let keep = c.len().saturating_sub(days as usize);
+                        let mut entry = json!({ "source": source, "closes": &c[keep..] });
+                        if c.is_empty() {
+                            entry["error"] =
+                                json!(error.clone().unwrap_or_else(|| "no bars".to_owned()));
+                        }
+                        series.insert(s.clone(), entry);
+                    }
+                }
+                Ok(json!({ "as_of": now, "days": days, "series": series }))
+            },
+        )
+        .await,
+    )
+}
+
+/// `[t, close]` from `[t, o, h, l, c, v]` bars.
+fn closes(bars: &Value) -> Vec<Value> {
+    bars.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| Some(json!([b[0].as_i64()?, b[4].as_f64()?])))
+        .collect()
 }
 
 async fn bars(AxState(app): AxState<Arc<App>>, Query(ask): Query<BarAsk>) -> Response {
@@ -1355,7 +1521,7 @@ async fn main() {
             { "id": "alpaca-data-api", "label": "Alpaca", "sub": format!("{} stocks, {} options", args.feed, args.options_feed), "kind": "flow", "via": "https" },
             { "id": "cboe-delayed", "label": "Cboe", "sub": "index bars, 15 min delayed", "kind": "flow", "via": "https" },
         ],
-        "streams": { "bars": "/bars", "snapshots": "/snapshots", "chain": "/chain", "news_search": "/news", "option_bars": "/option_bars", "option_contracts": "/option_contracts", "screener": "/screener" },
+        "streams": { "bars": "/bars", "daily": "/daily", "snapshots": "/snapshots", "chain": "/chain", "news_search": "/news", "option_bars": "/option_bars", "option_contracts": "/option_contracts", "screener": "/screener" },
     }));
     let app = Arc::new(App {
         http: reqwest::Client::builder()
@@ -1404,6 +1570,7 @@ async fn main() {
     let router = Router::new()
         .route("/snapshots", get(snapshots))
         .route("/bars", get(bars))
+        .route("/daily", get(daily))
         .route("/chain", get(option_chain))
         .route("/news", get(news))
         .route("/option_bars", get(option_bars))

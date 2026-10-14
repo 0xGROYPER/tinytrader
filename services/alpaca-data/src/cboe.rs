@@ -20,7 +20,8 @@ const BASE: &str = "https://cdn-api.cboe.com/api/global/delayed_quotes/charts";
 /// The indexes served from Cboe; any other symbol goes to Alpaca.
 pub const INDEXES: &[&str] = &[
     "XSP", "SPX", "VIX", "VIX9D", "VIX1D", "VIX3M", "NDX", "XND", "RUT", "MRUT", "DJX", "OEX",
-    "XEO",
+    "XEO", // Treasury yields, ten times the percentage (TNX 42.5 is 4.25%): 13-week, 5-, 10- and 30-year.
+    "IRX", "FVX", "TNX", "TYX",
 ];
 
 #[must_use]
