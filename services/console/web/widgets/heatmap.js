@@ -55,7 +55,7 @@ const tone = (c, sat) => {
 function readout(my) {
   const rows = (my.rows || []).filter(r => r.market_cap > 0), h = my.hover && rows.find(r => r.symbol === my.hover);
   if (h) return `<b class="mono">${esc(h.symbol)}</b> ${esc(h.name || '')} · <span class="mono">${pct(h[PERIODS[my.period][0]])} ${my.period}</span> · ${esc(h.sector || 'Other')} · ${esc(cap(h.market_cap))}${h.price ? ` · $${h.price.toFixed(2)}` : ''}`;
-  return `${rows.length} companies in ${new Set(rows.map(r => r.sector || 'Other')).size} sectors${my.at ? ` · as of ${new Date(my.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}`;
+  return `${rows.length} companies in ${new Set(rows.map(r => r.sector || 'Other')).size} sectors${my.pending ? ` (${my.pending} more being read)` : ''}${my.at ? ` · as of ${new Date(my.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}`;
 }
 
 function draw(my, W, H) {
@@ -94,7 +94,7 @@ defineWidget('heatmap', {
   title: 'Sector heatmap',
   mount(el) {
     const saved = store('tt-hm-period');
-    const my = { rows: /** @type {any[] | null} */ (null), err: '', at: 0, hover: /** @type {string | null} */ (null), alive: true, period: saved && PERIODS[saved] ? saved : '1D', loading: false };
+    const my = { rows: /** @type {any[] | null} */ (null), err: '', at: 0, tried: 0, pending: 0, hover: /** @type {string | null} */ (null), alive: true, period: saved && PERIODS[saved] ? saved : '1D', loading: false };
     const size = () => {
       const W = Math.max(240, el.clientWidth - 32);
       // The map takes what the panel has below its header, at least a third as tall as wide.
@@ -104,13 +104,13 @@ defineWidget('heatmap', {
     const update = () => { const [W, H] = size(); paint(el, draw(my, W, H)); };
     async function load() {
       const svc = service(); if (!svc) { update(); return; }
-      if (my.loading) return; my.loading = true;
+      if (my.loading) return; my.loading = true; my.tried = Date.now();
       try {
         const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/screener`, { cache: 'no-store' });
         const v = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(v.error || `${r.status}`);
         if (!my.alive) return;
-        my.rows = v.rows || []; my.at = Date.now(); my.err = '';
+        my.rows = v.rows || []; my.at = Date.now(); my.err = ''; my.pending = v.pending || 0;
       } catch (e) { my.err = `The screener couldn't be read: ${e.message}`; }
       my.loading = false; update();
     }
@@ -128,8 +128,15 @@ defineWidget('heatmap', {
     const resized = new ResizeObserver(() => update()); resized.observe(el);
     load();
     return {
-      // Shown again (or refreshed while shown): read again once ten minutes old.
-      update() { if (my.at && Date.now() - my.at > STALE) load(); },
+      // Shown again (or refreshed while shown): read again once ten minutes
+      // old; every minute while the screener is still filling in (after a
+      // restart); and, until a read has worked (the service down, or not yet
+      // known), every 15 seconds.
+      update() {
+        const now = Date.now();
+        if (!my.at) { if (now - my.tried > 15e3) load(); }
+        else if (now - my.at > (my.pending ? 60e3 : STALE)) load();
+      },
       dispose() { my.alive = false; resized.disconnect(); el.removeEventListener('mouseover', over); el.removeEventListener('click', click); },
     };
   },

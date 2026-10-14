@@ -11,3 +11,5 @@ The large companies the options screener scans, as a treemap after Finviz's map:
 - Hover a tile for the company, its change, sector, market value and price; the line above the map shows it.
 - Click a tile to point the workspace's charts (Candles, IV heatmap) at it. The workspace theme's symbols are outlined.
 - It fills its panel; small tiles drop the change, then the symbol.
+
+If the screener can't be read (its service down, or the console just started), the map tries again every 15 seconds. While the screener is still reading companies after a restart, the header says how many are left and the map refreshes every minute until it's complete.
