@@ -14,6 +14,7 @@ axum.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 databento = { version = "0.63", default-features = false, features = ["live"] }
 tinytrader-dbn.workspace = true
+tinytrader-alpaca.workspace = true
 tinytrader-observe.workspace = true
 tinytrader-schedule.workspace = true
 futures-util.workspace = true

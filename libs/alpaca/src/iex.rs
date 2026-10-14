@@ -89,7 +89,7 @@ pub struct Side {
     pub sz: u32,
 }
 
-const ABSENT: Side = Side {
+pub(crate) const ABSENT: Side = Side {
     px: UNDEF_PRICE,
     sz: 0,
 };
@@ -210,7 +210,7 @@ pub fn quote_lot(ts: u64) -> u32 {
     if ts < from { 100 } else { 1 }
 }
 
-fn side(px: &RawValue, sz: u64, lot: u32) -> Result<Side, String> {
+pub(crate) fn side(px: &RawValue, sz: u64, lot: u32) -> Result<Side, String> {
     let text = px.get();
     match (text == "0", sz == 0) {
         (true, true) => Ok(ABSENT),

@@ -33,14 +33,22 @@ pub struct Volume {
 /// Where incoming files wait to be incorporated.
 pub const INCOMING: &str = ".incoming";
 
-/// A provider's directory name, for the providers the store ingests.
+/// A provider's directory name, for the providers the store ingests. Every
+/// provider's batches have Databento's shape (a `manifest.json` of files with
+/// sizes and SHA-256, a `metadata.json` with the query, day files named
+/// `<name>-YYYYMMDD.<schema>.dbn.zst`): Databento's own, and Alpaca's history
+/// as tinytrader's `alpaca-history` packs it (decision 0014).
 #[must_use]
 pub fn provider_dir(provider: &str) -> Option<&'static str> {
     match provider.to_ascii_lowercase().as_str() {
         "databento" => Some("Databento"),
+        "alpaca" => Some("Alpaca"),
         _ => None,
     }
 }
+
+/// Schemas that aren't DBN's own: their files' headers name no schema.
+const EXTENSION_SCHEMAS: &[&str] = &["conditions"];
 
 /// A single path component safe to use as a batch or file name.
 #[must_use]
@@ -212,10 +220,18 @@ fn check_header(path: &Path, dataset: &str, schema: &str, day: &str) -> Result<(
             m.dataset
         ));
     }
-    let want: dbn::Schema = schema
-        .parse()
-        .map_err(|_| format!("unknown schema {schema}"))?;
-    if m.schema != Some(want) {
+    // An extension schema (trade conditions) is written as a header without a
+    // schema; DBN's own schemas must match.
+    let want: Option<dbn::Schema> = if EXTENSION_SCHEMAS.contains(&schema) {
+        None
+    } else {
+        Some(
+            schema
+                .parse()
+                .map_err(|_| format!("unknown schema {schema}"))?,
+        )
+    };
+    if m.schema != want {
         return Err(format!(
             "its header says schema {:?}, not {schema}",
             m.schema.map(|s| s.as_str())
@@ -323,13 +339,13 @@ pub struct Part {
 /// # Errors
 /// If the batch is incomplete, a file doesn't match the manifest, the
 /// request shape isn't supported, or a destination holds a different file.
-pub fn incorporate_databento(
+pub fn incorporate(
     parts: &[Part],
     elsewhere: &[PathBuf],
     batch: &str,
     today: &str,
 ) -> Result<Value, String> {
-    file_databento(parts, elsewhere, batch, today)
+    file_batch(parts, elsewhere, batch, today)
 }
 
 /// File a Databento download folder where it already is (`dir`, on the same
@@ -338,8 +354,8 @@ pub fn incorporate_databento(
 /// If any check fails, the folder is left exactly as it was.
 ///
 /// # Errors
-/// As [`incorporate_databento`].
-pub fn adopt_databento(
+/// As [`incorporate`].
+pub fn adopt(
     dir: &Path,
     root: &Path,
     elsewhere: &[PathBuf],
@@ -354,7 +370,7 @@ pub fn adopt_databento(
         inc: dir.to_path_buf(),
         root: root.to_path_buf(),
     };
-    file_databento(&[part], elsewhere, batch, today)
+    file_batch(&[part], elsewhere, batch, today)
 }
 
 /// Keep a receipt in `provenance/<batch>/` on every root: linked on its own
@@ -390,7 +406,7 @@ fn keep_receipt(
     clippy::too_many_lines,
     reason = "one pass of checks, then one of moves, kept together so nothing moves before every check"
 )]
-fn file_databento(
+fn file_batch(
     parts: &[Part],
     elsewhere: &[PathBuf],
     batch: &str,
@@ -827,7 +843,7 @@ mod tests {
                 root: b.clone(),
             },
         ];
-        let s = incorporate_databento(&parts, &[], "OPRA-S", "2026-10-06").unwrap();
+        let s = incorporate(&parts, &[], "OPRA-S", "2026-10-06").unwrap();
         assert_eq!(s["files"].as_array().unwrap().len(), 2);
         assert_eq!(fs::read(a.join(DAY)).unwrap(), one_day);
         assert_eq!(
@@ -869,7 +885,7 @@ mod tests {
         fs::write(b.join(DAY), b"what b had").unwrap();
         stage(&a, "OPRA-T", &["SPX.OPT"], b"other");
         let parts = one(&a, "OPRA-T");
-        let err = incorporate_databento(&parts, std::slice::from_ref(&b), "OPRA-T", "2026-10-06")
+        let err = incorporate(&parts, std::slice::from_ref(&b), "OPRA-T", "2026-10-06")
             .unwrap_err();
         assert!(err.contains("already holds a different file"), "{err}");
         assert_eq!(fs::read(b.join(DAY)).unwrap(), b"what b had");
@@ -890,7 +906,7 @@ mod tests {
     fn files_a_batch_in_the_standard_layout() {
         let root = scratch("batch").join("Databento");
         stage(&root, "OPRA-1", &["SPX.OPT"], b"day one");
-        let s = incorporate_databento(&one(&root, "OPRA-1"), &[], "OPRA-1", "2026-10-06").unwrap();
+        let s = incorporate(&one(&root, "OPRA-1"), &[], "OPRA-1", "2026-10-06").unwrap();
         assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         assert_eq!(s["files"].as_array().unwrap().len(), 1);
         let kept = fs::read_to_string(root.join("provenance/OPRA-1/manifest.json")).unwrap();
@@ -911,7 +927,7 @@ mod tests {
         fs::write(root.join(DAY), b"what we had").unwrap();
         stage(&root, "OPRA-2", &["SPX.OPT"], b"something else");
         let err =
-            incorporate_databento(&one(&root, "OPRA-2"), &[], "OPRA-2", "2026-10-06").unwrap_err();
+            incorporate(&one(&root, "OPRA-2"), &[], "OPRA-2", "2026-10-06").unwrap_err();
         assert!(err.contains("already holds a different file"), "{err}");
         assert_eq!(fs::read(root.join(DAY)).unwrap(), b"what we had");
         assert!(
@@ -936,7 +952,7 @@ mod tests {
 
         // A different day elsewhere: refused.
         stage(&here, "OPRA-3", &["SPX.OPT"], b"not the same");
-        let err = incorporate_databento(
+        let err = incorporate(
             &one(&here, "OPRA-3"),
             std::slice::from_ref(&there),
             "OPRA-3",
@@ -949,7 +965,7 @@ mod tests {
         // The same bytes elsewhere: a proven duplicate, not a second copy.
         let other = base.join("other/Databento");
         stage(&other, "OPRA-4", &["SPX.OPT"], b"held elsewhere");
-        let s = incorporate_databento(
+        let s = incorporate(
             &one(&other, "OPRA-4"),
             std::slice::from_ref(&there),
             "OPRA-4",
@@ -970,7 +986,7 @@ mod tests {
         let root = scratch("symbols").join("Databento");
         stage(&root, "OPRA-5", &["SPY.OPT", "QQQ.OPT"], b"two parents");
         let err =
-            incorporate_databento(&one(&root, "OPRA-5"), &[], "OPRA-5", "2026-10-06").unwrap_err();
+            incorporate(&one(&root, "OPRA-5"), &[], "OPRA-5", "2026-10-06").unwrap_err();
         assert!(err.contains("one symbol"), "{err}");
         assert!(!root.join("OPRA.PILLAR").exists());
         let _ = fs::remove_dir_all(root.parent().unwrap());
@@ -980,10 +996,10 @@ mod tests {
     fn filing_the_same_batch_again_changes_nothing() {
         let root = scratch("again").join("Databento");
         stage(&root, "OPRA-6", &["SPX.OPT"], b"day one");
-        incorporate_databento(&one(&root, "OPRA-6"), &[], "OPRA-6", "2026-10-06").unwrap();
+        incorporate(&one(&root, "OPRA-6"), &[], "OPRA-6", "2026-10-06").unwrap();
         let receipt = fs::read(root.join("provenance/OPRA-6/manifest.json")).unwrap();
         stage(&root, "OPRA-6", &["SPX.OPT"], b"day one");
-        let s = incorporate_databento(&one(&root, "OPRA-6"), &[], "OPRA-6", "2026-10-06").unwrap();
+        let s = incorporate(&one(&root, "OPRA-6"), &[], "OPRA-6", "2026-10-06").unwrap();
         assert_eq!(s["files"][0]["already_present"], true);
         assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         assert_eq!(
@@ -1011,7 +1027,7 @@ mod tests {
         fs::write(root.join("provenance/OPRA-7/manifest.json"), "{}").unwrap();
         stage(&root, "OPRA-7", &["SPX.OPT"], b"day one");
         let err =
-            incorporate_databento(&one(&root, "OPRA-7"), &[], "OPRA-7", "2026-10-06").unwrap_err();
+            incorporate(&one(&root, "OPRA-7"), &[], "OPRA-7", "2026-10-06").unwrap_err();
         assert!(err.contains("different manifest.json"), "{err}");
         assert!(!root.join(DAY).exists());
         assert_eq!(
@@ -1033,7 +1049,7 @@ mod tests {
             root.join(DAY),
         )
         .unwrap();
-        incorporate_databento(&one(&root, "OPRA-8"), &[], "OPRA-8", "2026-10-06").unwrap();
+        incorporate(&one(&root, "OPRA-8"), &[], "OPRA-8", "2026-10-06").unwrap();
         assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         assert!(root.join("provenance/OPRA-8/manifest.json").exists());
         assert!(!root.join(INCOMING).exists());
@@ -1049,7 +1065,7 @@ mod tests {
         let dir = base.join("OPRA-9");
         fs::rename(base.join(INCOMING).join("OPRA-9"), &dir).unwrap();
         fs::write(dir.join("_batch_listing.json"), "[]").unwrap();
-        let s = adopt_databento(&dir, &root, &[], "2026-10-06").unwrap();
+        let s = adopt(&dir, &root, &[], "2026-10-06").unwrap();
         assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         assert!(root.join("provenance/OPRA-9/_batch_listing.json").exists());
         assert!(!dir.exists(), "the folder is gone once filed");
@@ -1059,7 +1075,7 @@ mod tests {
         stage(&base, "OPRA-10", &["SPX.OPT"], b"different day one");
         let bad = base.join("OPRA-10");
         fs::rename(base.join(INCOMING).join("OPRA-10"), &bad).unwrap();
-        assert!(adopt_databento(&bad, &root, &[], "2026-10-06").is_err());
+        assert!(adopt(&bad, &root, &[], "2026-10-06").is_err());
         assert_eq!(fs::read_dir(&bad).unwrap().count(), 3);
         assert_eq!(fs::read(root.join(DAY)).unwrap(), dbn_day(b"day one"));
         let _ = fs::remove_dir_all(&base);
@@ -1075,7 +1091,7 @@ mod tests {
             &["SPX.OPT"],
             &dbn_file("OPRA.PILLAR", dbn::Schema::Trades, "2025-10-01", b""),
         );
-        let err = incorporate_databento(&one(&root, "OPRA-11"), &[], "OPRA-11", "2026-10-06")
+        let err = incorporate(&one(&root, "OPRA-11"), &[], "OPRA-11", "2026-10-06")
             .unwrap_err();
         assert!(err.contains("schema"), "{err}");
         stage_bytes(
@@ -1084,12 +1100,12 @@ mod tests {
             &["SPX.OPT"],
             &dbn_file("OPRA.PILLAR", dbn::Schema::Cmbp1, "2025-10-02", b""),
         );
-        let err = incorporate_databento(&one(&root, "OPRA-12"), &[], "OPRA-12", "2026-10-06")
+        let err = incorporate(&one(&root, "OPRA-12"), &[], "OPRA-12", "2026-10-06")
             .unwrap_err();
         assert!(err.contains("not 2025-10-01"), "{err}");
         stage_bytes(&root, "OPRA-13", &["SPX.OPT"], b"not dbn at all");
         assert!(
-            incorporate_databento(&one(&root, "OPRA-13"), &[], "OPRA-13", "2026-10-06")
+            incorporate(&one(&root, "OPRA-13"), &[], "OPRA-13", "2026-10-06")
                 .unwrap_err()
                 .contains("not a readable DBN file")
         );

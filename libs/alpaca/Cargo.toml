@@ -1,0 +1,15 @@
+[package]
+name = "tinytrader-alpaca"
+description = "Alpaca market data as DBN: IEX as MBP-1 and SIP as CMBP-1, with trade conditions"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+tinytrader-dbn.workspace = true

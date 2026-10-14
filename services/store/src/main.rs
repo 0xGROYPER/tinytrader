@@ -487,7 +487,7 @@ async fn incorporate(
     let today = today();
     let b = batch.clone();
     let result = tokio::task::spawn_blocking(move || {
-        ingest::incorporate_databento(&parts, &elsewhere, &b, &today)
+        ingest::incorporate(&parts, &elsewhere, &b, &today)
     })
     .await;
     match result {
@@ -637,7 +637,7 @@ async fn adopt(
     let today = today();
     let d = dir.clone();
     match tokio::task::spawn_blocking(move || {
-        ingest::adopt_databento(&d, &root, &elsewhere, &today)
+        ingest::adopt(&d, &root, &elsewhere, &today)
     })
     .await
     {

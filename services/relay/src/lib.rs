@@ -1,4 +1,4 @@
 //! Library side of the relay: source encoders shared by the relay and its
-//! offline tools.
+//! offline tools. The Alpaca encoders live in `tinytrader-alpaca`.
 
-pub mod iex;
+pub use tinytrader_alpaca::iex;

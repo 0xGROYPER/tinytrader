@@ -1,0 +1,27 @@
+[package]
+name = "alpaca-history"
+description = "Alpaca's historical trades and quotes, a day at a time, into the store"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+dbn = { version = "0.71", default-features = false, features = ["zstd"] }
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+sha2 = "0.10"
+time = { version = "0.3", features = ["macros", "parsing"] }
+tinytrader-alpaca.workspace = true
+tinytrader-dbn.workspace = true
+tinytrader-observe.workspace = true
+tinytrader-schedule.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+zstd = "0.13"
