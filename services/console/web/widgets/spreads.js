@@ -410,7 +410,7 @@ defineWidget('spreads', {
     function addSpread(name) {
       const ks = strikesOf(), spot = my.chain?.spot, make = STRUCTURES[name];
       if (!ks.length || !spot || !make) return;
-      const shape = make(my.width), credit = /credit/.test(name), calls = shape[0][0] === 'call';
+      const shape = make(my.width), credit = /credit/i.test(name), calls = shape[0][0] === 'call';
       const a = ks.indexOf(nearest(ks, spot)) + (credit ? (calls ? my.width : -my.width) : 0);
       const out = legs().map(l => ({ ...l }));
       for (const [type, o, side, qty] of shape) {

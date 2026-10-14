@@ -8,10 +8,10 @@
 /** @type {{ group: string, items: Record<string, { what: string, make: (w: number) => Shape[] }> }[]} */
 export const GROUPS = [
   { group: 'Verticals', items: {
-    'Bull call spread (debit)': { what: 'Bullish: buy the call at the strike, sell one w higher. Pays to open; makes the width less the debit above the higher strike.', make: w => [['call', 0, 1, 1], ['call', w, -1, 1]] },
-    'Bull put spread (credit)': { what: 'Bullish: sell the put at the strike, buy one w lower. Paid to open; keeps the credit above the strike.', make: w => [['put', 0, -1, 1], ['put', -w, 1, 1]] },
-    'Bear put spread (debit)': { what: 'Bearish: buy the put at the strike, sell one w lower. Pays to open; makes the width less the debit below the lower strike.', make: w => [['put', 0, 1, 1], ['put', -w, -1, 1]] },
-    'Bear call spread (credit)': { what: 'Bearish: sell the call at the strike, buy one w higher. Paid to open; keeps the credit below the strike.', make: w => [['call', 0, -1, 1], ['call', w, 1, 1]] },
+    'Bull Call Debit': { what: 'Bullish: buy the call at the strike, sell one w higher. Pays to open; makes the width less the debit above the higher strike.', make: w => [['call', 0, 1, 1], ['call', w, -1, 1]] },
+    'Bull Put Credit': { what: 'Bullish: sell the put at the strike, buy one w lower. Paid to open; keeps the credit above the strike.', make: w => [['put', 0, -1, 1], ['put', -w, 1, 1]] },
+    'Bear Put Debit': { what: 'Bearish: buy the put at the strike, sell one w lower. Pays to open; makes the width less the debit below the lower strike.', make: w => [['put', 0, 1, 1], ['put', -w, -1, 1]] },
+    'Bear Call Credit': { what: 'Bearish: sell the call at the strike, buy one w higher. Paid to open; keeps the credit below the strike.', make: w => [['call', 0, -1, 1], ['call', w, 1, 1]] },
   } },
   { group: 'Range (short volatility)', items: {
     'Iron condor': { what: 'Sell a put w below and a call w above, buy wings 2w out. Paid to open; keeps the credit between the short strikes.', make: w => [['call', w, -1, 1], ['put', -w, -1, 1], ['call', 2 * w, 1, 1], ['put', -2 * w, 1, 1]] },
@@ -87,8 +87,8 @@ export function identify(legs) {
       return `${type === 'call' ? 'Call' : 'Put'} ${more ? 'backspread' : 'ratio spread'} (${lo.n}:${hi.n})`;
     }
     if (lo.strike === hi.strike) return null;
-    if (type === 'call') return long(lo) ? 'Bull call spread (debit)' : 'Bear call spread (credit)';
-    return long(hi) ? 'Bear put spread (debit)' : 'Bull put spread (credit)';
+    if (type === 'call') return long(lo) ? 'Bull Call Debit' : 'Bear Call Credit';
+    return long(hi) ? 'Bear Put Debit' : 'Bull Put Credit';
   };
   if (L.length === 1) return `${long(L[0]) ? 'Long' : 'Short'} ${L[0].type}`;
   if (L.length === 2) {
