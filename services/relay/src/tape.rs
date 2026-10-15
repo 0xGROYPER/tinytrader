@@ -9,8 +9,9 @@
 //!
 //! `GET /tape?symbol=SPY&after=<seq>&limit=<n>` answers
 //! `{"symbol", "ticks": [...], "last", "symbols", "last_record"}`, oldest
-//! first: the ticks after `after` (or the latest `limit`, at most 1000,
-//! without it). Each tick is `{"s": seq, "t": ts_event (Unix seconds), "k":
+//! first: the ticks after `after`, or without it the latest `limit` trades
+//! and the latest `limit` quote changes (at most 4000 each, the whole tape),
+//! counted apart so the quotes that swamp the open don't crowd out trades. Each tick is `{"s": seq, "t": ts_event (Unix seconds), "k":
 //! "T" or "Q", "b", "a", "bz", "az"}`, with `"p"` and `"z"` (price and size)
 //! on a trade. A trade's book is the one before it (as the IEX encoder
 //! writes it), so a trade at the ask was a buy. `last` is the newest
@@ -235,16 +236,19 @@ impl Tape {
         let Some(book) = books.get(symbol) else {
             return (Vec::new(), *seq, symbols);
         };
-        let mut out: Vec<Tick> = book
-            .trades
-            .iter()
-            .chain(book.quotes.iter())
-            .filter(|t| after.is_none_or(|a| t.seq > a))
-            .copied()
-            .collect();
+        // Each kind's latest `limit`, counted apart.
+        let newest = |q: &VecDeque<Tick>| {
+            let fresh: Vec<Tick> = q
+                .iter()
+                .filter(|t| after.is_none_or(|a| t.seq > a))
+                .copied()
+                .collect();
+            let skip = fresh.len().saturating_sub(limit);
+            fresh.into_iter().skip(skip)
+        };
+        let mut out: Vec<Tick> = newest(&book.trades).chain(newest(&book.quotes)).collect();
         out.sort_by_key(|t| t.seq);
-        let skip = out.len().saturating_sub(limit);
-        (out.split_off(skip), *seq, symbols)
+        (out, *seq, symbols)
     }
 }
 
@@ -346,7 +350,7 @@ fn tick_json(t: &Tick) -> Value {
 }
 
 async fn serve(State(hub): State<Arc<Hub>>, Query(ask): Query<Ask>) -> Json<Value> {
-    let limit = ask.limit.unwrap_or(500).clamp(1, 1000);
+    let limit = ask.limit.unwrap_or(500).clamp(1, KEEP);
     let symbol = ask.symbol.unwrap_or_default().trim().to_uppercase();
     let refused = if ask.watch == Some(1) {
         hub.tape.watch.ask(&symbol).err()
@@ -459,8 +463,37 @@ mod tests {
         );
         assert_eq!(ticks[1].trade, Some((778.0, 100)));
         assert_eq!(tape.read("SPY", Some(1), 10).0.len(), 1);
-        assert_eq!(tape.read("SPY", None, 1).0[0].seq, 2);
+        // The latest of each kind: the quote and the trade.
+        let seqs: Vec<u64> = tape.read("SPY", None, 1).0.iter().map(|t| t.seq).collect();
+        assert_eq!(seqs, vec![1, 2]);
         assert!(tape.read("QQQ", None, 10).0.is_empty());
+    }
+
+    #[test]
+    fn a_burst_of_quotes_does_not_crowd_out_trades() {
+        let tape = Tape::default();
+        let d = 1_000_000_000i64;
+        let mut chunk = Vec::new();
+        for i in 0..5 {
+            chunk.extend(mbp(7, i, b'T', 500 * d, 100, 499 * d, 501 * d));
+        }
+        // The open: a hundred quote changes after the trades.
+        for i in 0..100 {
+            chunk.extend(mbp(
+                7,
+                10 + i,
+                b'M',
+                UNDEF_PRICE,
+                0,
+                (400 + i as i64) * d,
+                900 * d,
+            ));
+        }
+        tape.absorb(&chunk, |_| Some("SPY".to_owned()));
+        let (ticks, ..) = tape.read("SPY", None, 10);
+        assert_eq!(ticks.iter().filter(|t| t.trade.is_some()).count(), 5);
+        assert_eq!(ticks.iter().filter(|t| t.trade.is_none()).count(), 10);
+        assert!(ticks.windows(2).all(|w| w[0].seq < w[1].seq));
     }
 
     #[test]

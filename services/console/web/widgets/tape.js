@@ -14,7 +14,9 @@
 // restart, or just watched) the relay fills it from history: the latest
 // session's trades, marked as such and not flashed. The symbol is kept with
 // the panel, and its latest ticks in this browser, so a reload shows them at
-// once and carries on from where they end.
+// once and carries on from where they end. Trades and quote changes are kept
+// by separate counts (4000 trades held, 1500 kept in the browser), as quotes
+// outnumber trades many times over at the open.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
@@ -26,8 +28,17 @@ function cached(sym) {
   try { const v = JSON.parse(localStorage.getItem(CACHE(sym)) || 'null'); return v && Array.isArray(v.ticks) ? v : null; } catch (_) { return null; }
 }
 function cache(sym, last, ticks) {
-  try { localStorage.setItem(CACHE(sym), JSON.stringify({ last, ticks: ticks.slice(-1000).map(({ rt, ...x }) => x) })); } catch (_) {}
+  try { localStorage.setItem(CACHE(sym), JSON.stringify({ last, ticks: trim(ticks, 1500, 100).map(({ rt, ...x }) => x) })); } catch (_) {}
 }
+/** The latest `trades` trades and `quotes` quote changes, oldest first: each kind
+ * kept by its own count, so a burst of quotes (the open) never pushes trades out. */
+function trim(ticks, trades, quotes) {
+  const out = [];
+  let t = 0, q = 0;
+  for (let i = ticks.length - 1; i >= 0; i--) { const x = ticks[i]; if (x.k === 'T' ? t++ < trades : q++ < quotes) out.push(x); }
+  return out.reverse();
+}
+const TRADES = 4000, QUOTES = 1000;
 const EVERY = 500, HOLD = 1500, SHOW = 300, BIG = 1000, FLASH = 1200;
 const SIZES = [0, 100, 500, 1000, 5000];
 const relay = () => (fleet.topo?.services || []).find(s => s.tape)?.id || null;
@@ -117,7 +128,7 @@ defineWidget('tape', {
       try {
         // The symbol picked elsewhere when the relay carries it, until one is picked here.
         if (!my.sym) { const f = focused(); my.sym = f && my.symbols.includes(f) ? f : my.symbols[0] || 'SPY'; }
-        const q = my.last ? `after=${my.last}` : 'limit=1000';
+        const q = my.last ? `after=${my.last}` : `limit=${TRADES}`;
         const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/tape?symbol=${encodeURIComponent(my.sym)}&watch=1&${q}`, { cache: 'no-store' });
         const v = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(v.error || `${r.status}`);
@@ -133,7 +144,7 @@ defineWidget('tape', {
         // Arrival times, for the flash (none for the history read first).
         const rt = my.last ? performance.now() : 0;
         for (const x of v.ticks || []) { x.rt = x.h ? 0 : rt; my.ticks.push(x); }
-        if (my.ticks.length > 4000) my.ticks = my.ticks.slice(-4000);
+        if (my.ticks.length > TRADES + QUOTES) my.ticks = trim(my.ticks, TRADES, QUOTES);
         my.last = v.last; my.lastRecord = v.last_record || 0; my.err = '';
         // Kept in this browser every few seconds.
         if (Date.now() - saved > 5000) { saved = Date.now(); cache(my.sym, my.last, my.ticks); }
