@@ -257,7 +257,8 @@ defineWidget('candles', {
   title: 'Candles',
   mount(el) {
     const my = { typed: [],
-      pick: null, size: 60, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true,
+      // Daily bars to start with; a panel keeps the size picked.
+      pick: null, size: 86400, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true,
       drawn: { key: '', first: 0, len: 0, lastT: 0 }, backing: false, edgeTimer: 0,
       ind: loadIndicators(), open: '', expiries: /** @type {string[]} */ ([]), em: /** @type {Record<string, any>} */ ({}), emLines: [], spot: 0, emAt: 0, emFor: '',
       L: null, posLines: [], over: null, raf: 0, sig: '', hoverY: null,

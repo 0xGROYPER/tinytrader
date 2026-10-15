@@ -8,6 +8,8 @@
 // (the view opening, or another list picked) points the view's charts at its
 // first symbol, unless they're already on one of its symbols. Clicking a
 // symbol makes it the one charts follow and narrows the view's News to it
+// (the 1W and 1M columns are the change over 5 and 21 sessions, from daily
+// closes)
 // (clicking it again widens it); ↑/↓ step through the list the same way
 // once a row has been clicked (or the table tabbed to). The bell on a row
 // sets price alerts for it (lib/alerts.js); the % heading sorts by the day's
@@ -17,6 +19,7 @@ import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused, setFocus, parseSymbols } from '../lib/theme.js';
 import { alertsFor, alertForm, describe } from '../lib/alerts.js';
+import { closes, analyse, fmtChange } from '../lib/trend.js';
 import { watchlists, picked, setPicked, symbolsOf, addList, renameList, deleteList, addSymbols, removeSymbol, THEME_LIST } from '../lib/watchlists.js';
 
 const EVERY = 5000;
@@ -44,24 +47,32 @@ function draw(my) {
   if (!syms.length) return [bar, `<p class="muted">${mine ? 'This list is empty: add symbols above.' : 'The theme has no symbols.'}</p>`];
   const by = new Map((my.rows || []).map(r => [r.symbol, r]));
   const f = focused();
+  // The change over the day (snapshots), a week (5 sessions) and a month (21), from daily closes.
+  const ch = (s, k) => k === 'd' ? by.get(s)?.change_pct : my.trend.get(s)?.[k];
   let order = syms;
-  if (my.sort) order = [...syms].sort((a, b) => my.sort * ((by.get(b)?.change_pct ?? -Infinity) - (by.get(a)?.change_pct ?? -Infinity)));
+  if (my.sort) order = [...syms].sort((a, b) => my.sort * ((ch(b, my.sortKey) ?? -Infinity) - (ch(a, my.sortKey) ?? -Infinity)));
+  const tone = v => v == null ? '' : v >= 0 ? 'up' : 'down';
   const rows = order.map(s => {
     const r = by.get(s), c = r?.change_pct, cls = c == null ? '' : c >= 0 ? 'up' : 'down';
     const al = alertsFor(s), bell = al.some(a => a.fired) ? 'fired' : al.length ? 'set' : '';
     return `<tr data-wl="${esc(s)}"${s === f ? ' aria-current="true"' : ''}><td class="wl-sym">${esc(s)}<button type="button" class="wl-bell ${bell}" data-wl-alert="${esc(s)}" title="${al.length ? esc(al.map(describe).join('; ')) : 'Set an alert'}" aria-label="Alerts for ${esc(s)}">${bell ? '●' : '○'}</button></td><td class="num">${esc(num(r?.price))}</td>`
       + `<td class="num ${cls}">${esc(r?.change == null ? '' : (r.change >= 0 ? '+' : '−') + Math.abs(r.change).toFixed(2))}</td>`
-      + `<td class="num ${cls}">${esc(pct(c))}</td>${mine ? `<td class="wl-x"><button type="button" class="sb-x" data-wl-rm="${esc(s)}" aria-label="Remove ${esc(s)}" title="Remove from the list">×</button></td>` : ''}</tr>`;
+      + `<td class="num ${cls}">${esc(pct(c))}</td>`
+      + ['w', 'm'].map(k => { const v = ch(s, k); return `<td class="num wl-wm ${tone(v)}">${v == null ? '' : esc(fmtChange(v, false))}</td>`; }).join('')
+      + `${mine ? `<td class="wl-x"><button type="button" class="sb-x" data-wl-rm="${esc(s)}" aria-label="Remove ${esc(s)}" title="Remove from the list">×</button></td>` : ''}</tr>`;
   }).join('');
-  const arrow = my.sort > 0 ? ' ↓' : my.sort < 0 ? ' ↑' : '';
-  return [bar, `<table class="wl" tabindex="0" aria-label="Symbols: ↑↓ to step through"><thead><tr><th>Symbol</th><th class="num">Last</th><th class="num">Change</th><th class="num"><button type="button" class="wl-sort" data-wl-act="sort" title="Sort by the day's change">%${arrow}</button></th>${mine ? '<th></th>' : ''}</tr></thead><tbody>${rows}</tbody></table>
+  const arrow = k => my.sortKey === k ? (my.sort > 0 ? ' ↓' : my.sort < 0 ? ' ↑' : '') : '';
+  const sortBtn = (k, label, title) => `<button type="button" class="wl-sort" data-wl-act="sort" data-wl-key="${k}" title="${title}">${label}${arrow(k)}</button>`;
+  return [bar, `<table class="wl" tabindex="0" aria-label="Symbols: ↑↓ to step through"><thead><tr><th>Symbol</th><th class="num">Last</th><th class="num">Change</th><th class="num">${sortBtn('d', '%', "Sort by the day's change")}</th><th class="num">${sortBtn('w', '1W', 'The change over five sessions; click to sort')}</th><th class="num">${sortBtn('m', '1M', 'The change over 21 sessions; click to sort')}</th>${mine ? '<th></th>' : ''}</tr></thead><tbody>${rows}</tbody></table>
     <p class="muted wl-foot">${my.err ? esc(my.err) : my.at ? `IEX prices, updated ${new Date(my.at).toLocaleTimeString()}` : 'Loading…'}</p>`];
 }
 
 defineWidget('watchlist', {
   title: 'Watchlist',
   mount(el) {
-    const my = { rows: null, err: null, at: 0, alive: true, edit: /** @type {string} */ (''), sort: 0, asked: '', alertFor: '' };
+    const my = { rows: null, err: null, at: 0, alive: true, edit: /** @type {string} */ (''), sort: 0, sortKey: 'd', asked: '', alertFor: '',
+      /** Week and month changes by symbol, from daily closes (kept ten minutes by lib/trend.js). */
+      trend: /** @type {Map<string, { w: number | null, m: number | null }>} */ (new Map()) };
     // The list this panel shows, from its layout; it becomes the one picked while the view is open.
     let args = {}; try { args = JSON.parse(el.dataset.args || '{}'); } catch (_) {}
     if (args.list && (watchlists().some(l => l.name === args.list) || args.list === THEME_LIST)) setPicked(args.list);
@@ -107,6 +118,11 @@ defineWidget('watchlist', {
         my.rows = v.snapshots; my.err = null; my.at = Date.now(); my.asked = key;
       } catch (e) { my.err = `Prices unavailable: ${e.message}`; }
       if (my.alive) update();
+      // The week and month, from daily closes (fetched at most every ten minutes).
+      closes(fleet, syms).then(({ series }) => {
+        for (const sym of syms) { const a = analyse(sym, series.get(sym)?.closes); if (a) my.trend.set(sym, { w: a.w1, m: a.m1 }); }
+        if (my.alive) update();
+      }).catch(() => {});
     }
     // The charts follow the list shown: its first symbol, unless already on one of them.
     let shown = '';
@@ -129,7 +145,11 @@ defineWidget('watchlist', {
       const act = /** @type {HTMLElement | null} */ (t.closest('[data-wl-act]'))?.dataset.wlAct;
       if (act === 'alert-close') { my.alertFor = ''; update(); return; }
       if (act) {
-        if (act === 'sort') my.sort = my.sort > 0 ? -1 : my.sort < 0 ? 0 : 1;
+        if (act === 'sort') {
+          // A new column sorts by it, highest first; the same one again flips, then unsorts.
+          const k = /** @type {HTMLElement | null} */ (t.closest('[data-wl-key]'))?.dataset.wlKey || 'd';
+          if (k !== my.sortKey) { my.sortKey = k; my.sort = 1; } else my.sort = my.sort > 0 ? -1 : my.sort < 0 ? 0 : 1;
+        }
         else if (act === 'delete-yes') { deleteList(name()); my.edit = ''; }
         else if (act === 'cancel') my.edit = '';
         else my.edit = act;

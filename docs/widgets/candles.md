@@ -7,7 +7,7 @@ Candlesticks and volume for a symbol at the bar size you pick (1m, 5m, 15m, 1h, 
 **Using it:**
 
 - Several charts can share a view (add another from the palette or a panel's +). Each is **Linked** (it follows the symbol picked in a watchlist, Search or the Spread builder) until a ticker is typed into its own box, which pins it (**Pinned**) to that ticker; click the button to switch. Each chart keeps its symbol, bar size and link in the view's layout.
-- Pick a bar size. The chart opens on the latest bars; drag it right, scroll back, or zoom out, and older bars load a chunk at a time until the source has no more ("start of history" in the legend).
+- Pick a bar size; a new chart starts on daily bars (1D), and each chart keeps the size picked. The chart opens on the latest bars; drag it right, scroll back, or zoom out, and older bars load a chunk at a time until the source has no more ("start of history" in the legend).
 - In a themed workspace it shows the theme's symbols; it follows the watchlist's selection.
 - **Ticker box:** type any symbol and press Enter to chart it (needs a service with bars for any symbol, alpaca-data). Type an option in compact OCC form, such as `SPY261012C00777000`, to chart **today's mid** of that contract from its OPRA relay (SPY and XSP options; Databento's intraday replay, one-minute quotes). Clicking a contract in the Spread builder's legs does the same. Clicking a ticker in another widget (Watchlist, Options screener, Earnings week) charts it too.
 - **Extended hours:** intraday bars cover 04:00-20:00 New York; pre-market and after-hours candles are drawn faded.
