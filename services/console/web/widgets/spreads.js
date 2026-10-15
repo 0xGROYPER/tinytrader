@@ -174,7 +174,8 @@ defineWidget('spreads', {
       $('.sb-name').title = shape ? whatIs(shape).replace(/ w /g, ' ').replace(/ 2w /g, ' ') : '';
       // Held legs: the ticket is away until none are left (an order for them would open more).
       const heldNote = a?.held ? `${my.held ? `Your positions on ${esc(my.held.account)}` : 'Includes positions held'}, at their entry prices. Change a strike or type to try an adjustment.` : '';
-      $('.sb-why').innerHTML = my.why ? `<b>${esc(my.structure)}.</b> ${esc(my.why)}` : heldNote;
+      // A suggestion's legs speak for themselves (its name is by the summary); only its absence is said.
+      $('.sb-why').innerHTML = my.why.startsWith('No suggestion') ? esc(my.why) : heldNote;
       // The legs as a positions table, like the broker's: each contract, its mid,
       // signed quantity (− sells), market value and delta in shares; the strike
       // steps with ‹ ›, C/P switches type, the quantity steps through zero to flip side.

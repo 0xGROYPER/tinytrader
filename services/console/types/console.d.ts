@@ -34,6 +34,10 @@ interface TopoService extends TopoNode {
   chain?: string;
   /** A relay's time and sales (`/api/stream/{id}/tape?symbol=&after=`). */
   tape?: string;
+  /** An account service's daily P/L (`/api/stream/{id}/performance?account=`). */
+  performance?: string;
+  /** An account service's trades on a day (`/api/stream/{id}/trades?account=&date=`). */
+  trades?: string;
   /** The options screener (`/api/stream/{id}/screener`). */
   screener?: string;
   /** Every ticker with its company's name (`/api/stream/{id}/tickers`). */

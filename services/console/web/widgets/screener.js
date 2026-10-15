@@ -8,7 +8,7 @@
 // move and by volume, and by skew (the 30-day 25-delta risk reversal from the
 // chain's fitted smile). Click a row to point the workspace at the stock: its
 // chart and its news (opened beside the screener if need be), and a suggested
-// position in the Spread builder.
+// position in the Spread builder. ↑ and ↓ step through the rows the same way.
 import { defineWidget } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
@@ -79,7 +79,7 @@ const COLS = [
 defineWidget('screener', {
   title: 'Options screener',
   mount(el) {
-    const my = { data: null, err: '', view: 'Highest IV', sort: null, desc: true, cap: 2e9, sector: '', all: false, alive: true, at: 0, busy: false };
+    const my = { data: null, err: '', view: 'Highest IV', sort: null, desc: true, cap: 2e9, sector: '', all: false, alive: true, at: 0, busy: false, sel: '' };
     el.innerHTML = `<div class="sc">
       <div class="sc-top">
         <div class="sc-views chips"></div>
@@ -87,7 +87,7 @@ defineWidget('screener', {
         <label class="sc-field">Sector <select class="sc-sec"><option value="">All</option></select></label>
       </div>
       <p class="sc-note muted"></p>
-      <div class="sc-wrap"><table class="sc-table"></table></div>
+      <div class="sc-wrap" tabindex="0" aria-label="Stocks: ↑ and ↓ step through them"><table class="sc-table"></table></div>
       <p class="sc-msg muted"></p></div>`;
     const $ = s => el.querySelector(s);
 
@@ -128,7 +128,7 @@ defineWidget('screener', {
       const keep = new Set(['Symbol', 'Price', 'Day', VIEW_COL[my.view], 'IV / RV', my.sort != null ? COLS[my.sort][0] : null]);
       const k = (/** @type {string} */ l) => keep.has(l) ? 'sc-k' : '';
       $('.sc-table').innerHTML = `<thead><tr><th>#</th>${COLS.map(([l], i) => `<th data-col="${i}" class="${my.sort === i ? 'sc-sorted' : ''} ${k(l)}">${l}${my.sort === i ? (my.desc ? ' ↓' : ' ↑') : ''}</th>`).join('')}</tr></thead>
-        <tbody>${shown.map(({ r }, i) => `<tr data-sym="${esc(r.symbol)}" title="${esc(r.name)} · listed for ${esc(r.sources.join(', '))}"><td class="muted">${i + 1}</td>${COLS.map(c => `<td class="${k(c[0])}">${c[2](r, next)}</td>`).join('')}</tr>`).join('')}</tbody>`;
+        <tbody>${shown.map(({ r }, i) => `<tr data-sym="${esc(r.symbol)}"${r.symbol === my.sel ? ' class="sc-sel"' : ''} title="${esc(r.name)} · listed for ${esc(r.sources.join(', '))}"><td class="muted">${i + 1}</td>${COLS.map(c => `<td class="${k(c[0])}">${c[2](r, next)}</td>`).join('')}</tr>`).join('')}</tbody>`;
       const more = list.length - shown.length;
       const at = new Date(v.as_of * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
       $('.sc-msg').innerHTML = `${more > 0 ? `<button type="button" class="chip-btn sc-more">Show ${more} more</button> ` : ''}${rows.length} stocks of ${v.matched.toLocaleString()} listed at this size and over $${v.min_price}${v.pending ? `; scanning options for ${v.pending}` : ''}. As of ${at}; options from Alpaca's ${esc(v.options_feed)} feed.${my.err ? ` ${esc(my.err)}` : ''}`;
@@ -141,15 +141,34 @@ defineWidget('screener', {
       if (b?.classList.contains('sc-more')) { my.all = true; render(); return; }
       const th = /** @type {HTMLElement | null} */ (t.closest('th[data-col]'));
       if (th) { const i = +th.dataset.col; my.desc = my.sort === i ? !my.desc : i > 1; my.sort = i; render(); return; }
-      const row = t.closest('tr[data-sym]');
-      if (row) {
-        const sym = /** @type {HTMLElement} */ (row).dataset.sym, r = (my.data?.rows || []).find(x => x.symbol === sym);
-        // A suggested position in the Spread builder (opened if need be), and the symbol everywhere else.
-        askRecommendation({ sym, view: my.sort != null ? '' : my.view, row: r || null, earnings: reports().get(sym)?.date || null });
-        document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'spreads' }));
-        setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym }));
-        document.dispatchEvent(new CustomEvent('tt-show-ticker', { detail: { symbol: sym, from: el } }));
-      }
+      const row = /** @type {HTMLElement | null} */ (t.closest('tr[data-sym]'));
+      if (row) { select(row); /** @type {HTMLElement} */ ($('.sc-wrap')).focus({ preventScroll: true }); pick(row.dataset.sym || ''); }
+    });
+    // The stock picked: a suggested position in the Spread builder (opened if
+    // need be), the symbol everywhere else, and its chart and news.
+    function pick(sym) {
+      const r = (my.data?.rows || []).find(x => x.symbol === sym);
+      askRecommendation({ sym, view: my.sort != null ? '' : my.view, row: r || null, earnings: reports().get(sym)?.date || null });
+      document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'spreads' }));
+      setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym }));
+      document.dispatchEvent(new CustomEvent('tt-show-ticker', { detail: { symbol: sym, from: el } }));
+    }
+    function select(row) {
+      for (const x of el.querySelectorAll('tr.sc-sel')) x.classList.remove('sc-sel');
+      row.classList.add('sc-sel'); my.sel = row.dataset.sym || '';
+    }
+    // ↑ and ↓: the next row up or down, shown at once and picked once the keys
+    // rest a moment (a held key doesn't load every stock it passes).
+    let pause = 0;
+    el.addEventListener('keydown', e => {
+      if ((e.key !== 'ArrowDown' && e.key !== 'ArrowUp') || /** @type {HTMLElement} */ (e.target).closest('input, select, textarea')) return;
+      const rows = /** @type {HTMLElement[]} */ ([...el.querySelectorAll('tr[data-sym]')]);
+      if (!rows.length) return;
+      e.preventDefault();
+      const i = rows.findIndex(r => r.dataset.sym === my.sel);
+      const row = rows[i < 0 ? 0 : Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))];
+      select(row); row.scrollIntoView({ block: 'nearest' });
+      clearTimeout(pause); pause = setTimeout(() => pick(my.sel), 300);
     });
     el.addEventListener('change', e => {
       const t = /** @type {HTMLSelectElement} */ (e.target);
@@ -161,7 +180,7 @@ defineWidget('screener', {
     const timer = setInterval(() => { if (Date.now() - my.at > (my.data?.pending ? 15e3 : 120e3)) load(); }, 5000);
     return {
       update() {},
-      dispose() { my.alive = false; clearInterval(timer); },
+      dispose() { my.alive = false; clearInterval(timer); clearTimeout(pause); },
     };
   },
 });

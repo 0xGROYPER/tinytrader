@@ -42,10 +42,13 @@ use std::time::Duration;
 use tinytrader_observe::{lock, secret};
 
 use axum::Router;
+use axum::extract::Query;
+use axum::http::StatusCode;
 use axum::routing::get;
 use clap::{Parser, ValueEnum};
 use serde_json::{Map, Value, json};
 mod live;
+mod perf;
 
 use tinytrader_observe::{Events, Observer, Series, State, listen_address, unix_seconds};
 
@@ -288,7 +291,7 @@ async fn main() {
     observer.describe(json!({
         "role": format!("Balances and positions of Alpaca accounts: {}. Read only.", names.join(", ")),
         "upstream": [{ "id": "alpaca-trading", "label": "alpaca", "sub": "trading API", "kind": "flow", "via": "REST, read only" }],
-        "streams": { "events": "/events", "series": "/recent", "accounts": "/accounts", "calendar": "/calendar" },
+        "streams": { "events": "/events", "series": "/recent", "accounts": "/accounts", "calendar": "/calendar", "performance": "/performance", "trades": "/trades" },
         "schedule": [
             match args.hours {
                 Some(h) => json!({ "name": "Account session: order events and relay prices", "kind": "window", "hours": h.to_string(), "when": format!("{h} ET on trading days") }),
@@ -336,7 +339,30 @@ async fn main() {
         });
     }
 
+    // Performance (perf.rs): read from Alpaca when asked, kept a minute.
+    let asked = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .expect("http client");
     let app = Router::new()
+        .route(
+            "/performance",
+            get({
+                let (s, h) = (shared.clone(), asked.clone());
+                move |q: Query<HashMap<String, String>>| async move {
+                    performance(&s, &h, "performance", &q).await
+                }
+            }),
+        )
+        .route(
+            "/trades",
+            get({
+                let (s, h) = (shared.clone(), asked.clone());
+                move |q: Query<HashMap<String, String>>| async move {
+                    performance(&s, &h, "trades", &q).await
+                }
+            }),
+        )
         .route(
             "/accounts",
             get({
@@ -653,6 +679,154 @@ async fn get_json(
         .map_err(|e| format!("{path}: unreadable response: {e}"))
 }
 
+/// Answers kept a minute: (when, answer) by request.
+static KEPT: Mutex<Option<HashMap<String, (std::time::Instant, Value)>>> = Mutex::new(None);
+
+/// `/performance?account=NAME`: daily P/L for the past year, and each day's
+/// trades and winners for the past three months (from its fills, at most the
+/// latest 1,000).
+/// `/trades?account=NAME&date=YYYY-MM-DD`: that day's trades.
+async fn performance(
+    s: &Shared,
+    http: &reqwest::Client,
+    what: &str,
+    q: &HashMap<String, String>,
+) -> (StatusCode, axum::Json<Value>) {
+    let refuse = |code, why: &str| (code, axum::Json(json!({ "error": why })));
+    let Some(a) = s
+        .accounts
+        .iter()
+        .find(|a| q.get("account") == Some(&a.name))
+    else {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            "account: one of the service's accounts",
+        );
+    };
+    let date = q.get("date").cloned().unwrap_or_default();
+    if what == "trades"
+        && !(date.len() == 10
+            && date.bytes().enumerate().all(|(i, b)| {
+                if i == 4 || i == 7 {
+                    b == b'-'
+                } else {
+                    b.is_ascii_digit()
+                }
+            }))
+    {
+        return refuse(StatusCode::BAD_REQUEST, "date: YYYY-MM-DD");
+    }
+    let key = format!("{what}|{}|{date}", a.name);
+    if let Some((at, v)) = lock(&KEPT).get_or_insert_with(HashMap::new).get(&key)
+        && at.elapsed() < Duration::from_secs(60)
+    {
+        return (StatusCode::OK, axum::Json(v.clone()));
+    }
+    let get = |path: String| async move { get_json(http, a.env, &a.key, &a.secret, &path).await };
+    // Fills, oldest first, from `query` (paged by the last id), at most `pages` pages of 100.
+    let fills = |query: String, pages: usize| async move {
+        let mut out: Vec<Value> = Vec::new();
+        let mut token = String::new();
+        for _ in 0..pages {
+            let page = get(format!(
+                "/v2/account/activities/FILL?{query}&page_size=100{token}"
+            ))
+            .await?;
+            let list = page.as_array().cloned().unwrap_or_default();
+            let n = list.len();
+            token = list
+                .last()
+                .and_then(|x| x["id"].as_str())
+                .map(|id| format!("&page_token={id}"))
+                .unwrap_or_default();
+            out.extend(list);
+            if n < 100 {
+                break;
+            }
+        }
+        out.sort_by(|x, y| {
+            x["transaction_time"]
+                .as_str()
+                .cmp(&y["transaction_time"].as_str())
+        });
+        Ok::<_, String>(
+            out.iter()
+                .filter_map(perf::Fill::from_activity)
+                .collect::<Vec<_>>(),
+        )
+    };
+    let answer = if what == "trades" {
+        fills(format!("date={date}&direction=asc"), 10).await.map(|f| {
+            json!({ "account": a.name, "date": date, "fills": f.len(), "trades": perf::trades(&f) })
+        })
+    } else {
+        let since = civil_date((unix_seconds() / 86_400.0) as i64 - 92);
+        let history = get(
+            "/v2/account/portfolio/history?period=1A&timeframe=1D&cashflow_types=ALL".to_owned(),
+        )
+        .await;
+        match history {
+            Err(e) => Err(e),
+            Ok(h) => {
+                let days = perf::daily(&h, |t| civil_date(t.div_euclid(86_400)));
+                // Each day's trades, from its fills (dates in New York time).
+                let f = fills(format!("after={since}T00:00:00Z&direction=desc"), 10)
+                    .await
+                    .unwrap_or_default();
+                let mut by_day: std::collections::BTreeMap<String, Vec<perf::Fill>> =
+                    std::collections::BTreeMap::new();
+                for x in f {
+                    let day = unix_of(&x.time).map_or_else(
+                        || x.time.chars().take(10).collect(),
+                        |t| tinytrader_schedule::ny_date_time(t).0,
+                    );
+                    by_day.entry(day).or_default().push(x);
+                }
+                let counts: Map<String, Value> = by_day
+                    .iter()
+                    .map(|(d, f)| {
+                        let t = perf::trades(f);
+                        let closed: Vec<&Value> = t.iter().filter(|x| x["open"] == false).collect();
+                        let wins = closed
+                            .iter()
+                            .filter(|x| x["pnl"].as_f64().is_some_and(|p| p > 0.0))
+                            .count();
+                        (
+                            d.clone(),
+                            json!({ "trades": t.len(), "closed": closed.len(), "wins": wins }),
+                        )
+                    })
+                    .collect();
+                Ok(
+                    json!({ "account": a.name, "environment": a.env.name(), "days": days, "trades": counts }),
+                )
+            }
+        }
+    };
+    match answer {
+        Ok(v) => {
+            lock(&KEPT)
+                .get_or_insert_with(HashMap::new)
+                .insert(key, (std::time::Instant::now(), v.clone()));
+            (StatusCode::OK, axum::Json(v))
+        }
+        Err(e) => refuse(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+/// Seconds since the epoch of an RFC 3339 UTC time (`2026-10-15T13:32:09.782Z`).
+fn unix_of(t: &str) -> Option<i64> {
+    let n = |r: std::ops::Range<usize>| t.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y2 = if m <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    Some(days * 86_400 + n(11..13)? * 3600 + n(14..16)? * 60 + n(17..19)?)
+}
+
 /// The market clock, and trading sessions from a week ago to six weeks ahead.
 async fn read_calendar(
     http: &reqwest::Client,
@@ -819,6 +993,20 @@ mod tests {
         assert_eq!(
             a,
             json!({ "status": "ACTIVE", "equity": 1000.5, "pattern_day_trader": false })
+        );
+    }
+
+    #[test]
+    fn rfc3339_times_read_back() {
+        assert_eq!(unix_of("1970-01-01T00:00:00Z"), Some(0));
+        let t = unix_of("2026-10-15T13:32:09.782Z").unwrap();
+        assert_eq!(
+            (civil_date(t / 86_400), t % 86_400),
+            ("2026-10-15".to_owned(), 13 * 3600 + 32 * 60 + 9)
+        );
+        assert_eq!(
+            unix_of("2024-02-29T00:00:00Z").map(|t| civil_date(t / 86_400)),
+            Some("2024-02-29".to_owned())
         );
     }
 

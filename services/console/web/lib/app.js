@@ -17,6 +17,7 @@ import '../widgets/shell.js';
 import '../widgets/prices.js';
 import '../widgets/candles.js';
 import '../widgets/accounts.js';
+import '../widgets/performance.js';
 import '../widgets/news.js';
 import '../widgets/calendar.js';
 import '../widgets/data.js';
@@ -226,6 +227,8 @@ const READY = {
   Earnings: [1, () => ({ tree: { dir: 'row', ratio: 0.6, a: { view: 'earnings' }, b: { dir: 'col', ratio: 0.45, a: { view: 'calendar' }, b: { tabs: ['ivmap', 'candles'] } } } })],
   // One account (the live one to start), with room for its positions and orders.
   Account: [1, () => ({ tree: { view: 'account' } })],
+  // One account's P/L: the day's trades as a heatmap, and its days.
+  Performance: [1, () => ({ tree: { view: 'performance' } })],
   Notebook: [1, () => ({ tree: { dir: 'row', ratio: 0.72, a: { view: 'notebook' }, b: { dir: 'col', ratio: 0.5, a: { tabs: ['watchlist', 'earnings'] }, b: { tabs: ['candles', 'ivmap'] } } } })],
 };
 const DV = globalThis['dockview-core'];

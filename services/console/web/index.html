@@ -944,6 +944,32 @@ a.doc-card { text-decoration: none; }
 .dv-paths { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 .dv-paths div { display: flex; gap: 8px; align-items: center; overflow-wrap: anywhere; }
 .cal i.l1 { opacity: .35; } .cal i.l2 { opacity: .55; } .cal i.l3 { opacity: .78; } .cal i.l4 { opacity: 1; }
+/* Performance (widgets/performance.js): P/L in four steps of green or red, as the coverage grid shades size. */
+.tile-body:has(> .pf) { padding: 10px 12px; }
+.pf { display: flex; flex-direction: column; gap: 16px; container-type: inline-size; }
+.pf-top:empty { display: none; } .pf-top .pf-acct { align-self: flex-start; }
+.pf-sec { display: flex; flex-direction: column; gap: 8px; } .pf-sec:empty { display: none; }
+.pf-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; } .pf-head .muted { font-size: 12px; }
+.pf .up { --pf: var(--up); } .pf .down { --pf: var(--down); }
+.pf b.up { color: var(--up); } .pf b.down { color: var(--down); }
+.pf-cells { display: flex; flex-wrap: wrap; gap: 4px; }
+.pf-cell { width: 58px; height: 40px; border: 0; border-radius: 4px; padding: 0; display: inline-flex; align-items: center; justify-content: center; font: 11px var(--mono); color: var(--fg); background: var(--line-soft); cursor: pointer; }
+.pf-cell.up, .pf-cell.down, .pf-key.up, .pf-key.down, .pf-day.up, .pf-day.down { background: color-mix(in srgb, var(--pf) var(--pf-mix, 100%), var(--bg)); }
+.pf .l1 { --pf-mix: 22%; } .pf .l2 { --pf-mix: 42%; } .pf .l3 { --pf-mix: 66%; } .pf .l4 { --pf-mix: 90%; }
+.pf-cell.l3, .pf-cell.l4 { color: #fff; }
+.pf-cell.open, .pf-key.open { background: repeating-linear-gradient(135deg, var(--line-soft) 0 4px, var(--surface) 4px 8px); color: var(--muted); }
+.pf-cell.picked, .pf-day.picked { box-shadow: 0 0 0 2px var(--fg); }
+.pf-key { display: inline-block; width: 11px; height: 11px; border-radius: 3px; }
+.pf-detail { margin: 0; font-size: 12px; }
+.pf-nav { display: inline-flex; align-items: center; gap: 2px; } .pf-nav b { min-width: 9.5em; text-align: center; }
+.pf-week, .pf-month { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)) repeat(2, minmax(0, .45fr)); gap: 3px; }
+.pf-week span { font: 500 11px var(--ui); color: var(--muted); padding: 0 4px; }
+.pf-day { min-height: 54px; padding: 3px 5px; border: 0; border-radius: 4px; background: var(--surface); color: var(--fg); display: flex; flex-direction: column; align-items: flex-start; gap: 1px; text-align: left; font: 12px var(--mono); cursor: pointer; min-width: 0; overflow: hidden; }
+.pf-day:disabled { cursor: default; } .pf-day.blank { background: transparent; } .pf-day.weekend { background: transparent; }
+.pf-day .n { color: var(--muted); font-size: 11px; } .pf-day.today .n { color: var(--fg); font-weight: 600; }
+.pf-day b { font-weight: 600; white-space: nowrap; } .pf-day small { font-size: 10px; color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.pf-day.l3, .pf-day.l4 { color: #fff; } .pf-day.l3 .n, .pf-day.l4 .n, .pf-day.l3 small, .pf-day.l4 small { color: rgba(255, 255, 255, .85); }
+@container (max-width: 480px) { .pf-day { min-height: 40px; } .pf-day small { display: none; } .pf-cell { width: 48px; height: 34px; } }
 .cal i.d2, .cal-legend i.d2 { background: var(--ok); }
 .cal-legend i.has { background: var(--accent-mark); } .cal-legend i.has.d2 { background: var(--ok); }
 .cal-legend i.l1 { opacity: .35; } .cal-legend i.l2 { opacity: .55; } .cal-legend i.l3 { opacity: .78; }
@@ -958,6 +984,7 @@ a.doc-card { text-decoration: none; }
 .sc-note, .sc-msg { margin: 0; font-size: 12px; }
 .sc-wrap { overflow-x: auto; }
 .sc-table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+.sc-table tr.sc-sel td { background: var(--accent-soft); } .sc-wrap:focus { outline: none; } .sc-wrap:focus-visible tr.sc-sel td:first-child { box-shadow: inset 2px 0 var(--fg); }
 /* A narrow screener (a phone, or a thin panel): only the kept columns, and no row number or company name. */
 @container (max-width: 560px) {
   .sc-table th:not(.sc-k), .sc-table td:not(.sc-k) { display: none; }
