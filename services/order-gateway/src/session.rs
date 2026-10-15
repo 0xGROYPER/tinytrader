@@ -878,11 +878,6 @@ impl<B: Broker> Session<B> {
         let p = &self.cfg.profile;
         let notional =
             intent.limit_cents.unsigned_abs() * u64::from(intent.qty) * intent.multiplier();
-        let max_qty = if intent.is_equity() {
-            p.max_shares
-        } else {
-            p.max_qty
-        };
         let open = self.orders.values().filter(|o| o.open()).count();
         let minute_ago = Instant::now().checked_sub(Duration::from_mins(1));
         self.minute.retain(|t| minute_ago.is_none_or(|m| *t > m));
@@ -891,7 +886,6 @@ impl<B: Broker> Session<B> {
             self.day = (today, 0);
         }
         let hit = [
-            (intent.qty > max_qty, "qty"),
             (intent.legs.len() > p.max_legs, "legs"),
             (notional > p.max_notional_cents.unsigned_abs(), "notional"),
             (open >= p.max_open, "open_orders"),

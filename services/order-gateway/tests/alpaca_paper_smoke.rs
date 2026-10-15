@@ -34,7 +34,6 @@ fn paper_single_far_from_market_then_cancel() {
     cfg.timing = order_gateway::Timing::default();
     cfg.profile = Profile {
         underlyings: vec![symbol[..symbol.len() - 15].to_owned()],
-        max_qty: 1,
         max_open: 1,
         max_notional_cents: 100,
         ..Profile::default()

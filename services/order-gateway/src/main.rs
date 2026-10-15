@@ -19,8 +19,8 @@ const HELP: &str = "order-gateway --account NAME --broker sim|alpaca-paper|alpac
     --client NAME,ROLE,PREFIX,TOKEN [--client ...]      (ROLE: trade|observe|admin)
     [--environment paper] [--credentials-file FILE | --credentials env] [--listen-any] [--allow-live]
     [--sim-script FILE] [--sim-quotes DBN_FILE|tcp:HOST:PORT]
-    [--underlyings SPY,..] [--any-underlying-client NAME ...] [--equities AAPL,..] [--allow-short] [--max-shares N]
-    [--max-qty N] [--max-open N] [--max-legs N] [--max-notional DOLLARS]
+    [--underlyings SPY,..] [--any-underlying-client NAME ...] [--equities AAPL,..] [--allow-short]
+    [--max-open N] [--max-legs N] [--max-notional DOLLARS]
     [--submits-per-min N] [--submits-per-day N] [--max-rejects N] [--budget N] [--min-options-level N]
     [--resolve-ms 1000,2000,4000] [--test-stall-after-admitted]
 Serves one broker account on a loopback port (tinytrader.gateway/1, NDJSON). The sim broker runs
@@ -184,9 +184,7 @@ fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
             s.split(',').map(String::from).collect()
         }),
         allow_short,
-        max_shares: n32(take("--max-shares"), "--max-shares", d.max_shares)?,
         max_legs: n(take("--max-legs"), "--max-legs", d.max_legs)?,
-        max_qty: n32(take("--max-qty"), "--max-qty", d.max_qty)?,
         max_open: n(take("--max-open"), "--max-open", d.max_open)?,
         max_notional_cents: i64::try_from(
             num(take("--max-notional"), "--max-notional", 2500)? * 100,

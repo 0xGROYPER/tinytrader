@@ -25,7 +25,6 @@ fn cap_of(r: &serde_json::Value) -> (Option<&str>, Option<&str>) {
 fn stock_orders_follow_the_profile() {
     let mut cfg = config(root("equities"));
     cfg.profile.equities = vec!["AAPL".into(), "BRK.B".into()];
-    cfg.profile.max_shares = 50;
     cfg.profile.max_open = 10;
     let gw = scripted(cfg, &format!(r#"{{"clock_ts":{T0}}}"#));
     let mut c = Conn::open(&gw, "reactor", None);
@@ -67,14 +66,7 @@ fn stock_orders_follow_the_profile() {
         "accepted"
     );
 
-    // Shares have their own cap; dollars count at ×1.
-    assert_eq!(
-        cap_of(&c.submit(
-            "r6",
-            &stock("wse-6", "AAPL", "buy", "open", 51, "1.00", "day")
-        )),
-        (Some("cap"), Some("qty"))
-    );
+    // No share cap: size is bounded by dollars, at ×1.
     assert_eq!(
         cap_of(&c.submit(
             "r7",

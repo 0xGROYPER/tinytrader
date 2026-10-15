@@ -68,10 +68,6 @@ fn each_cap_refuses_before_any_send() {
         )
     };
     let want = |name: &str| (Some("cap".to_string()), Some(name.to_string()));
-    assert_eq!(
-        cap(c.submit("q", &single("wse-q", CALL, "buy", "open", 11, "0.10"))),
-        want("qty")
-    );
     let three = combo(
         "wse-l",
         &[
@@ -300,11 +296,7 @@ fn an_any_underlying_client_skips_only_the_allowlist() {
         o.submit("o1", &sap("oth-1", 1, "1.00"))["outcome"],
         "accepted"
     );
-    // Caps still apply: contracts and notional.
-    assert_eq!(
-        o.submit("o2", &sap("oth-2", 11, "0.10"))["detail"]["cap"],
-        "qty"
-    );
+    // Caps still apply.
     assert_eq!(
         o.submit("o3", &sap("oth-3", 1, "26.00"))["detail"]["cap"],
         "notional"

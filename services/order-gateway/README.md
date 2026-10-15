@@ -28,7 +28,7 @@ The inputs (the full syntax is in [Running `order-gateway`](#running-order-gatew
 | listen | `--listen 127.0.0.1:7601` | Must be a loopback address; anything else is refused, unless `--listen-any`, which is only for a container whose port is published on loopback. |
 | state root | `--state ~/.local/state/order-gateway/alpaca-paper-1` | Holds the journal ([section 11](#11-order-journal)). It must not be under `/tmp` or `/Volumes/Data`. |
 | clients | `--client NAME,ROLE,PREFIX,TOKEN` (repeatable; `TOKEN` is a mode-600 file or `env:VAR`) | See [section 4](#4-authentication-and-roles). |
-| profile | `--max-qty 10 --budget 150 …` | Caps and allowlist ([section 8](#8-rate-budget-and-caps)). |
+| profile | `--max-open 4 --budget 150 …` | Caps and allowlist ([section 8](#8-rate-budget-and-caps)). |
 
 ### Identities
 
@@ -282,8 +282,6 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 | submits per minute | 60 |
 | submits per day | 500 |
 | open orders | 4 |
-| qty per order | 10 contracts (`--max-qty`) |
-| shares per stock order | 1,000 (`--max-shares`) |
 | legs | 4 |
 | notional per order: \|limit_price\| (a market order's \|ref_price\|) × qty × multiplier (100 an option, 1 a share) | $2,500 |
 | consecutive broker rejects | 5, which trips `halt_opens` |
@@ -560,7 +558,7 @@ order-gateway --account sim-1 --broker sim --listen 127.0.0.1:7601 --state ~/.lo
   --client reactor,trade,wse-,~/.config/tinytrader/gateway-clients/reactor.token \
   --client watch,observe,,~/.config/tinytrader/gateway-clients/watch.token \
   [--sim-script FILE] [--sim-quotes DBN_FILE|tcp:HOST:PORT] \
-  [--underlyings SPY] [--any-underlying-client NAME ...] [--equities AAPL,..] [--allow-short] [--max-shares 1000] [--max-qty 10] [--max-open 4] [--max-legs 4] [--max-notional 2500] \
+  [--underlyings SPY] [--any-underlying-client NAME ...] [--equities AAPL,..] [--allow-short] [--max-open 4] [--max-legs 4] [--max-notional 2500] \
   [--submits-per-min 60] [--submits-per-day 500] [--max-rejects 5] [--budget 150] [--min-options-level 3] \
   [--resolve-ms 1000,2000,4000]
 ```

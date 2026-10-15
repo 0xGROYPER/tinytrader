@@ -18,12 +18,8 @@ pub struct Profile {
     pub equities: Vec<String>,
     /// Whether a stock may be sold to open (a short sale).
     pub allow_short: bool,
-    /// Shares per stock order.
-    pub max_shares: u32,
     /// Maximum combo legs.
     pub max_legs: usize,
-    /// Contracts (parent units) per order.
-    pub max_qty: u32,
     /// Working orders, including unknown outcomes.
     pub max_open: usize,
     /// |limit| × qty × the multiplier (100 an option contract, 1 a share), in cents.
@@ -47,9 +43,7 @@ impl Default for Profile {
             any_underlying_clients: Vec::new(),
             equities: Vec::new(),
             allow_short: false,
-            max_shares: 1_000,
             max_legs: 4,
-            max_qty: 10,
             max_open: 4,
             max_notional_cents: 250_000,
             submits_per_min: 60,
@@ -76,9 +70,7 @@ impl Profile {
         }
         o.raw("equities", &e)
             .s("allow_short", if self.allow_short { "yes" } else { "no" })
-            .n("max_shares", self.max_shares)
             .n("max_legs", self.max_legs)
-            .n("max_qty", self.max_qty)
             .n("max_open", self.max_open)
             .s("max_notional", &fmt_cents(self.max_notional_cents))
             .n("submits_per_min", self.submits_per_min)
