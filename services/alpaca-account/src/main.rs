@@ -35,6 +35,7 @@
 //! account reads `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY` (or the same
 //! names with a `_FILE` suffix pointing at files containing them).
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -453,20 +454,41 @@ async fn main() {
         feeds.want(&live::wanted(&docs(&shared), &relays));
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         let mut last_full = std::time::Instant::now();
+        // Alpaca's REST reads can lag its order stream by a moment: each event's
+        // account is read again a few seconds later, and orders the stream
+        // said ended are left out of reads that still list them, for a while.
+        let mut again: HashMap<usize, std::time::Instant> = HashMap::new();
+        let mut ended: Vec<HashMap<String, std::time::Instant>> =
+            vec![HashMap::new(); shared.accounts.len()];
         loop {
             let now = (unix_seconds() * 1e9) as u64;
             if now >= end {
                 break;
             }
             tokio::select! {
-                Some(i) = rx.recv() => {
+                Some((i, done)) = rx.recv() => {
+                    if let Some(id) = done {
+                        ended[i].insert(id, std::time::Instant::now());
+                    }
                     let a = &shared.accounts[i];
                     read_one(&shared, a, &http, &observer).await;
+                    leave_out(&mut lock(&a.doc), &mut ended[i]);
+                    again.insert(i, std::time::Instant::now() + LAG);
                     feeds.want(&live::wanted(&docs(&shared), &relays));
                 }
                 _ = tick.tick() => {
+                    let due: Vec<usize> = again.iter().filter(|(_, t)| t.elapsed() > Duration::ZERO).map(|(i, _)| *i).collect();
+                    for i in due {
+                        again.remove(&i);
+                        let a = &shared.accounts[i];
+                        read_one(&shared, a, &http, &observer).await;
+                        leave_out(&mut lock(&a.doc), &mut ended[i]);
+                    }
                     if last_full.elapsed() >= refresh {
                         read_all(&shared, &http, &observer).await;
+                        for (a, e) in shared.accounts.iter().zip(ended.iter_mut()) {
+                            leave_out(&mut lock(&a.doc), e);
+                        }
                         feeds.want(&live::wanted(&docs(&shared), &relays));
                         last_full = std::time::Instant::now();
                     }
@@ -697,6 +719,25 @@ fn pick(v: &Value, fields: &[&str]) -> Value {
     Value::Object(out)
 }
 
+/// How long after an order event its account is read again, for Alpaca's
+/// REST reads to catch up with its stream.
+const LAG: Duration = Duration::from_secs(3);
+/// How long an order the stream said ended is left out of reads listing it.
+const ENDED_FOR: Duration = Duration::from_secs(120);
+
+/// Leave out of the document's open orders those the order stream said
+/// ended (filled, cancelled, ...), forgetting them after `ENDED_FOR`.
+fn leave_out(doc: &mut Value, ended: &mut HashMap<String, std::time::Instant>) {
+    ended.retain(|_, at| at.elapsed() < ENDED_FOR);
+    if let Some(orders) = doc["orders"].as_array_mut() {
+        orders.retain(|o| {
+            o["client_order_id"]
+                .as_str()
+                .is_none_or(|id| !ended.contains_key(id))
+        });
+    }
+}
+
 /// Open orders, oldest first, each with its legs (a multi-leg order's).
 fn open_orders(orders: &Value) -> Value {
     let mut out: Vec<Value> = orders
@@ -802,6 +843,35 @@ mod tests {
             changes(&before, &after),
             ["opened QQQ: 1", "SPY: 10 → 4", "closed AAPL"]
         );
+    }
+
+    #[test]
+    fn orders_the_stream_ended_are_left_out_of_a_lagging_read() {
+        let mut doc = json!({ "orders": [
+            { "client_order_id": "tt-filled", "status": "new" },
+            { "client_order_id": "tt-open", "status": "new" },
+            { "status": "new" }
+        ] });
+        let mut ended = HashMap::from([
+            ("tt-filled".to_owned(), std::time::Instant::now()),
+            (
+                "tt-old".to_owned(),
+                std::time::Instant::now() - ENDED_FOR - Duration::from_secs(1),
+            ),
+        ]);
+        leave_out(&mut doc, &mut ended);
+        let ids: Vec<_> = doc["orders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["client_order_id"].as_str())
+            .collect();
+        assert_eq!(ids, vec![Some("tt-open"), None]);
+        assert!(!ended.contains_key("tt-old"));
+        // Unknown orders (null) stay unknown.
+        let mut unknown = json!({ "orders": null });
+        leave_out(&mut unknown, &mut ended);
+        assert!(unknown["orders"].is_null());
     }
 
     #[test]

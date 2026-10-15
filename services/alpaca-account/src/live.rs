@@ -2,7 +2,9 @@
 //! position prices from tinytrader's own relays.
 //!
 //! Each account keeps one `trade_updates` websocket; every order event asks
-//! for that account to be read again. Positions are valued from relay prices
+//! for that account to be read again, and an order's end (filled, cancelled,
+//! expired, rejected, replaced) is passed on as such: Alpaca's REST reads can
+//! lag its stream, still listing an order as open just after it filled. Positions are valued from relay prices
 //! (the bid/ask midpoint, or the last trade when a side is missing): stocks
 //! from the IEX relay, options from the OPRA relay for their root. The
 //! service connects only to relays covering what is held.
@@ -249,14 +251,26 @@ pub fn wanted(docs: &[Value], relays: &Relays) -> HashSet<String> {
         .collect()
 }
 
-/// Listen to one account's order events, sending its index on every event
-/// that can change positions or cash. Reconnects until aborted.
+/// One account's order event: its index, and the client id of an order the
+/// event ended (None for any other event).
+pub type OrderEvent = (usize, Option<String>);
+
+/// Whether a `trade_updates` event ends its order: it's no longer open.
+fn ends(event: &str) -> bool {
+    matches!(
+        event,
+        "fill" | "canceled" | "expired" | "rejected" | "replaced"
+    )
+}
+
+/// Listen to one account's order events, sending each one. Reconnects
+/// until aborted.
 pub async fn trade_updates(
     url: String,
     key: String,
     secret: String,
     index: usize,
-    events: mpsc::Sender<usize>,
+    events: mpsc::Sender<OrderEvent>,
 ) {
     loop {
         if let Err(e) = listen(&url, &key, &secret, index, &events).await {
@@ -271,7 +285,7 @@ async fn listen(
     key: &str,
     secret: &str,
     index: usize,
-    events: &mpsc::Sender<usize>,
+    events: &mpsc::Sender<OrderEvent>,
 ) -> Result<(), String> {
     let (mut ws, _) = tokio_tungstenite::connect_async(url)
         .await
@@ -301,7 +315,11 @@ async fn listen(
                 eprintln!("alpaca-account: account {index} listening for order events")
             }
             Some("trade_updates") => {
-                let _ = events.send(index).await;
+                let d = &v["data"];
+                let ended = ends(d["event"].as_str().unwrap_or(""))
+                    .then(|| d["order"]["client_order_id"].as_str().map(str::to_owned))
+                    .flatten();
+                let _ = events.send((index, ended)).await;
             }
             _ => {}
         }
