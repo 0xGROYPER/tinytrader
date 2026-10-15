@@ -22,6 +22,8 @@ function save() {
   try { localStorage.setItem(KEY, JSON.stringify(list)); } catch (_) {}
   document.dispatchEvent(new CustomEvent('tt-alerts'));
 }
+// Changed on another device (lib/prefs.js): read again.
+document.addEventListener('tt-prefs', e => { if (/** @type {CustomEvent} */ (e).detail === KEY) { list = read(); document.dispatchEvent(new CustomEvent('tt-alerts')); } });
 // Another tab's changes.
 window.addEventListener('storage', e => { if (e.key === KEY) { list = read(); document.dispatchEvent(new CustomEvent('tt-alerts')); } });
 

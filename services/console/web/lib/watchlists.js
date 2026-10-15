@@ -31,6 +31,12 @@ function save() {
   document.dispatchEvent(new CustomEvent('tt-watchlist'));
 }
 if (!read()) save();
+// Changed on another device (lib/prefs.js): read again.
+document.addEventListener('tt-prefs', e => {
+  if (/** @type {CustomEvent} */ (e).detail !== KEY) return;
+  lists = read() || lists;
+  document.dispatchEvent(new CustomEvent('tt-watchlist'));
+});
 
 /** Every stored list. */
 export const watchlists = () => lists;

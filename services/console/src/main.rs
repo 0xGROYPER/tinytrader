@@ -518,17 +518,39 @@ async fn prefs_get(AxumState(app): AxumState<Arc<App>>) -> Response {
     }
 }
 
+/// Save one setting. `If-Match` names the version the page started from;
+/// a stale save gets 409 with the current value, to merge and save again.
 async fn prefs_put(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path(key): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     axum::Json(value): axum::Json<serde_json::Value>,
 ) -> Response {
     let Some(p) = &app.prefs else {
         return (StatusCode::NOT_FOUND, "no settings file configured").into_response();
     };
-    match p.put(&key, value) {
+    let based_on = headers
+        .get(axum::http::header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim_matches('"').to_owned());
+    // A page from before versions (an old tab) can't overwrite: reload it.
+    let Some(based_on) = based_on else {
+        return (
+            StatusCode::PRECONDITION_REQUIRED,
+            axum::Json(json!({ "error": "save with If-Match (reload the page)" })),
+        )
+            .into_response();
+    };
+    match p.put(&key, value, Some(&based_on)) {
         Ok(()) => no_store(axum::Json(json!({ "ok": true }))),
-        Err(e) => (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": e }))).into_response(),
+        Err(prefs::Refused::Stale(current)) => (
+            StatusCode::CONFLICT,
+            axum::Json(json!({ "error": "changed since", "current": current })),
+        )
+            .into_response(),
+        Err(prefs::Refused::Bad(e)) => {
+            (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": e }))).into_response()
+        }
     }
 }
 
