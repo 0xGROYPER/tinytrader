@@ -987,12 +987,12 @@ a.doc-card { text-decoration: none; }
 .sb { display: flex; flex-direction: column; gap: 6px; min-width: 0; container-type: inline-size; }
 .sb-top { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; }
 .sb-search { margin: 0; }
-.sb-ticker, .sb-exp, .sb-st, .sb-addsp { height: 24px; font: 12px var(--mono, monospace); padding: 0 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--fg); }
+.sb-ticker, .sb-exp, .sb-addsp { height: 24px; font: 12px var(--mono, monospace); padding: 0 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--fg); }
 .sb-ticker { width: 6.5em; font-size: 13px; font-weight: 600; text-transform: uppercase; }
 .sb-ticker::placeholder { color: var(--fg); opacity: 1; } .sb-ticker:focus::placeholder { color: var(--muted); }
 .sb-ticker:focus { outline: none; border-color: var(--accent); }
 .sb-spot { font-size: 12px; }
-.sb-st { font-family: var(--ui); max-width: 13em; }
+.sb-name { font-size: 12px; cursor: help; } .sb-name:empty { display: none; }
 .sb-views { margin-left: auto; display: inline-flex; gap: 6px; }
 .sb-add { height: 24px; padding: 0 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--fg-2); font: 500 12px var(--mono); cursor: pointer; }
 .sb-add:hover { border-color: var(--accent-2); color: var(--accent); }
@@ -1033,7 +1033,7 @@ button.sb-occ:hover { color: var(--accent); text-decoration: underline; text-und
 /* Touch: bigger targets, the same layout. */
 @media (pointer: coarse) {
   .sb-mini, .sb-x { min-width: 30px; height: 30px; }
-  .sb-ticker, .sb-exp, .sb-st, .sb-addsp, .sb-add { height: 32px; font-size: 15px; }
+  .sb-ticker, .sb-exp, .sb-addsp, .sb-add { height: 32px; font-size: 15px; }
 }
 .sb-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .sb-bar .sb-sum { flex: 1 1 auto; min-width: 0; cursor: help; }

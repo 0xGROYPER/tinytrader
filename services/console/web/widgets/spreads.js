@@ -15,7 +15,7 @@ import { esc } from '../lib/format.js';
 import { focused, theme } from '../lib/theme.js';
 import { position, publish, wanted } from '../lib/position.js';
 import { recommend } from '../lib/recommend.js';
-import { GROUPS, STRUCTURES, structureOptions, identify, whatIs } from '../lib/structures.js';
+import { GROUPS, STRUCTURES, identify, whatIs } from '../lib/structures.js';
 import { notSentText } from '../lib/orders.js';
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (_) { /* private mode */ } return null; };
@@ -44,7 +44,7 @@ function bs(type, S, K, t, v) {
 defineWidget('spreads', {
   title: 'Spread builder',
   mount(el) {
-    const my = { sym: focused() || theme()?.symbols?.[0] || 'SPY', chain: null, expiry: null, structure: 'Iron condor', width: 2, err: '', alive: true, at: 0,
+    const my = { sym: focused() || theme()?.symbols?.[0] || 'SPY', chain: null, expiry: null, structure: 'Custom', width: 2, err: '', alive: true, at: 0,
       // A suggestion waiting for its chain, and the one shown.
       ask: /** @type {any} */ (null), why: '',
       // The order ticket.
@@ -59,7 +59,7 @@ defineWidget('spreads', {
         <form class="sb-search"><input class="sb-ticker mono" name="t" placeholder="Ticker" maxlength="10" autocomplete="off" spellcheck="false" aria-label="Underlying"></form>
         <span class="sb-spot mono muted"></span>
         <select class="sb-exp mono" aria-label="Expiry"></select>
-        <select class="sb-st" aria-label="Structure"></select>
+        <span class="sb-name muted"></span>
         <span class="sb-views"><button type="button" class="sb-add sb-paybtn" aria-pressed="false">Payoff</button></span>
       </div>
       <p class="sb-why muted"></p>
@@ -161,23 +161,22 @@ defineWidget('spreads', {
       $('.sb-spot').title = my.chain?.spot_from === 'parity' ? 'From the options (put-call parity)' : '';
       const exps = expiries(), sel = /** @type {HTMLSelectElement} */ ($('.sb-exp')), key = `${my.sym}|${exps.map(e => e.expiry).join()}`;
       if (sel.dataset.for !== key) {
-        sel.innerHTML = exps.map(e => `<option value="${e.expiry}">${day(e.expiry)}</option>`).join('');
+        // Each expiry with its days to expiry (New York's date).
+        const today = Date.parse(new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) + 'T00:00:00Z');
+        const dte = d => Math.round((Date.parse(d + 'T00:00:00Z') - today) / 86400e3);
+        sel.innerHTML = exps.map(e => `<option value="${e.expiry}">${dte(e.expiry)}d · ${day(e.expiry)}</option>`).join('');
         sel.dataset.for = key;
       }
       if (my.expiry) sel.value = my.expiry;
       $('.sb-paybtn').setAttribute('aria-pressed', String(my.payoff));
-      // The structure: a preset, or what the legs came from (a suggestion, held, edited).
-      const preset = !!STRUCTURES[my.structure] && !my.why;
-      // Edited legs keep a name when their shape has one (a bull call spread
-      // with its strikes moved is still one), so you can see what you built.
-      const shape = my.structure === 'Custom' ? identify(legs()) : null;
-      const label = my.structure === 'Custom' ? (shape ? `${shape} (edited)` : 'Custom') : my.structure;
-      $('.sb-st').innerHTML = (preset ? '' : `<option selected>${esc(label)}</option>`)
-        + structureOptions(preset ? my.structure : '', esc);
+      // What the legs make, when their shape has a name (an iron condor from
+      // two credit spreads), or where they came from (held, a suggestion).
+      const shape = identify(legs());
+      $('.sb-name').textContent = my.held || my.why ? my.structure : shape || '';
+      $('.sb-name').title = shape ? whatIs(shape).replace(/ w /g, ' ').replace(/ 2w /g, ' ') : '';
       // Held legs: the ticket is away until none are left (an order for them would open more).
       const heldNote = a?.held ? `${my.held ? `Your positions on ${esc(my.held.account)}` : 'Includes positions held'}, at their entry prices. Change a strike or type to try an adjustment.` : '';
-      const shapeNote = shape ? `<b>${esc(shape)}.</b> ${esc(whatIs(shape).replace(/ w /g, ' ').replace(/ 2w /g, ' ') || 'Its legs, as you set them.')}` : '';
-      $('.sb-why').innerHTML = my.why ? `<b>${esc(my.structure)}.</b> ${esc(my.why)}` : heldNote || shapeNote;
+      $('.sb-why').innerHTML = my.why ? `<b>${esc(my.structure)}.</b> ${esc(my.why)}` : heldNote;
       // The legs as a positions table, like the broker's: each contract, its mid,
       // signed quantity (− sells), market value and delta in shares; the strike
       // steps with ‹ ›, C/P switches type, the quantity steps through zero to flip side.
@@ -393,7 +392,7 @@ defineWidget('spreads', {
       if (v.outcome === 'unknown') return `<span class="sb-bad">Unknown (${esc(v.reason || '')}): it may have reached the broker. Don't send it again; the gateway is checking and it will show below if it did.</span>`;
       return esc(JSON.stringify(v).slice(0, 200));
     }
-    const switchTo = s => { my.sym = s; my.chain = null; my.expiry = null; my.why = ''; my.held = null; my.limit = null; my.review = false; my.result = ''; if (!STRUCTURES[my.structure]) my.structure = 'Iron condor'; position.legs = []; render(); loadChain(); };
+    const switchTo = s => { my.sym = s; my.chain = null; my.expiry = null; my.why = ''; my.held = null; my.limit = null; my.review = false; my.result = ''; my.structure = 'Custom'; position.legs = []; render(); loadChain(); };
 
     el.addEventListener('submit', e => {
       e.preventDefault();
@@ -429,7 +428,6 @@ defineWidget('spreads', {
     el.addEventListener('change', e => {
       const t = /** @type {HTMLSelectElement} */ (e.target);
       if (t.classList.contains('sb-addsp')) { if (t.value) { addSpread(t.value); render(); } return; }
-      if (t.classList.contains('sb-st')) { my.review = false; my.limit = null; my.result = ''; my.structure = t.value; my.why = ''; my.held = null; build(); render(); return; }
       if (t.classList.contains('sb-acct')) { my.acct = t.value; my.typed = ''; store('tt-sb-account', t.value); render(); return; }
       if (t.classList.contains('sb-limit')) { const v = Math.round(+t.value * 100) / 100; if (v) my.limit = v; t.blur(); render(); return; }
       if (!t.classList.contains('sb-exp')) return;
