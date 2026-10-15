@@ -88,7 +88,7 @@ defineWidget('observations', {
       // Yields move a lot in σ on quiet days: weigh their moves a little less.
       for (const o of items) if (o.kind === 'move' && isYield(o.s)) o.score *= 0.8;
       items.sort((a, b) => b.score - a.score);
-      my.items = items; my.n = r.series.size; my.err = r.error; my.at = Date.now(); my.asOf = [...dates].sort().pop() || '';
+      my.items = items; my.n = r.series.size; my.err = r.error; my.wait = r.wait; my.at = Date.now(); my.asOf = [...dates].sort().pop() || '';
       update();
     }
     const click = e => {
@@ -103,7 +103,7 @@ defineWidget('observations', {
     document.addEventListener('tt-board', changed); document.addEventListener('tt-watchlist', changed);
     update(); load();
     return {
-      update() { if (my.at && Date.now() - my.at > STALE) load(); },
+      update() { if (my.at && Date.now() - my.at > (my.wait || STALE)) load(); },
       dispose() { my.alive = false; el.removeEventListener('click', click); document.removeEventListener('tt-board', changed); document.removeEventListener('tt-watchlist', changed); },
     };
   },

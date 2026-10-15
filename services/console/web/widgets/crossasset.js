@@ -6,7 +6,8 @@
 // (▲) or below (▼) its 20-, 50- and 200-day averages, and where it sits in
 // its 52-week range. The rows are edited per group and kept in this browser.
 // Daily closes (lib/trend.js) are read when the board is shown, and again
-// once ten minutes old. Clicking a row points the workspace's charts at it.
+// once ten minutes old (30 seconds if any failed: an empty row says why).
+// Clicking a row points the workspace's charts at it.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
@@ -18,8 +19,15 @@ const tone = v => v == null ? '' : v > 0 ? 'pos' : v < 0 ? 'neg' : '';
 // Symbols for the board's editor: stock symbols, crypto pairs (BTC/USD) and Cboe's indexes.
 const parseRows = text => [...new Set(text.toUpperCase().split(/[\s,]+/).filter(s => /^[A-Z0-9.]{1,10}$/.test(s) || /^[A-Z]{2,6}\/[A-Z]{2,6}$/.test(s)))].slice(0, 30);
 
-function row(a, s) {
-  if (!a) return `<tr><td class="ca-name">${esc(label(s))}<span class="mono">${esc(s)}</span></td><td colspan="6" class="muted">no data</td></tr>`;
+/** Why a row has nothing: the upstream's error (retried shortly), no bars, or too few. */
+function why(k) {
+  if (k?.failed) return `<span title="${esc(k.error)}">Couldn’t be read (retrying): ${esc(k.error.length > 90 ? k.error.slice(0, 90) + '…' : k.error)}</span>`;
+  if (k?.error === 'no bars') return 'No daily bars for this symbol';
+  return k ? 'Too few closes to read' : 'Not loaded';
+}
+
+function row(a, s, k) {
+  if (!a) return `<tr><td class="ca-name">${esc(label(s))}<span class="mono">${esc(s)}</span></td><td colspan="6" class="muted ca-why">${why(k)}</td></tr>`;
   const arrows = [20, 50, 200].map(k => { const x = a.avg[k]; return x ? `<i class="${x.above ? 'up' : 'down'}" title="${x.above ? 'Above' : 'Below'} its ${k}-day average (${fmtLevel({ ...a, last: x.v, value: a.yield ? x.v / 10 : x.v })}) for ${x.run} session${x.run === 1 ? '' : 's'}${x.since ? `, since ${x.since}` : ''}">${x.above ? '▲' : '▼'}</i>` : '<i class="na">·</i>'; }).join('');
   const span = a.hi52 - a.lo52, pos = span > 0 ? (a.last - a.lo52) / span : 0.5;
   const range = `<span class="ca-range" title="52-week range ${fmtLevel({ ...a, last: a.lo52, value: a.yield ? a.lo52 / 10 : a.lo52 })} – ${fmtLevel({ ...a, last: a.hi52, value: a.yield ? a.hi52 / 10 : a.hi52 })}"><b style="left:${(pos * 100).toFixed(0)}%"></b></span>`;
@@ -49,7 +57,7 @@ function draw(my) {
   if (!my.series) return '<p class="muted">Loading the board…</p>';
   const by = new Map(), dates = new Set();
   for (const g of groups) for (const r of g.rows) { const k = my.series.get(r.s), a = k && analyse(r.s, k.closes); by.set(r.s, a); if (a && !isCrypto(r.s)) dates.add(a.date); }
-  const body = groups.map(g => `<tbody><tr class="ca-g"><th colspan="7">${esc(g.name)}</th></tr>${g.rows.map(r => row(by.get(r.s), r.s)).join('')}${g.rows.some(r => r.s.startsWith('VIX')) ? `<tr><td colspan="7">${term(by)}</td></tr>` : ''}</tbody>`).join('');
+  const body = groups.map(g => `<tbody><tr class="ca-g"><th colspan="7">${esc(g.name)}</th></tr>${g.rows.map(r => row(by.get(r.s), r.s, my.series.get(r.s))).join('')}${g.rows.some(r => r.s.startsWith('VIX')) ? `<tr><td colspan="7">${term(by)}</td></tr>` : ''}</tbody>`).join('');
   const asOf = [...dates].sort().pop();
   return `<div class="ca-head"><span class="muted">${asOf ? `Closes as of ${esc(asOf)} (crypto to today), up to 16 minutes late` : ''}${my.err ? ` · ${esc(my.err)}` : ''}</span><button type="button" class="btn small" data-ca="edit">Edit rows</button></div>
     <div class="scroll"><table class="ca"><thead><tr><th></th><th class="num">Last</th><th class="num">1D</th><th class="num">1W</th><th class="num">1M</th><th title="Against the 20-, 50- and 200-day averages">20 50 200</th><th title="Where today’s close sits in its 52-week range: the low at the left end, the high at the right; the tick is today. Hover a bar for the low and high.">52 weeks</th></tr></thead>${body}</table></div>`;
@@ -58,13 +66,13 @@ function draw(my) {
 defineWidget('crossasset', {
   title: 'Cross-asset',
   mount(el) {
-    const my = { series: /** @type {Map<string, any> | null} */ (null), err: '', at: 0, edit: false, alive: true };
+    const my = { series: /** @type {Map<string, any> | null} */ (null), err: '', at: 0, wait: STALE, edit: false, alive: true };
     const update = () => { paint(el, draw(my)); };
     async function load() {
       const syms = board().flatMap(g => g.rows.map(r => r.s));
       const r = await closes(fleet, syms);
       if (!my.alive) return;
-      my.series = r.series; my.err = r.error; my.at = Date.now(); update();
+      my.series = r.series; my.err = r.error; my.wait = r.wait; my.at = Date.now(); update();
     }
     const click = e => {
       const t = /** @type {HTMLElement} */ (e.target);
@@ -86,7 +94,7 @@ defineWidget('crossasset', {
     document.addEventListener('tt-board', changed);
     update(); load();
     return {
-      update() { if (my.at && Date.now() - my.at > STALE) load(); },
+      update() { if (my.at && Date.now() - my.at > my.wait) load(); },
       dispose() { my.alive = false; el.removeEventListener('click', click); el.removeEventListener('submit', submit); document.removeEventListener('tt-board', changed); },
     };
   },

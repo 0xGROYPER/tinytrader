@@ -26,7 +26,10 @@
 //!   ago), crypto pairs (`BTC/USD`) from Alpaca's crypto data, Cboe's indexes
 //!   (VIX and its terms, and Treasury yields: IRX, FVX, TNX, TYX, ten times
 //!   the percentage) from Cboe. `days` counts sessions (calendar days for
-//!   crypto), at most 400; at most 200 symbols. Kept ten minutes.
+//!   crypto), at most 400; at most 200 symbols. Kept ten minutes, or 30
+//!   seconds when any of it failed upstream (`"incomplete": true`; the
+//!   failed symbols' `error` says why). A symbol with no bars has the error
+//!   `no bars` and isn't a failure.
 //! - `/news?symbols=USO,XLE&limit=50`: recent stories on those symbols
 //!   (Benzinga, through Alpaca), in the news service's shape, newest first.
 //!
@@ -254,7 +257,9 @@ impl App {
         Ok(v)
     }
 
-    /// A kept answer for `key` if younger than `ttl`, else `make`'s.
+    /// A kept answer for `key` if younger than `ttl`, else `make`'s. An
+    /// answer marked `"incomplete": true` (part of it failed upstream) is
+    /// kept for at most `RETRY`, so an outage isn't served for the full `ttl`.
     async fn kept<F, Fut>(
         &self,
         key: String,
@@ -266,7 +271,12 @@ impl App {
         Fut: std::future::Future<Output = Result<Value, (StatusCode, String)>>,
     {
         if let Some((at, v, _)) = lock(&self.cache).get(&key)
-            && at.elapsed() < ttl
+            && at.elapsed()
+                < if v["incomplete"] == true {
+                    ttl.min(RETRY)
+                } else {
+                    ttl
+                }
         {
             return Ok(v.clone());
         }
@@ -296,6 +306,9 @@ impl App {
         Ok(v)
     }
 }
+
+/// How long an answer that partly failed upstream is kept.
+const RETRY: Duration = Duration::from_secs(30);
 
 /// A stock or ETF symbol: letters, digits and dots, at most 10.
 fn symbol_ok(s: &str) -> bool {
@@ -655,6 +668,7 @@ async fn daily(AxState(app): AxState<Arc<App>>, Query(ask): Query<DailyAsk>) -> 
                 let now = unix_seconds() as i64;
                 let start = ny_date_time(now - (days as i64 * 7 / 5 + 7) * 86_400).0;
                 let mut series = serde_json::Map::new();
+                let mut incomplete = false;
                 let (indexes, rest): (Vec<_>, Vec<_>) =
                     symbols.iter().cloned().partition(|s| cboe::is_index(s));
                 let (pairs, stocks): (Vec<_>, Vec<_>) =
@@ -665,7 +679,10 @@ async fn daily(AxState(app): AxState<Arc<App>>, Query(ask): Query<DailyAsk>) -> 
                         s.clone(),
                         match v {
                             Ok(v) => json!({ "source": "cboe", "closes": closes(&v["bars"]) }),
-                            Err((_, e)) => json!({ "source": "cboe", "closes": [], "error": e }),
+                            Err((_, e)) => {
+                                incomplete = true;
+                                json!({ "source": "cboe", "closes": [], "error": e })
+                            }
                         },
                     );
                 }
@@ -736,20 +753,23 @@ async fn daily(AxState(app): AxState<Arc<App>>, Query(ask): Query<DailyAsk>) -> 
                             }
                         }
                     }
+                    // A failed page leaves the rest of the list short or empty: each says so.
+                    incomplete |= error.is_some();
                     for s in list {
                         let mut c = got.remove(s).unwrap_or_default();
                         c.sort_by_key(|x| x[0].as_i64().unwrap_or(0));
                         c.dedup_by_key(|x| x[0].as_i64().unwrap_or(0));
                         let keep = c.len().saturating_sub(days as usize);
                         let mut entry = json!({ "source": source, "closes": &c[keep..] });
-                        if c.is_empty() {
-                            entry["error"] =
-                                json!(error.clone().unwrap_or_else(|| "no bars".to_owned()));
+                        if let Some(e) = &error {
+                            entry["error"] = json!(e);
+                        } else if c.is_empty() {
+                            entry["error"] = json!("no bars");
                         }
                         series.insert(s.clone(), entry);
                     }
                 }
-                Ok(json!({ "as_of": now, "days": days, "series": series }))
+                Ok(json!({ "as_of": now, "days": days, "series": series, "incomplete": incomplete }))
             },
         )
         .await,

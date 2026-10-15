@@ -53,23 +53,27 @@ export const isYield = s => YIELDS.has(s);
 export const isCrypto = s => s.includes('/');
 export const label = s => NAMES[s] || s;
 
-/** Closes by symbol, as fetched: { closes: [t, c][], at, error }. */
+/** Closes by symbol, as fetched: { closes: [t, c][], at, error, failed }. */
 const kept = new Map();
 const STALE = 10 * 60e3;
+/** How soon a symbol that failed upstream (not one with no bars) is asked for again. */
+export const RETRY = 30e3;
+const old = x => Date.now() - x.at > (x.failed ? RETRY : STALE);
 /** @type {Map<string, Promise<void>>} */
 const asking = new Map();
 const service = fleet => (fleet.topo?.services || []).find(s => s.daily)?.id || null;
 
 /**
- * Daily closes for the symbols, fetching those missing or ten minutes old
- * (one request for them all); the rest from what's kept.
+ * Daily closes for the symbols, fetching those missing or ten minutes old,
+ * or 30 seconds old if they failed (one request for them all); the rest from
+ * what's kept. `wait` is how soon to ask again: RETRY if any failed.
  * @param {any} fleet @param {string[]} symbols
- * @returns {Promise<{ series: Map<string, any>, error: string }>}
+ * @returns {Promise<{ series: Map<string, any>, error: string, wait: number }>}
  */
 export async function closes(fleet, symbols) {
   const svc = service(fleet);
-  if (!svc) return { series: new Map(), error: 'No service serves daily closes (alpaca-data).' };
-  const want = [...new Set(symbols)].filter(s => !kept.has(s) || Date.now() - kept.get(s).at > STALE);
+  if (!svc) return { series: new Map(), error: 'No service serves daily closes (alpaca-data).', wait: STALE };
+  const want = [...new Set(symbols)].filter(s => !kept.has(s) || old(kept.get(s)));
   let error = '';
   for (let i = 0; i < want.length; i += 200) {
     const part = want.slice(i, i + 200), key = part.join(',');
@@ -78,7 +82,11 @@ export async function closes(fleet, symbols) {
         const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/daily?symbols=${encodeURIComponent(key)}&days=400`, { cache: 'no-store' });
         const v = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(v.error || `${r.status}`);
-        for (const [s, x] of Object.entries(v.series || {})) kept.set(s, { closes: x.closes || [], error: x.error || '', at: Date.now() });
+        // An error other than "no bars" is the upstream failing (an outage, a limit): it's retried soon.
+        for (const [s, x] of Object.entries(v.series || {})) {
+          const error = x.error || '';
+          kept.set(s, { closes: x.closes || [], error, failed: !!error && error !== 'no bars', at: Date.now() });
+        }
       })().finally(() => asking.delete(key)));
     }
     try { await asking.get(key); } catch (e) { error = `Daily closes couldn't be read: ${e.message}`; }
@@ -86,7 +94,8 @@ export async function closes(fleet, symbols) {
   /** @type {Map<string, any>} */
   const series = new Map();
   for (const s of symbols) if (kept.has(s)) series.set(s, kept.get(s));
-  return { series, error };
+  const wait = error || [...series.values()].some(x => x.failed) ? RETRY : STALE;
+  return { series, error, wait };
 }
 
 const mean = xs => xs.reduce((a, b) => a + b, 0) / xs.length;

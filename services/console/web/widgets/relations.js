@@ -130,7 +130,7 @@ defineWidget('relations', {
     async function load() {
       const r = await closes(fleet, [...new Set([...my.pairs.flat(), ...my.syms])]);
       if (!my.alive) return;
-      my.series = r.series; my.err = r.error; my.at = Date.now(); update();
+      my.series = r.series; my.err = r.error; my.wait = r.wait; my.at = Date.now(); update();
     }
     const click = e => {
       const t = /** @type {HTMLElement} */ (e.target), d = (/** @type {HTMLElement | null} */ (t.closest('[data-rl-kind],[data-rl-opt],[data-rl]')))?.dataset;
@@ -167,7 +167,7 @@ defineWidget('relations', {
     el.addEventListener('click', click); el.addEventListener('submit', submit); el.addEventListener('mousemove', move); el.addEventListener('mouseleave', out);
     update(); load();
     return {
-      update() { if (my.at && Date.now() - my.at > STALE) load(); },
+      update() { if (my.at && Date.now() - my.at > (my.wait || STALE)) load(); },
       dispose() { my.alive = false; el.removeEventListener('click', click); el.removeEventListener('submit', submit); el.removeEventListener('mousemove', move); el.removeEventListener('mouseleave', out); },
     };
   },
