@@ -57,9 +57,9 @@ async function post(path, body) {
 
 function flattenPanel(a) {
   const name = a?.name, g = name && gateways[name];
-  if (a?.environment === 'live' || g?.environment === 'live') return '<p class="muted" style="margin:0;font-size:12px">Live account: flatten isn\'t offered from the console.</p>';
+  if (a?.environment === 'live' || g?.environment === 'live') return '';
   if (!g) return '';
-  if (g.error) return `<p class="muted" style="margin:0;font-size:12px">Gateway unreachable: ${esc(g.error)}</p>`;
+  if (g.error) return `<p class="muted acct-note" title="${esc(g.error)}">Order gateway unreachable.</p>`;
   const f = flat[name] || {};
   const halted = g.state === 'killed';
   const buttons = `<div class="acct-actions">
@@ -94,7 +94,7 @@ function ordersPanel(a) {
   const orders = a.orders, name = a.name;
   if (orders === undefined) return '';
   if (orders === null) return '<p class="neg" style="margin:0;font-size:12px">Open orders couldn\'t be read: check the broker before sending more.</p>';
-  if (!orders.length) return '<p class="muted" style="margin:0;font-size:12px">No open orders.</p>';
+  if (!orders.length) return '';
   const age = t => { const s = (Date.now() - Date.parse(t)) / 1000; return isFinite(s) ? duration(s) : ''; };
   const legsOf = o => o.legs?.length
     ? o.legs.map(l => `${l.side === 'sell' ? '−' : '+'}${(l.ratio_qty || 1) * (o.qty || 1)} ${esc(l.symbol)}`).join('<br>')
@@ -127,31 +127,38 @@ function money(v, cur) {
 function signed(v, cur) { return v == null ? '—' : (v > 0 ? '+' : '') + money(v, cur); }
 function pct(v) { return v == null || !isFinite(v) ? '—' : (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v * 100).toFixed(2) + '%'; }
 const tone = v => v > 0 ? 'pos' : v < 0 ? 'neg' : '';
+/** An option's OCC symbol as `SPY 775C 10/16`; anything else as it is. */
+function shortSym(sym) {
+  const m = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(sym || '');
+  return m ? `${m[1]} ${+m[6] / 1000}${m[5]} ${+m[3]}/${+m[4]}` : sym;
+}
 function accountCard(svc, a) {
   const acc = a?.account || {}, cur = acc.currency, env = a?.environment || 'paper';
-  const head = `<h3>${esc(a?.label || svc.label || svc.id)}<span class="env env-${env === 'live' ? 'live' : 'paper'}">${esc(env)}</span>
+  const day = acc.equity != null && acc.last_equity != null ? acc.equity - acc.last_equity : null;
+  // One line: the account, then its equity and the day's change.
+  const head = `<div class="acct-head"><h3>${esc(a?.label || svc.label || svc.id)}<span class="env env-${env === 'live' ? 'live' : 'paper'}">${esc(env)}</span>
     ${acc.status && acc.status !== 'ACTIVE' ? `<span class="pill p-warn">${esc(acc.status.toLowerCase())}</span>` : ''}
-    ${acc.trading_blocked || acc.account_blocked ? '<span class="pill p-crit">blocked</span>' : ''}</h3>`;
+    ${acc.trading_blocked || acc.account_blocked ? '<span class="pill p-crit">blocked</span>' : ''}</h3>
+    ${a?.updated_at ? `<span class="acct-eq"><b>${money(acc.equity, cur)}</b>${day != null ? `<span class="${tone(day)}">${signed(day, cur)} (${pct(acc.last_equity ? day / acc.last_equity : null)})</span>` : ''}</span>` : ''}</div>`;
   if (!a?.updated_at) {
     const err = svcState(svc.id).health?.body?.last_error;
     return `<article class="card acct">${head}<p class="muted" style="margin:0">${esc(err ? 'Cannot read the account: ' + err : 'Waiting for the first reading…')}</p></article>`;
   }
-  const day = acc.equity != null && acc.last_equity != null ? acc.equity - acc.last_equity : null;
-  const stats = [['Cash', money(acc.cash, cur)], ['Buying power', money(acc.buying_power, cur)], ['Long', money(acc.long_market_value, cur)]];
+  const stats = [['Cash', money(acc.cash, cur)], ['Buying power', money(acc.buying_power, cur)]];
+  if (acc.long_market_value) stats.push(['Long', money(acc.long_market_value, cur)]);
   if (acc.short_market_value) stats.push(['Short', money(acc.short_market_value, cur)]);
   const pos = a.positions || [];
   const rows = pos.slice().sort((x, y) => Math.abs(y.market_value || 0) - Math.abs(x.market_value || 0)).slice(0, 8).map(p => `<tr>
-    <td style="color:var(--fg)">${esc(p.symbol)}</td><td>${esc(String(p.qty ?? '—'))}</td><td>${money(p.market_value, cur)}</td>
-    <td class="${tone(p.unrealized_pl)}">${signed(p.unrealized_pl, cur)} <span class="muted">${pct(p.unrealized_plpc)}</span></td>
-    <td class="${tone(p.change_today)}">${pct(p.change_today)}</td></tr>`).join('');
+    <td style="color:var(--fg)" title="${esc(p.symbol)}">${esc(shortSym(p.symbol))}</td><td>${esc(String(p.qty ?? '—'))}</td><td>${money(p.market_value, cur)}</td>
+    <td class="${tone(p.unrealized_pl)}" title="${pct(p.unrealized_plpc)}">${signed(p.unrealized_pl, cur)}</td>
+    <td class="${tone(p.change_today)} acct-today">${pct(p.change_today)}</td></tr>`).join('');
   return `<article class="card acct">${head}
-    <div class="val"><span class="big">${money(acc.equity, cur)}</span>${day != null ? `<span class="chg ${tone(day)}">${signed(day, cur)} (${pct(acc.last_equity ? day / acc.last_equity : null)}) today</span>` : ''}</div>
-    <div class="acct-stats">${stats.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('')}</div>
-    <div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2"></div>
-    ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Symbol</th><th>Qty</th><th>Value</th><th>Unrealized</th><th>Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="muted" style="margin:0;font-size:13px">No open positions.</p>'}
+    <div class="acct-stats">${stats.map(([k, v]) => `<span>${k} <b>${v}</b></span>`).join('')}</div>
+    <div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2" data-height="56"></div>
+    ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Position</th><th>Qty</th><th>Value</th><th>P/L</th><th class="acct-today">Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
     ${(() => { const g = optionGroups(a.name || a.label || svc.id, pos), can = tradable(a.name); return g.length || can ? `<div class="acct-payoffs">${g.map(x => `<button type="button" class="chip-btn" data-held="${esc(x.key)}" title="Load these legs into the Spread builder at their entry prices">Payoff: ${esc(x.sym)} ${esc(dayLabel(x.expiry))} · ${x.legs.length} leg${x.legs.length > 1 ? 's' : ''}</button>${can ? `<button type="button" class="chip-btn" data-ot-close="${esc(x.key)}" title="An order closing these legs, priced to fill (natural)">Close…</button>` : ''}`).join('')}${can ? `<button type="button" class="chip-btn" data-sb-open="${esc(a.name)}" title="Build an order in the Spread builder, with this account picked for it">Spread builder</button>` : ''}</div>` : ''; })()}
     ${ordersPanel(a)}
-    <div class="foot">${pos.length > 8 ? `${pos.length} positions, largest 8 shown · ` : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
+    <div class="foot">${pos.length > 8 ? `${pos.length} positions, largest 8 shown · ` : ''}${!pos.length && Array.isArray(a.orders) && !a.orders.length ? 'No positions or open orders · ' : !pos.length ? 'No positions · ' : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
     ${flattenPanel(a)}
   </article>`;
 }
@@ -310,7 +317,7 @@ async function sendTicket(update) {
   update(true);
 }
 
-const draw = () => `<div><h1>Accounts</h1><p class="muted" style="margin:0">Balances and positions of every brokerage account this deployment reads. Paper accounts with an order gateway can be flattened.</p></div>` + (accountsView(false) || '<p class="muted">No account service is running.</p>');
+const draw = () => accountsView(false) || '<p class="muted">No account service is running.</p>';
 
 // Redraws on every update, keeping the scroll position, but not while the
 // operator is typing a confirmation. The ticket has its own box, redrawn

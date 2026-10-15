@@ -57,10 +57,10 @@ defineWidget('spreads', {
     el.innerHTML = `<div class="sb">
       <div class="sb-top">
         <form class="sb-search"><input class="sb-ticker mono" name="t" placeholder="Ticker" maxlength="10" autocomplete="off" spellcheck="false" aria-label="Underlying"></form>
-        <strong class="sb-sym mono"></strong><span class="sb-spot mono muted"></span>
+        <span class="sb-spot mono muted"></span>
         <select class="sb-exp mono" aria-label="Expiry"></select>
         <select class="sb-st" aria-label="Structure"></select>
-        <span class="sb-views"><button type="button" class="chip-btn sb-paybtn" aria-pressed="false">Payoff</button></span>
+        <span class="sb-views"><button type="button" class="sb-add sb-paybtn" aria-pressed="false">Payoff</button></span>
       </div>
       <p class="sb-why muted"></p>
       <div class="sb-table"><table class="sb-legs"></table></div>
@@ -154,7 +154,9 @@ defineWidget('spreads', {
       const a = analyse();
       // Publish first: Candles draws from it.
       publish({ sym: my.sym, expiry: my.expiry, strikes: { call: strikesOf('call'), put: strikesOf('put') }, net: a?.net ?? 0, be: a?.be ?? [], pay: a?.pay ?? null });
-      $('.sb-sym').textContent = my.sym;
+      // The box shows the underlying; typing replaces it.
+      const tickerBox = /** @type {HTMLInputElement} */ ($('.sb-ticker'));
+      if (document.activeElement !== tickerBox) tickerBox.placeholder = my.sym || 'Ticker';
       $('.sb-spot').textContent = my.chain?.spot ? my.chain.spot.toFixed(2) : '';
       $('.sb-spot').title = my.chain?.spot_from === 'parity' ? 'From the options (put-call parity)' : '';
       const exps = expiries(), sel = /** @type {HTMLSelectElement} */ ($('.sb-exp')), key = `${my.sym}|${exps.map(e => e.expiry).join()}`;
@@ -188,18 +190,19 @@ defineWidget('spreads', {
         if (value == null) known = false; else mv += value;
         if (delta != null) dl += delta;
         return `<tr data-i="${i}">
-          <td class="sb-asset">${q?.symbol ? `<button type="button" class="sb-occ mono" data-occ="${esc(q.symbol)}" title="Chart today's mid on Candles (SPY and XSP options, from Databento)">${esc(q.symbol)}</button>` : `<span class="mono">${esc(`${my.sym} ${l.strike}${l.type[0].toUpperCase()}`)}</span>`}
-            <span class="sb-steps"><button type="button" class="sb-mini" data-act="down" aria-label="Lower strike" title="Lower strike">‹</button><button type="button" class="sb-mini" data-act="type" title="Switch call / put">${l.type === 'call' ? 'C' : 'P'}</button><button type="button" class="sb-mini" data-act="up" aria-label="Higher strike" title="Higher strike">›</button></span></td>
-          <td class="num sb-c-price" data-label="Price">${m == null ? '<span class="muted">no quote</span>' : usd(m)}<small class="muted">${q?.bid != null ? `${q.bid.toFixed(2)} × ${q.ask?.toFixed(2) ?? '—'}` : ''}</small></td>
-          <td class="num sb-c-qty" data-label="Qty"><span class="sb-qty-cell"><button type="button" class="sb-mini" data-act="less" aria-label="One fewer" title="One fewer (shift: the whole position one unit smaller)">−</button><b class="mono">${n}</b><button type="button" class="sb-mini" data-act="more" aria-label="One more" title="One more (shift: the whole position one unit bigger)">+</button></span></td>
-          <td class="num sb-c-value" data-label="Value">${value == null ? '—' : usd(value)}</td>
-          <td class="num muted sb-c-delta" data-label="Δ">${delta == null ? '—' : delta.toFixed(0)}</td>
+          <td class="sb-asset"><span class="sb-steps"><button type="button" class="sb-mini" data-act="down" aria-label="Lower strike" title="Lower strike">‹</button>${q?.symbol
+              ? `<button type="button" class="sb-occ mono" data-occ="${esc(q.symbol)}" title="${esc(q.symbol)}: chart today's mid on Candles (SPY and XSP options, from Databento)">${l.strike}</button>`
+              : `<span class="sb-occ mono">${l.strike}</span>`}<button type="button" class="sb-mini sb-cp" data-act="type" title="Switch call / put">${l.type === 'call' ? 'C' : 'P'}</button><button type="button" class="sb-mini" data-act="up" aria-label="Higher strike" title="Higher strike">›</button></span></td>
+          <td class="num sb-c-qty"><span class="sb-qty-cell"><button type="button" class="sb-mini" data-act="less" aria-label="One fewer" title="One fewer (shift: the whole position one unit smaller)">−</button><b class="mono ${n < 0 ? 'sb-sell' : 'sb-buy'}">${n > 0 ? '+' : ''}${n}</b><button type="button" class="sb-mini" data-act="more" aria-label="One more" title="One more (shift: the whole position one unit bigger)">+</button></span></td>
+          <td class="num sb-c-price"${q?.bid != null ? ` title="${q.bid.toFixed(2)} × ${q.ask?.toFixed(2) ?? '—'}"` : ''}>${m == null ? '<span class="muted">—</span>' : m.toFixed(2)}<small class="muted">${q?.bid != null ? `${q.bid.toFixed(2)}×${q.ask?.toFixed(2) ?? '—'}` : ''}</small></td>
+          <td class="num sb-c-value">${value == null ? '—' : usd(value)}</td>
+          <td class="num muted sb-c-delta">${delta == null ? '—' : delta.toFixed(0)}</td>
           <td class="sb-c-x"><button type="button" class="sb-x" data-act="remove" aria-label="Remove this leg" title="Remove">×</button></td></tr>`;
       }).join('');
-      $('.sb-legs').innerHTML = `<thead><tr><th>Asset</th><th class="num">Price</th><th class="num">Qty</th><th class="num">Market value</th><th class="num" title="Delta in shares">Δ</th><th></th></tr></thead>
+      $('.sb-legs').innerHTML = `<thead><tr><th>Strike</th><th class="num">Qty</th><th class="num">Mid</th><th class="num sb-c-value">Value</th><th class="num" title="Delta in shares">Δ</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
-        <tfoot><tr><td><span class="sb-adds"><button type="button" class="chip-btn" data-act="add">Add leg</button><select class="sb-addsp" aria-label="Add a spread" title="Add a vertical spread to these legs (a credit spread goes one width out of the money, a debit spread at the money)"><option value="">+ Add spread…</option>${Object.keys(GROUPS[0].items).map(n => `<option>${esc(n)}</option>`).join('')}</select></span></td><td></td><td></td>
-          <td class="num" data-label="Net"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted" data-label="Δ">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr></tfoot>`;
+        <tfoot><tr><td colspan="3"><span class="sb-adds"><button type="button" class="sb-add" data-act="add" title="Add a leg">+ Leg</button><select class="sb-addsp" aria-label="Add a spread" title="Add a vertical spread to these legs (a credit spread goes one width out of the money, a debit spread at the money)"><option value="">+ Spread…</option>${Object.keys(GROUPS[0].items).map(n => `<option>${esc(n)}</option>`).join('')}</select></span></td>
+          <td class="num sb-c-value"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr></tfoot>`;
       payoff(a);
       // The summary: what it costs, what it can lose and make, and the chance; the rest on hover.
       const dollars = v => `$${Math.abs(v * 100).toFixed(0)}`, credit = a && a.net < 0;

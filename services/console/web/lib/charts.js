@@ -19,7 +19,7 @@ export function drawCharts() {
     const decimals = +el.dataset.decimals;
     const pts = (svcState(id)[source] || {})[key] || [];
     if (pts.length < 2) { el.innerHTML = '<div class="empty" style="padding:8px 0">Collecting…</div>'; return; }
-    const W = el.clientWidth || 320, H = 110, m = { l: 0, r: 6, t: 8, b: 8 };
+    const W = el.clientWidth || 320, H = +(el.dataset.height || 110), m = { l: 0, r: 6, t: 8, b: 8 };
     // Unchanged series keep their object between polls: skip a redraw that would draw the same.
     const e = /** @type {any} */ (el);
     if (e.ttPts === pts && e.ttW === W && el.firstElementChild) return;

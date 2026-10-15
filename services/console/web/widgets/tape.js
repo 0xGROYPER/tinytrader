@@ -8,6 +8,9 @@
 // volume, VWAP and trades a minute. Read from the relay's /tape twice a
 // second while shown; hovering the list (or pause) holds it still. IEX is a
 // few percent of all US volume, so it's a sample of the flow, not all of it.
+// Any ticker can be typed: one the relay doesn't carry is watched for the
+// tape on request (its open stream takes the symbol; no restart), with its
+// trades showing from then on.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
@@ -50,7 +53,7 @@ function list(my) {
   const fl = x => { const age = now - (x.rt || 0); return age < FLASH && lit++ < 40 ? ` tp-new" style="animation-delay:-${Math.round(age)}ms` : ''; };
   if (!relay()) return '<p class="muted">No relay serves a tape: relay-iex needs redeploying with it.</p>';
   if (my.err) return `<p class="msg-err">${esc(my.err)}</p>`;
-  if (my.missing) return `<p class="muted">The IEX relay carries ${esc(my.symbols.join(' and ').replace(/ and (?=.* and )/g, ', '))}; ${esc(my.sym)} isn't on it. Adding a symbol is a change to the relay's settings (and a restart).</p>`;
+  if (my.missing) return `<p class="muted">${esc(my.sym)} can't be shown: ${esc(my.missing)}.</p>`;
   const rows = [];
   for (let i = my.ticks.length - 1; i >= 0 && rows.length < SHOW; i--) {
     const x = my.ticks[i], fresh = fl(x);
@@ -59,14 +62,15 @@ function list(my) {
     rows.push(`<tr class="tp-${side(x)}${x.z >= BIG ? ' tp-big' : ''}${fresh}"><td>${hms(x.t)}<small>.${ms(x.t)}</small></td><td class="num">${x.p.toFixed(2)}</td><td class="num">${x.z.toLocaleString()}</td></tr>`);
   }
   const quiet = !my.lastRecord || Date.now() / 1000 - my.lastRecord > 120;
-  return `<div class="tp-list"><table class="tp"><tbody>${rows.join('') || '<tr><td colspan="3" class="muted">No trades yet.</td></tr>'}</tbody></table></div>`
+  const none = my.watching ? `Watching ${esc(my.sym)}: its trades show here as they happen.` : 'No trades yet.';
+  return `<div class="tp-list"><table class="tp"><tbody>${rows.join('') || `<tr><td colspan="3" class="muted">${none}</td></tr>`}</tbody></table></div>`
     + (quiet || my.paused ? `<p class="muted tp-foot">${my.paused ? 'Paused. ' : ''}${quiet ? 'The feed is quiet: outside its hours (07:55–17:05 ET), or down.' : ''}</p>` : '');
 }
 
 defineWidget('tape', {
   title: 'Tape',
   mount(el) {
-    const my = { missing: false, sym: '', symbols: /** @type {string[]} */ ([]), ticks: /** @type {any[]} */ ([]), last: 0, err: '', quotes: false, min: 0, paused: false, hover: 0, lastRecord: 0, alive: true, busy: false };
+    const my = { missing: /** @type {string | false} */ (false), watching: false, sym: '', symbols: /** @type {string[]} */ ([]), ticks: /** @type {any[]} */ ([]), last: 0, err: '', quotes: false, min: 0, paused: false, hover: 0, lastRecord: 0, alive: true, busy: false };
     el.innerHTML = '<div class="tp-top"></div><div class="tp-main"></div>';
     const top = /** @type {HTMLElement} */ (el.querySelector('.tp-top')), main = /** @type {HTMLElement} */ (el.querySelector('.tp-main'));
     // The last price flashes up or down when it changes.
@@ -95,13 +99,15 @@ defineWidget('tape', {
         // The symbol picked elsewhere when the relay carries it, until one is picked here.
         if (!my.sym) { const f = focused(); my.sym = f && my.symbols.includes(f) ? f : my.symbols[0] || 'SPY'; }
         const q = my.last ? `after=${my.last}` : 'limit=1000';
-        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/tape?symbol=${encodeURIComponent(my.sym)}&${q}`, { cache: 'no-store' });
+        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/tape?symbol=${encodeURIComponent(my.sym)}&watch=1&${q}`, { cache: 'no-store' });
         const v = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(v.error || `${r.status}`);
         if (v.symbol !== my.sym) return;
         my.symbols = v.symbols || [];
-        // A ticker the relay doesn't carry: said so, rather than swapped for another.
-        my.missing = my.symbols.length > 0 && !my.symbols.includes(my.sym);
+        // A ticker the relay doesn't carry is watched for the tape; an older
+        // relay, or a full watch list, says why it can't be.
+        my.watching = (v.watching || []).includes(my.sym);
+        my.missing = v.watch || (!v.watching && my.symbols.length > 0 && !my.symbols.includes(my.sym) ? `the relay carries only ${my.symbols.join(', ')} (redeploy it to watch others)` : false);
         if (my.missing) { my.ticks = []; return; }
         // A restarted relay counts from zero again.
         if (v.last < my.last) { my.ticks = []; }
