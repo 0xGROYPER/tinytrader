@@ -77,6 +77,7 @@
       relay = service "relay" "Market data relay: one provider connection served to local clients (tinytrader.relay/1)";
       queue = service "queue" "The job queue: deployment-defined job templates run when their conditions hold (decision 0012)";
       order-gateway = service "order-gateway" "Order gateway: one broker account behind a loopback protocol (tinytrader.gateway/1)";
+      alpaca-history = service "alpaca-history" "Alpaca's historical trades and quotes, a day at a time, into the store (decision 0014)";
 
     in
     {
@@ -94,6 +95,7 @@
           relay
           order-gateway
           queue
+          alpaca-history
           ;
       };
 
