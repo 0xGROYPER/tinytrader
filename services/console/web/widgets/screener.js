@@ -6,7 +6,9 @@
 // and volume against its average. Views rank by IV, by the expected move in
 // percent or in dollars of market value, by IV over realized, by the day's
 // move and by volume, and by skew (the 30-day 25-delta risk reversal from the
-// chain's fitted smile). Click a row to point the workspace at the stock.
+// chain's fitted smile). Click a row to point the workspace at the stock: its
+// chart and its news (opened beside the screener if need be), and a suggested
+// position in the Spread builder.
 import { defineWidget } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
@@ -146,6 +148,7 @@ defineWidget('screener', {
         askRecommendation({ sym, view: my.sort != null ? '' : my.view, row: r || null, earnings: reports().get(sym)?.date || null });
         document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'spreads' }));
         setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym }));
+        document.dispatchEvent(new CustomEvent('tt-show-ticker', { detail: { symbol: sym, from: el } }));
       }
     });
     el.addEventListener('change', e => {

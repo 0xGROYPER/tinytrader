@@ -6,7 +6,9 @@
 // (▲) or below (▼) its 20-, 50- and 200-day averages, and where it sits in
 // its 52-week range. The rows are edited per group and kept in this browser.
 // Daily closes (lib/trend.js) are read when the board is shown, and again
-// once ten minutes old (30 seconds if any failed: an empty row says why).
+// once ten minutes old (30 seconds if any failed: an empty row says why);
+// their date is on the header row's hover, and ✎ beside the first group's
+// name edits the rows.
 // Clicking a row points the workspace's charts at it.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
@@ -57,10 +59,12 @@ function draw(my) {
   if (!my.series) return '<p class="muted">Loading the board…</p>';
   const by = new Map(), dates = new Set();
   for (const g of groups) for (const r of g.rows) { const k = my.series.get(r.s), a = k && analyse(r.s, k.closes); by.set(r.s, a); if (a && !isCrypto(r.s)) dates.add(a.date); }
-  const body = groups.map(g => `<tbody><tr class="ca-g"><th colspan="7">${esc(g.name)}</th></tr>${g.rows.map(r => row(by.get(r.s), r.s, my.series.get(r.s))).join('')}${g.rows.some(r => r.s.startsWith('VIX')) ? `<tr><td colspan="7">${term(by)}</td></tr>` : ''}</tbody>`).join('');
+  // The first group's name heads the columns' row; the others have rows of their own.
+  const body = groups.map((g, i) => `<tbody>${i ? `<tr class="ca-g"><th colspan="7">${esc(g.name)}</th></tr>` : ''}${g.rows.map(r => row(by.get(r.s), r.s, my.series.get(r.s))).join('')}${g.rows.some(r => r.s.startsWith('VIX')) ? `<tr><td colspan="7">${term(by)}</td></tr>` : ''}</tbody>`).join('');
   const asOf = [...dates].sort().pop();
-  return `<div class="ca-head"><span class="muted">${asOf ? `Closes as of ${esc(asOf)} (crypto to today), up to 16 minutes late` : ''}${my.err ? ` · ${esc(my.err)}` : ''}</span><button type="button" class="btn small" data-ca="edit">Edit rows</button></div>
-    <div class="scroll"><table class="ca"><thead><tr><th></th><th class="num">Last</th><th class="num">1D</th><th class="num">1W</th><th class="num">1M</th><th title="Against the 20-, 50- and 200-day averages">20 50 200</th><th title="Where today’s close sits in its 52-week range: the low at the left end, the high at the right; the tick is today. Hover a bar for the low and high.">52 weeks</th></tr></thead>${body}</table></div>`;
+  const when = asOf ? `Closes as of ${asOf} (crypto to today), up to 16 minutes late` : '';
+  return `${my.err ? `<p class="msg-err" style="margin:0 0 6px;font-size:12px">${esc(my.err)}</p>` : ''}
+    <div class="scroll"><table class="ca"><thead><tr class="ca-g" title="${esc(when)}"><th>${esc(groups[0]?.name || '')}<button type="button" class="ca-pen" data-ca="edit" title="Edit rows" aria-label="Edit rows">✎</button></th><th class="num">Last</th><th class="num">1D</th><th class="num">1W</th><th class="num">1M</th><th title="Against the 20-, 50- and 200-day averages">20 50 200</th><th title="Where today’s close sits in its 52-week range: the low at the left end, the high at the right; the tick is today. Hover a bar for the low and high.">52 weeks</th></tr></thead>${body}</table></div>`;
 }
 
 defineWidget('crossasset', {
@@ -72,7 +76,8 @@ defineWidget('crossasset', {
       const syms = board().flatMap(g => g.rows.map(r => r.s));
       const r = await closes(fleet, syms);
       if (!my.alive) return;
-      my.series = r.series; my.err = r.error; my.wait = r.wait; my.at = Date.now(); update();
+      // Nothing yet and nothing wrong (the topology still loading): still loading.
+      my.series = r.series.size || r.error ? r.series : null; my.err = r.error; my.wait = r.wait; my.at = Date.now(); update();
     }
     const click = e => {
       const t = /** @type {HTMLElement} */ (e.target);

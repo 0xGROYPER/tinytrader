@@ -771,6 +771,11 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 .ca td { padding: 3px 6px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
 .ca tr[data-sym] { cursor: pointer; } .ca tr[data-sym]:hover td { background: var(--nav-hover); }
 .ca-g th { padding-top: 10px; font: 600 11px var(--ui); letter-spacing: .06em; text-transform: uppercase; color: var(--fg-2); border-bottom: 1px solid var(--line); }
+.ca thead .ca-g th { padding-top: 4px; }
+.ca thead .ca-g th:not(:first-child) { font: 500 11px var(--ui); letter-spacing: 0; text-transform: none; color: var(--muted); }
+.ca-pen { margin-left: 6px; padding: 0 4px; border: 0; background: none; color: var(--muted); font-size: 12px; cursor: pointer; opacity: 0; }
+.ca thead:hover .ca-pen, .ca-pen:focus-visible { opacity: 1; } .ca-pen:hover { color: var(--fg); }
+@media (hover: none) { .ca-pen { opacity: 1; } }
 .ca-name { color: var(--fg); } .ca-name .mono { margin-left: 6px; font-size: 11px; color: var(--muted); }
 .ca-name em { margin-left: 6px; font-style: normal; font-size: 10px; padding: 0 4px; border-radius: 3px; background: var(--accent-soft); color: var(--fg-2); }
 .ca-trend { font-size: 10px; letter-spacing: 3px; } .ca-trend .up { color: var(--ok); font-style: normal; } .ca-trend .down { color: var(--crit); font-style: normal; } .ca-trend .na { color: var(--muted); font-style: normal; }

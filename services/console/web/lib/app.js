@@ -426,6 +426,26 @@ function wsShow(view, where, reuse = false) {
 // builder, the builder for Candles): opened beside the active panel if it
 // isn't in the workspace.
 document.addEventListener('tt-show-view', e => { const v = /** @type {CustomEvent} */ (e).detail; if (state.tab === 'workspace' && VIEWS[v]) wsShow(v, 'right', true); });
+// A symbol picked in a list (the options screener): its chart and its news,
+// each reused if the workspace has one, else opened beside the asking panel
+// (the chart to its right, the news under the chart).
+document.addEventListener('tt-show-ticker', e => {
+  const { symbol, from } = /** @type {CustomEvent} */ (e).detail || {};
+  if (!dock || state.tab !== 'workspace' || typeof symbol !== 'string') return;
+  const ask = [...panelBody].find(([, b]) => b === from || b.contains(from))?.[0];
+  const ref = dock.panels.find(p => p.id === ask) || activePanel();
+  const add = (view, position) => dock.addPanel({ id: panelId(), component: 'view', params: { view }, title: VIEWS[view], ...(position ? { position } : {}) });
+  let chart = dock.panels.find(p => p.params?.view === 'candles');
+  if (chart) chart.api.setActive(); else chart = add('candles', ref ? { referencePanel: ref, direction: 'right' } : undefined);
+  const news = dock.panels.find(p => p.params?.view === 'news');
+  if (news) news.api.setActive(); else add('news', { referencePanel: chart, direction: 'below' });
+  laySave();
+  // Once mounted, both pointed at it.
+  requestAnimationFrame(() => {
+    document.dispatchEvent(new CustomEvent('tt-focus', { detail: symbol }));
+    document.dispatchEvent(new CustomEvent('tt-news-symbol', { detail: { symbol } }));
+  });
+});
 function wsMaximise() { const p = activePanel(); if (p) p.api.isMaximized() ? p.api.exitMaximized() : p.api.maximize(); }
 document.addEventListener('keydown', e => {
   if (state.tab !== 'workspace' || pal.open || sw.open) return;
