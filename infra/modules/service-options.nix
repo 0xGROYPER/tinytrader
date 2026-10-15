@@ -29,6 +29,22 @@ in
               default = { };
               description = "Environment variables (non-secret configuration).";
             };
+            secrets = mkOption {
+              type = types.attrsOf types.str;
+              default = { };
+              example = {
+                DATABENTO_API_KEY = "/run/secrets/databento-api-key";
+              };
+              description = ''
+                Secrets the service reads, as environment variable name → the
+                file holding the value (decrypted at boot into memory, as
+                sops-nix does into /run/secrets). Each is handed to the service
+                as a systemd credential, readable by it alone, and named to it
+                by `<NAME>_FILE`, which tinytrader services read in place of
+                `<NAME>`. The value never appears in its environment, its unit
+                or the store.
+              '';
+            };
             writablePaths = mkOption {
               type = types.listOf types.str;
               default = [ ];

@@ -100,6 +100,14 @@
                   # Reads the topology this module generates from the services above.
                   environment.CONSOLE_TOPOLOGY = config.tinytrader.topology.file;
                 };
+                # A service with a secret (decision 0004 in a deployment): handed
+                # over as a credential, named to it by DATABENTO_API_KEY_FILE.
+                tinytrader.services.databento-jobs = {
+                  enable = true;
+                  package = packages.databento-jobs;
+                  observe.port = 9121;
+                  secrets.DATABENTO_API_KEY = "/run/secrets/databento-api-key";
+                };
                 tinytrader.topology.overrides.focus = "ticker";
 
                 boot.loader.grub.enable = false;

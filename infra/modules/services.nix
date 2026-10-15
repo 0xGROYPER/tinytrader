@@ -128,8 +128,12 @@ in
           lib.optionalAttrs (svc.observe.port != null) {
             TINYTRADER_LISTEN = "${svc.observe.bind}:${toString svc.observe.port}";
           }
-          // svc.environment;
+          // svc.environment
+          # Each secret as a credential: <NAME>_FILE names it (%d is the
+          # unit's credentials directory, readable by this service alone).
+          // lib.mapAttrs' (var: _: lib.nameValuePair "${var}_FILE" "%d/${var}") svc.secrets;
         serviceConfig = {
+          LoadCredential = lib.mapAttrsToList (var: path: "${var}:${path}") svc.secrets;
           ExecStart = lib.escapeShellArgs ([ (lib.getExe svc.package) ] ++ svc.args);
           Restart = "on-failure";
           RestartSec = 2;
