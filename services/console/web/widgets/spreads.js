@@ -187,9 +187,9 @@ defineWidget('spreads', {
         if (value == null) known = false; else mv += value;
         if (delta != null) dl += delta;
         return `<tr data-i="${i}">
-          <td class="sb-asset">${q?.symbol
+          <td class="sb-asset"><div class="sb-asset-in">${q?.symbol
               ? `<button type="button" class="sb-occ mono" data-occ="${esc(q.symbol)}" title="Chart today's mid on Candles (SPY and XSP options, from Databento)">${esc(q.symbol)}</button>`
-              : `<span class="sb-occ mono">${esc(`${my.sym} ${l.strike}${l.type[0].toUpperCase()}`)}</span>`}<span class="sb-steps"><button type="button" class="sb-mini" data-act="down" aria-label="Lower strike" title="Lower strike">‹</button><button type="button" class="sb-mini sb-cp" data-act="type" title="Switch call / put">${l.type === 'call' ? 'C' : 'P'}</button><button type="button" class="sb-mini" data-act="up" aria-label="Higher strike" title="Higher strike">›</button></span></td>
+              : `<span class="sb-occ mono">${esc(`${my.sym} ${l.strike}${l.type[0].toUpperCase()}`)}</span>`}<span class="sb-steps"><button type="button" class="sb-mini" data-act="down" aria-label="Lower strike" title="Lower strike">‹</button><button type="button" class="sb-mini sb-cp" data-act="type" title="Switch call / put">${l.type === 'call' ? 'C' : 'P'}</button><button type="button" class="sb-mini" data-act="up" aria-label="Higher strike" title="Higher strike">›</button></span></div></td>
           <td class="num sb-c-price"${q?.bid != null ? ` title="${q.bid.toFixed(2)} × ${q.ask?.toFixed(2) ?? '—'}"` : ''}>${m == null ? '<span class="muted">—</span>' : m.toFixed(2)}<small class="muted">${q?.bid != null ? `${q.bid.toFixed(2)}×${q.ask?.toFixed(2) ?? '—'}` : ''}</small></td>
           <td class="num sb-c-qty"><span class="sb-qty-cell"><button type="button" class="sb-mini" data-act="less" aria-label="One fewer" title="One fewer (shift: the whole position one unit smaller)">−</button><b class="mono ${n < 0 ? 'sb-sell' : 'sb-buy'}">${n > 0 ? '+' : ''}${n}</b><button type="button" class="sb-mini" data-act="more" aria-label="One more" title="One more (shift: the whole position one unit bigger)">+</button></span></td>
           <td class="num sb-c-value">${value == null ? '—' : usd(value)}</td>

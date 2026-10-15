@@ -1012,9 +1012,10 @@ a.doc-card { text-decoration: none; }
 .sb-legs tfoot td { border-bottom: 0; border-top: 1px solid var(--line); padding-block: 4px; }
 .sb-legs .num { text-align: right; }
 .sb-legs td small { margin-left: 6px; font-size: 11px; }
-.sb-occ { border: 0; background: none; padding: 0; color: var(--fg); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.sb-asset-in { display: flex; align-items: center; gap: 8px; }
+.sb-occ { border: 0; background: none; padding: 0; color: var(--fg); font-size: clamp(11px, 1.6cqi + 4px, 15px); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 button.sb-occ:hover { color: var(--accent); }
-.sb-steps { display: inline-flex; align-items: center; gap: 2px; margin-left: 8px; vertical-align: middle; }
+.sb-steps { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; }
 .sb-mini { min-width: 20px; height: 20px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg-2); font: 12px var(--mono); line-height: 1; cursor: pointer; }
 .sb-mini:hover { border-color: var(--accent-2); color: var(--accent); }
 .sb-cp { min-width: 22px; font-weight: 600; }
@@ -1030,8 +1031,8 @@ button.sb-occ:hover { color: var(--accent); }
   .sb-legs td, .sb-legs th { padding-inline: 4px; }
 }
 @container (max-width: 420px) {
-  .sb-occ { font-size: 11px; letter-spacing: -.02em; }
-  .sb-steps { margin-left: 4px; gap: 1px; }
+  .sb-occ { letter-spacing: -.02em; }
+  .sb-asset-in { gap: 4px; } .sb-steps { gap: 1px; }
   .sb-mini { min-width: 18px; padding: 0 3px; }
   .sb-qty-cell { gap: 2px; }
   .sb-legs td, .sb-legs th { padding-inline: 3px; }
