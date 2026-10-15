@@ -184,6 +184,10 @@ async fn run(args: Args) -> Result<(), String> {
         args.client_queue,
         Duration::from_secs(args.heartbeat.max(1)),
     ));
+    // An Alpaca stream takes symbols while open: the tape can watch more (tape.rs).
+    if matches!(args.source, Provider::AlpacaIex) {
+        hub.tape.watch.enable(&args.symbols);
+    }
 
     let feed = format!("{name} {dataset}");
     let observer = Observer::new("relay", env!("CARGO_PKG_VERSION"));

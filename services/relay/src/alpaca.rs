@@ -118,7 +118,23 @@ impl Alpaca {
         let (mut ws, _) = tokio_tungstenite::connect_async(url)
             .await
             .map_err(|e| format!("cannot connect to Alpaca: {e}"))?;
-        while let Some(msg) = ws.next().await {
+        // Symbols watched for the tape (tape.rs), subscribed on this stream
+        // as they're asked for; their ticks go to the tape only.
+        let mut watched: HashMap<String, Encoder> = HashMap::new();
+        let (mut authed, mut live) = (false, false);
+        let mut sweep = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            let msg = tokio::select! {
+                m = ws.next() => match m { Some(m) => m, None => break },
+                () = hub.tape.watch.changed.notified() => {
+                    if authed { self.resubscribe(&mut ws, hub, &mut watched).await?; }
+                    continue;
+                }
+                _ = sweep.tick() => {
+                    if authed { self.resubscribe(&mut ws, hub, &mut watched).await?; }
+                    continue;
+                }
+            };
             let text = match msg.map_err(|e| format!("Alpaca stream failed: {e}"))? {
                 Message::Text(t) => t,
                 Message::Ping(p) => {
@@ -151,8 +167,11 @@ impl Alpaca {
                         ws.send(Message::text(sub.to_string()))
                             .await
                             .map_err(|e| format!("cannot subscribe: {e}"))?;
+                        authed = true;
+                        self.resubscribe(&mut ws, hub, &mut watched).await?;
                     }
-                    "subscription" => {
+                    "subscription" if !live => {
+                        live = true;
                         hub.upstream_up();
                         observer.set_state(State::Ready, "live");
                         eprintln!(
@@ -167,6 +186,14 @@ impl Alpaca {
                             tag.code.unwrap_or(0),
                             tag.msg.unwrap_or("")
                         ));
+                    }
+                    "q" | "t" if tag.symbol.is_some_and(|s| watched.contains_key(s)) => {
+                        let symbol = tag.symbol.unwrap_or_default();
+                        if let Some(enc) = watched.get_mut(symbol)
+                            && let Some(rec) = Self::encode(enc, tag.kind, tag.x, tag.bx, tag.ax, self.test, item.get(), ts_recv)
+                        {
+                            hub.tape.absorb_watched(RecordRef::from(&rec).as_ref(), symbol);
+                        }
                     }
                     "q" | "t" => {
                         let Some(enc) = tag.symbol.and_then(|s| encoders.get_mut(s)) else {
@@ -210,6 +237,71 @@ impl Alpaca {
             }
         }
         Ok(())
+    }
+
+    /// Bring the stream's watched symbols in line with the tape's: subscribe
+    /// the new, unsubscribe those no longer read.
+    async fn resubscribe<S>(
+        &self,
+        ws: &mut S,
+        hub: &Hub,
+        watched: &mut HashMap<String, Encoder>,
+    ) -> Result<(), String>
+    where
+        S: futures_util::Sink<Message> + Unpin,
+        S::Error: std::fmt::Display,
+    {
+        let want: Vec<String> = hub
+            .tape
+            .watch
+            .wanted()
+            .into_iter()
+            .filter(|s| !self.symbols.contains(s))
+            .collect();
+        let add: Vec<&String> = want.iter().filter(|s| !watched.contains_key(*s)).collect();
+        let drop: Vec<String> = watched.keys().filter(|s| !want.contains(s)).cloned().collect();
+        if !add.is_empty() {
+            let sub = json!({ "action": "subscribe", "trades": add, "quotes": add });
+            ws.send(Message::text(sub.to_string()))
+                .await
+                .map_err(|e| format!("cannot subscribe: {e}"))?;
+            eprintln!("relay: watching {} for the tape", add.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(","));
+            for s in add {
+                watched.insert(s.clone(), Encoder::new(s));
+            }
+        }
+        if !drop.is_empty() {
+            let sub = json!({ "action": "unsubscribe", "trades": drop, "quotes": drop });
+            ws.send(Message::text(sub.to_string()))
+                .await
+                .map_err(|e| format!("cannot unsubscribe: {e}"))?;
+            for s in &drop {
+                watched.remove(s);
+            }
+        }
+        Ok(())
+    }
+
+    /// One stream message encoded, if it's an IEX quote or trade that parses.
+    #[allow(clippy::too_many_arguments)]
+    fn encode(
+        enc: &mut Encoder,
+        kind: &str,
+        x: Option<&str>,
+        bx: Option<&str>,
+        ax: Option<&str>,
+        test: bool,
+        raw: &str,
+        ts_recv: u64,
+    ) -> Option<Mbp1Msg> {
+        let iex = |code: Option<&str>| test || matches!(code, None | Some("V"));
+        if kind == "q" {
+            let q = serde_json::from_str::<RawQuote>(raw).ok()?.parse().ok()?;
+            (iex(bx) && iex(ax)).then(|| enc.quote(&q, ts_recv))
+        } else {
+            let t = serde_json::from_str::<RawTrade>(raw).ok()?.parse().ok()?;
+            iex(x).then(|| enc.trade(&t, ts_recv).0)
+        }
     }
 
     async fn history(&self, start: u64, cut: u64) -> Result<Encoded, String> {

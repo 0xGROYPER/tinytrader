@@ -15,10 +15,19 @@
 //! on a trade. A trade's book is the one before it (as the IEX encoder
 //! writes it), so a trade at the ask was a buy. `last` is the newest
 //! sequence number held for any symbol, for the next `after`.
+//!
+//! With `&watch=1`, a symbol beyond the relay's own is watched for the tape:
+//! a relay whose provider can add symbols to its open stream (Alpaca IEX)
+//! subscribes it there, without reconnecting, and its ticks go to the tape
+//! only, never to the relay's clients or anything recorded. A watched symbol
+//! no one has read for ten minutes is dropped; at most twenty are watched.
+//! The answer's `watching` lists them, and `watch` says why one couldn't be.
 
 use std::collections::{HashMap, VecDeque};
 use std::mem::offset_of;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -55,6 +64,68 @@ struct Book {
 #[derive(Default)]
 pub struct Tape {
     inner: Mutex<(u64, HashMap<String, Book>)>,
+    pub watch: Watch,
+}
+
+/// Symbols watched for the tape beyond the relay's own: when each was last
+/// asked for.
+#[derive(Default)]
+pub struct Watch {
+    enabled: AtomicBool,
+    own: Mutex<Vec<String>>,
+    asked: Mutex<HashMap<String, Instant>>,
+    /// Woken when a symbol is added, for the source to subscribe it.
+    pub changed: tokio::sync::Notify,
+}
+
+/// At most this many watched symbols (Alpaca's free stream takes 30 in all).
+const WATCH_MAX: usize = 20;
+/// A watched symbol unread this long is dropped.
+const WATCH_IDLE: Duration = Duration::from_secs(600);
+
+impl Watch {
+    /// The source can add symbols to its stream; `own` are the relay's own.
+    pub fn enable(&self, own: &[String]) {
+        *self.own.lock().unwrap_or_else(PoisonError::into_inner) = own.to_vec();
+        self.enabled.store(true, Ordering::Relaxed);
+    }
+
+    /// Watch `symbol` (or keep watching it). `Err` says why not.
+    pub fn ask(&self, symbol: &str) -> Result<(), &'static str> {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return Err("this relay can't add symbols");
+        }
+        let valid = symbol.len() <= 10
+            && symbol.starts_with(|c: char| c.is_ascii_uppercase())
+            && symbol.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '.');
+        if !valid {
+            return Err("not a ticker");
+        }
+        if self.own.lock().unwrap_or_else(PoisonError::into_inner).iter().any(|s| s == symbol) {
+            return Ok(());
+        }
+        let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+        asked.retain(|_, t| t.elapsed() < WATCH_IDLE);
+        let new = !asked.contains_key(symbol);
+        if new && asked.len() >= WATCH_MAX {
+            return Err("already watching the most symbols it can");
+        }
+        asked.insert(symbol.to_owned(), Instant::now());
+        drop(asked);
+        if new {
+            self.changed.notify_one();
+        }
+        Ok(())
+    }
+
+    /// The symbols watched now (dropping those unread too long), sorted.
+    pub fn wanted(&self) -> Vec<String> {
+        let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+        asked.retain(|_, t| t.elapsed() < WATCH_IDLE);
+        let mut v: Vec<String> = asked.keys().cloned().collect();
+        v.sort();
+        v
+    }
 }
 
 fn at<const N: usize>(rec: &[u8], at: usize) -> Option<[u8; N]> {
@@ -140,6 +211,11 @@ impl Tape {
         }
     }
 
+    /// Take a watched symbol's records (encoded `mbp-1`, not forwarded).
+    pub fn absorb_watched(&self, chunk: &[u8], symbol: &str) {
+        self.absorb(chunk, |_| Some(symbol.to_owned()));
+    }
+
     /// A symbol's ticks after `after` (or its latest `limit`), oldest first,
     /// the newest sequence number held, and the symbols held.
     pub fn read(
@@ -173,6 +249,8 @@ struct Ask {
     symbol: Option<String>,
     after: Option<u64>,
     limit: Option<usize>,
+    #[serde(default)]
+    watch: Option<u8>,
 }
 
 fn tick_json(t: &Tick) -> Value {
@@ -188,9 +266,12 @@ fn tick_json(t: &Tick) -> Value {
 async fn serve(State(hub): State<Arc<Hub>>, Query(ask): Query<Ask>) -> Json<Value> {
     let limit = ask.limit.unwrap_or(500).clamp(1, 1000);
     let symbol = ask.symbol.unwrap_or_default().trim().to_uppercase();
+    let refused = if ask.watch == Some(1) { hub.tape.watch.ask(&symbol).err() } else { None };
     let (ticks, last, symbols) = hub.tape.read(&symbol, ask.after, limit);
     Json(json!({
         "symbol": symbol,
+        "watching": hub.tape.watch.wanted(),
+        "watch": refused,
         "ticks": ticks.iter().map(tick_json).collect::<Vec<_>>(),
         "last": last,
         "symbols": symbols,
@@ -226,6 +307,22 @@ mod tests {
             ..Default::default()
         };
         RecordRef::from(&m).as_ref().to_vec()
+    }
+
+    #[test]
+    fn watches_symbols_only_where_enabled_and_within_bounds() {
+        let w = Watch::default();
+        assert!(w.ask("GLD").is_err());
+        w.enable(&["SPY".to_owned()]);
+        assert_eq!(w.ask("GLD"), Ok(()));
+        assert_eq!(w.ask("SPY"), Ok(()));
+        assert!(w.ask("gld; rm").is_err());
+        assert_eq!(w.wanted(), vec!["GLD".to_owned()]);
+        for i in 0..WATCH_MAX - 1 {
+            assert_eq!(w.ask(&format!("X{i}")), Ok(()));
+        }
+        assert!(w.ask("ONEMORE").is_err());
+        assert_eq!(w.ask("GLD"), Ok(()));
     }
 
     #[test]
