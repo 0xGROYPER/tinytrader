@@ -1,6 +1,6 @@
-//! Mechanical safety: caps profile, request budget, civil/ET time and the expiry-day
-//! opening cutoff. None of this is portfolio or strategy state.
-use crate::intent::{Intent, fmt_cents, occ};
+//! Mechanical safety: caps profile, request budget, civil/ET time. None of this
+//! is portfolio or strategy state.
+use crate::intent::fmt_cents;
 use crate::protocol::Obj;
 use std::time::{Duration, Instant};
 
@@ -229,48 +229,4 @@ pub(crate) fn et_day(ts: u64) -> i64 {
 pub(crate) fn et_ns(day: i64, minutes: i64) -> u64 {
     let local = day * 86_400 + minutes * 60;
     u64::try_from((local - et_offset(local + 5 * 3600)) * NS).unwrap_or(0)
-}
-
-/// Section 9 opening cutoff. `close` gives the session close (minutes ET) of a day, or
-/// `None` when the calendar is unknown. Returns the `not_sent{cutoff}` detail.
-pub(crate) fn cutoff(
-    intent: &Intent,
-    now: Option<u64>,
-    close: &mut dyn FnMut(i64) -> Option<i64>,
-) -> Result<(), String> {
-    // Same-day option expiries only; stocks don't expire.
-    for leg in intent.legs.iter().filter(|l| l.open && !l.equity) {
-        let (root, expiry) = occ(&leg.symbol).unwrap_or(("", 0));
-        let Some(now) = now else {
-            return Err(Obj::new()
-                .s("leg", &leg.symbol)
-                .s("unknown", "clock")
-                .done());
-        };
-        let today = et_day(now);
-        if expiry != today {
-            continue;
-        }
-        let Some(close) = close(today) else {
-            return Err(Obj::new()
-                .s("leg", &leg.symbol)
-                .s("unknown", "calendar")
-                .done());
-        };
-        let guard_s = if matches!(root, "SPY" | "QQQ") {
-            30 * 60 + 30
-        } else {
-            45 * 60 + 30
-        };
-        let at = close * 60 - guard_s;
-        if now >= et_ns(today, 0) + u64::try_from(at).unwrap_or(0) * 1_000_000_000 {
-            let cut = format!("{:02}:{:02}:{:02}", at / 3600, at / 60 % 60, at % 60);
-            return Err(Obj::new()
-                .s("expiry", &date_string(expiry))
-                .s("cutoff_et", &cut)
-                .s("leg", &leg.symbol)
-                .done());
-        }
-    }
-    Ok(())
 }

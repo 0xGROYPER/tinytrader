@@ -9,8 +9,8 @@ use std::time::Duration;
 pub const TOKEN: &str = "abababababababababababababababababababababababababababababababab";
 /// 2026-10-05 10:00 `America/New_York` (a Monday; SPY261005 expires that day).
 pub const T0: u64 = 1_791_208_800_000_000_000;
-/// 2026-10-05 15:29:30 `America/New_York`.
-pub const CUTOFF: u64 = 1_791_228_570_000_000_000;
+/// 2026-10-05 15:45 `America/New_York`, a quarter hour before SPY261005 expires.
+pub const LATE: u64 = 1_791_229_500_000_000_000;
 pub const CALL: &str = "SPY261005C00580000";
 pub const PUT_A: &str = "SPY261005P00570000";
 pub const PUT_B: &str = "SPY261005P00568000";

@@ -55,7 +55,7 @@ pub(crate) struct Preload {
 /// The parsed script; every field has a default, so `{}` is a valid script.
 pub(crate) struct Script {
     pub(crate) clock_ts: Option<u64>,
-    /// `None`: no calendar (cutoff and session checks fail closed).
+    /// `None`: no calendar (session checks fail closed).
     pub(crate) calendar: Option<Vec<SessionDay>>,
     pub(crate) weekdays: bool,
     pub(crate) status: String,

@@ -1,5 +1,5 @@
-//! Safety and session rules: persistent kill switch, caps, the expiry-day opening
-//! cutoff, stream drop resync, `cancel_on_disconnect`, resume and slow consumers.
+//! Safety and session rules: persistent kill switch, caps, stream drop resync,
+//! `cancel_on_disconnect`, resume and slow consumers.
 mod support;
 use std::time::Duration;
 use support::*;
@@ -119,66 +119,6 @@ fn each_cap_refuses_before_any_send() {
     let mut c = Conn::open(&gw, "reactor", None);
     c.submit("d1", &buy("wse-d1"));
     assert_eq!(cap(c.submit("d2", &buy("wse-d2"))), want("submits_per_day"));
-    gw.stop().unwrap();
-}
-
-#[test]
-fn expiry_day_opening_cutoff_fails_closed() {
-    let script = format!(r#"{{"clock_ts":{}}}"#, CUTOFF - 1_000_000);
-    let gw = scripted(config(root("cutoff")), &script);
-    let mut c = Conn::open(&gw, "reactor", None);
-    assert_eq!(
-        c.submit("r1", &buy("wse-1"))["outcome"],
-        "accepted",
-        "15:29:29.999 is allowed"
-    );
-    c.req("advance", "a1", &format!(r#""to_ts":{CUTOFF}"#));
-    let r = c.submit("r2", &buy("wse-2"));
-    assert_eq!(r["reason"], "cutoff");
-    assert_eq!(
-        (
-            r["detail"]["cutoff_et"].as_str(),
-            r["detail"]["expiry"].as_str()
-        ),
-        (Some("15:29:30"), Some("2026-10-05"))
-    );
-    let close = single("wse-3", CALL, "sell", "close", 1, "1.00");
-    assert_eq!(
-        c.submit("r3", &close)["outcome"],
-        "accepted",
-        "closing legs pass"
-    );
-    let later = single("wse-4", "SPY261006C00580000", "buy", "open", 1, "1.00");
-    assert_eq!(
-        c.submit("r4", &later)["outcome"],
-        "accepted",
-        "other expiries pass"
-    );
-    gw.stop().unwrap();
-
-    let gw = scripted(
-        config(root("cutoff-nocal")),
-        &format!(r#"{{"clock_ts":{T0},"calendar":null}}"#),
-    );
-    let mut c = Conn::open(&gw, "reactor", None);
-    let r = c.submit("r1", &buy("wse-1"));
-    assert_eq!(
-        (r["reason"].as_str(), r["detail"]["unknown"].as_str()),
-        (Some("cutoff"), Some("calendar"))
-    );
-    gw.stop().unwrap();
-
-    let half_past_noon = T0 + 9_000_000_000_000;
-    let early = format!(
-        r#"{{"clock_ts":{half_past_noon},"calendar":[{{"date":"2026-10-05","open":"09:30","close":"13:00"}}]}}"#
-    );
-    let gw = scripted(config(root("cutoff-early")), &early);
-    let mut c = Conn::open(&gw, "reactor", None);
-    let r = c.submit("r1", &buy("wse-1"));
-    assert_eq!(
-        r["detail"]["cutoff_et"], "12:29:30",
-        "early close moves the cutoff"
-    );
     gw.stop().unwrap();
 }
 
@@ -373,20 +313,13 @@ fn an_any_underlying_client_skips_only_the_allowlist() {
 }
 
 #[test]
-fn an_any_underlying_client_has_the_earlier_expiry_day_cutoff() {
-    // 15:20 New York: past close − 45 min − 30 s for a non-SPY/QQQ underlying.
-    let script = format!(
-        r#"{{"clock_ts":{}}}"#,
-        T0 + (5 * 3600 + 20 * 60) * 1_000_000_000
+fn expiry_day_opens_go_to_the_broker() {
+    // No gateway cutoff: the broker's own expiry-day rules decide.
+    let gw = scripted(
+        config(root("expiry-day")),
+        &format!(r#"{{"clock_ts":{LATE}}}"#),
     );
-    let mut cfg = config(root("any-underlying-cutoff"));
-    cfg.profile.any_underlying_clients = vec!["other".into()];
-    let gw = scripted(cfg, &script);
-    let mut o = Conn::open(&gw, "other", None);
-    let r = o.submit(
-        "o1",
-        &single("oth-1", "SAP261005C00250000", "buy", "open", 1, "1.00"),
-    );
-    assert_eq!(r["reason"], "cutoff", "{r}");
+    let mut c = Conn::open(&gw, "reactor", None);
+    assert_eq!(c.submit("r1", &buy("wse-1"))["outcome"], "accepted");
     gw.stop().unwrap();
 }

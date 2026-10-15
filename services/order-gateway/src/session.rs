@@ -10,7 +10,7 @@ use crate::journal::Journal;
 use crate::protocol::{
     Invalid, KillLevel, Obj, Op, arr, error_line, invalid_detail, quote, request_error, response,
 };
-use crate::safety::{Budget, cutoff, hhmm};
+use crate::safety::Budget;
 use crate::server::{Config, Outbox, Role};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -874,20 +874,6 @@ impl<B: Broker> Session<B> {
         {
             let detail = Obj::new().s("level", level.name()).done();
             return Some(not_sent("killed", &detail));
-        }
-        if intent.has_open() {
-            let now = self.b.clock().ok().map(|r| r.value.ts);
-            let b = &mut self.b;
-            let mut close = |day: i64| -> Option<i64> {
-                let date = crate::safety::date_string(day);
-                let days = b.calendar(&date, &date).ok()?.value;
-                days.iter()
-                    .find(|d| d.date == date)
-                    .and_then(|d| hhmm(&d.close))
-            };
-            if let Err(detail) = cutoff(intent, now, &mut close) {
-                return Some(not_sent("cutoff", &detail));
-            }
         }
         let p = &self.cfg.profile;
         let notional =

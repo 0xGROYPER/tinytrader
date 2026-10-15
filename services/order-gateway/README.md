@@ -197,7 +197,7 @@ TICKER = ^[A-Z]{1,5}(\.[A-Z])?$       (e.g. AAPL, BRK.B)
 
 **The account allowlist** comes from the operator profile:
 - underlyings (default `SPY`), class `option`
-- clients allowed options on any underlying (`--any-underlying-client NAME`, repeatable, default none): for a manual trading client such as the console's. Only the underlying check is skipped, and only for that client's orders; every cap, the kill switch and the expiry-day cutoff still apply, and other clients on the account keep the list. The name must be a `trade` client. The profile in `welcome` lists them as `any_underlying_clients` when there are any.
+- clients allowed options on any underlying (`--any-underlying-client NAME`, repeatable, default none): for a manual trading client such as the console's. Only the underlying check is skipped, and only for that client's orders; every cap and the kill switch still apply, and other clients on the account keep the list. The name must be a `trade` client. The profile in `welcome` lists them as `any_underlying_clients` when there are any.
 - stocks (`--equities`, default none), and whether short sales are allowed (`--allow-short`, default no)
 - shapes and maximum legs
 - the caps in [section 8](#8-rate-budget-and-caps)
@@ -298,7 +298,7 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 | Kill switch | `kill{halt_opens}` refuses any submit with an opening leg. `kill{halt_all}` refuses every submit and cancels every open order: first `DELETE /v2/orders`, then a check of each order. The default level is `halt_all`. Triggers: an admin request, the CLI through the admin role, or a `KILL` sentinel file in the state root. The kill state is journaled and **persists across restarts**; only an explicit `unkill` clears it. |
 | Broker stream down | If `trade_updates` has been down for more than 5 s, the state becomes `degraded` and submits are `not_sent{not_ready}`. Cancels are still allowed. While down, the gateway polls open orders at 1 Hz. After reconnecting it resyncs through REST before returning to `ready`. |
 | Client disconnect | **No automatic cancel.** A client can opt in with `hello.cancel_on_disconnect: true`: after a 2 s grace period, its open orders (by prefix) are cancelled. A gateway restart leaves broker orders alone and reconciles them. |
-| Expiry-day opening cutoff | The gateway refuses (`not_sent{cutoff}`) any intent with an `effect: open` leg on a contract that expires today, from `close − 30 min − 30 s` America/New_York onward. On a normal day that is 15:29:30. `close` comes from the broker calendar. If the clock or calendar is unknown, the gateway refuses (fail closed). This rule is for SPY/QQQ-class ETFs; other underlyings use `close − 45 min − 30 s`. Stock legs never expire and are not subject to it; Alpaca takes limit-on-close orders until 10 minutes before the close. Closing legs pass the gateway; whether Alpaca accepts them after its cutoff is **UNVERIFIED**. Client policy, such as Reactor's 15:30 − 5 s rule, stays in the client. |
+| Expiry day | No gateway cutoff: an opening leg on a contract that expires today goes to the broker like any other, and the broker's own expiry-day rules decide (a rejection comes back as `rejected` with its reason). Client policy, such as Reactor's 15:30 − 5 s rule, stays in the client. (The gateway refused these as `not_sent{cutoff}` until 2026-10-15.) |
 | Index options | Not in the v1 allowlist. |
 
 ## 10. Simulated broker
@@ -463,7 +463,6 @@ The same resync runs after every `trade_updates` reconnect. An order in phase `s
 - `killed`
 - `not_ready`
 - `throttled`
-- `cutoff`
 - `duplicate_conflict`
 
 ## 13. Worked examples
@@ -530,8 +529,8 @@ These follow Reactor's two exact shapes. Lines are wrapped here for reading; on 
 **Refusals before any I/O:**
 
 ```json
-{"schema":"tinytrader.gateway/1","type":"response","request_id":"r-21","op":"submit","outcome":"not_sent","reason":"cutoff",
- "detail":{"expiry":"2026-10-05","cutoff_et":"15:29:30","leg":"SPY261005C00580000"}}
+{"schema":"tinytrader.gateway/1","type":"response","request_id":"r-21","op":"submit","outcome":"not_sent","reason":"killed",
+ "detail":{"level":"halt_opens"}}
 {"schema":"tinytrader.gateway/1","type":"response","request_id":"r-22","op":"submit","outcome":"duplicate",
  "current":{"client_order_id":"wse-20261005-0001","status":"filled",…}}
 ```
@@ -569,7 +568,7 @@ order-gateway --account sim-1 --broker sim --listen 127.0.0.1:7601 --state ~/.lo
 - Exit codes: 0 after SIGINT/SIGTERM (clients receive `shutting_down`), 1 for a runtime failure (lock held, journal chain broken, bind failure), 2 for usage (including a non-loopback `--listen`, a state root under `/tmp` or `/Volumes/Data`, or a token file that is not mode 600 or is a symlink).
 - The process needs no feed, relay, replay or data-gateway process. Market mode reads only the quote source it is given.
 - To stop new orders without a client, create `<state>/KILL`; the gateway enters `halt_all` within a second. Only an admin `unkill` clears it, and the sentinel must be removed first.
-- `--sim-script` is JSON. Every key is optional: `clock_ts` (a fixed clock moved only by `advance`; omitted means the wall clock), `calendar` (omitted: weekdays 09:30 to 16:00 ET; `null`: none, so opening cutoffs fail closed; or a list of `{date, open, close}`), `account` (`status`, `options_trading_level`, `cash`, `blocked`), `positions`, `orders` (preloaded broker orders), `quotes` (scripted fill prices), `default` and `rules` (each matching `nth` or `client_order_id`, with `submit`, `cancel`, `fill_on_query` and `skew`), `stream` (`drop_after_events`, `down_ms`), `fee_per_contract`, `latency_ms` and `size_cap`.
+- `--sim-script` is JSON. Every key is optional: `clock_ts` (a fixed clock moved only by `advance`; omitted means the wall clock), `calendar` (omitted: weekdays 09:30 to 16:00 ET; `null`: none, so session checks fail closed; or a list of `{date, open, close}`), `account` (`status`, `options_trading_level`, `cash`, `blocked`), `positions`, `orders` (preloaded broker orders), `quotes` (scripted fill prices), `default` and `rules` (each matching `nth` or `client_order_id`, with `submit`, `cancel`, `fill_on_query` and `skew`), `stream` (`drop_after_events`, `down_ms`), `fee_per_contract`, `latency_ms` and `size_cap`.
 - `--broker alpaca-paper --credentials env` serves one Alpaca paper account with keys from `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY` (or their `*_FILE` forms), decrypted by sops into the process only, as `tinytrader-ops`' `local-up` does. `--credentials-file ~/.config/tinytrader/alpaca-paper-N.env` serves one from a file. The file is mode 600, a regular file, not a symlink, and holds `APCA_API_KEY_ID`/`APCA_API_SECRET_KEY` (or the `ALPACA_*` spellings); values are never printed. The endpoints are compiled in (`paper-api.alpaca.markets`); there is no URL option. `--sim-*` options are refused with it.
 - `--broker alpaca-live --allow-live --credentials env` serves the live account (real money) on `api.alpaca.markets`, the one live host compiled in (`trading.rs`, checked by a test). The operator decided on 2026-10-12 that the console's Spread builder may trade the live account through its own gateway, with small caps (tinytrader-ops `scripts/order-gateway-native live`: $1,000 an order, 2 contracts a leg, 4 open orders, 20 submits a day, the console as its only trader). Without `--allow-live`, `alpaca-live` is refused; `--allow-live` with any other broker is refused too.
 - `--sim-quotes` takes a DBN v1/v3 file or a `tcp:` stream such as `replay dbn --listen`. Definitions, `cmbp-1` and `mbp-1` are read; other records are skipped. Market time starts at the first record and moves only with `advance`.
