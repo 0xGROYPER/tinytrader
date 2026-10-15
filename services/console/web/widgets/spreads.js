@@ -53,17 +53,15 @@ defineWidget('spreads', {
       typed: '', limit: /** @type {number | null} */ (null), review: false, sending: false, result: '',
       orders: /** @type {any} */ (null), ordersAt: 0,
       // Positions held, loaded from Accounts: their legs carry `cost`, the entry price.
-      held: /** @type {any} */ (null), heldAsk: /** @type {any} */ (null) };
+      held: /** @type {any} */ (null), heldAsk: /** @type {any} */ (null), wantExpiry: /** @type {string | null} */ (null) };
     el.innerHTML = `<div class="sb">
-      <div class="sb-top">
-        <form class="sb-search"><input class="sb-ticker mono" name="t" placeholder="Ticker" maxlength="10" autocomplete="off" spellcheck="false" aria-label="Underlying"></form>
-        <span class="sb-spot mono muted"></span>
-        <select class="sb-exp mono" aria-label="Expiry"></select>
-        <span class="sb-name muted"></span>
-      </div>
       <p class="sb-why muted"></p>
-      <div class="sb-table"><table class="sb-legs"></table></div>
-      <div class="sb-bar"><p class="sb-sum mono"></p><button type="button" class="btn sb-trade" aria-expanded="false">Trade</button></div>
+      <div class="sb-table"><table class="sb-legs"><thead><tr>
+        <th><div class="sb-head"><form class="sb-search"><input class="sb-ticker mono" name="t" placeholder="Ticker" maxlength="12" autocomplete="off" spellcheck="false" aria-label="Underlying, expiry (261015) or both (SPY261015)" title="A ticker, an expiry as YYMMDD (261015), or both (SPY261015)"></form>
+          <span class="sb-spot mono muted"></span><select class="sb-exp mono" aria-label="Expiry"></select></div></th>
+        <th class="num">Price</th><th class="num">Qty</th><th class="num sb-c-value">Market value</th><th class="num" title="Delta in shares">Δ</th><th></th>
+      </tr></thead><tbody></tbody><tfoot></tfoot></table></div>
+      <div class="sb-bar"><span class="sb-name muted"></span><p class="sb-sum mono"></p><button type="button" class="btn sb-trade" aria-expanded="false">Trade</button></div>
       <div class="sb-ticket"></div><div class="sb-orders"></div>
       <div class="sb-pay"></div>
       <p class="sb-msg muted"></p></div>`;
@@ -82,6 +80,8 @@ defineWidget('spreads', {
         if (my.ask?.sym === sym) { suggest(my.ask); my.ask = null; render(); return; }
         if (my.heldAsk?.sym === sym) { hold(my.heldAsk); my.heldAsk = null; render(); return; }
         const exps = expiries().map(e => e.expiry);
+        // An expiry typed with the ticker (SPY261015): that one, or the next listed.
+        if (my.wantExpiry) { my.expiry = exps.find(x => x >= my.wantExpiry) || my.expiry; my.wantExpiry = null; }
         if (!exps.includes(my.expiry)) { my.expiry = exps[0] || null; build(); }
         else if (!legs().length) build();
       } catch (e) { my.err = `${sym}: ${e.message}`; my.chain = null; }
@@ -196,10 +196,10 @@ defineWidget('spreads', {
           <td class="num muted sb-c-delta">${delta == null ? '—' : delta.toFixed(0)}</td>
           <td class="sb-c-x"><button type="button" class="sb-x" data-act="remove" aria-label="Remove this leg" title="Remove">×</button></td></tr>`;
       }).join('');
-      $('.sb-legs').innerHTML = `<thead><tr><th>Asset</th><th class="num">Price</th><th class="num">Qty</th><th class="num sb-c-value">Market value</th><th class="num" title="Delta in shares">Δ</th><th></th></tr></thead>
-        <tbody>${rows}</tbody>
-        <tfoot><tr><td colspan="3"><span class="sb-adds"><button type="button" class="sb-add" data-act="add" title="Add a leg">+ Leg</button><select class="sb-addsp" aria-label="Add a spread" title="Add a vertical spread to these legs (a credit spread goes one width out of the money, a debit spread at the money)"><option value="">+ Spread…</option>${Object.keys(GROUPS[0].items).map(n => `<option>${esc(n)}</option>`).join('')}</select><button type="button" class="sb-add sb-paybtn" aria-pressed="${my.payoff}">Payoff</button></span></td>
-          <td class="num sb-c-value"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr></tfoot>`;
+      // The header (ticker, expiry) stays put: only the rows are redrawn.
+      $('.sb-legs tbody').innerHTML = rows;
+      $('.sb-legs tfoot').innerHTML = `<tr><td colspan="3"><span class="sb-adds"><button type="button" class="sb-add" data-act="add" title="Add a leg">+ Leg</button><select class="sb-addsp" aria-label="Add a spread" title="Add a vertical spread to these legs (a credit spread goes one width out of the money, a debit spread at the money)"><option value="">+ Spread…</option>${Object.keys(GROUPS[0].items).map(n => `<option>${esc(n)}</option>`).join('')}</select><button type="button" class="sb-add sb-paybtn" aria-pressed="${my.payoff}">Payoff</button></span></td>
+          <td class="num sb-c-value"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr>`;
       payoff(a);
       // The summary: what it costs, what it can lose and make, and the chance; the rest on hover.
       const dollars = v => `$${Math.abs(v * 100).toFixed(0)}`, credit = a && a.net < 0;
@@ -392,10 +392,29 @@ defineWidget('spreads', {
     }
     const switchTo = s => { my.sym = s; my.chain = null; my.expiry = null; my.why = ''; my.held = null; my.limit = null; my.review = false; my.result = ''; my.structure = 'Custom'; position.legs = []; render(); loadChain(); };
 
+    // A new expiry: the legs keep their strikes, moved to listed ones.
+    const setExpiry = d => {
+      my.limit = null;
+      my.expiry = d;
+      if (STRUCTURES[my.structure] && !my.why) build();
+      else for (const l of legs()) { l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike; delete l.cost; }
+      render();
+    };
+    // The ticker box: a ticker, an expiry as OCC writes it (261015), or both
+    // (SPY261015). A date not listed goes to the next listed expiry.
     el.addEventListener('submit', e => {
       e.preventDefault();
-      const s = (/** @type {HTMLInputElement} */ ($('.sb-ticker')).value || '').trim().toUpperCase();
-      if (/^[A-Z][A-Z0-9.]{0,9}$/.test(s)) switchTo(s);
+      const box = /** @type {HTMLInputElement} */ ($('.sb-ticker'));
+      const s = (box.value || '').trim().toUpperCase().replace(/\s+/g, '');
+      const m = /^([A-Z][A-Z.]{0,5})?(\d{6})$/.exec(s);
+      const date = m ? `20${m[2].slice(0, 2)}-${m[2].slice(2, 4)}-${m[2].slice(4)}` : null;
+      if (m && (!m[1] || m[1] === my.sym)) {
+        const next = expiries().map(x => x.expiry).find(x => x >= date);
+        if (next) setExpiry(next); else { my.err = `No ${my.sym} expiry on or after ${date} in the chain.`; render(); }
+      } else if (m) { my.wantExpiry = date; switchTo(m[1]); }
+      else if (/^[A-Z][A-Z0-9.]{0,9}$/.test(s)) switchTo(s);
+      else return;
+      box.value = ''; box.blur();
     });
     el.addEventListener('input', e => {
       const t = /** @type {HTMLInputElement} */ (e.target);
@@ -429,12 +448,7 @@ defineWidget('spreads', {
       if (t.classList.contains('sb-acct')) { my.acct = t.value; my.typed = ''; store('tt-sb-account', t.value); render(); return; }
       if (t.classList.contains('sb-limit')) { const v = Math.round(+t.value * 100) / 100; if (v) my.limit = v; t.blur(); render(); return; }
       if (!t.classList.contains('sb-exp')) return;
-      my.limit = null;
-      my.expiry = t.value;
-      // A preset structure is rebuilt; a suggested or edited one keeps its strikes, moved to listed ones.
-      if (STRUCTURES[my.structure] && !my.why) build();
-      else for (const l of legs()) { l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike; delete l.cost; }
-      render();
+      setExpiry(t.value);
     });
     el.addEventListener('click', e => {
       const b = /** @type {HTMLElement} */ (e.target).closest('button'); if (!b) return;

@@ -988,7 +988,6 @@ a.doc-card { text-decoration: none; }
 .cd-last { margin-left: auto; color: var(--fg); font-size: 13px; }
 .cd-chart { flex: 1 1 auto; min-height: 160px; position: relative; }
 .sb { display: flex; flex-direction: column; gap: 6px; min-width: 0; container-type: inline-size; }
-.sb-top { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; }
 .sb-search { margin: 0; }
 .sb-ticker, .sb-exp, .sb-addsp { height: 24px; font: 12px var(--mono, monospace); padding: 0 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--fg); }
 .sb-ticker { width: 6.5em; font-size: 13px; font-weight: 600; text-transform: uppercase; }
@@ -1003,7 +1002,7 @@ a.doc-card { text-decoration: none; }
 .sb-pay:empty { display: none; }
 .sb-table { overflow-x: auto; max-width: 760px; border: 1px solid var(--line); border-radius: 8px; }
 .sb-legs { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
-.sb-top, .sb-bar, .sb-why, .sb-review { max-width: 760px; }
+.sb-bar, .sb-why, .sb-review { max-width: 760px; }
 .sb .sb-trade { min-height: 0; height: 28px; padding: 0 14px; font-size: 13px; }
 .sb-adds { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .sb-legs th { text-align: left; font: 500 12px var(--ui); color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--line); }
@@ -1012,6 +1011,9 @@ a.doc-card { text-decoration: none; }
 .sb-legs tfoot td { border-bottom: 0; border-top: 1px solid var(--line); padding-block: 4px; }
 .sb-legs .num { text-align: right; }
 .sb-legs td small { margin-left: 6px; font-size: 11px; }
+.sb-head { display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; font: 12px var(--mono); color: var(--fg); }
+.sb-legs th:first-child { padding-block: 4px; }
+.sb-name { margin-right: 8px; }
 .sb-asset-in { display: flex; align-items: center; gap: 8px; }
 .sb-occ { border: 0; background: none; padding: 0; color: var(--fg); font-size: clamp(11px, 1.6cqi + 4px, 15px); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 button.sb-occ:hover { color: var(--accent); }
@@ -1031,6 +1033,7 @@ button.sb-occ:hover { color: var(--accent); }
   .sb-legs td, .sb-legs th { padding-inline: 4px; }
 }
 @container (max-width: 420px) {
+  .sb-spot { display: none; }
   .sb-occ { letter-spacing: -.02em; }
   .sb-asset-in { gap: 4px; } .sb-steps { gap: 1px; }
   .sb-mini { min-width: 18px; padding: 0 3px; }
