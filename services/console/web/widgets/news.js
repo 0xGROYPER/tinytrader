@@ -5,7 +5,8 @@
 // mentioning its keywords, adding recent stories on its symbols from a
 // service that searches news (alpaca-data). The Watchlist chip does the same
 // for the list picked in the Watchlist widget (lib/watchlists.js), and is
-// chosen first in a view without a theme.
+// chosen first in a view without a theme that has a Watchlist panel; other
+// views start on All.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { newsItems, fleet } from '../lib/fleet.js';
 import { esc, ago, unentity } from '../lib/format.js';
@@ -31,16 +32,17 @@ function draw(my) {
   const live = newsItems();
   // The theme's and the watchlist's stories, and those found for a ticker searched: the live feed, plus what was found.
   const items = [...new Map([...live, ...(t ? my.found || [] : []), ...(w ? my.watched || [] : []), ...(my.searched || [])].map(n => [n.id, n])).values()].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
-  if (my.symbol === undefined) my.symbol = t ? THEME : w?.[1].length ? WATCH : null;
+  // Until a chip is picked, the theme's, else the watchlist's where a Watchlist panel shows it, else all.
   if (my.symbol === THEME && !t) my.symbol = null;
   if (my.symbol === WATCH && !w) my.symbol = null;
+  const sel = my.symbol !== undefined ? my.symbol : t ? THEME : w?.[1].length && my.listHere() ? WATCH : null;
   const inList = w ? new Set(w[1]) : null;
-  const pool = my.symbol === THEME && t ? items.filter(n => onTheme(n, t))
-    : my.symbol === WATCH && inList ? items.filter(n => (n.symbols || []).some(s => inList.has(s)))
+  const pool = sel === THEME && t ? items.filter(n => onTheme(n, t))
+    : sel === WATCH && inList ? items.filter(n => (n.symbols || []).some(s => inList.has(s)))
     : items;
   // A search looks through every story, whichever chip is chosen.
   const searching = !!my.q.trim(), shown = (searching ? items : pool).filter(n => matches(n, my.q));
-  const chip = (sym, label) => `<button type="button" class="chip-btn" data-news-symbol="${esc(sym ?? '')}" aria-pressed="${(my.symbol ?? null) === sym}">${esc(label)}</button>`;
+  const chip = (sym, label) => `<button type="button" class="chip-btn" data-news-symbol="${esc(sym ?? '')}" aria-pressed="${sel === sym}">${esc(label)}</button>`;
   const top = `<div class="nw-bar"><form class="nw-search" role="search"><input class="dh-search nw-q" type="search" placeholder="Search the news: words, or a ticker and Enter" aria-label="Search the news" autocomplete="off" spellcheck="false"></form>
     ${t || w ? `<span class="chips">${t ? chip(THEME, 'Theme') : ''}${w ? chip(WATCH, `Watchlist: ${w[0]}`) : ''}${chip(null, 'All')}</span>` : ''}</div>`;
   if (!items.length) return [top, '<p class="muted">No news service is running, or it has no stories yet.</p>'];
@@ -57,7 +59,7 @@ function draw(my) {
 defineWidget('news', {
   title: 'News',
   mount(el) {
-    const my = { symbol: undefined, found: [], watched: [], searched: [], q: '', looking: false, alive: true };
+    const my = { listHere: () => !!(el.closest('#ws-root') || document).querySelector('[data-view="watchlist"]'), symbol: undefined, found: [], watched: [], searched: [], q: '', looking: false, alive: true };
     // The box and the list are painted apart, so a refresh never takes what's being typed.
     el.innerHTML = '<div class="nw-top"></div><div class="nw-list"></div>';
     const topEl = /** @type {HTMLElement} */ (el.querySelector('.nw-top')), listEl = /** @type {HTMLElement} */ (el.querySelector('.nw-list'));
