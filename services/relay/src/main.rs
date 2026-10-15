@@ -26,9 +26,9 @@ mod hours;
 mod hub;
 mod protocol;
 mod quotes;
-mod tape;
 mod session;
 mod source;
+mod tape;
 
 use std::str::FromStr as _;
 use std::sync::Arc;
@@ -142,6 +142,7 @@ async fn run(args: Args) -> Result<(), String> {
         .iter()
         .map(|s| Schema::from_str(s).map_err(|e| format!("--reference {s}: {e}")))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut alpaca_source: Option<Arc<alpaca::Alpaca>> = None;
     let source: Arc<dyn Source> = match args.source {
         Provider::Databento => Arc::new(Databento {
             key: secret("DATABENTO_API_KEY")?,
@@ -151,16 +152,20 @@ async fn run(args: Args) -> Result<(), String> {
             reference,
             stype_in,
         }),
-        Provider::AlpacaIex => Arc::new(alpaca::Alpaca {
-            key: secret("APCA_API_KEY_ID")?,
-            secret: secret("APCA_API_SECRET_KEY")?,
-            symbols: args.symbols.clone(),
-            test: args.alpaca_test,
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .map_err(|e| e.to_string())?,
-        }),
+        Provider::AlpacaIex => {
+            let a = Arc::new(alpaca::Alpaca {
+                key: secret("APCA_API_KEY_ID")?,
+                secret: secret("APCA_API_SECRET_KEY")?,
+                symbols: args.symbols.clone(),
+                test: args.alpaca_test,
+                http: reqwest::Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .build()
+                    .map_err(|e| e.to_string())?,
+            });
+            alpaca_source = Some(a.clone());
+            a
+        }
     };
     let source::Feed {
         dataset,
@@ -185,8 +190,10 @@ async fn run(args: Args) -> Result<(), String> {
         Duration::from_secs(args.heartbeat.max(1)),
     ));
     // An Alpaca stream takes symbols while open: the tape can watch more (tape.rs).
-    if matches!(args.source, Provider::AlpacaIex) {
+    if let Some(a) = alpaca_source {
         hub.tape.watch.enable(&args.symbols);
+        // Tapes asked for with nothing held are filled from history.
+        tokio::spawn(a.tape_history(hub.clone()));
     }
 
     let feed = format!("{name} {dataset}");

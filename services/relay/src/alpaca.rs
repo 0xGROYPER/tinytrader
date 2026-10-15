@@ -190,9 +190,19 @@ impl Alpaca {
                     "q" | "t" if tag.symbol.is_some_and(|s| watched.contains_key(s)) => {
                         let symbol = tag.symbol.unwrap_or_default();
                         if let Some(enc) = watched.get_mut(symbol)
-                            && let Some(rec) = Self::encode(enc, tag.kind, tag.x, tag.bx, tag.ax, self.test, item.get(), ts_recv)
+                            && let Some(rec) = Self::encode(
+                                enc,
+                                tag.kind,
+                                tag.x,
+                                tag.bx,
+                                tag.ax,
+                                self.test,
+                                item.get(),
+                                ts_recv,
+                            )
                         {
-                            hub.tape.absorb_watched(RecordRef::from(&rec).as_ref(), symbol);
+                            hub.tape
+                                .absorb_watched(RecordRef::from(&rec).as_ref(), symbol);
                         }
                     }
                     "q" | "t" => {
@@ -259,13 +269,20 @@ impl Alpaca {
             .filter(|s| !self.symbols.contains(s))
             .collect();
         let add: Vec<&String> = want.iter().filter(|s| !watched.contains_key(*s)).collect();
-        let drop: Vec<String> = watched.keys().filter(|s| !want.contains(s)).cloned().collect();
+        let drop: Vec<String> = watched
+            .keys()
+            .filter(|s| !want.contains(s))
+            .cloned()
+            .collect();
         if !add.is_empty() {
             let sub = json!({ "action": "subscribe", "trades": add, "quotes": add });
             ws.send(Message::text(sub.to_string()))
                 .await
                 .map_err(|e| format!("cannot subscribe: {e}"))?;
-            eprintln!("relay: watching {} for the tape", add.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(","));
+            eprintln!(
+                "relay: watching {} for the tape",
+                add.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",")
+            );
             for s in add {
                 watched.insert(s.clone(), Encoder::new(s));
             }
@@ -434,6 +451,113 @@ impl Alpaca {
     }
 
     /// Every page of one kind of history for a symbol, oldest first.
+    /// Fill tapes from history as they ask (tape.rs): each symbol's latest
+    /// IEX trades and quotes of the past week, one request each.
+    pub async fn tape_history(self: Arc<Self>, hub: Arc<Hub>) {
+        loop {
+            hub.tape.watch.history_wanted.notified().await;
+            for symbol in hub.tape.watch.take_history() {
+                match self.latest(&symbol).await {
+                    Ok(chunk) if !chunk.is_empty() => {
+                        if hub.tape.seed(&chunk, &symbol) {
+                            eprintln!("relay: {symbol} tape filled from history");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("relay: history for the {symbol} tape: {e}"),
+                }
+            }
+        }
+    }
+
+    /// A symbol's latest 1,000 trades of the past week, each with the quote
+    /// before it (for which side it took), encoded as `mbp-1`, oldest first.
+    /// Quotes are paged back until they reach the first trade, at most five
+    /// requests.
+    async fn latest(&self, symbol: &str) -> Result<Vec<u8>, String> {
+        let start = rfc3339(protocol::now_ns().saturating_sub(7 * 86_400 * 1_000_000_000));
+        let get = |kind: &'static str, limit: &'static str, token: Option<String>| {
+            let mut req = self
+                .http
+                .get(format!("{HISTORY_URL}/{kind}"))
+                .header("APCA-API-KEY-ID", &self.key)
+                .header("APCA-API-SECRET-KEY", &self.secret)
+                .query(&[
+                    ("symbols", symbol),
+                    ("feed", "iex"),
+                    ("start", &start),
+                    ("limit", limit),
+                    ("sort", "desc"),
+                ]);
+            if let Some(t) = token {
+                req = req.query(&[("page_token", t)]);
+            }
+            async move {
+                let r = req.send().await.map_err(|e| format!("{kind}: {e}"))?;
+                if !r.status().is_success() {
+                    return Err(format!("{kind}: Alpaca answered {}", r.status()));
+                }
+                r.text().await.map_err(|e| format!("{kind}: {e}"))
+            }
+        };
+        #[derive(Deserialize)]
+        struct Next {
+            next_page_token: Option<String>,
+        }
+        let text = get("trades", "1000", None).await?;
+        let page: Page = serde_json::from_str(&text).map_err(|e| format!("trades: {e}"))?;
+        let mut t: Vec<_> = page
+            .trades
+            .and_then(|mut m| m.remove(symbol))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| r.parse().ok())
+            .collect();
+        t.reverse();
+        let Some(first) = t.first().map(|x| x.ts) else {
+            return Ok(Vec::new());
+        };
+        let mut q = Vec::new();
+        let mut token = None;
+        for _ in 0..5 {
+            let text = get("quotes", "10000", token.take()).await?;
+            let page: Page = serde_json::from_str(&text).map_err(|e| format!("quotes: {e}"))?;
+            q.extend(
+                page.quotes
+                    .and_then(|mut m| m.remove(symbol))
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|r| r.parse().ok()),
+            );
+            token = serde_json::from_str::<Next>(&text)
+                .ok()
+                .and_then(|n| n.next_page_token);
+            if token.is_none() || q.last().is_some_and(|x: &iex::Quote| x.ts <= first) {
+                break;
+            }
+        }
+        q.reverse();
+        // Each trade with the quote just before it: a tape of trades, not of quotes.
+        let rows = iex::merge(t, q)?;
+        let keep: Vec<bool> = (0..rows.len())
+            .map(|i| {
+                matches!(rows[i], iex::Row::Trade(_))
+                    || matches!(rows.get(i + 1), Some(iex::Row::Trade(_)))
+            })
+            .collect();
+        let rows: Vec<iex::Row> = rows
+            .into_iter()
+            .zip(keep)
+            .filter_map(|(r, k)| k.then_some(r))
+            .collect();
+        let (records, _) = iex::encode_day(symbol, &rows)?;
+        let mut out = Vec::with_capacity(records.len() * 80);
+        for r in &records {
+            out.extend_from_slice(RecordRef::from(r).as_ref());
+        }
+        Ok(out)
+    }
+
     async fn pages(
         &self,
         symbol: &str,

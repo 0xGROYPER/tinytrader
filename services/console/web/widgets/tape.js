@@ -10,7 +10,9 @@
 // few percent of all US volume, so it's a sample of the flow, not all of it.
 // Any ticker can be typed: one the relay doesn't carry is watched for the
 // tape on request (its open stream takes the symbol; no restart), with its
-// trades showing from then on.
+// trades showing from then on. With nothing held (overnight, after a
+// restart, or just watched) the relay fills it from history: the latest
+// session's trades, marked as such and not flashed.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
@@ -62,9 +64,10 @@ function list(my) {
     rows.push(`<tr class="tp-${side(x)}${x.z >= BIG ? ' tp-big' : ''}${fresh}"><td>${hms(x.t)}<small>.${ms(x.t)}</small></td><td class="num">${x.p.toFixed(2)}</td><td class="num">${x.z.toLocaleString()}</td></tr>`);
   }
   const quiet = !my.lastRecord || Date.now() / 1000 - my.lastRecord > 120;
+  const hist = my.ticks.length && my.ticks[my.ticks.length - 1].h;
   const none = my.watching ? `Watching ${esc(my.sym)}: its trades show here as they happen.` : 'No trades yet.';
   return `<div class="tp-list"><table class="tp"><tbody>${rows.join('') || `<tr><td colspan="3" class="muted">${none}</td></tr>`}</tbody></table></div>`
-    + (quiet || my.paused ? `<p class="muted tp-foot">${my.paused ? 'Paused. ' : ''}${quiet ? 'The feed is quiet: outside its hours (07:55–17:05 ET), or down.' : ''}</p>` : '');
+    + (quiet || my.paused || hist ? `<p class="muted tp-foot">${my.paused ? 'Paused. ' : ''}${hist ? 'From history: the latest trades before now. ' : ''}${quiet ? 'The feed is quiet: outside its hours (07:55–17:05 ET), or down.' : ''}</p>` : '');
 }
 
 defineWidget('tape', {
@@ -113,7 +116,7 @@ defineWidget('tape', {
         if (v.last < my.last) { my.ticks = []; }
         // Arrival times, for the flash (none for the history read first).
         const rt = my.last ? performance.now() : 0;
-        for (const x of v.ticks || []) { x.rt = rt; my.ticks.push(x); }
+        for (const x of v.ticks || []) { x.rt = x.h ? 0 : rt; my.ticks.push(x); }
         if (my.ticks.length > 4000) my.ticks = my.ticks.slice(-4000);
         my.last = v.last; my.lastRecord = v.last_record || 0; my.err = '';
       } catch (e) { my.err = `The tape couldn't be read: ${e.message}`; }

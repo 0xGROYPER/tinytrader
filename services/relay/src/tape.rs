@@ -22,6 +22,11 @@
 //! only, never to the relay's clients or anything recorded. A watched symbol
 //! no one has read for ten minutes is dropped; at most twenty are watched.
 //! The answer's `watching` lists them, and `watch` says why one couldn't be.
+//!
+//! A symbol asked for with nothing held (after a restart, overnight, or
+//! just watched) is filled from history: the source's latest trades and
+//! quotes, at most once per symbol every five minutes, and only into an empty
+//! tape so history never lands among live ticks. Those ticks carry `"h": true`.
 
 use std::collections::{HashMap, VecDeque};
 use std::mem::offset_of;
@@ -51,6 +56,8 @@ pub struct Tick {
     pub ask: Option<f64>,
     pub bid_size: u32,
     pub ask_size: u32,
+    /// From history, not the live feed.
+    pub hist: bool,
 }
 
 #[derive(Default)]
@@ -76,6 +83,21 @@ pub struct Watch {
     asked: Mutex<HashMap<String, Instant>>,
     /// Woken when a symbol is added, for the source to subscribe it.
     pub changed: tokio::sync::Notify,
+    /// Symbols to fill from history, and when each was last asked for.
+    history: Mutex<(HashMap<String, Instant>, Vec<String>)>,
+    /// Woken when a symbol needs history.
+    pub history_wanted: tokio::sync::Notify,
+}
+
+/// History for a symbol's tape is fetched at most this often.
+const HISTORY_EVERY: Duration = Duration::from_secs(300);
+
+fn ticker(symbol: &str) -> bool {
+    symbol.len() <= 10
+        && symbol.starts_with(|c: char| c.is_ascii_uppercase())
+        && symbol
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '.')
 }
 
 /// At most this many watched symbols (Alpaca's free stream takes 30 in all).
@@ -95,13 +117,16 @@ impl Watch {
         if !self.enabled.load(Ordering::Relaxed) {
             return Err("this relay can't add symbols");
         }
-        let valid = symbol.len() <= 10
-            && symbol.starts_with(|c: char| c.is_ascii_uppercase())
-            && symbol.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '.');
-        if !valid {
+        if !ticker(symbol) {
             return Err("not a ticker");
         }
-        if self.own.lock().unwrap_or_else(PoisonError::into_inner).iter().any(|s| s == symbol) {
+        if self
+            .own
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|s| s == symbol)
+        {
             return Ok(());
         }
         let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
@@ -116,6 +141,33 @@ impl Watch {
             self.changed.notify_one();
         }
         Ok(())
+    }
+
+    /// Ask for `symbol`'s tape to be filled from history (where the source
+    /// can, and not within five minutes of the last time).
+    pub fn want_history(&self, symbol: &str) {
+        if !self.enabled.load(Ordering::Relaxed) || !ticker(symbol) {
+            return;
+        }
+        let mut h = self.history.lock().unwrap_or_else(PoisonError::into_inner);
+        if h.0.get(symbol).is_some_and(|t| t.elapsed() < HISTORY_EVERY) {
+            return;
+        }
+        h.0.insert(symbol.to_owned(), Instant::now());
+        h.1.push(symbol.to_owned());
+        drop(h);
+        self.history_wanted.notify_one();
+    }
+
+    /// The symbols waiting for history.
+    pub fn take_history(&self) -> Vec<String> {
+        std::mem::take(
+            &mut self
+                .history
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .1,
+        )
     }
 
     /// The symbols watched now (dropping those unread too long), sorted.
@@ -145,70 +197,22 @@ impl Tape {
     pub fn absorb(&self, chunk: &[u8], symbol_of: impl Fn(u32) -> Option<String>) {
         let mut guard = self.lock();
         let (seq, books) = &mut *guard;
-        let lv = offset_of!(Mbp1Msg, levels);
-        let mut off = 0;
-        while off < chunk.len() {
-            let len = usize::from(chunk[off]) * 4;
-            let Some(rec) = chunk.get(off..off + len).filter(|r| r.len() >= 16) else {
-                return;
-            };
-            off += len;
-            if rec[1] != rtype::MBP_1 || len < std::mem::size_of::<Mbp1Msg>() {
-                continue;
-            }
-            let num = |o: usize| at::<8>(rec, o).map(i64::from_le_bytes);
-            let small = |o: usize| at::<4>(rec, o).map(u32::from_le_bytes);
-            let (Some(id), Some(ts), Some(b), Some(a), Some(bz), Some(az)) = (
-                small(offset_of!(RecordHeader, instrument_id)),
-                at::<8>(rec, offset_of!(RecordHeader, ts_event)).map(u64::from_le_bytes),
-                num(lv + offset_of!(BidAskPair, bid_px)),
-                num(lv + offset_of!(BidAskPair, ask_px)),
-                small(lv + offset_of!(BidAskPair, bid_sz)),
-                small(lv + offset_of!(BidAskPair, ask_sz)),
-            ) else {
-                continue;
-            };
-            let Some(symbol) = symbol_of(id) else {
-                continue;
-            };
-            let book = books.entry(symbol).or_default();
-            let top = (px(b), px(a), bz, az);
-            let trade = if rec.get(offset_of!(Mbp1Msg, action)) == Some(&b'T') {
-                match (
-                    num(offset_of!(Mbp1Msg, price)).and_then(px),
-                    small(offset_of!(Mbp1Msg, size)),
-                ) {
-                    (Some(p), Some(z)) => Some((p, z)),
-                    _ => continue,
-                }
-            } else {
-                // A quote: kept only when the top of book changed.
-                if book.top == Some(top) {
-                    continue;
-                }
-                book.top = Some(top);
-                None
-            };
-            *seq += 1;
-            let tick = Tick {
-                seq: *seq,
-                ts,
-                trade,
-                bid: top.0,
-                ask: top.1,
-                bid_size: bz,
-                ask_size: az,
-            };
-            let ring = if trade.is_some() {
-                &mut book.trades
-            } else {
-                &mut book.quotes
-            };
-            if ring.len() == KEEP {
-                ring.pop_front();
-            }
-            ring.push_back(tick);
+        take(seq, books, chunk, &symbol_of, false);
+    }
+
+    /// Fill `symbol`'s tape from history (encoded `mbp-1`, oldest first),
+    /// only if it holds nothing yet. Whether it was taken.
+    pub fn seed(&self, chunk: &[u8], symbol: &str) -> bool {
+        let mut guard = self.lock();
+        let (seq, books) = &mut *guard;
+        if books
+            .get(symbol)
+            .is_some_and(|b| !b.trades.is_empty() || !b.quotes.is_empty())
+        {
+            return false;
         }
+        take(seq, books, chunk, &|_| Some(symbol.to_owned()), true);
+        true
     }
 
     /// Take a watched symbol's records (encoded `mbp-1`, not forwarded).
@@ -244,6 +248,81 @@ impl Tape {
     }
 }
 
+/// Take a chunk's `mbp-1` trades and top-of-book changes into the books.
+fn take(
+    seq: &mut u64,
+    books: &mut HashMap<String, Book>,
+    chunk: &[u8],
+    symbol_of: &dyn Fn(u32) -> Option<String>,
+    hist: bool,
+) {
+    let lv = offset_of!(Mbp1Msg, levels);
+    let mut off = 0;
+    while off < chunk.len() {
+        let len = usize::from(chunk[off]) * 4;
+        let Some(rec) = chunk.get(off..off + len).filter(|r| r.len() >= 16) else {
+            return;
+        };
+        off += len;
+        if rec[1] != rtype::MBP_1 || len < std::mem::size_of::<Mbp1Msg>() {
+            continue;
+        }
+        let num = |o: usize| at::<8>(rec, o).map(i64::from_le_bytes);
+        let small = |o: usize| at::<4>(rec, o).map(u32::from_le_bytes);
+        let (Some(id), Some(ts), Some(b), Some(a), Some(bz), Some(az)) = (
+            small(offset_of!(RecordHeader, instrument_id)),
+            at::<8>(rec, offset_of!(RecordHeader, ts_event)).map(u64::from_le_bytes),
+            num(lv + offset_of!(BidAskPair, bid_px)),
+            num(lv + offset_of!(BidAskPair, ask_px)),
+            small(lv + offset_of!(BidAskPair, bid_sz)),
+            small(lv + offset_of!(BidAskPair, ask_sz)),
+        ) else {
+            continue;
+        };
+        let Some(symbol) = symbol_of(id) else {
+            continue;
+        };
+        let book = books.entry(symbol).or_default();
+        let top = (px(b), px(a), bz, az);
+        let trade = if rec.get(offset_of!(Mbp1Msg, action)) == Some(&b'T') {
+            match (
+                num(offset_of!(Mbp1Msg, price)).and_then(px),
+                small(offset_of!(Mbp1Msg, size)),
+            ) {
+                (Some(p), Some(z)) => Some((p, z)),
+                _ => continue,
+            }
+        } else {
+            // A quote: kept only when the top of book changed.
+            if book.top == Some(top) {
+                continue;
+            }
+            book.top = Some(top);
+            None
+        };
+        *seq += 1;
+        let tick = Tick {
+            seq: *seq,
+            ts,
+            trade,
+            bid: top.0,
+            ask: top.1,
+            bid_size: bz,
+            ask_size: az,
+            hist,
+        };
+        let ring = if trade.is_some() {
+            &mut book.trades
+        } else {
+            &mut book.quotes
+        };
+        if ring.len() == KEEP {
+            ring.pop_front();
+        }
+        ring.push_back(tick);
+    }
+}
+
 #[derive(Deserialize)]
 struct Ask {
     symbol: Option<String>,
@@ -256,6 +335,9 @@ struct Ask {
 fn tick_json(t: &Tick) -> Value {
     let mut v = json!({ "s": t.seq, "t": t.ts as f64 / 1e9, "k": if t.trade.is_some() { "T" } else { "Q" },
         "b": t.bid, "a": t.ask, "bz": t.bid_size, "az": t.ask_size });
+    if t.hist {
+        v["h"] = json!(true);
+    }
     if let Some((p, z)) = t.trade {
         v["p"] = json!(p);
         v["z"] = json!(z);
@@ -266,8 +348,15 @@ fn tick_json(t: &Tick) -> Value {
 async fn serve(State(hub): State<Arc<Hub>>, Query(ask): Query<Ask>) -> Json<Value> {
     let limit = ask.limit.unwrap_or(500).clamp(1, 1000);
     let symbol = ask.symbol.unwrap_or_default().trim().to_uppercase();
-    let refused = if ask.watch == Some(1) { hub.tape.watch.ask(&symbol).err() } else { None };
+    let refused = if ask.watch == Some(1) {
+        hub.tape.watch.ask(&symbol).err()
+    } else {
+        None
+    };
     let (ticks, last, symbols) = hub.tape.read(&symbol, ask.after, limit);
+    if ticks.is_empty() && ask.after.is_none() {
+        hub.tape.watch.want_history(&symbol);
+    }
     Json(json!({
         "symbol": symbol,
         "watching": hub.tape.watch.wanted(),
@@ -307,6 +396,31 @@ mod tests {
             ..Default::default()
         };
         RecordRef::from(&m).as_ref().to_vec()
+    }
+
+    #[test]
+    fn history_fills_only_an_empty_tape_and_is_marked() {
+        let tape = Tape::default();
+        let old = mbp(
+            7,
+            1_000,
+            b'T',
+            500_000_000_000,
+            10,
+            499_000_000_000,
+            501_000_000_000,
+        );
+        assert!(tape.seed(&old, "GLD"));
+        let (ticks, _, _) = tape.read("GLD", None, 10);
+        assert!(ticks.len() == 1 && ticks[0].hist);
+        assert!(!tape.seed(&old, "GLD"));
+        let w = Watch::default();
+        w.want_history("GLD");
+        assert!(w.take_history().is_empty());
+        w.enable(&[]);
+        w.want_history("GLD");
+        w.want_history("GLD");
+        assert_eq!(w.take_history(), vec!["GLD".to_owned()]);
     }
 
     #[test]
