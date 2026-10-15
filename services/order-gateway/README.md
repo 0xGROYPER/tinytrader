@@ -275,7 +275,7 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
   - A throttle that happens on the client side, before any send, is `not_sent{throttled}`.
   - GETs may retry with bounded backoff. POSTs and DELETEs never retry.
 
-**Per-account caps.** These are defaults from the operator profile. They are mechanical access limits, not portfolio risk. A violation is `not_sent{cap}` with the cap's name in `detail`.
+**Per-account caps.** These are defaults from the operator profile. They are mechanical access limits, not portfolio risk. A violation is `not_sent{cap}` with the cap's name in `detail`. The notional and open-order caps apply to intents with an opening leg; an intent whose legs all close is held only to the legs, submit and reject limits, so a position can always be closed.
 
 | Cap | Default |
 |---|---|

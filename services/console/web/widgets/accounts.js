@@ -8,6 +8,10 @@
 // market or a limit, sent as the console's trade client (POST
 // /api/orders/{account}). A new order is built in the Spread builder:
 // Spread builder on a card opens it with that account picked for its ticket.
+// Liquidate (any account the console trades, live too) closes every option
+// position at once (lib/liquidate.js): the orders it will send are shown with
+// their prices, the console's own open orders are cancelled first, and a live
+// account asks once more.
 //
 // Account (one account): the same for one account, picked at its top (the
 // live account until another is picked, kept with the panel), with room for
@@ -16,7 +20,8 @@ import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { askHeld } from '../lib/position.js';
-import { createTicket, tradable, routed } from '../lib/ticket.js';
+import { createTicket, tradable, routed, occLabel } from '../lib/ticket.js';
+import { plan, quotes, priced, send, cancelOurs } from '../lib/liquidate.js';
 
 /** An account's option positions by underlying and expiry, for the Spread builder's payoff. */
 const heldGroups = new Map();
@@ -87,6 +92,45 @@ function flattenPanel(a) {
       <div class="acct-actions"><button type="button" class="btn small" data-flat-cancel="${esc(name)}">Close</button></div></div>${buttons}`;
   }
   return buttons;
+}
+
+// Liquidate per account: {stage: 'review' | 'sending' | 'done', market, confirm, q (quotes), results}.
+const liq = {};
+function liquidatePanel(a) {
+  const name = a?.name;
+  if (!name || !tradable(name)) return '';
+  const { orders, left } = plan(a.positions);
+  const L = liq[name];
+  const button = orders.length ? `<div class="acct-actions"><button type="button" class="btn liq-btn" data-liq-open="${esc(name)}"${L?.stage === 'sending' ? ' disabled' : ''}>Liquidate</button></div>` : '';
+  if (!L) return button;
+  const live = a.environment === 'live';
+  const legsOf = o => o.legs.map(l => `<span class="${l.side === 'buy' ? 'pos' : 'neg'}">${l.side === 'buy' ? '+' : '−'}${l.ratio * o.qty}</span> ${esc(occLabel(l.symbol))}`).join('<br>');
+  const priceOf = o => {
+    const p = L.q && priced(o, L.q, L.market);
+    if (!L.q) return '<span class="muted">quotes…</span>';
+    if (!p) return '<span class="neg">no quote</span>';
+    const at = o.legs.length === 1 ? p.price.toFixed(2) : p.price < 0 ? `cr ${(-p.price).toFixed(2)}` : `db ${p.price.toFixed(2)}`;
+    return p.type === 'market' ? `market <small class="muted">(~${at})</small>` : at;
+  };
+  const shown = L.stage === 'done' || L.stage === 'sending' ? L.sent : orders;
+  const rows = shown.map((o, i) => `<tr><td style="text-align:left;color:var(--fg)">${legsOf(o)}</td><td>${priceOf(o)}</td>${L.results ? `<td class="${L.results[i]?.ok ? 'pos' : 'neg'}" style="text-align:left">${esc(L.results[i]?.text || '…')}</td>` : ''}</tr>`).join('');
+  const ours = (a.orders || []).filter(o => (o.client_order_id || '').startsWith('tt-')).length, theirs = (a.orders || []).length - ours;
+  const notes = [
+    ours ? `Cancels the console's ${ours} open order${ours > 1 ? 's' : ''} first.` : '',
+    theirs ? `<span class="neg">${theirs} open order${theirs > 1 ? 's' : ''} placed elsewhere stay${theirs > 1 ? '' : 's'}, and can keep a contract from closing: cancel ${theirs > 1 ? 'them' : 'it'} where ${theirs > 1 ? 'they were' : 'it was'} placed.</span>` : '',
+    left.length ? `Left out: ${left.map(x => `${esc(occLabel(x.symbol))} (${esc(x.why)})`).join(', ')}.` : '',
+  ].filter(Boolean).map(x => `<p class="muted" style="margin:0;font-size:12px">${x}</p>`).join('');
+  const confirming = L.confirm > Date.now();
+  const head = L.stage === 'done' ? `<b>Liquidate ${esc(a.label || name)}: ${L.results.filter(r => r.ok).length} of ${L.results.length} sent.</b>`
+    : L.stage === 'sending' ? `<b>Liquidating ${esc(a.label || name)}…</b>`
+    : `<b>Close every option position in ${esc(a.label || name)}${live ? ' (LIVE, real money)' : ''}: ${orders.length} order${orders.length > 1 ? 's' : ''}.</b>`;
+  const seg = L.stage === 'review' ? `<span class="tk-seg" role="group" aria-label="Price"><button type="button" data-liq-type="limit" data-liq="${esc(name)}" aria-pressed="${!L.market}" title="The natural and 5% (at least $0.05) past it: fills like market unless the quotes jump">Marketable limit</button><button type="button" data-liq-type="market" data-liq="${esc(name)}" aria-pressed="${L.market}" title="Fills at whatever the market gives">Market</button></span>` : '';
+  const acts = L.stage === 'review'
+    ? `<button type="button" class="btn liq-btn" data-liq-go="${esc(name)}"${orders.length && L.q ? '' : ' disabled'}>${confirming ? `Confirm: liquidate ${esc(name)} for real` : 'Liquidate now'}</button><button type="button" class="btn small" data-liq-cancel="${esc(name)}">${confirming ? 'Not yet' : 'Cancel'}</button>`
+    : L.stage === 'done' ? `<button type="button" class="btn small" data-liq-cancel="${esc(name)}">Done</button>${orders.length ? `<button type="button" class="btn small danger" data-liq-open="${esc(name)}">Again for what's left</button>` : ''}` : '';
+  return `<div class="acct-flat liq${live ? ' liq-live' : ''}">${head}${seg}
+    <div class="scroll"><table class="pos-tbl"><tbody>${rows}</tbody></table></div>${notes}
+    <div class="acct-actions">${acts}</div></div>`;
 }
 
 // Open orders, from the account itself: the console's (ids tt-) with Cancel,
@@ -162,6 +206,7 @@ function accountCard(svc, a, pick) {
     <div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2" data-height="${pick ? 90 : 56}"></div>
     ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Position</th><th>Qty</th>${pick ? '<th>Avg</th><th>Last</th>' : ''}<th>Value</th><th>P/L</th><th class="acct-today">Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
     ${(() => { const g = optionGroups(a.name || a.label || svc.id, pos), can = tradable(a.name); return g.length || can ? `<div class="acct-payoffs">${g.map(x => `<button type="button" class="chip-btn" data-held="${esc(x.key)}" title="Load these legs into the Spread builder at their entry prices">Payoff: ${esc(x.sym)} ${esc(dayLabel(x.expiry))} · ${x.legs.length} leg${x.legs.length > 1 ? 's' : ''}</button>${can ? `<button type="button" class="chip-btn" data-ot-close="${esc(x.key)}" title="An order closing these legs, at market or a limit">Close…</button>` : ''}`).join('')}${can ? `<button type="button" class="chip-btn" data-sb-open="${esc(a.name)}" title="Build an order in the Spread builder, with this account picked for it">Spread builder</button>` : ''}</div>` : ''; })()}
+    ${liquidatePanel(a)}
     ${ordersPanel(a)}
     <div class="foot">${pos.length > shown ? `${pos.length} positions, largest ${shown} shown · ` : ''}${!pos.length && Array.isArray(a.orders) && !a.orders.length ? 'No positions or open orders · ' : !pos.length ? 'No positions · ' : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
     ${flattenPanel(a)}
@@ -235,6 +280,7 @@ function mount(el, single = false) {
       catch (err) { cancelling[d.cancelOrder] = 'Cancel failed'; console.warn(err); }
       update(); return;
     }
+    if (d.liqOpen || d.liqType || d.liqGo || d.liqCancel) { liquidate(d); return; }
     if (d.flatOpen) { flat[d.flatOpen] = { stage: 'confirm', typed: '' }; update(); el.querySelector(`[data-flat-typed="${CSS.escape(d.flatOpen)}"]`)?.focus(); }
     else if (d.flatCancel) { delete flat[d.flatCancel]; update(); }
     else if (d.flatGo) {
@@ -249,6 +295,39 @@ function mount(el, single = false) {
       gwAt = 0; update();
     }
   };
+  // Liquidate: review (quotes read), then cancel ours, wait for them to go, and send every close.
+  const accountOf = name => allAccounts().find(x => x.a?.name === name)?.a;
+  async function liquidate(d) {
+    const name = d.liqOpen || d.liq || d.liqGo || d.liqCancel, L = liq[name];
+    if (d.liqOpen) {
+      liq[name] = { stage: 'review', market: false, confirm: 0, q: null };
+      update();
+      const a = accountOf(name), q = await quotes(plan(a?.positions).orders);
+      if (liq[name]?.stage === 'review') { liq[name].q = q; update(); }
+      return;
+    }
+    if (!L) return;
+    if (d.liqCancel) { if (L.confirm > Date.now()) L.confirm = 0; else delete liq[name]; update(); return; }
+    if (d.liqType) { L.market = d.liqType === 'market'; L.confirm = 0; update(); return; }
+    if (!d.liqGo || L.stage !== 'review') return;
+    const a = accountOf(name), live = a?.environment === 'live';
+    if (live && L.confirm <= Date.now()) { L.confirm = Date.now() + 6000; update(); setTimeout(update, 6100); return; }
+    const { orders } = plan(a?.positions);
+    L.stage = 'sending'; L.sent = orders; L.results = orders.map(() => null); update();
+    // Our own working orders hold contracts: cancelled, then gone from the account (at most 5 s).
+    if (await cancelOurs(name, a?.orders)) {
+      for (let i = 0; i < 25 && (accountOf(name)?.orders || []).some(o => (o.client_order_id || '').startsWith('tt-')); i++) await new Promise(r => setTimeout(r, 200));
+    }
+    // Fresh quotes, then every order at once.
+    L.q = await quotes(orders);
+    await Promise.all(orders.map(async (o, i) => {
+      const p = priced(o, L.q, L.market);
+      L.results[i] = p ? await send(name, live, o, p) : { ok: false, text: 'not sent: no quote on every leg' };
+      update();
+    }));
+    L.stage = 'done'; update();
+  }
+
   const input = e => {
     if (box.contains(e.target)) return;
     const name = e.target.dataset?.flatTyped; if (!name || !flat[name]) return;

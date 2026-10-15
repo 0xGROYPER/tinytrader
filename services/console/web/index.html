@@ -305,6 +305,11 @@ tr:last-child td { border-bottom: 0; }
 .field input:focus-visible, .field select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .btn { min-height: 38px; padding: 0 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: 500 14px var(--ui); cursor: pointer; white-space: nowrap; }
 .btn.danger { border-color: var(--crit); color: var(--crit); }
+.btn.liq-btn { background: var(--crit-mark); border-color: var(--crit-mark); color: #fff; font-weight: 700; letter-spacing: 0.02em; }
+.btn.liq-btn:hover:not(:disabled) { filter: brightness(1.1); }
+.acct-flat.liq { border-color: var(--crit-mark); }
+.acct-flat.liq .pos-tbl td { vertical-align: top; }
+.acct-flat.liq .tk-seg { align-self: flex-start; }
 .btn:hover:not(:disabled) { background: var(--surface); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
 .btn.primary:hover:not(:disabled) { background: var(--accent-mark); }

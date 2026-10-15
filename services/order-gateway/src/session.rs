@@ -879,6 +879,7 @@ impl<B: Broker> Session<B> {
         let notional =
             intent.limit_cents.unsigned_abs() * u64::from(intent.qty) * intent.multiplier();
         let open = self.orders.values().filter(|o| o.open()).count();
+        let opening = intent.has_open();
         let minute_ago = Instant::now().checked_sub(Duration::from_mins(1));
         self.minute.retain(|t| minute_ago.is_none_or(|m| *t > m));
         let today = utc_day(self.ts());
@@ -887,8 +888,13 @@ impl<B: Broker> Session<B> {
         }
         let hit = [
             (intent.legs.len() > p.max_legs, "legs"),
-            (notional > p.max_notional_cents.unsigned_abs(), "notional"),
-            (open >= p.max_open, "open_orders"),
+            // What an order may risk, and how many may work at once, bound what
+            // opens: an order that only closes is never kept from closing.
+            (
+                opening && notional > p.max_notional_cents.unsigned_abs(),
+                "notional",
+            ),
+            (opening && open >= p.max_open, "open_orders"),
             (self.minute.len() >= p.submits_per_min, "submits_per_minute"),
             (self.day.1 >= p.submits_per_day, "submits_per_day"),
         ];

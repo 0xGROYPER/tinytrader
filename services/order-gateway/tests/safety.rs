@@ -315,3 +315,21 @@ fn expiry_day_opens_go_to_the_broker() {
     assert_eq!(c.submit("r1", &buy("wse-1"))["outcome"], "accepted");
     gw.stop().unwrap();
 }
+
+#[test]
+fn closing_orders_pass_the_notional_and_open_order_caps() {
+    let mut cfg = config(root("caps-close"));
+    cfg.profile.max_open = 1;
+    let gw = scripted(cfg, &clocked());
+    let mut c = Conn::open(&gw, "reactor", None);
+    assert_eq!(c.submit("a1", &buy("wse-a1"))["outcome"], "accepted");
+    // Past the notional cap ($2,500) and with the one open order working: still sent.
+    let r = c.submit("x1", &single("wse-x1", CALL, "sell", "close", 10, "2.51"));
+    assert_ne!(r["reason"], "cap", "{r}");
+    // Opening is still held to both.
+    assert_eq!(
+        c.submit("o1", &buy("wse-o1"))["detail"]["cap"],
+        "open_orders"
+    );
+    gw.stop().unwrap();
+}
