@@ -171,10 +171,11 @@ impl Gateways {
 }
 
 /// A gateway order intent (tinytrader.gateway/1, section 6) from the
-/// Spread builder's order: `{legs: [{symbol, side, ratio?}], qty,
+/// console's order tickets: `{legs: [{symbol, side, ratio?}], qty,
 /// limit_price, effect?}`, with `limit_price` the net per unit, + debit and
-/// − credit (a single leg's is its positive price). Options only; the id is
-/// given. The gateway checks everything again, with its caps.
+/// − credit (a single leg's is its positive price); or with `type: "market"`,
+/// `ref_price` in its place, the natural when sent, for the gateway's caps.
+/// Options only; the id is given. The gateway checks everything again.
 pub fn intent(order: &Value, id: &str) -> Result<Value, String> {
     let legs = order["legs"].as_array().ok_or("legs: a list")?;
     if !(1..=4).contains(&legs.len()) {
@@ -188,13 +189,19 @@ pub fn intent(order: &Value, id: &str) -> Result<Value, String> {
         .as_u64()
         .filter(|q| (1..=100).contains(q))
         .ok_or("qty: 1 to 100")?;
-    let price = order["limit_price"]
+    let market = match order["type"].as_str().unwrap_or("limit") {
+        "limit" => false,
+        "market" => true,
+        _ => return Err("type: limit or market".into()),
+    };
+    let key = if market { "ref_price" } else { "limit_price" };
+    let price = order[key]
         .as_f64()
         .filter(|p| p.is_finite())
-        .ok_or("limit_price: a number")?;
+        .ok_or(format!("{key}: a number"))?;
     let cents = (price * 100.0).round();
     if cents == 0.0 || (price * 100.0 - cents).abs() > 1e-6 {
-        return Err("limit_price: non-zero, whole cents".into());
+        return Err(format!("{key}: non-zero, whole cents"));
     }
     let mut out = Vec::new();
     for l in legs {
@@ -219,16 +226,19 @@ pub fn intent(order: &Value, id: &str) -> Result<Value, String> {
         out.push(json!({ "instrument": { "class": "option", "symbol": symbol }, "ratio": ratio, "side": side, "effect": effect }));
     }
     let price = format!("{:.2}", cents / 100.0);
-    Ok(if out.len() == 1 {
+    let mut i = if out.len() == 1 {
         if cents < 0.0 {
-            return Err("a single leg's limit price is positive".into());
+            return Err(format!("a single leg's {key} is positive"));
         }
         let l = &out[0];
-        json!({ "client_order_id": id, "shape": "single", "instrument": l["instrument"], "side": l["side"], "effect": effect,
-                "qty": qty, "type": "limit", "limit_price": price, "time_in_force": "day" })
+        json!({ "client_order_id": id, "shape": "single", "instrument": l["instrument"], "side": l["side"], "effect": effect, "qty": qty })
     } else {
-        json!({ "client_order_id": id, "shape": "combo", "legs": out, "qty": qty, "type": "limit", "limit_price": price, "time_in_force": "day" })
-    })
+        json!({ "client_order_id": id, "shape": "combo", "legs": out, "qty": qty })
+    };
+    i["type"] = json!(if market { "market" } else { "limit" });
+    i[key] = json!(price);
+    i["time_in_force"] = json!("day");
+    Ok(i)
 }
 
 /// `^[A-Z]{1,6}\d{6}[CP]\d{8}$`
@@ -287,7 +297,19 @@ mod tests {
             ),
             (Some("single"), Some("2.10"), Some("buy"))
         );
+        // A market order: its reference price instead of a limit.
+        let m = json!({ "type": "market", "qty": 1, "ref_price": -2.13, "effect": "close", "legs": [
+            { "symbol": "SPY261015C00765000", "side": "buy" }, { "symbol": "SPY261015C00769000", "side": "sell" },
+        ] });
+        let i = intent(&m, "tt-4").unwrap();
+        assert_eq!(
+            (i["type"].as_str(), i["ref_price"].as_str()),
+            (Some("market"), Some("-2.13"))
+        );
+        assert!(i.get("limit_price").is_none());
         for bad in [
+            json!({ "type": "stop", "qty": 1, "limit_price": 1.0, "legs": [{ "symbol": "SPY261016C00780000", "side": "buy" }] }),
+            json!({ "type": "market", "qty": 1, "limit_price": 1.0, "legs": [{ "symbol": "SPY261016C00780000", "side": "buy" }] }),
             json!({ "qty": 1, "limit_price": 1.234, "legs": [{ "symbol": "SPY261016C00780000", "side": "buy" }] }),
             json!({ "qty": 1, "limit_price": -1.0, "legs": [{ "symbol": "SPY261016C00780000", "side": "buy" }] }),
             json!({ "qty": 0, "limit_price": 1.0, "legs": [{ "symbol": "SPY261016C00780000", "side": "buy" }] }),

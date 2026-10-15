@@ -176,6 +176,35 @@ fn dbn_file_source_and_unknown_instrument() {
     gw.stop().unwrap();
 }
 
+/// A market order takes the touch, whatever its reference price: a buy the
+/// ask, a sell the bid.
+#[test]
+fn market_orders_fill_at_the_touch() {
+    let q = vec![quote(1, T0, Some(190), Some(200), 5)];
+    let market = |s: String| {
+        s.replace(
+            r#""type":"limit","limit_price""#,
+            r#""type":"market","ref_price""#,
+        )
+    };
+    run("market-type", "{}", &q, |c| {
+        advance(c, T0);
+        let r = c.submit(
+            "r1",
+            &market(single("wse-m1", CALL, "buy", "open", 1, "1.00")),
+        );
+        assert_eq!(r["outcome"], "accepted", "{r}");
+        let r = c.submit(
+            "r2",
+            &market(single("wse-m2", CALL, "sell", "close", 1, "3.00")),
+        );
+        assert_eq!(r["outcome"], "accepted", "{r}");
+        let ev = advance(c, T0 + 10 * MS);
+        assert_eq!(fill_price(&ev, "wse-m1").as_deref(), Some("2.00"));
+        assert_eq!(fill_price(&ev, "wse-m2").as_deref(), Some("1.90"));
+    });
+}
+
 /// Rule 1: records with equal timestamps apply in input order.
 #[test]
 fn rule1_equal_timestamps_keep_input_order() {

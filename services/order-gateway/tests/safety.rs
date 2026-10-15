@@ -87,6 +87,20 @@ fn each_cap_refuses_before_any_send() {
         cap(c.submit("n", &single("wse-n", CALL, "buy", "open", 10, "2.51"))),
         want("notional")
     );
+    // A market order's notional is its reference price's.
+    let market = |s: String| {
+        s.replace(
+            r#""type":"limit","limit_price""#,
+            r#""type":"market","ref_price""#,
+        )
+    };
+    assert_eq!(
+        cap(c.submit(
+            "nm",
+            &market(single("wse-nm", CALL, "buy", "open", 10, "2.51"))
+        )),
+        want("notional")
+    );
     c.submit("a1", &buy("wse-a1"));
     c.submit("a2", &buy("wse-a2"));
     assert_eq!(cap(c.submit("o", &buy("wse-o"))), want("open_orders"));

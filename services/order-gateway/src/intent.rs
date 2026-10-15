@@ -19,7 +19,8 @@ pub struct Leg {
     pub open: bool,
 }
 
-/// A validated limit/day intent of one allowlisted shape.
+/// A validated day intent of one allowlisted shape: a limit order, or a
+/// market order carrying the client's reference price for the caps.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Intent {
     /// The only logical order key.
@@ -30,8 +31,13 @@ pub struct Intent {
     pub legs: Vec<Leg>,
     /// Contracts (parent units for a combo).
     pub qty: u32,
-    /// Limit in cents; a combo is signed (+ debit, − credit).
+    /// Limit in cents; a combo is signed (+ debit, − credit). For a market
+    /// order, its `ref_price`: what the client expects it to cost (the
+    /// natural price when sent), which the notional cap is checked against.
+    /// It doesn't bound the fill.
     pub limit_cents: i64,
+    /// `type: market`: sent with no price; fills at whatever the market gives.
+    pub market: bool,
     /// `time_in_force: cls`: the closing auction (limit-on-close), stock singles only.
     pub on_close: bool,
 }
@@ -194,11 +200,15 @@ impl Intent {
             }]
         };
         let qty = u32::try_from(f.int("qty", 1, 1_000_000)?).unwrap_or(1);
-        if f.string("type")? != "limit" {
-            return Err(invalid(&f.at("type"), "only limit"));
-        }
-        let price_path = f.at("limit_price");
-        let limit_cents = parse_cents(&f.string("limit_price")?)
+        let market = match f.string("type")?.as_str() {
+            "limit" => false,
+            "market" => true,
+            _ => return Err(invalid(&f.at("type"), "limit or market")),
+        };
+        // A market order names no limit, but a reference price for the caps.
+        let price_field = if market { "ref_price" } else { "limit_price" };
+        let price_path = f.at(price_field);
+        let limit_cents = parse_cents(&f.string(price_field)?)
             .filter(|c| if combo { *c != 0 } else { *c > 0 })
             .ok_or_else(|| {
                 invalid(
@@ -208,11 +218,11 @@ impl Intent {
             })?;
         let on_close = match f.string("time_in_force")?.as_str() {
             "day" => false,
-            "cls" if !combo && legs[0].equity => true,
+            "cls" if !combo && legs[0].equity && !market => true,
             _ => {
                 return Err(invalid(
                     &f.at("time_in_force"),
-                    "day, or cls for a stock single",
+                    "day, or cls for a stock single limit",
                 ));
             }
         };
@@ -223,6 +233,7 @@ impl Intent {
             legs,
             qty,
             limit_cents,
+            market,
             on_close,
         })
     }
@@ -276,8 +287,15 @@ impl Intent {
                 .s("effect", effect(l));
         }
         o.n("qty", self.qty)
-            .s("type", "limit")
-            .s("limit_price", &fmt_cents(self.limit_cents))
+            .s("type", if self.market { "market" } else { "limit" })
+            .s(
+                if self.market {
+                    "ref_price"
+                } else {
+                    "limit_price"
+                },
+                &fmt_cents(self.limit_cents),
+            )
             .s("time_in_force", if self.on_close { "cls" } else { "day" })
             .done()
     }

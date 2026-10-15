@@ -180,7 +180,7 @@ pub fn order_body(
     combo: bool,
     legs: &[LegSpec<'_>],
     qty: u32,
-    limit_price: &str,
+    limit_price: Option<&str>,
     on_close: bool,
 ) -> String {
     let side = |l: &LegSpec<'_>| if l.buy { "buy" } else { "sell" };
@@ -188,7 +188,14 @@ pub fn order_body(
         let effect = if l.open { "open" } else { "close" };
         format!("\"{}_to_{effect}\"", side(l))
     };
-    let (cid, price) = (quote(client_order_id), quote(limit_price));
+    let cid = quote(client_order_id);
+    // A limit order's type and price; a market order has no price.
+    let ty = if limit_price.is_some() {
+        "limit"
+    } else {
+        "market"
+    };
+    let price = limit_price.map_or_else(String::new, |p| format!(r#","limit_price":{}"#, quote(p)));
     if combo {
         let legs: Vec<String> = legs
             .iter()
@@ -203,21 +210,21 @@ pub fn order_body(
             })
             .collect();
         format!(
-            r#"{{"order_class":"mleg","qty":"{qty}","type":"limit","time_in_force":"day","limit_price":{price},"client_order_id":{cid},"legs":[{}]}}"#,
+            r#"{{"order_class":"mleg","qty":"{qty}","type":"{ty}","time_in_force":"day"{price},"client_order_id":{cid},"legs":[{}]}}"#,
             legs.join(",")
         )
     } else if legs[0].equity {
         let l = &legs[0];
         let tif = if on_close { "cls" } else { "day" };
         format!(
-            r#"{{"symbol":{},"qty":"{qty}","side":"{}","type":"limit","limit_price":{price},"time_in_force":"{tif}","client_order_id":{cid}}}"#,
+            r#"{{"symbol":{},"qty":"{qty}","side":"{}","type":"{ty}"{price},"time_in_force":"{tif}","client_order_id":{cid}}}"#,
             quote(l.symbol),
             side(l)
         )
     } else {
         let l = &legs[0];
         format!(
-            r#"{{"symbol":{},"qty":"{qty}","side":"{}","type":"limit","limit_price":{price},"time_in_force":"day","client_order_id":{cid},"position_intent":{}}}"#,
+            r#"{{"symbol":{},"qty":"{qty}","side":"{}","type":"{ty}"{price},"time_in_force":"day","client_order_id":{cid},"position_intent":{}}}"#,
             quote(l.symbol),
             side(l),
             intent(l)

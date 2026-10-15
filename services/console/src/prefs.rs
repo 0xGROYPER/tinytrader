@@ -84,7 +84,9 @@ impl Prefs {
     /// large, or the file can't be written.
     pub fn put(&self, key: &str, value: Value, based_on: Option<&str>) -> Result<(), Refused> {
         if !key_ok(key) {
-            return Err(Refused::Bad("a key is lower case letters, digits and dashes".into()));
+            return Err(Refused::Bad(
+                "a key is lower case letters, digits and dashes".into(),
+            ));
         }
         let size = serde_json::to_vec(&value).map_or(usize::MAX, |b| b.len());
         if size > MAX_VALUE {
@@ -134,8 +136,16 @@ mod tests {
         let path = dir.join("prefs.json");
         let p = Prefs::open(path.clone());
         let ok = |r: Result<(), Refused>| assert!(r.is_ok());
-        ok(p.put("tinytrader-watchlists", serde_json::json!([{ "name": "China AI" }]), None));
-        ok(p.put("tinytrader-theme", Value::String("dark".into()), Some("absent")));
+        ok(p.put(
+            "tinytrader-watchlists",
+            serde_json::json!([{ "name": "China AI" }]),
+            None,
+        ));
+        ok(p.put(
+            "tinytrader-theme",
+            Value::String("dark".into()),
+            Some("absent"),
+        ));
         // Saved from an old version: refused, with the current value.
         let v1 = version(Some(&Value::String("dark".into())));
         ok(p.put("tinytrader-theme", Value::String("light".into()), Some(&v1)));

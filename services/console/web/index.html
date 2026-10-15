@@ -249,7 +249,7 @@ tr.today td { background: var(--accent-soft); }
 .acct .pos-tbl { font-size: 12px; }
 .acct .pos-tbl th, .acct .pos-tbl td { padding: 3px 6px; }
 @container (max-width: 340px) { .acct .acct-today { display: none; } .acct .pos-tbl th, .acct .pos-tbl td { padding-inline: 3px; } }
-.tile-body:has(> .acct-main), .tile-body:has(> .ot-box) { padding: 8px; }
+.tile-body:has(> .acct-main) { padding: 8px; }
 .acct-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .acct-flat { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
 .acct-flat input { margin-left: 6px; font: 13px var(--mono); padding: 2px 6px; width: 10em; }
@@ -1007,7 +1007,7 @@ a.doc-card { text-decoration: none; }
 .sb-pay:empty { display: none; }
 .sb-table { overflow-x: auto; max-width: 760px; border: 1px solid var(--line); border-radius: 8px; }
 .sb-legs { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
-.sb-bar, .sb-why, .sb-review { max-width: 760px; }
+.sb-bar, .sb-why, .sb-ticket { max-width: 760px; }
 .sb .sb-trade { min-height: 0; height: 28px; padding: 0 14px; font-size: 13px; }
 .sb-adds { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .sb-legs th { text-align: left; font: 500 12px var(--ui); color: var(--muted); padding: 4px 8px; border-bottom: 1px solid var(--line); }
@@ -1045,11 +1045,6 @@ button.sb-occ:hover { color: var(--accent); }
   .sb-qty-cell { gap: 2px; }
   .sb-legs td, .sb-legs th { padding-inline: 3px; }
 }
-@container (max-width: 520px) {
-  .sb-tk label { flex: 1 1 40%; } .sb-tk select, .sb-tk input { flex: 1; }
-  .sb-tk .btn.primary, .sb-review .btn { flex: 1 1 100%; }
-  .sb-review p:last-child { display: flex; flex-wrap: wrap; gap: 8px; }
-}
 /* Touch: bigger targets, the same layout. */
 @media (pointer: coarse) {
   .sb-mini, .sb-x { min-width: 30px; height: 30px; }
@@ -1075,19 +1070,33 @@ button.sb-occ:hover { color: var(--accent); }
 .sb-sum { margin: 0; font-size: 13px; line-height: 1.7; }
 .sb-msg { margin: 0; font-size: 12px; }
 .sb-why { margin: 0; font-size: 13px; line-height: 1.5; max-width: 70ch; }
-.sb-why:empty, .sb-ticket:empty, .sb-orders:empty { display: none; }
+.sb-why:empty, .sb-ticket:empty { display: none; }
 .sb-why { font-size: 12px; }
-.sb-tk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
-.sb-tk label { display: inline-flex; align-items: center; gap: 4px; }
-.sb-tk select, .sb-tk input { font: 13px var(--mono, monospace); padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
-.sb-limit { width: 6.5em; }
-.sb-review { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--surface); font-size: 13px; }
-.sb-review p { margin: 4px 0; } .sb-review ul { margin: 4px 0; padding-left: 18px; font-size: 12px; }
-.sb-note { margin: 0; font-size: 12px; } .sb-result { margin: 4px 0 0; font-size: 12px; }
 .sb-good { color: var(--ok); } .sb-bad { color: var(--crit); }
-.sb-live { border: 2px solid var(--crit-mark); background: var(--crit-soft); }
-.sb-confirm { width: 7em; font-size: 13px; padding: 3px 6px; border: 1px solid var(--crit-line); border-radius: 6px; background: var(--bg); color: var(--fg); }
-.sb-ol { list-style: none; margin: 4px 0 0; padding: 0; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+/* The order ticket (lib/ticket.js): Accounts' Close… and the Spread builder's Trade. */
+.ot-box:empty { display: none; } .ot-box { margin-bottom: 10px; }
+.tk { container-type: inline-size; display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--surface); font-size: 13px; }
+.tk p { margin: 0; }
+.tk-live { border: 2px solid var(--crit-mark); }
+.tk-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.tk-head .tk-x { margin-left: auto; }
+.tk-live-tag { font: 600 11px var(--ui); letter-spacing: .04em; color: var(--crit); }
+.tk select, .tk input { font: 13px var(--mono, monospace); padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
+.tk-legs { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; }
+.tk-leg small { color: var(--muted); margin-left: 4px; }
+.tk-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.tk-qty { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); } .tk-q { width: 7ch; }
+.tk-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.tk-seg button { border: 0; padding: 4px 10px; background: transparent; color: var(--fg-2); font: 12px var(--ui); cursor: pointer; }
+.tk-seg button + button { border-left: 1px solid var(--line); }
+.tk-seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--fg); font-weight: 600; }
+.tk-px { display: inline-flex; align-items: center; gap: 2px; } .tk-limit { width: 11ch; text-align: right; }
+.tk-link { border: 0; padding: 0; background: none; color: var(--muted); font: 12px var(--mono, monospace); text-decoration: underline dotted; cursor: pointer; } .tk-link:hover { color: var(--fg); }
+.tk-sum, .tk-warn, .tk-note, .tk-res { font-size: 12px; }
+.tk-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.tk .btn.primary.danger { background: var(--crit-mark); border-color: var(--crit-mark); color: #fff; }
+@container (max-width: 420px) { .tk-acts .btn { flex: 1 1 100%; min-height: 40px; } }
+@media (pointer: coarse) { .tk input, .tk select { font-size: 16px; } .tk-seg button { padding: 8px 14px; } }
 .pf-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 5px 12px calc(5px + env(safe-area-inset-bottom, 0px)); background: var(--surface, #fff); border-top: 1px solid var(--line); font: 12px var(--mono, monospace); color: var(--fg-2, var(--fg)); }
 .pf-bar b { color: var(--fg); } .pf-bar .pf-gap { flex: 1; }
 .pf-bar button { min-height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; cursor: pointer; }
@@ -1174,13 +1183,6 @@ body.pf-on { padding-bottom: 40px; }
 @keyframes evflash { from { background: var(--accent-soft); } to { background: transparent; } }
 @media (prefers-reduced-motion: reduce) { .ev-row.new summary { animation: none; } }
 /* Accounts: the order ticket (widgets/accounts.js). */
-.ot-box:empty { display: none; }
-.ot-box { margin-bottom: 12px; }
-.ot { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--surface); font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
-.ot p { margin: 0; }
-.ot-head { display: flex; align-items: center; gap: 8px; } .ot-head .btn { margin-left: auto; }
-.ot-legs input, .ot-legs select, .ot-price input, .ot-price select { font: 13px var(--mono, monospace); padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
-.ot-legs .ot-sym { width: 21ch; } .ot-legs .ot-ratio, .ot-price .ot-qty { width: 6ch; } .ot-limit { width: 11ch; min-width: 92px; }
 .tp-top { flex-shrink: 0; } .tile-body:has(> .tp-main) { gap: 6px; padding-block: 8px; } .tile-body > .tp-main { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; gap: 4px; }
 .tp-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 12px; }
 .tp-bar select { font: 12px var(--ui); padding: 2px 4px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--fg); }
@@ -1208,14 +1210,6 @@ body.pf-on { padding-bottom: 40px; }
 .tp-last.tp-up { animation: tp-flash-buy .9s ease-out; color: var(--ok, #1a7f37); } .tp-last.tp-down { animation: tp-flash-sell .9s ease-out; color: var(--crit, #c62828); }
 @media (prefers-reduced-motion: reduce) { .tp-new td, .tp-last.tp-up, .tp-last.tp-down { animation: none; } }
 .tp-foot { margin: 0; font-size: 11px; }
-.ot-legs td, .ot-legs th { text-align: left; } .ot-legs .num { text-align: right; }
-.ot-price { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
-.ot-price label { display: inline-flex; align-items: center; gap: 4px; }
-.ot-steps { display: inline-flex; flex-wrap: wrap; gap: 4px; }
-.ot-where { font-size: 12px; }
-.ot-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.ot-result { margin: 4px 0 0; font-size: 12px; }
-@media (max-width: 640px) { .ot-price input, .ot-legs input, .ot-legs select { font-size: 16px; } .ot-acts .btn { flex: 1 1 100%; min-height: 44px; } }
 </style>
 </head>
 <body>

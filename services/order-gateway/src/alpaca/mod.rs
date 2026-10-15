@@ -314,7 +314,7 @@ impl Broker for AlpacaPaper {
             intent.combo,
             &legs,
             intent.qty,
-            &price,
+            (!intent.market).then_some(price.as_str()),
             intent.on_close,
         );
         let r = match self.http.call("POST", "/v2/orders", Some(&body)) {

@@ -165,8 +165,13 @@ fn request_errors_keep_the_connection_open() {
         ),
         (buy("wse 1"), "intent.client_order_id"),
         (
-            buy("wse-1").replace(r#""type":"limit""#, r#""type":"market""#),
+            buy("wse-1").replace(r#""type":"limit""#, r#""type":"stop""#),
             "intent.type",
+        ),
+        // A market order names a reference price for the caps, not a limit.
+        (
+            buy("wse-1").replace(r#""type":"limit""#, r#""type":"market""#),
+            "intent.ref_price",
         ),
         (
             buy("wse-1").replace(r#""day""#, r#""day","extra":true"#),

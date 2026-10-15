@@ -545,7 +545,17 @@ impl Broker for SimBroker {
             intent.combo,
             legs,
             u64::from(intent.qty),
-            intent.limit_cents,
+            // A market order against quotes takes any price (a sell's at least
+            // a cent); scripted, it fills at its reference price.
+            if intent.market && self.market.is_some() {
+                if !intent.combo && !intent.legs[0].buy {
+                    1
+                } else {
+                    i64::MAX / CENT
+                }
+            } else {
+                intent.limit_cents
+            },
             rule,
         );
         let accepted = self.broker_order(i);

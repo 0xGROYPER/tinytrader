@@ -176,9 +176,10 @@ intent = {
   // combo:
   legs: [{instrument, ratio: int ≥ 1, side, effect}]   // 2..=4 legs, distinct symbols, gcd(ratios) = 1
   qty: int ≥ 1,                 // contracts or shares; for a combo, parent units
-  type: "limit",
-  limit_price: decimal string,  // single: > 0; combo: signed net per unit, + debit, − credit, ≠ 0
-  time_in_force: "day" | "cls"  // cls: the closing auction (limit-on-close), stock singles only
+  type: "limit" | "market",
+  limit_price: decimal string,  // limit: single > 0; combo: signed net per unit, + debit, − credit, ≠ 0
+  ref_price: decimal string,    // market (instead of limit_price): what the client expects it to cost, same form
+  time_in_force: "day" | "cls"  // cls: the closing auction (limit-on-close), stock single limits only
 }
 OCC    = ^[A-Z]{1,6}\d{6}[CP]\d{8}$   (compact, spaces removed)
 TICKER = ^[A-Z]{1,5}(\.[A-Z])?$       (e.g. AAPL, BRK.B)
@@ -205,8 +206,10 @@ The broker's `capabilities` declare its tick rules, and the gateway refuses an i
 
 **Canonical form:** the gateway re-serializes the parsed intent with a fixed field order, no whitespace, and prices normalized to the shortest form with 2 decimal places. Its SHA-256 is `intent_sha256`, which is used for duplicate detection.
 
+**Market orders** (`type: "market"`) are sent with no price and fill at whatever the market gives, across the spread. The gateway has no quotes of its own, so a market intent carries `ref_price`, the client's estimate of its price when sent (the console sends the natural: the ask on buys, the bid on sells), and the notional cap is checked against it. It doesn't bound the fill. Day only; no `cls`.
+
 **Reserved for later versions, as allowlist additions rather than protocol changes:**
-- market, stop and stop-limit types
+- stop and stop-limit types
 - GTC, IOC and FOK
 - `replace`
 - index-option roots
@@ -216,6 +219,7 @@ The broker's `capabilities` declare its tick rules, and the gateway refuses an i
 | Intent | Alpaca `POST /v2/orders` body |
 |---|---|
 | single | `{symbol, qty, side, type:"limit", limit_price, time_in_force:"day", client_order_id, position_intent}` |
+| market (single or combo) | as above with `type:"market"` and no `limit_price` |
 | combo | `{order_class:"mleg", qty, type:"limit", limit_price, time_in_force:"day", client_order_id, legs:[{symbol, ratio_qty, side, position_intent}]}` |
 | stock single | `{symbol, qty, side, type:"limit", limit_price, time_in_force:"day"\|"cls", client_order_id}`, with no `position_intent`: Alpaca infers opening or closing from the position |
 | `side` + `effect` | `position_intent` is `buy_to_open`, `buy_to_close`, `sell_to_open` or `sell_to_close` (options) |
@@ -281,7 +285,7 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 | qty per order | 10 contracts (`--max-qty`) |
 | shares per stock order | 1,000 (`--max-shares`) |
 | legs | 4 |
-| notional per order: \|limit_price\| × qty × multiplier (100 an option, 1 a share) | $2,500 |
+| notional per order: \|limit_price\| (a market order's \|ref_price\|) × qty × multiplier (100 an option, 1 a share) | $2,500 |
 | consecutive broker rejects | 5, which trips `halt_opens` |
 
 ## 9. Safety rules
@@ -334,7 +338,7 @@ The script also sets the account fields (status, options level, cash, blocked fl
 - *Single sell:* fillable when the bid is present and bid ≥ L, at the bid.
 - *Combo:* the net cost per unit is
   `N = Σ_buy ratio·ask − Σ_sell ratio·bid`
-  over the current state of every leg. Every needed side must be present and every leg usable. The combo is fillable when N ≤ `limit_price`; this one rule covers both debits and credits, because credits are negative. It fills **atomically**, with each leg at its touch and the parent `fill.price = N`.
+  over the current state of every leg. Every needed side must be present and every leg usable. The combo is fillable when N ≤ `limit_price`; this one rule covers both debits and credits, because credits are negative. It fills **atomically**, with each leg at its touch and the parent `fill.price = N`. A market order is fillable whenever every needed side is present (in scripted mode it fills at its `ref_price`).
 - *Quantity:* the default is atomic full quantity. With `size_cap: displayed`, the fill is min(remaining, displayed size) for a single, or min over legs of ⌊size / ratio⌋ for a combo. The rest stays working. A displayed size, once consumed, is not consumed again until a new quote record arrives for that instrument.
 - *Expiry:* working `day` orders expire at the session close in the profile calendar, with an early close where the calendar lists one.
 - *Fees:* each fill carries `fees` from the fee profile. The default is $0 commission plus a configurable per-contract regulatory fee.

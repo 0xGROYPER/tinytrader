@@ -76,7 +76,7 @@ fn bodies_follow_reactor_field_order() {
         false,
         &[leg("SPY261005C00580000", false, false)],
         2,
-        "1.25",
+        Some("1.25"),
         false,
     );
     assert_eq!(
@@ -91,8 +91,38 @@ fn bodies_follow_reactor_field_order() {
         leg("SPY261005C00590000", false, true),
     ];
     assert_eq!(
-        order_body("wse-2", true, &legs, 1, "-0.40", false),
+        order_body("wse-2", true, &legs, 1, Some("-0.40"), false),
         r#"{"order_class":"mleg","qty":"1","type":"limit","time_in_force":"day","limit_price":"-0.40","client_order_id":"wse-2","legs":[{"symbol":"SPY261005C00580000","ratio_qty":"2","side":"buy","position_intent":"buy_to_open"},{"symbol":"SPY261005C00590000","ratio_qty":"1","side":"sell","position_intent":"sell_to_open"}]}"#
+    );
+}
+
+#[test]
+fn market_orders_have_no_price() {
+    let leg = |symbol, buy, open| LegSpec {
+        symbol,
+        ratio: 1,
+        buy,
+        open,
+        equity: false,
+    };
+    let legs = [
+        leg("SPY261005C00580000", true, false),
+        leg("SPY261005C00590000", false, false),
+    ];
+    assert_eq!(
+        order_body("tt-1", true, &legs, 1, None, false),
+        r#"{"order_class":"mleg","qty":"1","type":"market","time_in_force":"day","client_order_id":"tt-1","legs":[{"symbol":"SPY261005C00580000","ratio_qty":"1","side":"buy","position_intent":"buy_to_close"},{"symbol":"SPY261005C00590000","ratio_qty":"1","side":"sell","position_intent":"sell_to_close"}]}"#
+    );
+    assert_eq!(
+        order_body(
+            "tt-2",
+            false,
+            &[leg("SPY261005C00580000", false, true)],
+            3,
+            None,
+            false
+        ),
+        r#"{"symbol":"SPY261005C00580000","qty":"3","side":"sell","type":"market","time_in_force":"day","client_order_id":"tt-2","position_intent":"sell_to_open"}"#
     );
 }
 
@@ -106,11 +136,25 @@ fn stock_orders_have_no_position_intent_and_may_be_on_close() {
         equity: true,
     };
     assert_eq!(
-        order_body("pead-1", false, &[aapl(true, true)], 9, "222.50", true),
+        order_body(
+            "pead-1",
+            false,
+            &[aapl(true, true)],
+            9,
+            Some("222.50"),
+            true
+        ),
         r#"{"symbol":"AAPL","qty":"9","side":"buy","type":"limit","limit_price":"222.50","time_in_force":"cls","client_order_id":"pead-1"}"#
     );
     assert_eq!(
-        order_body("pead-2", false, &[aapl(false, true)], 9, "210.00", false),
+        order_body(
+            "pead-2",
+            false,
+            &[aapl(false, true)],
+            9,
+            Some("210.00"),
+            false
+        ),
         r#"{"symbol":"AAPL","qty":"9","side":"sell","type":"limit","limit_price":"210.00","time_in_force":"day","client_order_id":"pead-2"}"#
     );
 }
