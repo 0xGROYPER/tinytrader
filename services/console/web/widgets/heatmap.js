@@ -12,6 +12,7 @@ import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, setFocus } from '../lib/theme.js';
+import { get, stream } from '../lib/cache.js';
 
 // Periods: the row's field and the change at which colour saturates.
 const PERIODS = { '1D': ['change_pct', 0.03], '1W': ['change_5d', 0.06], '1M': ['change_21d', 0.10] };
@@ -106,9 +107,7 @@ defineWidget('heatmap', {
       const svc = service(); if (!svc) { update(); return; }
       if (my.loading) return; my.loading = true; my.tried = Date.now();
       try {
-        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/screener`, { cache: 'no-store' });
-        const v = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(v.error || `${r.status}`);
+        const v = await get(stream(svc, 'screener'), { fresh: 10e3 });
         if (!my.alive) return;
         my.rows = v.rows || []; my.at = Date.now(); my.err = ''; my.pending = v.pending || 0;
       } catch (e) { my.err = `The screener couldn't be read: ${e.message}`; }

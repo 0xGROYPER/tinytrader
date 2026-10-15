@@ -9,6 +9,7 @@ import { defineWidget } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused } from '../lib/theme.js';
+import { get, stream } from '../lib/cache.js';
 
 const EVERY = 30_000;
 /** Strikes shown either side of spot. */
@@ -89,9 +90,7 @@ defineWidget('ivmap', {
       const svc = source(), sym = my.symbol;
       if (!my.alive || !svc || !sym) return;
       try {
-        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/chain?underlying=${encodeURIComponent(sym)}`, { cache: 'no-store' });
-        const v = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(v.error || `${r.status} ${r.statusText}`);
+        const v = await get(stream(svc, 'chain', { underlying: sym }), { fresh: 10e3 });
         if (sym !== my.symbol) return;
         my.chain = v; my.err = null;
       } catch (e) { if (sym === my.symbol) my.err = `Chain unavailable: ${e.message}`; }

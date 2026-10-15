@@ -9,6 +9,7 @@
 // seconds. A live account is never picked for you, and its Send asks once
 // more before it sends.
 import { fleet, svcState } from './fleet.js';
+import { get, stream } from './cache.js';
 import { esc } from './format.js';
 import { notSentText } from './orders.js';
 
@@ -74,9 +75,8 @@ export function createTicket(box, hooks = {}) {
     const errs = [];
     await Promise.all([...want.values()].map(async ([root, expiry]) => {
       try {
-        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/chain?underlying=${encodeURIComponent(root)}&from=${expiry}&to=${expiry}`, { cache: 'no-store' });
-        const v = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(v.error || `${r.status}`);
+        // The same read as the Spread builder's for that expiry: shared.
+        const v = await get(stream(svc, 'chain', { underlying: root, from: expiry, to: expiry }), { fresh: 1500 });
         for (const c of v.contracts || []) if (c.symbol) me.quotes.set(c.symbol, c);
       } catch (e) { errs.push(`${root} ${expiry}: ${e.message}`); }
     }));

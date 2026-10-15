@@ -191,6 +191,55 @@ pub fn expiries(
         .collect()
 }
 
+/// An underlying's listed contracts as the chain's index: its expiries from
+/// `today` on, each with its OCC root and the call and put strikes, from
+/// pages of Alpaca's `/v2/options/contracts`. What exists, not what it costs:
+/// it changes once a day, so it's kept a day.
+#[must_use]
+pub fn index(underlying: &str, today: &str, pages: &[Value]) -> Value {
+    // Expiry → (root, call strikes, put strikes).
+    type Listed = (String, Vec<f64>, Vec<f64>);
+    let mut by: BTreeMap<String, Listed> = BTreeMap::new();
+    for c in pages
+        .iter()
+        .flat_map(|v| v["option_contracts"].as_array().into_iter().flatten())
+    {
+        let (Some(expiry), Some(strike)) = (
+            c["expiration_date"].as_str().filter(|e| *e >= today),
+            c["strike_price"]
+                .as_str()
+                .and_then(|x| x.parse::<f64>().ok())
+                .or_else(|| c["strike_price"].as_f64()),
+        ) else {
+            continue;
+        };
+        let e = by.entry(expiry.to_owned()).or_insert_with(|| {
+            (
+                c["root_symbol"].as_str().unwrap_or(underlying).to_owned(),
+                Vec::new(),
+                Vec::new(),
+            )
+        });
+        if c["type"] == "call" {
+            e.1.push(strike)
+        } else {
+            e.2.push(strike)
+        }
+    }
+    let tidy = |mut v: Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        v.dedup();
+        v
+    };
+    json!({
+        "underlying": underlying,
+        "date": today,
+        "expiries": by.into_iter().map(|(expiry, (root, calls, puts))| json!({
+            "expiry": expiry, "root": root, "calls": tidy(calls), "puts": tidy(puts),
+        })).collect::<Vec<_>>(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +312,20 @@ mod tests {
         assert!((e[0]["implied_move"].as_f64().unwrap() - 4.0 / 101.0).abs() < 1e-9);
         // Only a call at the money: an IV, but no straddle.
         assert!(e[1]["straddle"].is_null() && e[1]["atm_iv"].as_f64().is_some());
+    }
+
+    #[test]
+    fn indexes_listed_contracts() {
+        let page = json!({ "option_contracts": [
+            { "symbol": "SPXW261016P05742500", "root_symbol": "SPXW", "expiration_date": "2026-10-16", "type": "put", "strike_price": "5742.5" },
+            { "symbol": "SPXW261016C05750000", "root_symbol": "SPXW", "expiration_date": "2026-10-16", "type": "call", "strike_price": "5750" },
+            { "symbol": "SPXW261016P05700000", "root_symbol": "SPXW", "expiration_date": "2026-10-16", "type": "put", "strike_price": "5700" },
+            { "symbol": "SPXW261014P05700000", "root_symbol": "SPXW", "expiration_date": "2026-10-14", "type": "put", "strike_price": "5700" },
+        ]});
+        let v = index("SPX", "2026-10-15", &[page]);
+        assert_eq!(
+            v["expiries"],
+            json!([{ "expiry": "2026-10-16", "root": "SPXW", "calls": [5750.0], "puts": [5700.0, 5742.5] }])
+        );
     }
 }

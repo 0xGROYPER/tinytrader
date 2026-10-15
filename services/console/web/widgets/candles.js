@@ -20,6 +20,7 @@ import { esc } from '../lib/format.js';
 import { theme, focused } from '../lib/theme.js';
 import { position } from '../lib/position.js';
 import { held, latest, older, exhausted } from '../lib/bars.js';
+import { get, stream } from '../lib/cache.js';
 
 const LIB = '/vendor/lightweight-charts-5.2.1.min.js';
 /** @type {Promise<any> | null} */
@@ -146,8 +147,7 @@ function chainFor(sym, to) {
   const c = chains.get(sym), svc = chainService();
   if (!svc) return Promise.resolve(null);
   if (c && c.to >= to && Date.now() - c.at < 300e3) return c.got;
-  const got = fetch(`/api/stream/${encodeURIComponent(svc)}/chain?underlying=${encodeURIComponent(sym)}&to=${to}`, { cache: 'no-store' })
-    .then(r => r.ok ? r.json() : null).catch(() => null);
+  const got = get(stream(svc, 'chain', { underlying: sym, to }), { fresh: 300e3 }).catch(() => null);
   chains.set(sym, { at: Date.now(), to, got });
   return got;
 }
@@ -384,8 +384,7 @@ defineWidget('candles', {
       if (!svc || OCC.test(symbol) || size > 86400 || !my.drawn.len) return;
       let snap;
       try {
-        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/snapshots?symbols=${encodeURIComponent(symbol)}`, { cache: 'no-store' });
-        snap = (await r.json()).snapshots?.find(x => x.symbol === symbol);
+        snap = (await get(stream(svc, 'snapshots', { symbols: symbol }), { fresh: 1500 })).snapshots?.find(x => x.symbol === symbol);
       } catch (_) { return; }
       const px = snap?.price, at = snap?.at;
       if (!(px > 0) || !at || my.pick?.symbol !== symbol || my.size !== size || !my.candles) return;

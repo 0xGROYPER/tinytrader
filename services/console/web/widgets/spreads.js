@@ -3,7 +3,10 @@
 // its chance of profit (from the expiry's implied distribution, fitted to the
 // whole chain by alpaca-data, unless the fit is poor; else lognormal at the
 // at-the-money volatility). Quotes come from a service serving option chains
-// (alpaca-data), which works out implied volatilities from them. The
+// (alpaca-data), which works out implied volatilities from them. What the
+// chain lists (expiries, strikes) is read once a day and kept in the browser
+// (lib/cache.js), so a ticker lays out at once; prices are read for the expiry
+// shown only, every few seconds, the same read the order ticket makes. The
 // underlying is typed in, or follows the symbol picked elsewhere; a stock
 // clicked in the screener gets a suggested position (lib/recommend.js) with
 // the reason. Trade opens the order ticket (lib/ticket.js): the account, the
@@ -17,6 +20,7 @@ import { position, publish, wanted } from '../lib/position.js';
 import { recommend } from '../lib/recommend.js';
 import { GROUPS, STRUCTURES, identify, whatIs } from '../lib/structures.js';
 import { createTicket } from '../lib/ticket.js';
+import { get, peek, stream } from '../lib/cache.js';
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (_) { /* private mode */ } return null; };
 // Each account's open orders as the broker has them (alpaca-account), however placed: null if unknown.
@@ -44,7 +48,8 @@ function bs(type, S, K, t, v) {
 defineWidget('spreads', {
   title: 'Spread builder',
   mount(el) {
-    const my = { sym: focused() || theme()?.symbols?.[0] || 'SPY', chain: null, expiry: null, structure: 'Custom', width: 2, err: '', alive: true, at: 0,
+    // index: what the chain lists; chain: the shown expiry's prices; spot: the underlying's last.
+    const my = { sym: focused() || theme()?.symbols?.[0] || 'SPY', index: /** @type {any} */ (null), full: /** @type {any} */ (null), chain: /** @type {any} */ (null), spot: /** @type {number | null} */ (null), expiry: /** @type {string | null} */ (null), structure: 'Custom', width: 2, err: '', alive: true, at: 0,
       // A suggestion waiting for its chain, and the one shown.
       ask: /** @type {any} */ (null), why: '',
       // The order ticket's account.
@@ -67,40 +72,95 @@ defineWidget('spreads', {
     const tkBox = /** @type {HTMLElement} */ ($('.sb-ticket'));
     const tk = createTicket(tkBox, { onAccount: n => { my.acct = n; store('tt-sb-account', n); } });
 
-    async function loadChain() {
-      const svc = chainService();
+    const day0 = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    // By day, so yesterday's kept listing isn't taken for today's.
+    const indexUrl = (svc, sym) => stream(svc, 'chain_index', { underlying: sym, day: day0() });
+    // The ticket reads its quotes with this same URL, so the two share it.
+    const pricesUrl = (svc, sym, e) => stream(svc, 'chain', { underlying: sym, from: e, to: e });
+    // The whole chain, only for a suggestion (lib/recommend.js looks 14 to 60 days out).
+    const fullUrl = (svc, sym) => stream(svc, 'chain', { underlying: sym, to: new Date(Date.now() + 61 * 86400e3).toISOString().slice(0, 10) });
+    const took = v => { if (v?.spot) my.spot = v.spot; };
+
+    // What the chain lists: kept from before at once (today's), then read.
+    async function loadIndex() {
+      const svc = chainService(), sym = my.sym;
       if (!svc) { my.err = 'No service serves option chains (alpaca-data).'; render(); return; }
-      const sym = my.sym, to = new Date(Date.now() + 120 * 86400e3).toISOString().slice(0, 10);
+      const url = indexUrl(svc, sym), kept = peek(url)?.v;
+      if (kept && !my.index) { my.index = kept; arrived(); }
       try {
-        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/chain?underlying=${encodeURIComponent(sym)}&to=${to}`, { cache: 'no-store' });
-        const v = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(v.error || `${r.status}`);
+        const v = await get(url, { fresh: 6 * 3600e3, keep: true });
         if (!my.alive || sym !== my.sym) return;
-        my.chain = v; my.at = Date.now(); my.err = '';
-        if (my.ask?.sym === sym) { suggest(my.ask); my.ask = null; render(); return; }
-        if (my.heldAsk?.sym === sym) { hold(my.heldAsk); my.heldAsk = null; render(); return; }
-        const exps = expiries().map(e => e.expiry);
-        // An expiry typed with the ticker (SPY261015): that one, or the next listed.
-        if (my.wantExpiry) { my.expiry = exps.find(x => x >= my.wantExpiry) || my.expiry; my.wantExpiry = null; }
-        if (!exps.includes(my.expiry)) { my.expiry = exps[0] || null; build(); }
-        else if (!legs().length) build();
-      } catch (e) { my.err = `${sym}: ${e.message}`; my.chain = null; }
+        my.index = v; arrived();
+      } catch (e) {
+        // No index (an older alpaca-data): the expiries come with the whole chain.
+        if (!my.alive || sym !== my.sym) return;
+        if (!my.index) loadFull();
+      }
+    }
+    // The chain listed: an expiry picked (asked for, typed or the first), then its prices.
+    function arrived() {
+      if (my.ask?.sym === my.sym) { loadFull(); return; }
+      if (my.heldAsk?.sym === my.sym) { hold(my.heldAsk); my.heldAsk = null; render(); loadPrices(); return; }
+      const exps = expiries().map(e => e.expiry);
+      if (my.wantExpiry) { my.expiry = exps.find(x => x >= my.wantExpiry) || my.expiry; my.wantExpiry = null; }
+      if (!exps.includes(my.expiry)) my.expiry = exps[0] || null;
+      render(); loadPrices();
+    }
+    // The shown expiry's quotes, IVs and greeks.
+    async function loadPrices() {
+      const svc = chainService(), sym = my.sym, e = my.expiry;
+      if (!svc || !e) return;
+      try {
+        const v = await get(pricesUrl(svc, sym, e), { fresh: 1500 });
+        if (!my.alive || sym !== my.sym || e !== my.expiry) return;
+        my.chain = v; my.at = Date.now(); my.err = ''; took(v);
+        if (!legs().length) build();
+      } catch (err) { if (sym === my.sym) my.err = `${sym}: ${err.message}`; }
       render();
+    }
+    // The whole chain: for a suggestion, positions held, or with no index.
+    async function loadFull() {
+      const svc = chainService(), sym = my.sym;
+      if (!svc) return;
+      try {
+        const v = await get(fullUrl(svc, sym), { fresh: 15e3 });
+        if (!my.alive || sym !== my.sym) return;
+        took(v); my.err = '';
+        if (!my.index) my.full = v;
+        if (my.ask?.sym === sym) { suggest(my.ask, v); my.ask = null; }
+        else if (my.heldAsk?.sym === sym) { hold(my.heldAsk); my.heldAsk = null; }
+        else {
+          const exps = expiries().map(x => x.expiry);
+          if (my.wantExpiry) { my.expiry = exps.find(x => x >= my.wantExpiry) || my.expiry; my.wantExpiry = null; }
+          if (!exps.includes(my.expiry)) my.expiry = exps[0] || null;
+        }
+        // Its prices for the expiry shown, until the expiry's own read comes.
+        if (my.chain?.from !== my.expiry) my.chain = { ...v, contracts: (v.contracts || []).filter(c => c.expiry === my.expiry) };
+        if (!legs().length) build();
+      } catch (e) { if (sym === my.sym) { my.err = `${sym}: ${e.message}`; } }
+      render(); loadPrices();
     }
     const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Today's expiry until a quarter past the close.
     const settled = () => +new Date().toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' }).replace(':', '') >= 1615;
-    const expiries = () => (my.chain?.expiries || []).filter(e => e.expiry > today() || (e.expiry === today() && !settled()));
+    const expiries = () => (my.index?.expiries || my.full?.expiries || []).filter(e => e.expiry > today() || (e.expiry === today() && !settled()));
+    const listed = () => my.index?.expiries?.find(e => e.expiry === my.expiry) || null;
     const contracts = () => (my.chain?.contracts || []).filter(c => c.expiry === my.expiry);
-    const strikesOf = type => [...new Set(contracts().filter(c => !type || c.type === type).map(c => c.strike))].sort((a, b) => a - b);
+    const strikesOf = type => {
+      const l = listed();
+      const ks = l ? (type === 'call' ? l.calls : type === 'put' ? l.puts : [...l.calls, ...l.puts]) : contracts().filter(c => !type || c.type === type).map(c => c.strike);
+      return [...new Set(ks)].sort((a, b) => a - b);
+    };
     const quote = (type, strike) => contracts().find(c => c.type === type && c.strike === strike) || null;
-    const atmIV = () => expiries().find(x => x.expiry === my.expiry)?.atm_iv || null;
+    // The shown expiry's measures (at-the-money IV, implied distribution) come with its prices.
+    const stats = () => my.chain?.expiries?.find(x => x.expiry === my.expiry) || null;
+    const atmIV = () => stats()?.atm_iv || null;
     const years = () => Math.max((Date.parse(`${my.expiry}T20:00:00Z`) - Date.now()) / (365 * 86400e3), 1 / (365 * 24 * 12));
     const legs = () => position.sym === my.sym ? position.legs : [];
     const nearest = (ks, x) => ks.reduce((b, k) => Math.abs(k - x) < Math.abs(b - x) ? k : b, ks[0]);
 
     function build() {
-      const ks = strikesOf(), spot = my.chain?.spot, make = STRUCTURES[my.structure];
+      const ks = strikesOf(), spot = my.spot, make = STRUCTURES[my.structure];
       if (!ks.length || !spot || !make) return;
       const a = ks.indexOf(nearest(ks, spot));
       position.sym = my.sym;
@@ -108,7 +168,7 @@ defineWidget('spreads', {
     }
 
     function analyse() {
-      const spot = my.chain?.spot, t = years(), ls = legs().map(l => ({ ...l, q: quote(l.type, l.strike) }));
+      const spot = my.spot, t = years(), ls = legs().map(l => ({ ...l, q: quote(l.type, l.strike) }));
       if (!spot || !ls.length) return null;
       const mid = q => q && q.bid != null && q.ask ? (q.bid + q.ask) / 2 : null;
       // A leg without a two-sided quote: at its own implied volatility, else the at-the-money one.
@@ -129,7 +189,7 @@ defineWidget('spreads', {
       // Chance of profit at expiry: from the implied distribution when its fit
       // is usable (linear between its CDF points), else lognormal at the
       // at-the-money implied volatility.
-      const dist = expiries().find(x => x.expiry === my.expiry)?.distribution;
+      const dist = stats()?.distribution;
       const pts = dist && dist.quality !== 'poor' && Array.isArray(dist.cdf) && dist.cdf.length > 2 ? dist.cdf : null;
       const sd = (atmIV() || 0.3) * Math.sqrt(t);
       const cdf = pts ? x => {
@@ -156,7 +216,7 @@ defineWidget('spreads', {
       // The box shows the underlying; typing replaces it.
       const tickerBox = /** @type {HTMLInputElement} */ ($('.sb-ticker'));
       if (document.activeElement !== tickerBox) tickerBox.placeholder = my.sym || 'Ticker';
-      $('.sb-spot').textContent = my.chain?.spot ? my.chain.spot.toFixed(2) : '';
+      $('.sb-spot').textContent = my.spot ? my.spot.toFixed(2) : '';
       $('.sb-spot').title = my.chain?.spot_from === 'parity' ? 'From the options (put-call parity)' : '';
       const exps = expiries(), sel = /** @type {HTMLSelectElement} */ ($('.sb-exp')), key = `${my.sym}|${exps.map(e => e.expiry).join()}`;
       if (sel.dataset.for !== key) {
@@ -225,7 +285,7 @@ defineWidget('spreads', {
       tb.textContent = open ? `Trade · ${open} open` : 'Trade';
       tb.title = open ? `${open} open order${open > 1 ? 's' : ''} across the accounts (see Accounts)` : '';
       if (tk.isOpen && (!a || a.held)) tk.close();
-      $('.sb-msg').textContent = my.err || (a?.missing ? 'A leg has no quote on this expiry; it is priced from its implied volatility.' : '') || (my.chain ? '' : 'Loading the chain…');
+      $('.sb-msg').textContent = my.err || (a?.missing ? 'A leg has no quote on this expiry; it is priced from its implied volatility.' : '') || (my.chain ? '' : my.index ? 'Loading prices…' : 'Loading the chain…');
     }
 
     // The payoff chart: P&L at expiry (solid, green above zero and red below) and
@@ -291,13 +351,13 @@ defineWidget('spreads', {
     const heldAsked = () => {
       const h = wanted.held; if (!h) return;
       wanted.held = null;
-      if (h.sym === my.sym && my.chain) { hold(h); render(); }
+      if (h.sym === my.sym && my.index) { hold(h); render(); loadPrices(); }
       else { my.heldAsk = h; switchTo(h.sym); }
     };
 
     // A suggested position for the stock asked about (from the screener).
-    function suggest(ask) {
-      const r = recommend({ chain: my.chain, view: ask.view, row: ask.row, earnings: ask.earnings });
+    function suggest(ask, chain) {
+      const r = recommend({ chain, view: ask.view, row: ask.row, earnings: ask.earnings });
       if ('none' in r) { my.why = `No suggestion: ${r.none}.`; my.structure = 'Custom'; return; }
       my.expiry = r.expiry; my.structure = r.label; my.why = r.why;
       position.sym = my.sym; position.legs = r.legs; tk.close();
@@ -305,7 +365,8 @@ defineWidget('spreads', {
 
     // Trade opens the ticket for the legs as they are: ratios in lowest terms,
     // the quantity the rest; opening. Changing the legs closes it.
-    const symbolOf = l => quote(l.type, l.strike)?.symbol || null;
+    // The contract's OCC symbol: as quoted, else from the listing's root.
+    const symbolOf = l => quote(l.type, l.strike)?.symbol || (listed() ? `${listed().root}${my.expiry.slice(2).replace(/-/g, '')}${l.type === 'call' ? 'C' : 'P'}${String(Math.round(l.strike * 1000)).padStart(8, '0')}` : null);
     function trade() {
       const a = analyse(), ls = legs();
       if (!a || !ls.length || ls.some(l => !symbolOf(l))) return;
@@ -318,7 +379,7 @@ defineWidget('spreads', {
         risk: (net, qty) => { const b = analyse(); if (!b) return ''; if (!isFinite(b.maxL)) return 'Loss unlimited.'; const worst = b.maxL + b.net - net * qty; return worst < 0 ? `Max loss $${Math.abs(worst * 100).toFixed(0)}.` : 'No loss at expiry.'; },
       });
     }
-    const switchTo = s => { my.sym = s; my.chain = null; my.expiry = null; my.why = ''; my.held = null; tk.close(); my.structure = 'Custom'; position.legs = []; render(); loadChain(); };
+    const switchTo = s => { my.sym = s; my.index = null; my.full = null; my.chain = null; my.spot = null; my.expiry = null; my.why = ''; my.held = null; tk.close(); my.structure = 'Custom'; position.legs = []; render(); loadIndex(); };
 
     // A new expiry: the legs keep their strikes, moved to listed ones.
     const setExpiry = d => {
@@ -326,7 +387,8 @@ defineWidget('spreads', {
       my.expiry = d;
       if (STRUCTURES[my.structure] && !my.why) build();
       else for (const l of legs()) { l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike; delete l.cost; }
-      render();
+      if (my.chain?.from !== d) my.chain = null;
+      render(); loadPrices();
     };
     // The ticker box: a ticker, an expiry as OCC writes it (261015), or both
     // (SPY261015). A date not listed goes to the next listed expiry.
@@ -348,7 +410,7 @@ defineWidget('spreads', {
     // one width out of the money (calls above, puts below), a debit spread's
     // long strike at the money. Legs on the same contract net out.
     function addSpread(name) {
-      const ks = strikesOf(), spot = my.chain?.spot, make = STRUCTURES[name];
+      const ks = strikesOf(), spot = my.spot, make = STRUCTURES[name];
       if (!ks.length || !spot || !make) return;
       const shape = make(my.width), credit = /credit/i.test(name), calls = shape[0][0] === 'call';
       const a = ks.indexOf(nearest(ks, spot)) + (credit ? (calls ? my.width : -my.width) : 0);
@@ -381,7 +443,7 @@ defineWidget('spreads', {
       tk.close();
       if (act === 'add') {
         const ks = strikesOf('call');
-        if (ks.length) { position.sym = my.sym; position.legs = [...legs(), { type: 'call', strike: nearest(ks, my.chain?.spot || 0), side: 1, qty: 1 }]; }
+        if (ks.length) { position.sym = my.sym; position.legs = [...legs(), { type: 'call', strike: nearest(ks, my.spot || 0), side: 1, qty: 1 }]; }
       } else if (e.shiftKey && (act === 'more' || act === 'less')) {
         // Shift-click sizes the whole position by one unit, keeping its ratios
         // (1/1/1/1 to 2/2/2/2, +1/−2 to +2/−4); never below one unit or past 20 a leg.
@@ -410,7 +472,7 @@ defineWidget('spreads', {
     const asked = () => {
       const ask = wanted.ask; if (!ask) return;
       wanted.ask = null;
-      if (ask.sym === my.sym && my.chain) { suggest(ask); render(); }
+      if (ask.sym === my.sym && my.index) { my.ask = ask; loadFull(); }
       else { my.ask = ask; switchTo(ask.sym); }
     };
     const follow = (/** @type {Event} */ e) => {
@@ -424,10 +486,11 @@ defineWidget('spreads', {
     // Opened from an account's card: that account for the Trade review.
     const acctAsked = e => { const n = /** @type {CustomEvent} */ (e).detail; if (typeof n === 'string' && n) { my.acct = n; render(); } };
     document.addEventListener('tt-sb-account', acctAsked);
-    if (wanted.held) heldAsked(); else if (wanted.ask) asked(); else { render(); loadChain(); }
+    if (wanted.held) heldAsked(); else if (wanted.ask) asked(); else { render(); loadIndex(); }
     resized.observe(el);
+    // The shown expiry's prices, every 5 seconds while the page is in view.
     const timer = setInterval(() => {
-      if (Date.now() - my.at > 30e3) loadChain();
+      if (!document.hidden && el.isConnected && Date.now() - my.at >= 4500) loadPrices();
     }, 5000);
     return {
       update() {},

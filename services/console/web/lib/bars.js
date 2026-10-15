@@ -4,6 +4,7 @@
 // not its history. A series grows at the end as bars arrive and at the start
 // as a reader scrolls back (`older`, with the service's `end` parameter);
 // the 12 most recently used series are kept, each up to 60,000 bars.
+import { get } from './cache.js';
 
 const MAX_SERIES = 12, MAX_BARS = 60_000;
 // Trading days per request (weeks for weekly bars): the first load, each
@@ -31,9 +32,7 @@ function series(service, symbol, size) {
 
 async function fetchBars(service, symbol, size, days, end) {
   const q = `symbol=${encodeURIComponent(symbol)}&days=${days}&interval=${size}${end ? `&end=${end}` : ''}`;
-  const r = await fetch(`/api/bars/${encodeURIComponent(service)}?${q}`, { cache: 'no-store' });
-  const v = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(v.error || `${r.status} ${r.statusText}`);
+  const v = await get(`/api/bars/${encodeURIComponent(service)}?${q}`, { fresh: 2000 });
   return { bars: /** @type {Bar[]} */ (v.bars || []), note: v.note || null };
 }
 

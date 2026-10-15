@@ -12,6 +12,7 @@ import { newsItems, fleet } from '../lib/fleet.js';
 import { esc, ago, unentity } from '../lib/format.js';
 import { theme, onTheme } from '../lib/theme.js';
 import { picked, symbolsOf, THEME_LIST } from '../lib/watchlists.js';
+import { get, stream } from '../lib/cache.js';
 
 const THEME = '\u0000theme', WATCH = '\u0000watch';
 /** The picked watchlist, unless it's the theme's: [name, symbols], or null. */
@@ -68,8 +69,7 @@ defineWidget('news', {
       const t = theme(), svc = (fleet.topo?.services || []).find(s => s.news_search)?.id;
       if (!my.alive || !t?.symbols.length || !svc) return;
       try {
-        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/news_search?symbols=${encodeURIComponent(t.symbols.join(','))}&limit=50`, { cache: 'no-store' });
-        if (r.ok) { my.found = (await r.json()).items || []; if (my.alive) update(); }
+        my.found = (await get(stream(svc, 'news_search', { symbols: t.symbols.join(','), limit: 50 }), { fresh: 30e3 })).items || []; if (my.alive) update();
       } catch (_) {}
     }
     // And on the picked watchlist's.
@@ -77,8 +77,7 @@ defineWidget('news', {
       const w = watch(), svc = (fleet.topo?.services || []).find(s => s.news_search)?.id;
       if (!my.alive || !w?.[1].length || !svc) { my.watched = []; return; }
       try {
-        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/news_search?symbols=${encodeURIComponent(w[1].join(','))}&limit=50`, { cache: 'no-store' });
-        if (r.ok) { my.watched = (await r.json()).items || []; if (my.alive) update(); }
+        my.watched = (await get(stream(svc, 'news_search', { symbols: w[1].join(','), limit: 50 }), { fresh: 30e3 })).items || []; if (my.alive) update();
       } catch (_) {}
     }
     const timer = setInterval(() => { find(); findWatched(); }, 60_000);
@@ -96,8 +95,7 @@ defineWidget('news', {
       const svc = (fleet.topo?.services || []).find(s => s.news_search)?.id; if (!svc) return;
       my.looking = true; update();
       try {
-        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/news_search?symbols=${encodeURIComponent(sym)}&limit=50`, { cache: 'no-store' });
-        if (r.ok) my.searched = (await r.json()).items || [];
+        my.searched = (await get(stream(svc, 'news_search', { symbols: sym, limit: 50 }), { fresh: 30e3 })).items || [];
       } catch (_) {}
       my.looking = false; if (my.alive) update();
     }

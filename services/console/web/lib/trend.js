@@ -6,6 +6,7 @@
 // which side of each the price is on (and since when), 20-day and 52-week
 // highs and lows, the streak of up or down days, and how unusual the day's
 // move is against the last 20.
+import { get, stream } from './cache.js';
 
 import './prefs.js'; // settings shared between devices, read first
 
@@ -80,9 +81,7 @@ export async function closes(fleet, symbols) {
     const part = want.slice(i, i + 200), key = part.join(',');
     if (!asking.has(key)) {
       asking.set(key, (async () => {
-        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/daily?symbols=${encodeURIComponent(key)}&days=400`, { cache: 'no-store' });
-        const v = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(v.error || `${r.status}`);
+        const v = await get(stream(svc, 'daily', { symbols: key, days: 400 }), { fresh: 5e3 });
         // An error other than "no bars" is the upstream failing (an outage, a limit): it's retried soon.
         for (const [s, x] of Object.entries(v.series || {})) {
           const error = x.error || '';

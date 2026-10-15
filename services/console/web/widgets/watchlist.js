@@ -21,6 +21,7 @@ import { theme, focused, setFocus, parseSymbols } from '../lib/theme.js';
 import { alertsFor, alertForm, describe } from '../lib/alerts.js';
 import { closes, analyse, fmtChange } from '../lib/trend.js';
 import { watchlists, picked, setPicked, symbolsOf, addList, renameList, deleteList, addSymbols, removeSymbol, THEME_LIST } from '../lib/watchlists.js';
+import { get, stream } from '../lib/cache.js';
 
 const EVERY = 5000;
 
@@ -112,9 +113,7 @@ defineWidget('watchlist', {
       if (!my.alive || !syms.length || !svc) return;
       const key = syms.join(',');
       try {
-        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/snapshots?symbols=${encodeURIComponent(key)}`, { cache: 'no-store' });
-        const v = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(v.error || `${r.status} ${r.statusText}`);
+        const v = await get(stream(svc, 'snapshots', { symbols: key }), { fresh: 1500 });
         my.rows = v.snapshots; my.err = null; my.at = Date.now(); my.asked = key;
       } catch (e) { my.err = `Prices unavailable: ${e.message}`; }
       if (my.alive) update();

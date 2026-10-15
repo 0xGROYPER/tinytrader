@@ -19,6 +19,12 @@
 //!   many, and each contract's `quote_src` which it has. The screener's scan
 //!   uses them too.
 //!
+//! - `/chain_index?underlying=AAPL`: what the chain lists, without prices:
+//!   each expiry from today on with its OCC root and its call and put
+//!   strikes. Read from Alpaca's contract listings once a New York day (kept
+//!   under `ALPACA_DATA_DIR`'s `contracts/`, so a restart doesn't read it
+//!   again), for laying out a chain before its prices come.
+//!
 //! - `/daily?symbols=SPY,TLT,TNX,BTC/USD&days=300`: daily closes for a mix
 //!   of symbols in one request, `{ "series": { SYMBOL: { "source",
 //!   "closes": [[t, c], ...], "error" } } }`, `t` each session's New York
@@ -50,7 +56,9 @@
 //!   stock is rescanned every 15 minutes while asked for; until scanned, its
 //!   row has no option measures (`pending` counts them).
 //!
-//! Answers are kept briefly (snapshots 2 s, chains 15 s, bars a minute) and
+//! Answers are kept briefly (snapshots 2 s, chains 15 s or 3 for one expiry,
+//! bars a minute), one
+//! request to Alpaca answering everyone who asks the same at once, and
 //! requests to Alpaca are held under its free plan's 200 a minute, so many
 //! panels asking at once don't multiply the load.
 //!
@@ -135,9 +143,11 @@ struct App {
     observer: Observer,
     /// Recent requests to Alpaca, for the rate limit.
     sent: Mutex<VecDeque<Instant>>,
-    /// Answers kept briefly, by request.
     /// Answers kept briefly, by request: when, the answer, its size.
     cache: Mutex<HashMap<String, (Instant, Value, usize)>>,
+    /// Requests being answered, by key: a second asker waits for the first's
+    /// answer instead of asking Alpaca again.
+    flights: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The screener's universe, its scans and what it was last asked for.
     screen: Mutex<Screen>,
     /// Where index minutes are saved (`cboe`).
@@ -270,17 +280,33 @@ impl App {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<Value, (StatusCode, String)>>,
     {
-        if let Some((at, v, _)) = lock(&self.cache).get(&key)
-            && at.elapsed()
-                < if v["incomplete"] == true {
+        let fresh = |cache: &HashMap<String, (Instant, Value, usize)>| {
+            cache.get(&key).and_then(|(at, v, _)| {
+                let keep = if v["incomplete"] == true {
                     ttl.min(RETRY)
                 } else {
                     ttl
-                }
-        {
-            return Ok(v.clone());
+                };
+                (at.elapsed() < keep).then(|| v.clone())
+            })
+        };
+        if let Some(v) = fresh(&lock(&self.cache)) {
+            return Ok(v);
         }
-        let v = make().await?;
+        // One request per key at a time: whoever comes second takes the first's answer.
+        let flight = lock(&self.flights).entry(key.clone()).or_default().clone();
+        let _turn = flight.lock().await;
+        if let Some(v) = fresh(&lock(&self.cache)) {
+            return Ok(v);
+        }
+        let made = make().await;
+        {
+            let mut flights = lock(&self.flights);
+            if Arc::strong_count(&flight) <= 2 {
+                flights.remove(&key);
+            }
+        }
+        let v = made?;
         let mut cache = lock(&self.cache);
         let size = v.to_string().len();
         // Expired answers go first, then the oldest, until this one fits.
@@ -562,6 +588,84 @@ async fn option_contracts(
             }
             Ok(json!({ "underlying": underlying, "contracts": out }))
         })
+        .await,
+    )
+}
+
+#[derive(Deserialize)]
+struct IndexAsk {
+    underlying: String,
+}
+
+/// What an underlying lists, without prices: `/chain_index?underlying=`
+/// (`chain::index`). Read from Alpaca once a New York day and saved under
+/// `<dir>/contracts/`, so a restart doesn't read it again.
+async fn chain_index(AxState(app): AxState<Arc<App>>, Query(ask): Query<IndexAsk>) -> Response {
+    let underlying = ask.underlying.trim().to_uppercase();
+    if !symbol_ok(&underlying) {
+        return refuse(StatusCode::BAD_REQUEST, "underlying: a stock symbol");
+    }
+    let today = ny_date_time(unix_seconds() as i64).0;
+    let a = app.clone();
+    answer(
+        app.kept(
+            format!("index|{underlying}|{today}"),
+            Duration::from_secs(86_400),
+            || async move {
+                let file = a.dir.as_ref().map(|d| {
+                    d.join("contracts")
+                        .join(&underlying)
+                        .join(format!("{today}.json"))
+                });
+                if let Some(v) = file
+                    .as_ref()
+                    .and_then(|f| std::fs::read(f).ok())
+                    .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                {
+                    return Ok(v);
+                }
+                let mut pages = Vec::new();
+                let mut token: Option<String> = None;
+                for _ in 0..10 {
+                    let mut q = vec![
+                        ("underlying_symbols", underlying.clone()),
+                        ("status", "active".to_owned()),
+                        ("expiration_date_gte", today.clone()),
+                        ("limit", "10000".to_owned()),
+                    ];
+                    if let Some(t) = &token {
+                        q.push(("page_token", t.clone()));
+                    }
+                    let v = a.get("/v2/options/contracts", &q).await?;
+                    token = v["next_page_token"].as_str().map(str::to_owned);
+                    pages.push(v);
+                    if token.is_none() {
+                        break;
+                    }
+                }
+                let mut v = chain::index(&underlying, &today, &pages);
+                if token.is_some() {
+                    // More than ten pages: not kept on disk, and said so.
+                    v["truncated"] = json!(true);
+                    return Ok(v);
+                }
+                if let Some(f) = file
+                    && let Some(dir) = f.parent()
+                {
+                    // Only today's is kept; write beside, then rename.
+                    let _ = std::fs::remove_dir_all(dir);
+                    let tmp = f.with_extension("tmp");
+                    if let Err(e) = std::fs::create_dir_all(dir)
+                        .and_then(|()| std::fs::write(&tmp, v.to_string()))
+                        .and_then(|()| std::fs::rename(&tmp, &f))
+                    {
+                        a.observer
+                            .record_error(&format!("saving {underlying}'s contracts: {e}"));
+                    }
+                }
+                Ok(v)
+            },
+        )
         .await,
     )
 }
@@ -1056,9 +1160,12 @@ async fn option_chain(AxState(app): AxState<Arc<App>>, Query(ask): Query<ChainAs
     if !date_ok(&from) || !date_ok(&to) {
         return refuse(StatusCode::BAD_REQUEST, "from and to: YYYY-MM-DD");
     }
+    // One expiry (a ticket's or the Spread builder's, read every few seconds)
+    // is kept 3 seconds; a range, 15.
+    let keep = Duration::from_secs(if from == to { 3 } else { 15 });
     let a = app.clone();
     answer(
-        app.kept(format!("chain|{underlying}|{from}|{to}"), Duration::from_secs(15), || async move {
+        app.kept(format!("chain|{underlying}|{from}|{to}"), keep, || async move {
             let spot = a
                 .get("/v2/stocks/snapshots", &[("symbols", underlying.clone()), ("feed", a.feed.clone())])
                 .await?
@@ -1541,7 +1648,7 @@ async fn main() {
             { "id": "alpaca-data-api", "label": "Alpaca", "sub": format!("{} stocks, {} options", args.feed, args.options_feed), "kind": "flow", "via": "https" },
             { "id": "cboe-delayed", "label": "Cboe", "sub": "index bars, 15 min delayed", "kind": "flow", "via": "https" },
         ],
-        "streams": { "bars": "/bars", "daily": "/daily", "snapshots": "/snapshots", "chain": "/chain", "news_search": "/news", "option_bars": "/option_bars", "option_contracts": "/option_contracts", "screener": "/screener" },
+        "streams": { "bars": "/bars", "daily": "/daily", "snapshots": "/snapshots", "chain": "/chain", "chain_index": "/chain_index", "news_search": "/news", "option_bars": "/option_bars", "option_contracts": "/option_contracts", "screener": "/screener" },
     }));
     let app = Arc::new(App {
         http: reqwest::Client::builder()
@@ -1556,6 +1663,7 @@ async fn main() {
         observer: observer.clone(),
         sent: Mutex::default(),
         cache: Mutex::default(),
+        flights: Mutex::default(),
         screen: Mutex::default(),
         dir: args.dir,
         relays: opra::parse(&args.quotes),
@@ -1592,6 +1700,7 @@ async fn main() {
         .route("/bars", get(bars))
         .route("/daily", get(daily))
         .route("/chain", get(option_chain))
+        .route("/chain_index", get(chain_index))
         .route("/news", get(news))
         .route("/option_bars", get(option_bars))
         .route("/option_contracts", get(option_contracts))

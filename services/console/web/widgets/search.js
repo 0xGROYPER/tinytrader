@@ -15,6 +15,7 @@ import { esc, ago, unentity } from '../lib/format.js';
 import { watchlists, addSymbols } from '../lib/watchlists.js';
 import { alertsFor, alertForm } from '../lib/alerts.js';
 import { mark } from './docs.js';
+import { get } from '../lib/cache.js';
 
 const MAX = 8;
 
@@ -24,8 +25,7 @@ let directory = null;
 /** @type {Promise<void> | null} */
 let loading = null;
 function loadDirectory() {
-  loading ||= fetch('/api/stream/econ-calendar/tickers', { cache: 'no-store' })
-    .then(r => (r.ok ? r.json() : null))
+  loading ||= get('/api/stream/econ-calendar/tickers', { fresh: 3600e3 })
     .then(j => { if (j?.names) directory = j.names; else loading = null; })
     .catch(() => { loading = null; });
   return loading;
@@ -149,7 +149,7 @@ export function bindSearch(root, onPick) {
 const cap = v => !v ? '' : v >= 1e12 ? `$${(v / 1e12).toFixed(2)}T` : v >= 1e9 ? `$${Math.round(v / 1e9)}B` : `$${Math.round(v / 1e6)}M`;
 const pct = v => v == null ? '—' : `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v * 100).toFixed(2)}%`;
 const svcWith = k => (fleet.topo?.services || []).find(s => s[k])?.id || null;
-const getJson = async url => { const r = await fetch(url, { cache: 'no-store' }); return r.ok ? r.json() : null; };
+const getJson = url => get(url, { fresh: 5000 }).catch(() => null);
 
 /** A ticker's results: quote, the screener's row, next earnings and recent news. */
 async function results(sym) {

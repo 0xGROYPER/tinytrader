@@ -14,6 +14,7 @@ import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { occLabel } from '../lib/ticket.js';
+import { get } from '../lib/cache.js';
 
 const service = () => (fleet.topo?.services || []).find(s => s.performance)?.id || null;
 const nyToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -95,7 +96,7 @@ defineWidget('performance', {
     try { my.acct = JSON.parse(el.dataset.args || '{}').account || ''; } catch (_) {}
     el.innerHTML = '<div class="pf"><div class="pf-top"></div><section class="pf-sec pf-trades"></section><section class="pf-sec pf-cal"></section></div>';
     const $ = s => /** @type {HTMLElement} */ (el.querySelector(s));
-    const ask = (what, q) => fetch(`/api/stream/${encodeURIComponent(service() || 'accounts')}/${what}?${q}`, { cache: 'no-store' }).then(async r => { const v = await r.json().catch(() => ({})); if (!r.ok) throw new Error(v.error || `${r.status}`); return v; });
+    const ask = (what, q) => get(`/api/stream/${encodeURIComponent(service() || 'accounts')}/${what}?${q}`, { fresh: 5000 });
     const draw = () => {
       const list = accounts();
       if (!list.some(a => a.name === my.acct)) my.acct = (list.find(a => a.live) || list[0])?.name || '';

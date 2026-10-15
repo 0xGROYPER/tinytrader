@@ -14,6 +14,7 @@ import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { setFocus } from '../lib/theme.js';
 import { askRecommendation } from '../lib/position.js';
+import { get, stream } from '../lib/cache.js';
 
 const service = () => (fleet.topo?.services || []).find(s => s.screener)?.id || null;
 const SHOW = 50;
@@ -97,9 +98,7 @@ defineWidget('screener', {
       if (my.busy) return;
       my.busy = true;
       try {
-        const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/screener?min_cap=${my.cap}`, { cache: 'no-store' });
-        const v = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(v.error || `${r.status}`);
+        const v = await get(stream(svc, 'screener', { min_cap: my.cap }), { fresh: 10e3 });
         if (!my.alive) return;
         my.data = v; my.err = '';
       } catch (e) { my.err = e.message; }

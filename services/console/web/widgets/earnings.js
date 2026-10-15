@@ -20,6 +20,7 @@ import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, setFocus } from '../lib/theme.js';
+import { get } from '../lib/cache.js';
 
 const svcWith = k => (fleet.topo?.services || []).find(s => s[k])?.id || null;
 const DAY = 86_400_000;
@@ -141,10 +142,7 @@ defineWidget('earnings', {
     const my = { days: theme()?.symbols.length ? 42 : 14, min: 200e9, open: null, opts: new Map(), hist: new Map(), alive: true, busy: false };
     const update = () => { paint(el, draw(my)); };
     async function json(url) {
-      const r = await fetch(url, { cache: 'no-store' });
-      const v = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(v.error || `${r.status} ${r.statusText}`);
-      return v;
+      return get(url, { fresh: 60e3 });
     }
     async function options(r) {
       const svc = svcWith('chain'); if (!svc) return;

@@ -216,6 +216,7 @@ pub const ON_DEMAND: &[&str] = &[
     "daily",
     "snapshots",
     "chain",
+    "chain_index",
     "news_search",
     "earnings_history",
     "option_bars",

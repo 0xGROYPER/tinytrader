@@ -32,6 +32,8 @@ interface TopoService extends TopoNode {
   snapshots?: string;
   /** On-demand option chains (`/api/stream/{id}/chain?underlying=`). */
   chain?: string;
+  /** What a chain lists, without prices (`/api/stream/{id}/chain_index?underlying=`). */
+  chain_index?: string;
   /** A relay's time and sales (`/api/stream/{id}/tape?symbol=&after=`). */
   tape?: string;
   /** An account service's daily P/L (`/api/stream/{id}/performance?account=`). */

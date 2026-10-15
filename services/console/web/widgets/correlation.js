@@ -7,15 +7,14 @@ import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme } from '../lib/theme.js';
+import { get } from '../lib/cache.js';
 
 const WINDOWS = [20, 60, 120, 250];
 const source = () => (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id || null;
 
 /** Daily closes by date for one symbol. @returns {Promise<Map<number, number>>} */
 async function closes(svc, symbol, days) {
-  const r = await fetch(`/api/bars/${encodeURIComponent(svc)}?symbol=${encodeURIComponent(symbol)}&days=${days}&interval=86400`, { cache: 'no-store' });
-  const v = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(`${symbol}: ${v.error || r.status}`);
+  const v = await get(`/api/bars/${encodeURIComponent(svc)}?symbol=${encodeURIComponent(symbol)}&days=${days}&interval=86400`, { fresh: 60e3 }).catch(e => { throw new Error(`${symbol}: ${e.message}`); });
   return new Map((v.bars || []).map(b => [b[0], b[4]]));
 }
 

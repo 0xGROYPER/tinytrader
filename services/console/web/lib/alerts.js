@@ -6,6 +6,7 @@
 // once: it's listed under the bell, and shown as a notification when the
 // browser allows them. Re-arming it starts it again. Several tabs share the
 // alerts (and fire each once); nothing watches with every page closed.
+import { get, stream } from './cache.js';
 
 import './prefs.js'; // settings shared between devices, read first
 
@@ -93,9 +94,7 @@ export function watch(source) {
     const syms = [...new Set(armed.map(a => a.symbol))].slice(0, 200);
     let rows;
     try {
-      const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/snapshots?symbols=${encodeURIComponent(syms.join(','))}`, { cache: 'no-store' });
-      if (!r.ok) return;
-      rows = new Map(((await r.json()).snapshots || []).map(x => [x.symbol, x]));
+      rows = new Map(((await get(stream(svc, 'snapshots', { symbols: syms.join(',') }), { fresh: 1500 })).snapshots || []).map(x => [x.symbol, x]));
     } catch (_) { return; }
     // Read again: another tab may have fired some meanwhile.
     const now = read(), fired = [];
