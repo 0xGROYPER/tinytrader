@@ -6,9 +6,9 @@
 // which side of each the price is on (and since when), 20-day and 52-week
 // highs and lows, the streak of up or down days, and how unusual the day's
 // move is against the last 20.
-import { get, stream } from './cache.js';
 
 import './prefs.js'; // settings shared between devices, read first
+import { get, stream } from './cache.js';
 
 /** @typedef {{ s: string, label?: string }} Row */
 /** @typedef {{ name: string, rows: Row[] }} Group */

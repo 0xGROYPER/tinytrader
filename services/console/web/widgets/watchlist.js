@@ -16,7 +16,7 @@
 // change.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
-import { esc } from '../lib/format.js';
+import { esc, etTime } from '../lib/format.js';
 import { theme, focused, setFocus, parseSymbols } from '../lib/theme.js';
 import { alertsFor, alertForm, describe } from '../lib/alerts.js';
 import { closes, analyse, fmtChange } from '../lib/trend.js';
@@ -65,7 +65,7 @@ function draw(my) {
   const arrow = k => my.sortKey === k ? (my.sort > 0 ? ' ↓' : my.sort < 0 ? ' ↑' : '') : '';
   const sortBtn = (k, label, title) => `<button type="button" class="wl-sort" data-wl-act="sort" data-wl-key="${k}" title="${title}">${label}${arrow(k)}</button>`;
   return [bar, `<table class="wl" tabindex="0" aria-label="Symbols: ↑↓ to step through"><thead><tr><th>Symbol</th><th class="num">Last</th><th class="num">Change</th><th class="num">${sortBtn('d', '%', "Sort by the day's change")}</th><th class="num">${sortBtn('w', '1W', 'The change over five sessions; click to sort')}</th><th class="num">${sortBtn('m', '1M', 'The change over 21 sessions; click to sort')}</th>${mine ? '<th></th>' : ''}</tr></thead><tbody>${rows}</tbody></table>
-    <p class="muted wl-foot">${my.err ? esc(my.err) : my.at ? `IEX prices, updated ${new Date(my.at).toLocaleTimeString()}` : 'Loading…'}</p>`];
+    <p class="muted wl-foot">${my.err ? esc(my.err) : my.at ? `IEX prices, updated ${etTime(my.at, true)} ET` : 'Loading…'}</p>`];
 }
 
 defineWidget('watchlist', {

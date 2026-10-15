@@ -3,7 +3,7 @@
 // polling the fleet. The widgets are modules under ../widgets (decision 0010).
 // Settings shared between devices: read before anything here runs.
 import './prefs.js';
-import { esc, bytes, duration, fmt, ago } from './format.js';
+import { esc, bytes, duration, fmt, ago, etStamp } from './format.js';
 import { fleet, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf, newsItems } from './fleet.js';
 import { widget, widgetNames } from './widgets.js';
 import { drawCharts } from './charts.js';
@@ -1337,7 +1337,7 @@ function updateHeaderStatus() {
 function bellDraw() {
   const list = alerts();
   const fired = priceAlerts().filter(a => a.fired).sort((a, b) => b.fired - a.fired), armed = priceAlerts().filter(a => !a.fired).length;
-  const when = t => new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const when = t => etStamp(t);
   const prices = fired.map(a => `<div class="bell-item bell-price${a.seen ? '' : ' new'}"><i class="warn"></i><b><button type="button" class="linkish mono" data-alert-sym="${esc(a.symbol)}">${esc(a.symbol)}</button> ${a.price?.toFixed(2) ?? ''}</b><span>${esc(alertText(a))} · ${esc(when(a.fired))} <button type="button" class="chip-btn" data-al-rearm="${esc(a.id)}">Re-arm</button><button type="button" class="chip-btn" data-al-rm="${esc(a.id)}">Remove</button></span></div>`).join('');
   const html = '<h3>Alerts</h3>' + prices + (armed ? `<p class="bell-none">${armed} price alert${armed === 1 ? '' : 's'} armed (the Alerts widget lists them).</p>` : '') + (list.length
     ? list.map(x => `<button type="button" class="bell-item" data-alert="${esc(x.s.id)}"><i class="${x.st}"></i><b>${esc(x.s.id)} ${x.st === 'crit' ? 'is down' : 'needs attention'}</b><span>${esc(subOf({ ...x.s, kind: 'svc' }))}</span></button>`).join('')

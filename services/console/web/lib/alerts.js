@@ -6,9 +6,10 @@
 // once: it's listed under the bell, and shown as a notification when the
 // browser allows them. Re-arming it starts it again. Several tabs share the
 // alerts (and fire each once); nothing watches with every page closed.
-import { get, stream } from './cache.js';
 
 import './prefs.js'; // settings shared between devices, read first
+import { get, stream } from './cache.js';
+import { etStamp } from './format.js';
 
 /** @typedef {{ id: string, symbol: string, kind: 'above' | 'below' | 'move', value: number, made: number,
  *   fired: number | null, price: number | null, change: number | null, seen: boolean }} Alert */
@@ -56,7 +57,7 @@ export function rearm(id) { list = read().map(a => a.id === id ? { ...a, fired: 
 export function markSeen() { if (!unseen().length) return; list = read().map(a => a.fired ? { ...a, seen: true } : a); save(); }
 
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const when = t => new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+const when = t => etStamp(t);
 /**
  * A symbol's alerts and a form for another, for any widget to show; this
  * module handles its buttons and its submit (on the document).

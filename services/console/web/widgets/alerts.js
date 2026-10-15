@@ -3,11 +3,11 @@
 // from a Watchlist row's dot, a ticker view's Alert button in the header,
 // and Search's results; fired ones are listed under the bell.
 import { defineWidget, paint } from '../lib/widgets.js';
-import { esc } from '../lib/format.js';
+import { esc, etStamp } from '../lib/format.js';
 import { setFocus } from '../lib/theme.js';
 import { alerts, describe, alertForm } from '../lib/alerts.js';
 
-const when = t => new Date(t).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+const when = t => etStamp(t);
 
 function draw(my) {
   const all = [...alerts()].sort((a, b) => (b.fired || 0) - (a.fired || 0) || a.symbol.localeCompare(b.symbol));

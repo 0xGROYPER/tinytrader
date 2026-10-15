@@ -2,6 +2,18 @@
 
 export const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
+// Times are shown in New York time (ET), the market's, 24-hour, whatever the
+// browser's own zone: the charts, the tape and the session's hours all use it.
+export const NY = 'America/New_York';
+/** A moment (ms) as ET: 14:05, or 14:05:09 with seconds. */
+export const etTime = (ms, seconds = false) => new Date(ms).toLocaleTimeString('en-GB', { timeZone: NY, hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}) });
+/** A moment (ms) as ET with its date unless today's: "14:05:09 ET", "Oct 14, 14:05 ET". */
+export function etStamp(ms, seconds = false) {
+  const day = t => new Date(t).toLocaleDateString('en-CA', { timeZone: NY });
+  if (day(ms) === day(Date.now())) return `${etTime(ms, seconds)} ET`;
+  return `${new Date(ms).toLocaleDateString('en-US', { timeZone: NY, month: 'short', day: 'numeric' })}, ${etTime(ms)} ET`;
+}
+
 export function bytes(n) {
   if (n == null) return '—';
   const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;

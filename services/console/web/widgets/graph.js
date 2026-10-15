@@ -3,7 +3,7 @@
 // live event tail and every metric. Only what's running now is drawn.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf } from '../lib/fleet.js';
-import { esc, bytes, duration, fmt, labelText, clip } from '../lib/format.js';
+import { esc, bytes, duration, fmt, labelText, clip, etTime } from '../lib/format.js';
 
 // ---------- topology layout ----------
 const NW = 176, NH = 50, CG = 96, RG = 26, PAD = 24, HOST_TOP = 40;
@@ -206,7 +206,7 @@ function eventsPanel(node, g) {
 function evRows(g) {
   if (!g.ev.rows.length) return '<div class="empty">Waiting for events…</div>';
   return g.ev.rows.map(e => `<details class="ev-row${g.ev.fresh.has(e.seq) ? ' new' : ''}" data-seq="${e.seq}"${g.ev.open.has(e.seq) ? ' open' : ''}>
-    <summary><span class="ev-t">${new Date(e.received_ms).toISOString().slice(11, 23)}</span><span class="ev-s">${esc(e.summary)}</span></summary>
+    <summary><span class="ev-t">${etTime(e.received_ms, true)}.${String(e.received_ms % 1000).padStart(3, '0')}</span><span class="ev-s">${esc(e.summary)}</span></summary>
     <pre>${esc(prettyRaw(e.raw))}</pre></details>`).join('');
 }
 function prettyRaw(raw) { try { return JSON.stringify(JSON.parse(raw), null, 2); } catch (_) { return raw; } }

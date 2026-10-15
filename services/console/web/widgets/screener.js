@@ -11,7 +11,7 @@
 // position in the Spread builder. ↑ and ↓ step through the rows the same way.
 import { defineWidget } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
-import { esc } from '../lib/format.js';
+import { esc, etTime } from '../lib/format.js';
 import { setFocus } from '../lib/theme.js';
 import { askRecommendation } from '../lib/position.js';
 import { get, stream } from '../lib/cache.js';
@@ -129,7 +129,7 @@ defineWidget('screener', {
       $('.sc-table').innerHTML = `<thead><tr><th>#</th>${COLS.map(([l], i) => `<th data-col="${i}" class="${my.sort === i ? 'sc-sorted' : ''} ${k(l)}">${l}${my.sort === i ? (my.desc ? ' ↓' : ' ↑') : ''}</th>`).join('')}</tr></thead>
         <tbody>${shown.map(({ r }, i) => `<tr data-sym="${esc(r.symbol)}"${r.symbol === my.sel ? ' class="sc-sel"' : ''} title="${esc(r.name)} · listed for ${esc(r.sources.join(', '))}"><td class="muted">${i + 1}</td>${COLS.map(c => `<td class="${k(c[0])}">${c[2](r, next)}</td>`).join('')}</tr>`).join('')}</tbody>`;
       const more = list.length - shown.length;
-      const at = new Date(v.as_of * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      const at = `${etTime(v.as_of * 1000)} ET`;
       $('.sc-msg').innerHTML = `${more > 0 ? `<button type="button" class="chip-btn sc-more">Show ${more} more</button> ` : ''}${rows.length} stocks of ${v.matched.toLocaleString()} listed at this size and over $${v.min_price}${v.pending ? `; scanning options for ${v.pending}` : ''}. As of ${at}; options from Alpaca's ${esc(v.options_feed)} feed.${my.err ? ` ${esc(my.err)}` : ''}`;
     }
 

@@ -2,7 +2,7 @@
 // "service|stream|key" is drawn from the latest snapshot, with a hover
 // crosshair and tooltip. Drawn after each refresh and when panels resize.
 import { svcState } from './fleet.js';
-import { esc, fmt } from './format.js';
+import { esc, fmt, etStamp } from './format.js';
 
 // ---------- charts ----------
 function tipAt(el, html, px, py) {
@@ -42,7 +42,7 @@ export function drawCharts() {
       const cx = X(best[0]), cy = Y(best[1]);
       cross.setAttribute('x1', String(cx)); cross.setAttribute('x2', String(cx)); dot.setAttribute('cx', String(cx)); dot.setAttribute('cy', String(cy));
       hov.setAttribute('visibility', 'visible');
-      tipAt(el, `${fmt(best[1], { decimals })}<span class="muted">${new Date(best[0]).toISOString().slice(11, 19)} UTC</span>`, cx, cy);
+      tipAt(el, `${fmt(best[1], { decimals })}<span class="muted">${etStamp(best[0], true)}</span>`, cx, cy);
     };
     const hit = svg.querySelector('.c-hit');
     hit.addEventListener('pointermove', move); hit.addEventListener('pointerdown', move);

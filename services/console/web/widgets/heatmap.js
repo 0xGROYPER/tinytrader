@@ -10,7 +10,7 @@
 // the companies the screener scans, not every listed stock.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
-import { esc } from '../lib/format.js';
+import { esc, etTime } from '../lib/format.js';
 import { theme, setFocus } from '../lib/theme.js';
 import { get, stream } from '../lib/cache.js';
 
@@ -56,7 +56,7 @@ const tone = (c, sat) => {
 function readout(my) {
   const rows = (my.rows || []).filter(r => r.market_cap > 0), h = my.hover && rows.find(r => r.symbol === my.hover);
   if (h) return `<b class="mono">${esc(h.symbol)}</b> ${esc(h.name || '')} · <span class="mono">${pct(h[PERIODS[my.period][0]])} ${my.period}</span> · ${esc(h.sector || 'Other')} · ${esc(cap(h.market_cap))}${h.price ? ` · $${h.price.toFixed(2)}` : ''}`;
-  return `${rows.length} companies in ${new Set(rows.map(r => r.sector || 'Other')).size} sectors${my.pending ? ` (${my.pending} more being read)` : ''}${my.at ? ` · as of ${new Date(my.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}`;
+  return `${rows.length} companies in ${new Set(rows.map(r => r.sector || 'Other')).size} sectors${my.pending ? ` (${my.pending} more being read)` : ''}${my.at ? ` · as of ${etTime(my.at)} ET` : ''}`;
 }
 
 function draw(my, W, H) {
