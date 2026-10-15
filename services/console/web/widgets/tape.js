@@ -12,12 +12,22 @@
 // tape on request (its open stream takes the symbol; no restart), with its
 // trades showing from then on. With nothing held (overnight, after a
 // restart, or just watched) the relay fills it from history: the latest
-// session's trades, marked as such and not flashed.
+// session's trades, marked as such and not flashed. The symbol is kept with
+// the panel, and its latest ticks in this browser, so a reload shows them at
+// once and carries on from where they end.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { focused } from '../lib/theme.js';
 
+/** This browser's copy of a symbol's latest ticks: { last, ticks }. */
+const CACHE = sym => `tt-tape-${sym}`;
+function cached(sym) {
+  try { const v = JSON.parse(localStorage.getItem(CACHE(sym)) || 'null'); return v && Array.isArray(v.ticks) ? v : null; } catch (_) { return null; }
+}
+function cache(sym, last, ticks) {
+  try { localStorage.setItem(CACHE(sym), JSON.stringify({ last, ticks: ticks.slice(-1000).map(({ rt, ...x }) => x) })); } catch (_) {}
+}
 const EVERY = 500, HOLD = 1500, SHOW = 300, BIG = 1000, FLASH = 1200;
 const SIZES = [0, 100, 500, 1000, 5000];
 const relay = () => (fleet.topo?.services || []).find(s => s.tape)?.id || null;
@@ -74,6 +84,12 @@ defineWidget('tape', {
   title: 'Tape',
   mount(el) {
     const my = { missing: /** @type {string | false} */ (false), watching: false, sym: '', symbols: /** @type {string[]} */ ([]), ticks: /** @type {any[]} */ ([]), last: 0, err: '', quotes: false, min: 0, paused: false, hover: 0, lastRecord: 0, alive: true, busy: false };
+    // The symbol kept with the panel, and what this browser last held for it.
+    try { const a = JSON.parse(el.dataset.args || '{}'); if (typeof a.symbol === 'string' && a.symbol) my.sym = a.symbol; } catch (_) {}
+    const restore = () => { const c = my.sym && cached(my.sym); if (c) { my.ticks = c.ticks.map(x => ({ ...x, rt: 0 })); my.last = c.last; } };
+    restore();
+    const keepSym = () => el.dispatchEvent(new CustomEvent('tt-tab-args', { bubbles: true, detail: { args: { symbol: my.sym } } }));
+    let saved = 0;
     el.innerHTML = '<div class="tp-top"></div><div class="tp-main"></div>';
     const top = /** @type {HTMLElement} */ (el.querySelector('.tp-top')), main = /** @type {HTMLElement} */ (el.querySelector('.tp-main'));
     // The last price flashes up or down when it changes.
@@ -113,12 +129,14 @@ defineWidget('tape', {
         my.missing = v.watch || (!v.watching && my.symbols.length > 0 && !my.symbols.includes(my.sym) ? `the relay carries only ${my.symbols.join(', ')} (redeploy it to watch others)` : false);
         if (my.missing) { my.ticks = []; return; }
         // A restarted relay counts from zero again.
-        if (v.last < my.last) { my.ticks = []; }
+        if (v.last < my.last) { my.ticks = []; my.last = 0; return; }
         // Arrival times, for the flash (none for the history read first).
         const rt = my.last ? performance.now() : 0;
         for (const x of v.ticks || []) { x.rt = x.h ? 0 : rt; my.ticks.push(x); }
         if (my.ticks.length > 4000) my.ticks = my.ticks.slice(-4000);
         my.last = v.last; my.lastRecord = v.last_record || 0; my.err = '';
+        // Kept in this browser every few seconds.
+        if (Date.now() - saved > 5000) { saved = Date.now(); cache(my.sym, my.last, my.ticks); }
       } catch (e) { my.err = `The tape couldn't be read: ${e.message}`; }
       finally { my.busy = false; if (my.alive) draw(); }
     }
@@ -141,7 +159,7 @@ defineWidget('tape', {
       const v = /** @type {HTMLInputElement} */ (f.elements.namedItem('s')).value.trim().toUpperCase();
       if (!/^[A-Z][A-Z0-9.]{0,9}$/.test(v)) return;
       /** @type {HTMLElement} */ (document.activeElement)?.blur?.();
-      if (v !== my.sym) { my.sym = v; my.missing = false; reset(); } else draw();
+      if (v !== my.sym) { my.sym = v; my.missing = false; keepSym(); my.ticks = []; my.last = 0; lastPx = null; restore(); load(); } else draw();
     };
     el.addEventListener('submit', find);
     el.addEventListener('change', change); el.addEventListener('click', click); el.addEventListener('mousemove', over);

@@ -60,7 +60,6 @@ defineWidget('spreads', {
         <span class="sb-spot mono muted"></span>
         <select class="sb-exp mono" aria-label="Expiry"></select>
         <span class="sb-name muted"></span>
-        <span class="sb-views"><button type="button" class="sb-add sb-paybtn" aria-pressed="false">Payoff</button></span>
       </div>
       <p class="sb-why muted"></p>
       <div class="sb-table"><table class="sb-legs"></table></div>
@@ -168,7 +167,6 @@ defineWidget('spreads', {
         sel.dataset.for = key;
       }
       if (my.expiry) sel.value = my.expiry;
-      $('.sb-paybtn').setAttribute('aria-pressed', String(my.payoff));
       // What the legs make, when their shape has a name (an iron condor from
       // two credit spreads), or where they came from (held, a suggestion).
       const shape = identify(legs());
@@ -200,7 +198,7 @@ defineWidget('spreads', {
       }).join('');
       $('.sb-legs').innerHTML = `<thead><tr><th>Strike</th><th class="num">Qty</th><th class="num">Mid</th><th class="num sb-c-value">Value</th><th class="num" title="Delta in shares">Δ</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
-        <tfoot><tr><td colspan="3"><span class="sb-adds"><button type="button" class="sb-add" data-act="add" title="Add a leg">+ Leg</button><select class="sb-addsp" aria-label="Add a spread" title="Add a vertical spread to these legs (a credit spread goes one width out of the money, a debit spread at the money)"><option value="">+ Spread…</option>${Object.keys(GROUPS[0].items).map(n => `<option>${esc(n)}</option>`).join('')}</select></span></td>
+        <tfoot><tr><td colspan="3"><span class="sb-adds"><button type="button" class="sb-add" data-act="add" title="Add a leg">+ Leg</button><select class="sb-addsp" aria-label="Add a spread" title="Add a vertical spread to these legs (a credit spread goes one width out of the money, a debit spread at the money)"><option value="">+ Spread…</option>${Object.keys(GROUPS[0].items).map(n => `<option>${esc(n)}</option>`).join('')}</select><button type="button" class="sb-add sb-paybtn" aria-pressed="${my.payoff}">Payoff</button></span></td>
           <td class="num sb-c-value"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr></tfoot>`;
       payoff(a);
       // The summary: what it costs, what it can lose and make, and the chance; the rest on hover.

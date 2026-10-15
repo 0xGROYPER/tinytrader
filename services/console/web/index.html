@@ -243,6 +243,9 @@ tr.today td { background: var(--accent-soft); }
 .acct .foot, .acct-note { margin: 0; font-size: 11px; color: var(--muted); }
 .acct .chip-btn { min-height: 26px; padding: 0 8px; font-size: 12px; }
 .acct { container-type: inline-size; }
+.acct-one { display: flex; flex-direction: column; gap: 8px; }
+.acct-pick { height: 26px; font: 600 14px var(--ui); padding: 0 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--fg); }
+.acct-one .acct-eq b { font-size: 22px; }
 .acct .pos-tbl { font-size: 12px; }
 .acct .pos-tbl th, .acct .pos-tbl td { padding: 3px 6px; }
 @container (max-width: 340px) { .acct .acct-today { display: none; } .acct .pos-tbl th, .acct .pos-tbl td { padding-inline: 3px; } }

@@ -224,6 +224,8 @@ const READY = {
   // A watchlist (lib/watchlists.js) with a chart of the symbol clicked, and news on the list.
   Watchlist: [1, () => ({ tree: { dir: 'row', ratio: 0.45, a: { dir: 'col', ratio: 0.55, a: { view: 'watchlist' }, b: { view: 'candles' } }, b: { view: 'news' } } })],
   Earnings: [1, () => ({ tree: { dir: 'row', ratio: 0.6, a: { view: 'earnings' }, b: { dir: 'col', ratio: 0.45, a: { view: 'calendar' }, b: { tabs: ['ivmap', 'candles'] } } } })],
+  // One account (the live one to start), with room for its positions and orders.
+  Account: [1, () => ({ tree: { view: 'account' } })],
   Notebook: [1, () => ({ tree: { dir: 'row', ratio: 0.72, a: { view: 'notebook' }, b: { dir: 'col', ratio: 0.5, a: { tabs: ['watchlist', 'earnings'] }, b: { tabs: ['candles', 'ivmap'] } } } })],
 };
 const DV = globalThis['dockview-core'];
