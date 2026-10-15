@@ -23,11 +23,13 @@
           ../libs/schedule
           ../libs/dbn
           ../libs/tinytrader
+          ../libs/alpaca
           ../apps/tui
           ../services/ticker
           ../services/databento-jobs
           ../services/store
           ../services/alpaca-news
+          ../services/alpaca-history
           ../services/econ-calendar
           ../services/alpaca-account
           ../services/alpaca-data
