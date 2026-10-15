@@ -2,8 +2,9 @@
 // any symbol (alpaca-data: consolidated history with pre-market and after-
 // hours, 04:00-20:00 New York, and its latest minutes), or from a relay's own
 // bars where no such service runs (a relay has only its session hours).
-// Pre-market and after-hours candles are drawn faded. Symbols: the theme's,
-// the relays', or any typed into the ticker box. Pick a bar size; scroll or
+// Pre-market and after-hours candles are drawn faded. The chart shows one
+// symbol: the one typed into its ticker box, or picked elsewhere while it's
+// linked (else the theme's or a relay's first). Pick a bar size; scroll or
 // zoom back for more history, loaded a chunk at a time and kept in the page
 // (lib/bars.js). Indicators (the expected move to a chosen horizon) are
 // listed over the chart's top left, each with its settings.
@@ -293,10 +294,12 @@ defineWidget('candles', {
       const list = offered();
       if (my.want) { const c = list.find(x => x.symbol === my.want); if (c) { my.pick = c; my.want = null; } }
       if (!my.pick || !list.some(c => c.service === my.pick.service && c.symbol === my.pick.symbol)) my.pick = (!my.linked && list.find(c => c.symbol === my.want)) || list.find(c => c.symbol === focused()) || list[0] || null;
+      // The box shows the symbol charted; typing replaces it.
+      const input = /** @type {HTMLInputElement} */ (el.querySelector('.cd-ticker'));
+      if (document.activeElement !== input) input.placeholder = my.pick?.symbol || 'Ticker or option';
       bar.innerHTML = list.length
-        ? `<span class="chips">${list.map(c => `<button type="button" class="chip-btn" data-cd-pick="${esc(c.service)}|${esc(c.symbol)}" aria-pressed="${my.pick?.service === c.service && my.pick?.symbol === c.symbol}">${esc(c.symbol)}</button>`).join('')}</span>
-           <span class="chips">${SIZES.map(([l, z]) => `<button type="button" class="chip-btn" data-cd-size="${z}" aria-pressed="${my.size === z}">${l}</button>`).join('')}</span>
-           <button type="button" class="chip-btn cd-link" data-cd-link aria-pressed="${my.linked}" title="${my.linked ? 'Linked: follows the symbol picked in a watchlist, Search or the Spread builder. Click to pin it to this symbol.' : 'Pinned to this symbol. Click to follow the symbol picked elsewhere again.'}">${my.linked ? '⛓ Linked' : '📌 Pinned'}</button>`
+        ? `<span class="cd-seg">${SIZES.map(([l, z]) => `<button type="button" data-cd-size="${z}" aria-pressed="${my.size === z}">${l}</button>`).join('')}</span>
+           <button type="button" class="cd-link" data-cd-link aria-pressed="${my.linked}" aria-label="${my.linked ? 'Linked' : 'Pinned'}" title="${my.linked ? 'Linked: follows the symbol picked in a watchlist, Search or the Spread builder. Click to pin it to this symbol.' : 'Pinned to this symbol. Click to follow the symbol picked elsewhere again.'}">${my.linked ? '⛓' : '📌'}</button>`
         : '';
       msg.textContent = !list.length ? (theme() ? 'No service serves bars for the theme’s symbols.' : 'No relay serves bars yet.') : my.err ? my.err : my.note || '';
     };
@@ -622,12 +625,10 @@ defineWidget('candles', {
       if (!any && !OCC.test(symbol)) { my.err = 'Typing a ticker needs a service with bars for any symbol (alpaca-data).'; head(); return; }
       if (!my.typed.includes(symbol)) my.typed.push(symbol);
       my.pick = offered().find(c => c.symbol === symbol) || { service: optionRelay(symbol) || any, symbol };
-      my.linked = false; input.value = '';
+      my.linked = false; input.value = ''; input.blur();
       fresh();
     });
     const click = e => {
-      const p = e.target.closest('[data-cd-pick]');
-      if (p) { const [service, symbol] = p.dataset.cdPick.split('|'); my.pick = { service, symbol }; fresh(); return; }
       const z = e.target.closest('[data-cd-size]');
       if (z) { my.size = +z.dataset.cdSize; fresh(); return; }
       if (e.target.closest('[data-cd-link]')) { my.linked = !my.linked; if (my.linked) { const f = focused(), c = f && offered().find(x => x.symbol === f); if (c) { my.pick = c; fresh(); return; } } head(); keep(); }
