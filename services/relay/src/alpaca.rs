@@ -33,6 +33,22 @@ const HISTORY_URL: &str = "https://data.alpaca.markets/v2/stocks";
 /// History is sent to clients in chunks of about this many bytes.
 const CHUNK: usize = 64 * 1024;
 
+/// Transport liveness of the stream: a ping every `every`, and the connection
+/// is dead when no frame (a pong counts) arrives within `deadline` of a ping.
+/// They bound how long a dead TCP connection can look alive, at most `every`
+/// plus `deadline`. They decide nothing about data: a quiet market still
+/// answers pings.
+#[derive(Clone, Copy)]
+struct Liveness {
+    every: Duration,
+    deadline: Duration,
+}
+
+const LIVENESS: Liveness = Liveness {
+    every: Duration::from_secs(15),
+    deadline: Duration::from_secs(10),
+};
+
 pub struct Alpaca {
     pub key: String,
     pub secret: String,
@@ -110,11 +126,12 @@ impl Alpaca {
 
     async fn stream(
         &self,
+        url: &str,
+        liveness: Liveness,
         hub: &Hub,
         observer: &Observer,
         encoders: &mut HashMap<String, Encoder>,
     ) -> Result<(), String> {
-        let url = if self.test { TEST_URL } else { LIVE_URL };
         let (mut ws, _) = tokio_tungstenite::connect_async(url)
             .await
             .map_err(|e| format!("cannot connect to Alpaca: {e}"))?;
@@ -123,7 +140,11 @@ impl Alpaca {
         let mut watched: HashMap<String, Encoder> = HashMap::new();
         let (mut authed, mut live) = (false, false);
         let mut sweep = tokio::time::interval(Duration::from_secs(60));
+        // The next ping, and the pong we wait for once one is sent.
+        let mut next_ping = Instant::now() + liveness.every;
+        let mut pong_due: Option<Instant> = None;
         loop {
+            let wake = pong_due.unwrap_or(next_ping);
             let msg = tokio::select! {
                 m = ws.next() => match m { Some(m) => m, None => break },
                 () = hub.tape.watch.changed.notified() => {
@@ -134,7 +155,24 @@ impl Alpaca {
                     if authed { self.resubscribe(&mut ws, hub, &mut watched).await?; }
                     continue;
                 }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {
+                    if pong_due.is_some() {
+                        return Err(format!(
+                            "no pong from Alpaca within {}s",
+                            liveness.deadline.as_secs()
+                        ));
+                    }
+                    ws.send(Message::Ping(Vec::new().into()))
+                        .await
+                        .map_err(|e| format!("cannot ping Alpaca: {e}"))?;
+                    let now = Instant::now();
+                    pong_due = Some(now + liveness.deadline);
+                    next_ping = now + liveness.every;
+                    continue;
+                }
             };
+            // Any frame from Alpaca, a pong included, shows the connection is alive.
+            pong_due = None;
             let text = match msg.map_err(|e| format!("Alpaca stream failed: {e}"))? {
                 Message::Text(t) => t,
                 Message::Ping(p) => {
@@ -247,6 +285,50 @@ impl Alpaca {
             }
         }
         Ok(())
+    }
+
+    /// The reconnect loop behind `run`, against any stream URL.
+    async fn keep_up(
+        &self,
+        url: &str,
+        liveness: Liveness,
+        hub: &Hub,
+        observer: &Observer,
+        hours: &Hours,
+    ) {
+        let mut encoders: HashMap<String, Encoder> = self
+            .symbols
+            .iter()
+            .map(|s| (s.clone(), Encoder::new(s)))
+            .collect();
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            let end = hours.wait_until_active(hub, observer).await;
+            let began = Instant::now();
+            // At the end of the active window the stream is dropped, which
+            // disconnects it.
+            let outcome = tokio::select! {
+                r = self.stream(url, liveness, hub, observer, &mut encoders) => Some(r),
+                () = hours::until(end) => None,
+            };
+            let Some(outcome) = outcome else {
+                continue;
+            };
+            hub.upstream_down();
+            let why = match outcome {
+                Ok(()) => "Alpaca closed the stream".to_owned(),
+                Err(e) => e,
+            };
+            eprintln!("relay: {why}; reconnecting in {}s", backoff.as_secs());
+            observer.record_error(&why);
+            observer.set_state(State::Degraded, &format!("{why}; reconnecting"));
+            if began.elapsed() > Duration::from_secs(60) {
+                backoff = Duration::from_secs(1);
+            }
+            tokio::time::sleep(backoff).await;
+            // Alpaca refuses a second connection for a while after a drop.
+            backoff = (backoff * 2).min(Duration::from_secs(60));
+        }
     }
 
     /// Bring the stream's watched symbols in line with the tape's: subscribe
@@ -626,39 +708,8 @@ impl Source for Alpaca {
     ) -> BoxFuture<'static, ()> {
         Box::pin(async move {
             hub.publish(self.definitions(), self.symbols.len() as u64);
-            let mut encoders: HashMap<String, Encoder> = self
-                .symbols
-                .iter()
-                .map(|s| (s.clone(), Encoder::new(s)))
-                .collect();
-            let mut backoff = Duration::from_secs(1);
-            loop {
-                let end = hours.wait_until_active(&hub, &observer).await;
-                let began = Instant::now();
-                // At the end of the active window the stream is dropped, which
-                // disconnects it.
-                let outcome = tokio::select! {
-                    r = self.stream(&hub, &observer, &mut encoders) => Some(r),
-                    () = hours::until(end) => None,
-                };
-                let Some(outcome) = outcome else {
-                    continue;
-                };
-                hub.upstream_down();
-                let why = match outcome {
-                    Ok(()) => "Alpaca closed the stream".to_owned(),
-                    Err(e) => e,
-                };
-                eprintln!("relay: {why}; reconnecting in {}s", backoff.as_secs());
-                observer.record_error(&why);
-                observer.set_state(State::Degraded, &format!("{why}; reconnecting"));
-                if began.elapsed() > Duration::from_secs(60) {
-                    backoff = Duration::from_secs(1);
-                }
-                tokio::time::sleep(backoff).await;
-                // Alpaca refuses a second connection for a while after a drop.
-                backoff = (backoff * 2).min(Duration::from_secs(60));
-            }
+            let url = if self.test { TEST_URL } else { LIVE_URL };
+            self.keep_up(url, LIVENESS, &hub, &observer, &hours).await;
         })
     }
 
@@ -726,4 +777,176 @@ fn rfc3339(ns: u64) -> String {
         t.second(),
         t.nanosecond()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    use databento::dbn::Metadata;
+    use futures_util::StreamExt as _;
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+
+    /// How the fake Alpaca treats a connection after it subscribes.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Peer {
+        /// Answers pings, sends no data.
+        Healthy,
+        /// Stops reading and writing: the socket stays open, as a dead one does.
+        Silent,
+    }
+
+    fn alpaca() -> Alpaca {
+        Alpaca {
+            key: "key".to_owned(),
+            secret: "secret".to_owned(),
+            symbols: Vec::new(),
+            test: false,
+            http: reqwest::Client::new(),
+        }
+    }
+
+    fn hub() -> Hub {
+        let metadata = Metadata::builder()
+            .dataset("TEST.DATA".to_owned())
+            .schema(None)
+            .start(0)
+            .stype_in(None)
+            .stype_out(databento::dbn::SType::InstrumentId)
+            .build();
+        Hub::new(metadata, 64, Duration::from_secs(1))
+    }
+
+    /// A local websocket server: each connection gets the next `script` entry
+    /// (healthy after that). Returns its URL and the pings it has answered.
+    async fn fake_alpaca(script: Vec<Peer>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let pings = Arc::new(AtomicUsize::new(0));
+        let counted = pings.clone();
+        tokio::spawn(async move {
+            for n in 0.. {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let peer = script.get(n).copied().unwrap_or(Peer::Healthy);
+                tokio::spawn(serve(tcp, peer, counted.clone()));
+            }
+        });
+        (url, pings)
+    }
+
+    async fn serve(tcp: TcpStream, peer: Peer, pings: Arc<AtomicUsize>) {
+        let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+            return;
+        };
+        let _ = ws
+            .send(Message::text(r#"[{"T":"success","msg":"connected"}]"#))
+            .await;
+        let _ = ws.next().await; // auth
+        let _ = ws
+            .send(Message::text(r#"[{"T":"success","msg":"authenticated"}]"#))
+            .await;
+        let _ = ws.next().await; // subscribe
+        let _ = ws
+            .send(Message::text(
+                r#"[{"T":"subscription","trades":[],"quotes":[]}]"#,
+            ))
+            .await;
+        if peer == Peer::Silent {
+            // Keeps the socket open but never reads (so never answers a ping).
+            std::future::pending::<()>().await;
+        }
+        while let Some(Ok(msg)) = ws.next().await {
+            if let Message::Ping(p) = msg {
+                pings.fetch_add(1, SeqCst);
+                let _ = ws.send(Message::Pong(p)).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_silent_connection_is_dropped_within_the_pong_deadline() {
+        let (url, _) = fake_alpaca(vec![Peer::Silent]).await;
+        let liveness = Liveness {
+            every: Duration::from_millis(100),
+            deadline: Duration::from_millis(200),
+        };
+        let (hub, observer) = (hub(), Observer::new("relay", "test"));
+        let mut encoders = HashMap::new();
+        let started = Instant::now();
+        let r = tokio::time::timeout(
+            Duration::from_secs(5),
+            alpaca().stream(&url, liveness, &hub, &observer, &mut encoders),
+        )
+        .await
+        .expect("a silent stream was not dropped");
+        let err = r.unwrap_err();
+        assert!(err.contains("no pong"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_healthy_connection_that_answers_pings_stays_up_with_no_quotes() {
+        let (url, pings) = fake_alpaca(vec![Peer::Healthy]).await;
+        let liveness = Liveness {
+            every: Duration::from_millis(50),
+            deadline: Duration::from_millis(500),
+        };
+        let (hub, observer) = (hub(), Observer::new("relay", "test"));
+        let mut encoders = HashMap::new();
+        let r = tokio::time::timeout(
+            Duration::from_secs(1),
+            alpaca().stream(&url, liveness, &hub, &observer, &mut encoders),
+        )
+        .await;
+        assert!(r.is_err(), "the healthy stream ended: {r:?}");
+        assert!(
+            pings.load(SeqCst) >= 3,
+            "pings answered: {}",
+            pings.load(SeqCst)
+        );
+        assert_eq!(observer.state(), State::Ready);
+    }
+
+    #[tokio::test]
+    async fn a_silent_connection_degrades_the_relay_until_the_reconnect_is_ready() {
+        // The first connection goes silent after it is live; the second is healthy.
+        let (url, _) = fake_alpaca(vec![Peer::Silent]).await;
+        let liveness = Liveness {
+            every: Duration::from_millis(100),
+            deadline: Duration::from_millis(200),
+        };
+        let (alpaca, hub) = (Arc::new(alpaca()), Arc::new(hub()));
+        let observer = Observer::new("relay", "test");
+        let hours = Hours::new(None, None, reqwest::Client::new());
+        let task = {
+            let (alpaca, hub, observer) = (alpaca.clone(), hub.clone(), observer.clone());
+            tokio::spawn(async move {
+                alpaca
+                    .keep_up(&url, liveness, &hub, &observer, &hours)
+                    .await;
+            })
+        };
+        // Watch the states in order until the reconnect is ready again.
+        let seen = tokio::time::timeout(Duration::from_secs(10), async {
+            let mut seen: Vec<State> = Vec::new();
+            loop {
+                let s = observer.state();
+                if seen.last() != Some(&s) {
+                    seen.push(s);
+                }
+                if seen.contains(&State::Degraded) && s == State::Ready {
+                    return seen;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the relay never came back to ready");
+        task.abort();
+        let degraded = seen.iter().position(|s| *s == State::Degraded).unwrap();
+        assert!(seen[..degraded].contains(&State::Ready), "{seen:?}");
+        assert!(seen[degraded..].contains(&State::Ready), "{seen:?}");
+    }
 }
