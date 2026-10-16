@@ -110,7 +110,7 @@ S→C error      {code, message}  fatal errors close the connection after sendin
 |---|---|
 | `trade` | `submit` and `cancel` for ids with its own prefix, plus every query. It sees its own orders and account-wide events. |
 | `observe` | Every query and every event on the account. It cannot submit or cancel. |
-| `admin` | Everything `observe` can do, plus `kill`, `unkill`, and `cancel` of any order. |
+| `admin` | Everything `observe` can do, plus `kill`, `unkill`, `clear_order`, and `cancel` of any order. |
 
 - A request outside the client's role gets `response{outcome:"error", code:"forbidden"}`.
 - Access to the market-data relay grants no access to orders. They are separate processes, ports and tokens.
@@ -133,6 +133,7 @@ Every request has the form `{type, request_id, …}`. Every response is `{type:"
 | `kill` | `level: halt_opens \| halt_all`, `reason` | admin | `ok{state}` |
 | `unkill` | `reason` | admin | `ok{state}` |
 | `flatten` | `reason` | admin | `ok{state, positions: [{symbol, status, broker_raw}], broker_raw}`, or `rejected` / `unknown` ([section 9](#9-safety-rules)) |
+| `clear_order` | `client_order_id`, `reason` (non-empty) | admin | `ok{client_order_id}`, or `not_cleared{reason, detail}` with the reasons in [section 12](#12-error-codes). See item 6 of section 5. |
 | `advance` | `to_ts` | trade | `ok{market_ts}`. Only for the simulator in client-clocked replay ([section 10](#10-simulated-broker)). |
 
 - Every `ok` query response carries `ts_gateway` and `broker_raw`.
@@ -159,7 +160,7 @@ A known `client_order_id` with a *different* intent is `not_sent{duplicate_confl
 4. Only a 404 from the broker says the order is not there. If the last lookup is a 404, the gateway emits `resolution{outcome:"absent_after", window_ms}`.
    - This is **not** a statement that the order was never submitted.
    - The id stays reserved, and a late `trade_updates` event or a later reconciliation still correlates to it.
-   - The order **stays open** until it is settled. It uses a `max_open` slot, blocks closes on its legs ([section 8](#8-rate-budget-and-caps)) and counts in `unresolved`.
+   - The order **stays open** until it is settled or cleared (item 6). It uses a `max_open` slot, blocks closes on its legs ([section 8](#8-rate-budget-and-caps)) and counts in `unresolved`.
    - A stream event for it settles it: a terminal state (`canceled`, `rejected`, `filled`, ...) stops it counting, and any other state makes it an ordinary open order.
    - A reconciliation settles it too, but only when the broker shows it: it looks the order up again, and if it is found, the order is an ordinary order from its state. A 404 never clears an absent order, however many lookups return it. It stays open and counted until a stream event or a found lookup settles it.
    - While the gateway is connected to the broker, every poll interval (`poll`, default 1 s) looks up each absent order again, with the same rule: found settles it, and a 404 or any other failure leaves it absent. Each check is one budget charge per absent order.
@@ -169,6 +170,15 @@ A known `client_order_id` with a *different* intent is `not_sent{duplicate_confl
    - It still counts as open, so it uses a `max_open` slot, blocks closes on its legs and counts in `unresolved`.
    - A stream event for it, a reconciliation after the stream reconnects, or a restart settles it. Until then clients should treat it as `unknown`.
    - After a restart an unknown order is looked up again. A journaled `absent_after` does not restore the absent state.
+6. **Clearing an order the broker does not have.** An unresolved order is never cleared by a 404 alone, nor by time. Only two broker answers that agree clear it:
+   - `clear_order` (admin only) needs an order the gateway holds that is unresolved (unknown or absent) or otherwise open. The gateway then checks the broker twice, both always: the open orders listing, and a lookup by client id. The order is cleared only when both answer and neither shows it.
+   - A shown order is refused as `broker_shows_order`, with the status the broker returned, whichever check saw it. A failed check (an error, a timeout or the budget) is `broker_unreachable`, unless a check shows the order.
+   - A cleared order is not open: it no longer uses a `max_open` slot, does not block closes on its legs, and is not looked up again. Its client id stays reserved, so the same intent is `duplicate` and a different one `duplicate_conflict`. A late stream event for it still applies (the broker, not the clear, has the last word).
+   - Each clear is journaled as a `cleared` event ([section 7](#7-events)), and a restart keeps the order cleared.
+   - Every `clear_order` request is journaled, whether it clears or is refused, as a `clear_refused` event ([section 7](#7-events)): a request from a client that is not an admin, a request with an empty reason, and a refused clear all count. A refused request changes no state.
+   - The open orders listing has no paging and is capped at 500 orders. A listing of 500 entries may hide orders, so it is `unreliable`, not `absent`: an order that the listing does not show is then not ruled out. A clear is refused as `broker_unreachable` (`detail.check: open_orders`, `detail.code: listing_full`) unless the lookup by id shows the order.
+   - **Automatic clear of session orders.** A `day` or `cls` (closing-auction) order that is still unresolved after its New York trading date has passed (the journaled submit time, in `America/New_York`) is checked by the same two broker calls. If the broker shows nothing, it is cleared with requester `gateway` and reason `day_order_after_session`. If the broker shows it, or the open orders listing is full, it is left alone: it is live, or the broker cannot rule it out, and the stream or a lookup settles it. The check runs on the poll that rechecks absent orders (`poll`), with no timer of its own. An automatic refusal is not journaled.
+   - Good-til-canceled and unknown time-in-force orders are never cleared automatically. The time in force is read from the intent journaled at admission (`intent.time_in_force`); a journal line without it is unknown.
 
 Cancel follows the same rule. An `unknown` cancel is not repeated by the gateway. The client may send another `cancel`, which is idempotent at the broker.
 
@@ -249,7 +259,9 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 | `submit` | `client`, `request_id`, `client_order_id`, `phase: admitted \| sent \| outcome`, `intent` and `intent_sha256` (admitted only), `outcome` (outcome only, the same object as the response) |
 | `cancel` | `client`, `request_id`, `target`, `phase`, `outcome` |
 | `order` | `client_order_id`, `broker_order_id`, `event`, `status`, `ts_broker`, `fill?{execution_id, qty, price}`, `filled_qty`, `avg_price`, `legs?[{symbol, filled_qty, avg_price, fill?{qty, price}}]`, `position_qty?`, `reason?{code, message}`, `source: stream \| rest_reconcile \| sim`, `broker_event`, `broker_raw` |
-| `resolution` | `client_order_id`, `outcome: found \| absent_after \| unresolved`, `window_ms`. `absent_after` is a 404 on the last lookup: the order is absent but stays open until a stream event or a reconciliation settles it; `unresolved` is a failed last lookup, and the order stays unknown ([section 5](#unknown-outcome-never-resend)). |
+| `resolution` | `client_order_id`, `outcome: found \| absent_after \| unresolved`, `window_ms`. `absent_after` is a 404 on the last lookup: the order is absent but stays open until a stream event or a lookup that finds it settles it; `unresolved` is a failed last lookup, and the order stays unknown ([section 5](#unknown-outcome-never-resend)). |
+| `cleared` | `client_order_id`, `requester` (the admin's client name, or `gateway` for the session-order rule), `reason`, `broker: {open_orders: {result: "absent", listed}, by_id: {result: "absent", broker_raw}}`. The two broker answers that cleared the order ([section 5](#5-requests-and-responses), item 6). Visible to the same clients as an `order` event. |
+| `clear_refused` | `client_order_id` (empty when the request had none), `requester` (the requesting client's name, admin or not), `request_reason` (the reason the request gave, possibly empty), `reason` and `detail` (the `not_cleared` outcome of the refused request, [section 12](#12-error-codes)), `broker?: {open_orders: {result: shows \| unreliable \| failed \| absent, listed, status?, code?}, by_id: {result, status?, code?, broker_raw}}`, present when the broker was consulted. Visible to the same clients as a `cleared` event. Recovery ignores it: it changes no order's state. |
 | `account` | `snapshot: account \| positions`, `broker_raw`. Derived from polling and emitted on change; Alpaca has no account stream. |
 | `activity` | `activity_type`, `broker_raw`, for example `OPEXP`, `OPASN`, `OPEXC`, `FILL` or `FEE` |
 | `status` | `state`, `broker_stream: up \| down{since}`, `resync?{from_ts, to_ts, orders_checked}`, `kill?{level, reason}`, `cap?{name}` |
@@ -304,6 +316,8 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 
 **Closes and pending legs.** A close is refused with `not_sent{reason: "leg_pending"}`, and `detail.symbols` lists each leg that has a pending order, while any order the gateway holds on that leg's symbol (the same symbol key as in section 6) is still open or unresolved: an admitted, sent or unknown order, an absent order that is not yet settled, or any working order in a non-terminal state. The whole intent is refused. Closes on legs with no such order are unchanged, and no open-order or daily cap applies to them. Opens are not refused by this rule; they count pending orders against `--max-open`.
 
+A cleared order (section 5, item 6) is not open, so it neither blocks a close on its legs nor counts toward `--max-open`.
+
 The day count is rebuilt from the journal on restart, and only a journaled submit with an opening leg counts toward it. A journaled intent that cannot be read counts as opening, so the count fails closed.
 
 ## 9. Safety rules
@@ -313,6 +327,7 @@ The day count is rebuilt from the journal on restart, and only a journaled submi
 | Paper/live isolation | Endpoints are compiled constants selected by `--environment`. A paper process cannot build a live URL (enforced by the type system), and tests inject transports instead of overriding URLs. Live trading needs separate operator authorization and is outside v1. |
 | Start gate | The process starts `reconciling` and becomes `ready` only when: the account is active and not blocked; `options_trading_level` ≥ the profile minimum (3); the journal chain verifies; and broker reconciliation ([section 11](#11-order-journal)) is complete. Until then a submit is `not_sent{not_ready}`. Foreign orders or non-option positions are reported as `foreign` events; they do not block unless the profile says so. |
 | Flatten | An admin's `flatten` closes everything: it sets `kill{halt_opens}` (unless `halt_all` is already set), cancels every open order as `halt_all` does, then asks the broker to close every position at market in **one request that is never resent**. Alpaca: `DELETE /v2/positions?cancel_orders=true`, which places a market order per position; the response lists each position's `{symbol, status, broker_raw}` (its closing order, or why not). An `unknown` outcome means the request may have reached the broker: look at `positions` before asking again. The closing orders are the broker's, so they arrive as `foreign` order events, with their fills. Options close at market, across whatever spread there is. Opens stay refused until `unkill`. The request and its outcome are journaled as `flatten` events (phase `requested` / `outcome`), visible to the requesting admin and to observers. The simulated broker closes each position at its touch (else the scripted quote's mid, else its average cost). |
+| Clearing | Only an admin's `clear_order`, or the session-order rule for `day` and `cls` orders, and only when both broker checks show nothing for the order ([section 5](#5-requests-and-responses), item 6). A clear never resends and never closes anything; it stops the order counting as open, and its client id stays reserved. |
 | Kill switch | `kill{halt_opens}` refuses any submit with an opening leg. `kill{halt_all}` refuses every submit and cancels every open order: first `DELETE /v2/orders`, then a check of each order. The default level is `halt_all`. Triggers: an admin request, the CLI through the admin role, or a `KILL` sentinel file in the state root. The kill state is journaled and **persists across restarts**; only an explicit `unkill` clears it. |
 | Broker stream down | If `trade_updates` has been down for more than 5 s, the state becomes `degraded` and submits are `not_sent{not_ready}`. Cancels are still allowed. While down, the gateway polls open orders at 1 Hz. After reconnecting it resyncs through REST before returning to `ready`. |
 | Client disconnect | **No automatic cancel.** A client can opt in with `hello.cancel_on_disconnect: true`: after a 2 s grace period, its open orders (by prefix) are cancelled. A gateway restart leaves broker orders alone and reconciles them. |
@@ -432,7 +447,7 @@ Creating a new file also fsyncs the directory.
 1. Take the lock.
 2. Read the files in order. A torn final line, with no `\n`, is truncated; this is the only repair allowed.
 3. Verify the hash chain and the `seq` continuity. A mismatch anywhere else is fatal: the process refuses to start and leaves the files untouched.
-4. Rebuild the map `client_order_id → last known state, intent_sha256` and the reserved-id set from the last 30 days.
+4. Rebuild the map `client_order_id → last known state, intent_sha256` and the reserved-id set from the last 30 days. A `cleared` line marks its order cleared; a `clear_refused` line changes nothing.
 5. Enter `reconciling`.
    - Fetch every order that is non-terminal or `unknown` by its client id.
    - Then `GET /v2/orders?status=all&after=<last event ts − 60 s>&nested=true`, plus `FILL` activities since then.
@@ -467,7 +482,7 @@ The same resync runs after every `trade_updates` reconnect. An order in phase `s
 |---|---|
 | `invalid_request` | Unknown type or field, or a wrong JSON type, with `detail.path` |
 | `duplicate_request_id` | Reused within the connection |
-| `forbidden` | Outside the client's role or prefix (`kill`, `unkill` and `flatten` need the admin role) |
+| `forbidden` | Outside the client's role or prefix (`kill`, `unkill`, `flatten` and `clear_order` need the admin role) |
 | `not_found` | `cancel` target unknown to the journal and the broker |
 | `broker_error` | A query failed, with `http_status`, `code` and `message` |
 | `throttled`, `not_ready` | A query was refused by the budget or the state |
@@ -485,6 +500,12 @@ The same resync runs after every `trade_updates` reconnect. An order in phase `s
 - `position_unknown` (with `detail.symbol`, `requested_qty`, `code`: the position read failed, so the close is refused)
 - `throttled`
 - `duplicate_conflict`
+
+**`not_cleared.reason`** for `clear_order` ([section 5](#5-requests-and-responses), item 6):
+- `unknown_order`: the gateway holds no order with that client id.
+- `not_unresolved`: the order is settled, so there is nothing to clear.
+- `broker_shows_order` (with `detail.check` and `detail.status`): the broker has the order in that state. `check` is `open_orders` or `by_id`.
+- `broker_unreachable` (with `detail.check` and `detail.code`): a broker check failed (an error, a timeout or the budget) and neither check showed the order. `code: listing_full` means the open orders listing had 500 entries and did not show the order, so it may have been cut short.
 
 ## 13. Worked examples
 
