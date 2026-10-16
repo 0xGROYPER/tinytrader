@@ -11,6 +11,7 @@
 // panel's update time. Record collects a bounded event log; Stop uploads it
 // to the console (/api/profiles, read on the host with
 // services/console/scripts/profile-report) and offers it as a download.
+import { orderFetch } from './api.js';
 
 const KEY = 'tt-profile';
 // The page's own timers, unwrapped, so profiling doesn't measure itself.
@@ -204,7 +205,7 @@ async function stopRecording() {
   const name = `tinytrader-profile-${recording.meta.started_at.replace(/[:.]/g, '-')}.json`;
   let where = '';
   try {
-    const r = await fetch('/api/profiles', { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+    const r = await orderFetch('/api/profiles', recording);
     const v = await r.json().catch(() => ({}));
     where = r.ok ? `saved as ${v.id}` : `not saved (${v.error || r.status})`;
   } catch (e) { where = `not saved (${e.message})`; }
