@@ -2,7 +2,7 @@
 // workspaces on Dockview, the palette and the switcher, the docs pages, and
 // polling the fleet. The widgets are modules under ../widgets (decision 0010).
 // Settings shared between devices: read before anything here runs.
-import './prefs.js';
+import { refusedNote } from './prefs.js';
 import { esc, bytes, duration, fmt, ago, etStamp } from './format.js';
 import { fleet, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf, newsItems } from './fleet.js';
 import { widget, widgetNames } from './widgets.js';
@@ -1371,9 +1371,11 @@ function status() {
   const d = fleet.snap?.docker;
   if (d?.configured && d.error) problems.push('Docker API unavailable: ' + d.error + '. Container state is missing.');
   if (fleet.snap?.error) problems.push(fleet.snap.error);
+  if (refusedNote) problems.push(refusedNote);
   $('banner').hidden = !problems.length;
   $('banner').textContent = problems.join(' ');
 }
+document.addEventListener('tt-prefs-refused', status);
 async function loadTopology() {
   try { const r = await fetch('/api/topology', { cache: 'no-store' }); if (r.ok) { fleet.topo = await r.json(); document.title = fleet.topo.name ? `tinytrader · ${fleet.topo.name}` : 'tinytrader'; } } catch (_) {}
 }

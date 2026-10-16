@@ -10,8 +10,9 @@
 // Spread builder on a card opens it with that account picked for its ticket.
 // Liquidate (any account the console trades, live too) closes every option
 // position at once (lib/liquidate.js): the orders it will send are shown with
-// their prices, the console's own open orders are cancelled first, and a live
-// account asks once more.
+// their prices, the console's own open orders are cancelled first, each order
+// is checked against a fresh read just before it is sent, and a live account
+// asks once more.
 //
 // Account (one account): the same for one account, picked at its top (the
 // live account until another is picked, kept with the panel), with room for
@@ -23,9 +24,10 @@ import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { askHeld } from '../lib/position.js';
-import { createTicket, tradable, routed, occLabel } from '../lib/ticket.js';
-import { plan, quotes, priced, send, cancelOurs } from '../lib/liquidate.js';
+import { createTicket, tradable, routed, occLabel, unresolvedOf } from '../lib/ticket.js';
+import { plan, quotes, priced, send, cancelOurs, hold, holdOf, reread, fitted } from '../lib/liquidate.js';
 import { get } from '../lib/cache.js';
+import { orderFetch } from '../lib/api.js';
 
 /** An account's option positions by underlying and expiry, for the Spread builder's payoff. */
 const heldGroups = new Map();
@@ -60,7 +62,7 @@ async function readGateways(update) {
 // Flatten in progress per account: {stage: 'confirm' | 'busy' | 'done', typed, result, error}.
 const flat = {};
 async function post(path, body) {
-  const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await orderFetch(path, body);
   let v = null; try { v = await r.json(); } catch (_) {}
   if (!r.ok) throw new Error(v?.error || `${r.status} ${r.statusText}`);
   return v;
@@ -105,8 +107,11 @@ function liquidatePanel(a) {
   if (!name || !tradable(name)) return '';
   const { orders, left } = plan(a.positions);
   const L = liq[name];
-  const button = orders.length ? `<div class="acct-actions"><button type="button" class="btn liq-btn" data-liq-open="${esc(name)}"${L?.stage === 'sending' ? ' disabled' : ''}>Liquidate</button></div>` : '';
-  if (!L) return button;
+  // An unknown result may be live: nothing is sent here until the account is read again (lib/liquidate.js).
+  const held = holdOf(name, a);
+  const heldNote = held ? `<p class="neg" style="margin:0 0 6px;font-size:12px">A result from the last run is unknown and may be live. Open orders must be re-read before anything is sent to this account. ${esc(held)}</p>` : '';
+  const button = orders.length ? `<div class="acct-actions"><button type="button" class="btn liq-btn" data-liq-open="${esc(name)}"${L?.stage === 'sending' || held ? ' disabled' : ''}>Liquidate</button></div>` : '';
+  if (!L) return heldNote + button;
   const live = a.environment === 'live';
   const legsOf = o => o.legs.map(l => `<span class="${l.side === 'buy' ? 'pos' : 'neg'}">${l.side === 'buy' ? '+' : '−'}${l.ratio * o.qty}</span> ${esc(occLabel(l.symbol))}`).join('<br>');
   const priceOf = o => {
@@ -123,6 +128,8 @@ function liquidatePanel(a) {
     ours ? `Cancels the console's ${ours} open order${ours > 1 ? 's' : ''} first.` : '',
     theirs ? `<span class="neg">${theirs} open order${theirs > 1 ? 's' : ''} placed elsewhere stay${theirs > 1 ? '' : 's'}, and can keep a contract from closing: cancel ${theirs > 1 ? 'them' : 'it'} where ${theirs > 1 ? 'they were' : 'it was'} placed.</span>` : '',
     left.length ? `Left out: ${left.map(x => `${esc(occLabel(x.symbol))} (${esc(x.why)})`).join(', ')}.` : '',
+    L?.left?.length ? `Left out at send, from a fresh read: ${L.left.map(x => `${esc(occLabel(x.symbol))} (${esc(x.why)})`).join(', ')}.` : '',
+    L?.error ? `<span class="neg">${esc(L.error)}</span>` : '',
   ].filter(Boolean).map(x => `<p class="muted" style="margin:0;font-size:12px">${x}</p>`).join('');
   const confirming = L.confirm > Date.now();
   const head = L.stage === 'done' ? `<b>Liquidate ${esc(a.label || name)}: ${L.results.filter(r => r.ok).length} of ${L.results.length} sent.</b>`
@@ -130,10 +137,10 @@ function liquidatePanel(a) {
     : `<b>Close every option position in ${esc(a.label || name)}${live ? ' (LIVE, real money)' : ''}: ${orders.length} order${orders.length > 1 ? 's' : ''}.</b>`;
   const seg = L.stage === 'review' ? `<span class="tk-seg" role="group" aria-label="Price"><button type="button" data-liq-type="limit" data-liq="${esc(name)}" aria-pressed="${!L.market}" title="The natural and 5% (at least $0.05) past it: fills like market unless the quotes jump">Marketable limit</button><button type="button" data-liq-type="market" data-liq="${esc(name)}" aria-pressed="${L.market}" title="Fills at whatever the market gives">Market</button></span>` : '';
   const acts = L.stage === 'review'
-    ? `<button type="button" class="btn liq-btn" data-liq-go="${esc(name)}"${orders.length && L.q ? '' : ' disabled'}>${confirming ? `Confirm: liquidate ${esc(name)} for real` : 'Liquidate now'}</button><button type="button" class="btn small" data-liq-cancel="${esc(name)}">${confirming ? 'Not yet' : 'Cancel'}</button>`
-    : L.stage === 'done' ? `<button type="button" class="btn small" data-liq-cancel="${esc(name)}">Done</button>${orders.length ? `<button type="button" class="btn small danger" data-liq-open="${esc(name)}">Again for what's left</button>` : ''}` : '';
+    ? `<button type="button" class="btn liq-btn" data-liq-go="${esc(name)}"${orders.length && L.q && !held ? '' : ' disabled'}>${confirming ? `Confirm: liquidate ${esc(name)} for real` : 'Liquidate now'}</button><button type="button" class="btn small" data-liq-cancel="${esc(name)}">${confirming ? 'Not yet' : 'Cancel'}</button>`
+    : L.stage === 'done' ? `<button type="button" class="btn small" data-liq-cancel="${esc(name)}">Done</button>${orders.length ? `<button type="button" class="btn small danger" data-liq-open="${esc(name)}"${held ? ' disabled' : ''}>Again for what's left</button>` : ''}` : '';
   return `<div class="acct-flat liq${live ? ' liq-live' : ''}">${head}${seg}
-    <div class="scroll"><table class="pos-tbl"><tbody>${rows}</tbody></table></div>${notes}
+    <div class="scroll"><table class="pos-tbl"><tbody>${rows}</tbody></table></div>${heldNote}${notes}
     <div class="acct-actions">${acts}</div></div>`;
 }
 
@@ -241,6 +248,9 @@ function accountCard(svc, a, pick, book = false) {
     return `<article class="${pick ? 'acct acct-one' : 'card acct'}">${head}<p class="muted" style="margin:0">${esc(err ? 'Cannot read the account: ' + err : 'Waiting for the first reading…')}</p></article>`;
   }
   const pos = a.positions || [];
+  // The gateway's count of unresolved orders: opens are refused until they resolve (closes are not blocked here).
+  const unresolved = unresolvedOf(a.name);
+  const unresolvedNote = unresolved ? `<p class="neg" style="margin:0 0 6px;font-size:12px">${unresolved} order${unresolved > 1 ? 's' : ''} unresolved on this account: new opens are blocked until they resolve.</p>` : '';
   const stats = [['Cash', money(acc.cash, cur)], ['Buying power', money(acc.buying_power, cur)]];
   if (acc.long_market_value) stats.push(['Long', money(acc.long_market_value, cur)]);
   if (acc.short_market_value) stats.push(['Short', money(acc.short_market_value, cur)]);
@@ -256,7 +266,7 @@ function accountCard(svc, a, pick, book = false) {
     <td style="color:var(--fg)" title="${esc(p.symbol)}">${esc(shortSym(p.symbol))}</td><td>${esc(String(p.qty ?? '—'))}</td>${pick ? `<td>${px(p.avg_entry_price)}</td><td>${px(p.current_price)}</td>` : ''}<td>${money(p.market_value, cur)}</td>
     <td class="${tone(p.unrealized_pl)}" title="${pct(p.unrealized_plpc)}">${signed(p.unrealized_pl, cur)}</td>
     <td class="${tone(p.change_today)} acct-today">${pct(p.change_today)}</td></tr>`).join('');
-  return `<article class="${pick ? 'acct acct-one' : 'card acct'}">${head}
+  return `<article class="${pick ? 'acct acct-one' : 'card acct'}">${head}${unresolvedNote}
     <div class="acct-stats">${stats.map(([k, v]) => `<span>${k} <b>${v}</b></span>`).join('')}</div>
     ${book ? '' : `<div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2" data-height="${pick ? 90 : 56}"></div>`}
     ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Position</th><th>Qty</th>${pick ? '<th>Avg</th><th>Last</th>' : ''}<th>Value</th><th>P/L</th><th class="acct-today">Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
@@ -363,6 +373,7 @@ function mount(el, single = false, book = false) {
   async function liquidate(d) {
     const name = d.liqOpen || d.liq || d.liqGo || d.liqCancel, L = liq[name];
     if (d.liqOpen) {
+      if (L?.stage === 'sending') return; // a run is in flight: its sends are not repeated
       liq[name] = { stage: 'review', market: false, confirm: 0, q: null };
       update();
       const a = accountOf(name), q = await quotes(plan(a?.positions).orders);
@@ -374,20 +385,40 @@ function mount(el, single = false, book = false) {
     if (d.liqType) { L.market = d.liqType === 'market'; L.confirm = 0; update(); return; }
     if (!d.liqGo || L.stage !== 'review') return;
     const a = accountOf(name), live = a?.environment === 'live';
+    if (holdOf(name, a)) { update(); return; }
     if (live && L.confirm <= Date.now()) { L.confirm = Date.now() + 6000; update(); setTimeout(update, 6100); return; }
     const { orders } = plan(a?.positions);
-    L.stage = 'sending'; L.sent = orders; L.results = orders.map(() => null); update();
-    // Our own working orders hold contracts: cancelled, then gone from the account (at most 5 s).
-    if (await cancelOurs(name, a?.orders)) {
-      for (let i = 0; i < 25 && (accountOf(name)?.orders || []).some(o => (o.client_order_id || '').startsWith('tt-')); i++) await new Promise(r => setTimeout(r, 200));
+    // Set before any await: a second run cannot start while this one reads or sends.
+    L.stage = 'sending'; L.sent = orders; L.results = orders.map(() => null); L.left = []; L.error = ''; update();
+    const unread = (from, text) => {
+      L.error = text;
+      for (let j = from; j < orders.length; j++) L.results[j] = { ok: false, text: 'not sent: the positions could not be re-read' };
+    };
+    // Read first: if the account can't be read, nothing is cancelled or sent.
+    const first = await reread(name);
+    if (!first.account) unread(0, `${first.why}; nothing was sent.`);
+    else {
+      // Our own working orders hold contracts: cancelled, then gone from the account (at most 5 s).
+      if (await cancelOurs(name, a?.orders)) {
+        for (let i = 0; i < 25 && (accountOf(name)?.orders || []).some(o => (o.client_order_id || '').startsWith('tt-')); i++) await new Promise(r => setTimeout(r, 200));
+      }
+      // The account's updated_at as the cancel step leaves it: each later read must be from this poll or a newer one (null refuses every read).
+      const cancelledAt = accountOf(name)?.updated_at ?? null;
+      // Fresh quotes, then the orders one at a time: each is checked against a fresh read just before it is sent.
+      L.q = await quotes(orders);
+      for (let i = 0; i < orders.length; i++) {
+        const fresh = await reread(name, cancelledAt);
+        if (!fresh.account) { unread(i, `${fresh.why}; the rest were not sent.`); break; }
+        const f = fitted(orders[i], fresh.account);
+        L.left.push(...f.left);
+        if (!f.order) { L.results[i] = { ok: false, text: `not sent: ${[...new Set(f.left.map(x => x.why))].join('; ')}` }; update(); continue; }
+        const p = priced(f.order, L.q, L.market);
+        L.results[i] = p ? await send(name, live, f.order, p) : { ok: false, text: 'not sent: no quote on every leg' };
+        update();
+      }
     }
-    // Fresh quotes, then every order at once.
-    L.q = await quotes(orders);
-    await Promise.all(orders.map(async (o, i) => {
-      const p = priced(o, L.q, L.market);
-      L.results[i] = p ? await send(name, live, o, p) : { ok: false, text: 'not sent: no quote on every leg' };
-      update();
-    }));
+    // An order that may be live holds the account until its open orders are read again (lib/liquidate.js).
+    hold(name, accountOf(name)?.updated_at, L.results.filter(r => r.maybe).map(r => r.id || null));
     L.stage = 'done'; update();
   }
 

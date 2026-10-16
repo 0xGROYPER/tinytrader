@@ -12,7 +12,7 @@ A card per brokerage account, live first: equity, the day's change, balances, an
 
 **Open orders:** every open order on the account as the broker has it, however it was placed: from the console, another client of the gateway, or Alpaca's own app (replacements included). Each shows its legs, limit (`cr` for a credit), filled quantity, status and age. The console's own orders (ids `tt-`) have **Cancel**, through the account's order gateway; others say *elsewhere*: change or cancel them where they were placed. If the orders can't be read the card says so in red, rather than showing none. They're read with the balances, so they follow the account service's hours.
 
-**Order ticket** (accounts with an order gateway): one option order of one to four legs, sent as the console's trade client (`POST /api/orders/{account}`), opening or closing.
+**Order ticket** (accounts with an order gateway): one option order of one to four legs, sent as the console's trade client (`POST /api/orders/{account}`), opening or closing. The first send on a device asks for the console's order token (`CONSOLE_ORDER_TOKEN`), which it keeps; the server refuses orders without it.
 
 - **Close…** beside each option group's Payoff button opens it to close that group: each leg reversed (a long sold, a short bought back), ratios in lowest terms with the quantity carrying the rest, priced at the natural.
 - **Spread builder** on a card with an order gateway opens the [Spread builder](spreads.md) with that account picked for its Trade review: build the order there (from a structure, or leg by leg), then Trade. The order ticket here is for closing what's held.

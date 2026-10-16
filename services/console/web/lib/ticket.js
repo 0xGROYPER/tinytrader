@@ -12,6 +12,7 @@ import { fleet, svcState } from './fleet.js';
 import { get, stream } from './cache.js';
 import { esc } from './format.js';
 import { notSentText } from './orders.js';
+import { orderFetch } from './api.js';
 
 const OCC = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/;
 const r2 = x => Math.round(x * 100) / 100;
@@ -25,6 +26,11 @@ const band = n => Math.max(0.05, r2(Math.abs(n) * 0.05));
 let routing = /** @type {any} */ (null), routingAt = 0, asking = /** @type {Promise<void> | null} */ (null);
 /** Whether an account can be traded from the console. @param {string} name */
 export const tradable = name => !!name && !!routing?.trading && (routing.accounts || []).some(x => x.account === name && !x.error);
+/** How many of an account's orders the gateway says have not resolved (0 when it doesn't say, or isn't a number). @param {string} name */
+export const unresolvedOf = name => {
+  const n = name ? (routing?.accounts || []).find(x => x.account === name)?.unresolved : 0;
+  return typeof n === 'number' && n > 0 ? n : 0;
+};
 /** Routing, read if it's 15 seconds old; then `done` (every caller waiting on the read). */
 export function routed(done) {
   if (asking) { asking.then(done); return; }
@@ -170,7 +176,7 @@ export function createTicket(box, hooks = {}) {
     t.sending = true; t.confirm = 0; draw(true);
     const me = t;
     try {
-      const r = await fetch(`/api/orders/${encodeURIComponent(me.acct)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: me.acct, live, order }) });
+      const r = await orderFetch(`/api/orders/${encodeURIComponent(me.acct)}`, { confirm: me.acct, live, order });
       const v = await r.json().catch(() => ({})), o = outcome(v, r.ok);
       me.result = o.html; me.done = !o.again;
       hooks.onSent?.(v);

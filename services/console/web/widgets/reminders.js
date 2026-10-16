@@ -5,11 +5,12 @@
 // same document, each with its own list chosen.
 import { defineWidget } from '../lib/widgets.js';
 import { esc } from '../lib/format.js';
+import { orderFetch } from '../lib/api.js';
 
 const rem = { doc: null, err: null, loaded: 0 };
 const panels = new Set();
 async function remApi(change) {
-  const r = await fetch('/api/reminders', change ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(change) } : { cache: 'no-store' });
+  const r = change ? await orderFetch('/api/reminders', change) : await fetch('/api/reminders', { cache: 'no-store' });
   let v = null; try { v = await r.json(); } catch (_) {}
   if (!r.ok) throw new Error(v?.error || (r.status === 404 ? 'Reminders are not configured on this console.' : `${r.status} ${r.statusText}`));
   return v;

@@ -4,6 +4,7 @@
 import { defineWidget } from '../lib/widgets.js';
 import { fleet, catalogRoots, catalogStamp } from '../lib/fleet.js';
 import { esc, bytes } from '../lib/format.js';
+import { orderFetch } from '../lib/api.js';
 
 // What fills a drive: each dataset (by its path on the drive) and every
 // other folder, largest first.
@@ -96,7 +97,7 @@ defineWidget('storage', {
       if (e.target.closest('[data-drive-approve]')) {
         e.target.disabled = true;
         try {
-          const r = await fetch('/api/store/volumes/approve', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path, name: my.name }) });
+          const r = await orderFetch('/api/store/volumes/approve', { path, name: my.name });
           const v = await r.json().catch(() => ({}));
           if (!r.ok) throw new Error(v.error || `${r.status} ${r.statusText}`);
           my.asking = null;
