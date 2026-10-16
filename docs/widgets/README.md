@@ -26,6 +26,7 @@ A workspace is a set of panels, each showing one widget. A widget can be added m
 ## Accounts and data
 
 - [Accounts](accounts.md): A card per brokerage account, live first: equity, the day's change, balances, an equity chart and the largest positions.
+- [Positions and risk](positions.md): The accounts' positions and orders without the equity chart, with total equity and total value at risk (one day, 95%) above them.
 - [Data](data.md): What the store holds, as a tree (dataset, symbol, schema) merged across drives, with each level's size and which drives hold it.
 - [Storage](storage.md): The store's drives as one pool: free space first, then each drive against the store's thresholds, then any new drive that could be approved.
 - [Jobs](jobs.md): Databento batch jobs: a request form that prices a request before it can be submitted, and every job through to filed in the store.

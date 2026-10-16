@@ -16,12 +16,16 @@
 // Account (one account): the same for one account, picked at its top (the
 // live account until another is picked, kept with the panel), with room for
 // every position (average price, last price, P/L) and the standing orders.
+//
+// Positions (live accounts, no equity chart): totals of equity and value at
+// risk (one day, 95%; see bookView) above the same cards.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { askHeld } from '../lib/position.js';
 import { createTicket, tradable, routed, occLabel } from '../lib/ticket.js';
 import { plan, quotes, priced, send, cancelOurs } from '../lib/liquidate.js';
+import { get } from '../lib/cache.js';
 
 /** An account's option positions by underlying and expiry, for the Spread builder's payoff. */
 const heldGroups = new Map();
@@ -178,23 +182,74 @@ function shortSym(sym) {
   const m = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(sym || '');
   return m ? `${m[1]} ${+m[6] / 1000}${m[5]} ${+m[3]}/${+m[4]}` : sym;
 }
-/** @param {string} [pick] One account's view: its picker, every position, more columns. */
-function accountCard(svc, a, pick) {
+// Realised volatility per underlying ({v: annualised or null, at}), read from daily bars every 5 minutes while shown.
+const vols = new Map();
+const VOL_TTL = 5 * 60e3;
+const Z95 = 1.645;
+const rootOf = sym => /^([A-Z]{1,6})\d{6}[CP]\d{8}$/.exec(sym || '')?.[1] || sym;
+const barsSource = () => (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id || null;
+/** Annualised realised volatility over the last 60 daily log returns, or null without enough history. */
+async function realisedVol(svc, sym) {
+  const r = await get(`/api/bars/${encodeURIComponent(svc)}?symbol=${encodeURIComponent(sym)}&days=120&interval=86400`, { fresh: 60e3 });
+  const c = (r.bars || []).map(b => b[4]).filter(x => x > 0);
+  const rets = [];
+  for (let i = 1; i < c.length; i++) rets.push(Math.log(c[i] / c[i - 1]));
+  const w = rets.slice(-60);
+  if (w.length < 20) return null;
+  const mu = w.reduce((x, y) => x + y, 0) / w.length;
+  return Math.sqrt(w.reduce((x, y) => x + (y - mu) ** 2, 0) / (w.length - 1) * 252);
+}
+async function readVols(update) {
+  const svc = barsSource();
+  if (!svc) return;
+  const now = Date.now();
+  const roots = [...new Set(allAccounts().filter(x => x.a?.environment === 'live').flatMap(x => (x.a?.positions || []).map(p => rootOf(p.symbol))))]
+    .filter(r => r && (!vols.has(r) || now - vols.get(r).at > VOL_TTL));
+  if (!roots.length) return;
+  for (const r of roots) vols.set(r, { v: vols.get(r)?.v ?? null, at: now });
+  await Promise.all(roots.map(async r => {
+    const v = await realisedVol(svc, r).catch(() => null);
+    vols.set(r, { v, at: Date.now() });
+  }));
+  update();
+}
+/** One account's value at risk: {total, unpriced} (positions with no volatility yet are counted, not added). */
+function varOf(pos) {
+  let total = 0, unpriced = 0;
+  for (const p of pos || []) {
+    const v = vols.get(rootOf(p.symbol))?.v;
+    if (v == null) { unpriced++; continue; }
+    total += Math.abs(p.market_value || 0) * v * Z95 / Math.sqrt(252);
+  }
+  return { total, unpriced };
+}
+
+/**
+ * @param {string} [pick] One account's view: its picker, every position, more columns.
+ * @param {boolean} [book] The Positions view: no equity chart; equity and value at risk instead.
+ */
+function accountCard(svc, a, pick, book = false) {
   const acc = a?.account || {}, cur = acc.currency, env = a?.environment || 'paper';
   const day = acc.equity != null && acc.last_equity != null ? acc.equity - acc.last_equity : null;
-  // One line: the account, then its equity and the day's change.
-  const head = `<div class="acct-head"><h3>${pick ?? esc(a?.label || svc.label || svc.id)}<span class="env env-${env === 'live' ? 'live' : 'paper'}">${esc(env)}</span>
+  // One line: the account, then its equity and the day's change (the Positions view shows equity in its stats).
+  const head = `<div class="acct-head"><h3>${pick ?? esc(a?.label || svc.label || svc.id)}${book ? '' : `<span class="env env-${env === 'live' ? 'live' : 'paper'}">${esc(env)}</span>`}
     ${acc.status && acc.status !== 'ACTIVE' ? `<span class="pill p-warn">${esc(acc.status.toLowerCase())}</span>` : ''}
     ${acc.trading_blocked || acc.account_blocked ? '<span class="pill p-crit">blocked</span>' : ''}</h3>
-    ${a?.updated_at ? `<span class="acct-eq"><b>${money(acc.equity, cur)}</b>${day != null ? `<span class="${tone(day)}">${signed(day, cur)} (${pct(acc.last_equity ? day / acc.last_equity : null)})</span>` : ''}</span>` : ''}</div>`;
+    ${a?.updated_at && !book ? `<span class="acct-eq"><b>${money(acc.equity, cur)}</b>${day != null ? `<span class="${tone(day)}">${signed(day, cur)} (${pct(acc.last_equity ? day / acc.last_equity : null)})</span>` : ''}</span>` : ''}</div>`;
   if (!a?.updated_at) {
     const err = svcState(svc.id).health?.body?.last_error;
     return `<article class="${pick ? 'acct acct-one' : 'card acct'}">${head}<p class="muted" style="margin:0">${esc(err ? 'Cannot read the account: ' + err : 'Waiting for the first reading…')}</p></article>`;
   }
+  const pos = a.positions || [];
   const stats = [['Cash', money(acc.cash, cur)], ['Buying power', money(acc.buying_power, cur)]];
   if (acc.long_market_value) stats.push(['Long', money(acc.long_market_value, cur)]);
   if (acc.short_market_value) stats.push(['Short', money(acc.short_market_value, cur)]);
-  const pos = a.positions || [];
+  if (book) {
+    const r = varOf(pos);
+    const share = acc.equity ? ` <small class="muted">${(r.total / acc.equity * 100).toFixed(1)}%</small>` : '';
+    const unpriced = r.unpriced ? ` <small class="muted" title="No price history yet for ${r.unpriced} position${r.unpriced > 1 ? 's' : ''}, so not counted">+${r.unpriced} unpriced</small>` : '';
+    stats.unshift(['Equity', `<span class="${tone(day)}">${money(acc.equity, cur)}</span>`], ['Value at risk', money(r.total, cur) + share + unpriced]);
+  }
   const shown = pick ? pos.length : 8;
   const px = v => v == null || v === '' || !isFinite(+v) ? '—' : (+v).toFixed(2);
   const rows = pos.slice().sort((x, y) => Math.abs(y.market_value || 0) - Math.abs(x.market_value || 0)).slice(0, shown).map(p => `<tr>
@@ -203,9 +258,9 @@ function accountCard(svc, a, pick) {
     <td class="${tone(p.change_today)} acct-today">${pct(p.change_today)}</td></tr>`).join('');
   return `<article class="${pick ? 'acct acct-one' : 'card acct'}">${head}
     <div class="acct-stats">${stats.map(([k, v]) => `<span>${k} <b>${v}</b></span>`).join('')}</div>
-    <div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2" data-height="${pick ? 90 : 56}"></div>
+    ${book ? '' : `<div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2" data-height="${pick ? 90 : 56}"></div>`}
     ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Position</th><th>Qty</th>${pick ? '<th>Avg</th><th>Last</th>' : ''}<th>Value</th><th>P/L</th><th class="acct-today">Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
-    ${(() => { const g = optionGroups(a.name || a.label || svc.id, pos), can = tradable(a.name); return g.length || can ? `<div class="acct-payoffs">${g.map(x => `<button type="button" class="chip-btn" data-held="${esc(x.key)}" title="Load these legs into the Spread builder at their entry prices">Payoff: ${esc(x.sym)} ${esc(dayLabel(x.expiry))} · ${x.legs.length} leg${x.legs.length > 1 ? 's' : ''}</button>${can ? `<button type="button" class="chip-btn" data-ot-close="${esc(x.key)}" title="An order closing these legs, at market or a limit">Close…</button>` : ''}`).join('')}${can ? `<button type="button" class="chip-btn" data-sb-open="${esc(a.name)}" title="Build an order in the Spread builder, with this account picked for it">Spread builder</button>` : ''}</div>` : ''; })()}
+    ${(() => { const g = optionGroups(a.name || a.label || svc.id, pos), can = tradable(a.name); return g.length || (can && !book) ? `<div class="acct-payoffs">${g.map(x => `<button type="button" class="chip-btn" data-held="${esc(x.key)}" title="Load these legs into the Spread builder at their entry prices">Payoff: ${esc(x.sym)} ${esc(dayLabel(x.expiry))} · ${x.legs.length} leg${x.legs.length > 1 ? 's' : ''}</button>${can ? `<button type="button" class="chip-btn" data-ot-close="${esc(x.key)}" title="An order closing these legs, at market or a limit">Close…</button>` : ''}`).join('')}${can && !book ? `<button type="button" class="chip-btn" data-sb-open="${esc(a.name)}" title="Build an order in the Spread builder, with this account picked for it">Spread builder</button>` : ''}</div>` : ''; })()}
     ${liquidatePanel(a)}
     ${ordersPanel(a)}
     <div class="foot">${pos.length > shown ? `${pos.length} positions, largest ${shown} shown · ` : ''}${!pos.length && Array.isArray(a.orders) && !a.orders.length ? 'No positions or open orders · ' : !pos.length ? 'No positions · ' : ''}updated ${duration(Date.now() / 1000 - a.updated_at)} ago</div>
@@ -228,6 +283,13 @@ const draw = () => accountsView(false) || '<p class="muted">No account service i
 const allAccounts = () => (fleet.topo?.services || []).filter(s => s.accounts)
   .flatMap(s => (svcState(s.id).accounts?.accounts || []).map(a => ({ svc: s, a })))
   .sort((x, y) => (x.a?.environment === 'live' ? 0 : 1) - (y.a?.environment === 'live' ? 0 : 1));
+
+/** The Positions view: the live account's card (equity and value at risk in its stats), no chart. */
+function bookView() {
+  const one = allAccounts().find(x => x.a?.updated_at && x.a?.environment === 'live');
+  if (!one) return '<p class="muted">No live account is reporting.</p>';
+  return `<div class="cards acct-cards">${accountCard(one.svc, one.a, undefined, true)}</div>`;
+}
 /** One account: `want` (a name), else the live one, else the first. */
 function drawOne(want) {
   const list = allAccounts();
@@ -240,7 +302,7 @@ function drawOne(want) {
 
 // Redraws on every update, keeping the scroll position, but not while the
 // operator is typing a confirmation. The ticket has its own box above.
-function mount(el, single = false) {
+function mount(el, single = false, book = false) {
   // One account's view: which, kept with the panel.
   let want = '';
   if (single) { try { want = JSON.parse(el.dataset.args || '{}').account || ''; } catch (_) {} }
@@ -248,7 +310,8 @@ function mount(el, single = false) {
   const box = /** @type {HTMLElement} */ (el.querySelector('.ot-box')), main = /** @type {HTMLElement} */ (el.querySelector('.acct-main'));
   const tk = createTicket(box);
   const update = () => {
-    if (!(el.contains(document.activeElement) && document.activeElement.matches('.acct-flat-input, .acct-pick'))) paint(main, single ? drawOne(want) : draw());
+    if (!(el.contains(document.activeElement) && document.activeElement.matches('.acct-flat-input, .acct-pick'))) paint(main, book ? bookView() : single ? drawOne(want) : draw());
+    if (book) readVols(update);
     tk.update();
     readGateways(update); routed(update);
   };
@@ -349,3 +412,4 @@ function mount(el, single = false) {
 
 defineWidget('accounts', { title: 'Accounts and equity', mount: el => mount(el) });
 defineWidget('account', { title: 'Account', mount: el => mount(el, true) });
+defineWidget('positions', { title: 'Positions and risk', mount: el => mount(el, false, true) });
