@@ -61,6 +61,7 @@
           openrouter="$(secret OPENROUTER_API_KEY)"
           client="$(secret AI_PROXY_KEY)"
           port="''${AI_PROXY_PORT:-8317}"
+          host="''${AI_PROXY_HOST:-127.0.0.1}"
           state="''${AI_PROXY_STATE:-''${XDG_STATE_HOME:-$HOME/.local/state}/ai-proxy}"
           mkdir -p "$state/auth"
           chmod 700 "$state"
@@ -76,7 +77,7 @@
           config="$state/config.yaml"
           umask 077
           {
-            printf 'host: "127.0.0.1"\nport: %s\n' "$port"
+            printf 'host: "%s"\nport: %s\n' "$host" "$port"
             printf 'remote-management:\n  allow-remote: false\n  secret-key: ""\n  disable-control-panel: true\n'
             printf 'auth-dir: "%s"\n' "$state/auth"
             printf 'api-keys:\n  - %s\n' "$(jq -Rn --arg k "$client" '$k')"
@@ -92,7 +93,7 @@
             done <<<"$models"
           } > "$config.tmp"
           mv "$config.tmp" "$config"
-          echo "ai-proxy: serving $(grep -c '^      - name:' "$config") OpenRouter models on http://127.0.0.1:$port/v1" >&2
+          echo "ai-proxy: serving $(grep -c '^      - name:' "$config") OpenRouter models on http://$host:$port/v1" >&2
           exec cliproxyapi -config "$config"
         '';
       };
