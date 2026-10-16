@@ -311,8 +311,16 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 | closes per minute (counted apart from the opens; `not_sent{cap}`, `closes_per_minute`) | `--closes-per-min` | 30 |
 | open orders | `--max-open` | 4 |
 | legs | `--max-legs` | 4 |
-| notional per order: \|limit_price\| (a market order's \|ref_price\|) × qty × multiplier (100 an option, 1 a share) | `--max-notional` | $2,500 |
+| maximum loss per opening intent (see above; a market order's \|ref_price\| is used for its price): the cap is named `notional` | `--max-notional` | $2,500 |
 | consecutive broker rejects | `--max-rejects` | 5, which trips `halt_opens` |
+
+**Maximum loss.** `--max-notional` caps what an opening intent can lose, not what it costs to open. The loss is per parent unit, times qty and the multiplier (100 an option, 1 a share):
+- a long option or share, or a combo of long options only: the premium paid.
+- a vertical (two one-to-one legs, one long and one short, same underlying, expiry and type): the debit when the long strike is the outer one (a call at the lower strike, a put at the higher). Otherwise the width less the credit, so a credit spread loses its width less the credit.
+- an iron condor with a credit: the wider wing less the credit, with the put wing at or below the call wing.
+- a naked short put: the strike less the credit.
+
+A naked short call or a short share is refused with `max_loss_unbounded`, even with `--allow-short`. A combo with a closing leg, a roll, a calendar, a butterfly, or any other shape is refused with `max_loss_unknown`. A close is never checked against it.
 
 **Closes and pending legs.** A close is refused with `not_sent{reason: "leg_pending"}`, and `detail.symbols` lists each leg that has a pending order, while any order the gateway holds on that leg's symbol (the same symbol key as in section 6) is still open or unresolved: an admitted, sent or unknown order, an absent order that is not yet settled, or any working order in a non-terminal state. The whole intent is refused. Closes on legs with no such order are unchanged, and no open-order or daily cap applies to them. Opens are not refused by this rule; they count pending orders against `--max-open`.
 
@@ -493,6 +501,8 @@ The same resync runs after every `trade_updates` reconnect. An order in phase `s
 - `unsupported`
 - `prefix`
 - `cap` (with `detail.cap`)
+- `max_loss_unbounded` (with `detail.symbols`): an opening naked short call or short share
+- `max_loss_unknown` (with `detail.symbols`): an opening intent whose maximum loss the gateway cannot bound
 - `killed`
 - `not_ready`
 - `leg_pending` (with `detail.symbols`: a close on a leg that has an open or unresolved order)

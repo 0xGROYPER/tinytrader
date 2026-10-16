@@ -83,19 +83,19 @@ fn stock_orders_follow_the_profile() {
 }
 
 #[test]
-fn short_sales_pass_when_allowed() {
+fn short_sales_are_refused_as_unbounded_even_when_allowed() {
+    // --allow-short admits a short sale to the profile; its loss is unbounded, so the
+    // cap refuses it all the same.
     let mut cfg = config(root("equities-short"));
     cfg.profile.equities = vec!["INTC".into()];
     cfg.profile.allow_short = true;
     let gw = scripted(cfg, &format!(r#"{{"clock_ts":{T0}}}"#));
     let mut c = Conn::open(&gw, "reactor", None);
-    assert_eq!(
-        c.submit(
-            "r1",
-            &stock("wse-1", "INTC", "sell", "open", 70, "27.30", "cls")
-        )["outcome"],
-        "accepted"
+    let r = c.submit(
+        "r1",
+        &stock("wse-1", "INTC", "sell", "open", 70, "27.30", "cls"),
     );
+    assert_eq!(r["reason"], "max_loss_unbounded", "{r}");
     gw.stop().unwrap();
 }
 
