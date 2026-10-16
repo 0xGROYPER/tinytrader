@@ -22,10 +22,10 @@ function orderToken() {
   }
   return orderTok;
 }
-/** A write request (`/api/orders/...`, flatten, resume, jobs, the queue, ...): the response, as fetch gives it. */
-export async function orderFetch(path, body, method = 'POST') {
+/** A write request (`/api/orders/...`, flatten, resume, jobs, the queue, settings, ...): the response, as fetch gives it. `null` is sent as `null`; `extra` adds headers. */
+export async function orderFetch(path, body, method = 'POST', extra = {}) {
   const t = orderToken();
-  const r = await fetch(path, { method, headers: { 'content-type': 'application/json', ...(t ? { 'x-order-token': t } : {}) }, body: JSON.stringify(body ?? {}) });
+  const r = await fetch(path, { method, headers: { 'content-type': 'application/json', ...extra, ...(t ? { 'x-order-token': t } : {}) }, body: JSON.stringify(body === undefined ? {} : body) });
   if (r.status === 401) { orderTok = null; try { localStorage.removeItem(TOKEN_KEY); } catch (_) {} }
   return r;
 }

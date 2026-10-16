@@ -69,8 +69,9 @@
 //!   which the page sends as `X-Order-Token`. Either unset refuses them
 //!   (`WriteGate`). The write routes are the order routes (those, and an
 //!   account's flatten and resume), the jobs service's and the queue's POST
-//!   (and the queue's PATCH) routes, drive approval, and POST `/api/reminders`
-//!   and `/api/profiles`. Their GET routes stay open.
+//!   (and the queue's PATCH) routes, drive approval, POST `/api/reminders`
+//!   and `/api/profiles`, and PUT `/api/prefs/{key}`. Their GET routes stay
+//!   open.
 //! - `CONSOLE_PAGE`: serve the page from this file, and its modules and
 //!   libraries from beside it, read on each request, instead of the copies
 //!   built in (optional; lets the page change without a rebuild).
@@ -280,7 +281,6 @@ async fn main() {
         .route("/api/queue/{*rest}", get(queue_proxy))
         .route("/api/reminders", get(reminders_get))
         .route("/api/prefs", get(prefs_get))
-        .route("/api/prefs/{key}", axum::routing::put(prefs_put))
         .route("/api/profiles", get(profiles_list))
         .route("/api/profiles/{id}", get(profiles_get))
         .route("/api/accounts/gateways", get(gateways_list))
@@ -792,8 +792,8 @@ async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
 }
 
 /// Who may write. Every write route (see [`write_routes`]: orders, flatten and
-/// resume, the jobs service, the queue, drive approval, reminders, profiles)
-/// needs both checks, before anything is forwarded or sent to a gateway:
+/// resume, the jobs service, the queue, drive approval, reminders, profiles,
+/// settings) needs both checks, before anything is forwarded or sent to a gateway:
 ///
 /// - the Tailscale login: `tailscale serve` sets `Tailscale-User-Login` on
 ///   what it forwards, and it must be one of `CONSOLE_ORDER_LOGINS`
@@ -869,8 +869,8 @@ async fn write_gate(
 
 /// The write routes, each behind the [`WriteGate`]: orders (submit, cancel,
 /// flatten, resume), the jobs service and the queue (POST, and PATCH for the
-/// queue), drive approval, reminders and profile recordings. Their GET routes
-/// are merged in separately and stay open.
+/// queue), drive approval, reminders, profile recordings and settings (PUT).
+/// Their GET routes are merged in separately and stay open.
 fn write_routes(gate: WriteGate) -> Router<Arc<App>> {
     Router::new()
         .route("/api/orders/{account}", axum::routing::post(order_submit))
@@ -896,6 +896,7 @@ fn write_routes(gate: WriteGate) -> Router<Arc<App>> {
             axum::routing::post(store_approve),
         )
         .route("/api/reminders", axum::routing::post(reminders_post))
+        .route("/api/prefs/{key}", axum::routing::put(prefs_put))
         .route(
             "/api/profiles",
             axum::routing::post(profiles_post).layer(axum::extract::DefaultBodyLimit::max(
