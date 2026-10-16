@@ -20,6 +20,36 @@ meets the service contract (`/health`, `/metrics`, `/describe`) and serves
 
 Writes are refused from a web page of another origin.
 
+## Write token
+
+When the store is given a token (`STORE_WRITE_TOKEN`, or better
+`STORE_WRITE_TOKEN_FILE` naming a file that holds it, as a systemd credential
+or a decrypted secret provides), every write must carry it:
+
+```text
+Authorization: Bearer <token>
+```
+
+A write without it, or with another, is refused with `401`. Reads stay open:
+limit who can reach the store at all with the network (loopback, or a tailnet
+policy). With no token configured, writes are open as before, so a deployment
+can roll the token out client by client. A token that is configured but
+can't be read, or is empty, stops the store from starting.
+
+The clients that write send it when they are given it:
+
+| Client | Writes | Its token |
+|---|---|---|
+| `databento-jobs` | uploads, filing | `JOBS_STORE_TOKEN` (or `_FILE`) |
+| `alpaca-history` | uploads, filing | `HISTORY_STORE_TOKEN` (or `_FILE`) |
+| `console` | approving a drive (Storage) | `CONSOLE_STORE_TOKEN` (or `_FILE`) |
+
+`POST /adopt` has no client; send the header by hand
+(`curl -H "Authorization: Bearer $(cat token-file)" …`).
+
+Bind the store beyond loopback (`STORE_LISTEN`, or the module's
+`observe.bind`) only with a token configured.
+
 ## Reading files
 
 A file is named logically, `<volume>/<path within the volume>`, where the

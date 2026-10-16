@@ -18,7 +18,9 @@
 //! It is background work (decision 0011): while a capture service is live,
 //! or its hours begin soon, it waits. It uses its own Alpaca key
 //! (`ALPACA_HISTORY_KEY_ID`, `ALPACA_HISTORY_SECRET_KEY`, or `*_FILE`): the
-//! data limit is per key, so it never competes with live use.
+//! data limit is per key, so it never competes with live use. The store's
+//! write token, when the store requires one: `HISTORY_STORE_TOKEN` or
+//! `HISTORY_STORE_TOKEN_FILE`.
 
 mod day;
 mod fetch;
@@ -114,6 +116,8 @@ struct App {
     alpaca: Alpaca,
     http: reqwest::Client,
     store: String,
+    /// The store's write token, if it requires one.
+    store_token: Option<String>,
     runs: Mutex<Vec<Run>>,
     events: Events,
     observer: Observer,
@@ -319,8 +323,8 @@ async fn work(a: &App, id: &str) {
         let result = match day::build(&a.alpaca, run.feed, &sym, &d, &spool).await {
             Ok((m, c, out)) => {
                 let filed = async {
-                    day::file(&a.http, &a.store, &m).await?;
-                    day::file(&a.http, &a.store, &c).await
+                    day::file(&a.http, &a.store, a.store_token.as_deref(), &m).await?;
+                    day::file(&a.http, &a.store, a.store_token.as_deref(), &c).await
                 }
                 .await;
                 // The store keeps what it filed; the spool copies go either way.
@@ -439,6 +443,13 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    let store_token = match tinytrader_observe::optional_secret("HISTORY_STORE_TOKEN") {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("alpaca-history: {e}");
+            std::process::exit(2);
+        }
+    };
     if let Err(e) = std::fs::create_dir_all(&args.state) {
         eprintln!("alpaca-history: cannot use {}: {e}", args.state.display());
         std::process::exit(2);
@@ -466,6 +477,7 @@ async fn main() {
         alpaca: Alpaca { http: http.clone(), data: args.data_url.trim_end_matches('/').to_owned(), key_id, secret: secret_key, pace: Pace::new(args.max_rpm) },
         http,
         store: args.store.trim_end_matches('/').to_owned(),
+        store_token,
         runs: Mutex::new(runs),
         events: Events::default(),
         observer: observer.clone(),

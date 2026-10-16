@@ -43,7 +43,8 @@
 //!   service reporting `failed` (`notify.rs`).
 //! - `CONSOLE_STORE`: the store, e.g. `http://host.docker.internal:9120`, so
 //!   the Storage widget can approve a new drive (decision 0007). Only that
-//!   one call is passed through.
+//!   one call is passed through. `CONSOLE_STORE_TOKEN` (or `_FILE`): the
+//!   store's write token, when the store requires one, sent with it.
 //! - `CONSOLE_JOBS`: the Databento jobs service, e.g. `http://databento-jobs:9121`
 //!   (optional). The one exception to read-only: `/api/jobs/...` is passed to
 //!   it, so the Data page can price, submit and download jobs. The jobs
@@ -108,6 +109,8 @@ struct App {
     queue: Option<(String, reqwest::Client)>,
     /// The store's base URL, for approving drives.
     store: Option<String>,
+    /// The store's write token, if it requires one.
+    store_token: Option<String>,
     /// The roadmap's reminders, if configured.
     /// Settings that follow the user between devices (`/api/prefs`).
     prefs: Option<prefs::Prefs>,
@@ -125,6 +128,13 @@ struct App {
 #[tokio::main]
 async fn main() {
     let listen = tinytrader_observe::listen_address("CONSOLE_LISTEN", "127.0.0.1:8080");
+    let store_token = match tinytrader_observe::optional_secret("CONSOLE_STORE_TOKEN") {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("console: {e}");
+            std::process::exit(2);
+        }
+    };
     let config = PollerConfig {
         topology: env("CONSOLE_TOPOLOGY", "topology.json"),
         docker: std::env::var("CONSOLE_DOCKER")
@@ -155,6 +165,7 @@ async fn main() {
             .ok()
             .filter(|s| !s.is_empty())
             .map(|s| s.trim_end_matches('/').to_owned()),
+        store_token,
         jobs: std::env::var("CONSOLE_JOBS")
             .ok()
             .filter(|s| !s.is_empty())
@@ -682,8 +693,11 @@ async fn store_approve(AxumState(app): AxumState<Arc<App>>, body: axum::body::By
         )
             .into_response();
     };
-    let sent = reqwest::Client::new()
-        .post(format!("{base}/volumes/approve"))
+    let mut req = reqwest::Client::new().post(format!("{base}/volumes/approve"));
+    if let Some(t) = &app.store_token {
+        req = req.bearer_auth(t);
+    }
+    let sent = req
         .header(header::CONTENT_TYPE, "application/json")
         .body(body)
         .timeout(Duration::from_secs(30))
