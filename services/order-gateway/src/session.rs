@@ -10,7 +10,7 @@ use crate::journal::Journal;
 use crate::protocol::{
     Invalid, KillLevel, Obj, Op, arr, error_line, invalid_detail, quote, request_error, response,
 };
-use crate::safety::Budget;
+use crate::safety::{Budget, et_day};
 use crate::server::{Config, Outbox, Role};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -19,6 +19,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// The requester recorded on a `cleared` line made by the gateway itself.
+const GATEWAY: &str = "gateway";
 
 const EVENTS: &str = r#"["new","accepted","pending_new","partial_fill","fill","pending_cancel","canceled","expired","done_for_day","replaced","rejected","stopped","suspended","calculated","cancel_rejected","replace_rejected","other"]"#;
 
@@ -66,6 +69,9 @@ enum Phase {
     /// finds it settles it. A 404 never clears it. Not journaled: after a restart it
     /// is Unknown again.
     Absent,
+    /// Cleared after both broker checks showed nothing (section 5). Not open, but the
+    /// client order id stays reserved.
+    Cleared,
 }
 
 struct OrderState {
@@ -80,6 +86,11 @@ struct OrderState {
     raw: Option<String>,
     /// The intent's leg symbols, the keys a close is checked against.
     symbols: Vec<String>,
+    /// The intent's `time_in_force` (`day` or `cls`). `None` when the journal does not
+    /// say, which is never auto-cleared.
+    tif: Option<String>,
+    /// The submit time (ns), when journaled.
+    submitted: Option<u64>,
     phase: Phase,
 }
 
@@ -96,6 +107,11 @@ fn journal_opens(v: &Value) -> bool {
         _ => vec![intent],
     };
     legs.iter().any(|l| l["effect"].as_str() != Some("close"))
+}
+
+/// The `time_in_force` of a journaled `admitted` intent; `None` when absent.
+fn journal_tif(v: &Value) -> Option<String> {
+    v["intent"]["time_in_force"].as_str().map(String::from)
 }
 
 /// The leg symbols of a journaled `admitted` intent, as `Leg::symbol` has them.
@@ -116,6 +132,8 @@ impl OrderState {
         request_id: String,
         sha: Option<String>,
         symbols: Vec<String>,
+        tif: Option<String>,
+        submitted: Option<u64>,
     ) -> Self {
         let (status, phase) = (String::new(), Phase::Admitted);
         let (broker_id, avg, legs, raw) = (None, None, None, None);
@@ -130,6 +148,8 @@ impl OrderState {
             legs,
             raw,
             symbols,
+            tif,
+            submitted,
             phase,
         }
     }
@@ -138,6 +158,7 @@ impl OrderState {
     fn open(&self) -> bool {
         match self.phase {
             Phase::Admitted | Phase::Sent | Phase::Unknown | Phase::Absent => true,
+            Phase::Cleared => false,
             Phase::Done => !terminal(&self.status) && self.status != "not_sent",
         }
     }
@@ -228,6 +249,77 @@ fn close_check(held: Option<i64>, requested: u64, buy: bool) -> Result<(), &'sta
     }
 }
 
+/// A day order is past its session once its New York trading date has moved past the
+/// date it was submitted. Only a journaled `day` order qualifies: good-til-canceled,
+/// `cls` and an unknown time-in-force are never auto-cleared.
+pub(crate) fn day_order_expired(tif: Option<&str>, submitted: Option<u64>, now: u64) -> bool {
+    match (tif, submitted) {
+        (Some("day"), Some(at)) => et_day(now) > et_day(at),
+        _ => false,
+    }
+}
+
+/// One broker check of a client order id: the status when the broker shows the order,
+/// a clean absence, or the failure's code.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Seen {
+    Absent,
+    Shows(String),
+    Failed(String),
+}
+
+/// Why a clear is refused. `check` names the broker call: `open_orders` or `by_id`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Refusal {
+    Shows { check: &'static str, status: String },
+    Unreachable { check: &'static str, code: String },
+}
+
+/// Clears only when neither check shows the order and both answered. A shown order
+/// refuses whichever check saw it, so a failed check never hides one; a failure refuses
+/// only when nothing is shown.
+pub(crate) fn clear_verdict(open: &Seen, by_id: &Seen) -> Result<(), Refusal> {
+    let shows = |check, seen: &Seen| match seen {
+        Seen::Shows(status) => Some(Refusal::Shows {
+            check,
+            status: status.clone(),
+        }),
+        _ => None,
+    };
+    if let Some(r) = shows("open_orders", open).or_else(|| shows("by_id", by_id)) {
+        return Err(r);
+    }
+    for (check, seen) in [("open_orders", open), ("by_id", by_id)] {
+        if let Seen::Failed(code) = seen {
+            return Err(Refusal::Unreachable {
+                check,
+                code: code.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn not_cleared(reason: &str, detail: &str) -> String {
+    outcome("not_cleared")
+        .s("reason", reason)
+        .raw("detail", detail)
+        .done()
+}
+
+fn refused_clear(r: &Refusal) -> String {
+    match r {
+        Refusal::Shows { check, status } => not_cleared(
+            "broker_shows_order",
+            &Obj::new().s("check", check).s("status", status).done(),
+        ),
+        Refusal::Unreachable { check, code } => not_cleared(
+            "broker_unreachable",
+            &Obj::new().s("check", check).s("code", code).done(),
+        ),
+    }
+}
+
 fn broker_error_obj(kind: &str, e: &BrokerError) -> Obj {
     outcome(kind)
         .n("http_status", e.http_status)
@@ -250,6 +342,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::Kill { .. } => "kill",
         Op::Unkill => "unkill",
         Op::Flatten { .. } => "flatten",
+        Op::ClearOrder { .. } => "clear_order",
         Op::Advance(_) => "advance",
     }
 }
@@ -331,7 +424,15 @@ impl<B: Broker> Session<B> {
                     let (c, r) = (text("client").unwrap_or_default(), text("request_id"));
                     let symbols = journal_symbols(v);
                     let sha = text("intent_sha256");
-                    let st = OrderState::admitted(c, r.unwrap_or_default(), sha, symbols);
+                    let submitted = v["ts_gateway"].as_u64();
+                    let st = OrderState::admitted(
+                        c,
+                        r.unwrap_or_default(),
+                        sha,
+                        symbols,
+                        journal_tif(v),
+                        submitted,
+                    );
                     self.orders.insert(cid, st);
                 }
                 phase => {
@@ -375,6 +476,11 @@ impl<B: Broker> Session<B> {
                 st.raw = Some(v["broker_raw"].to_string());
                 if let Some(b) = st.broker_id.clone() {
                     self.by_broker.insert(b, cid);
+                }
+            }
+            "cleared" => {
+                if let Some(st) = self.orders.get_mut(&cid) {
+                    st.phase = Phase::Cleared;
                 }
             }
             // `resolution` is not restored. An unknown order stays Unknown across a
@@ -646,7 +752,9 @@ impl<B: Broker> Session<B> {
         let allowed = match &op {
             Op::Submit(_) | Op::Advance(_) => spec.role == Role::Trade,
             Op::Cancel(_) => spec.role != Role::Observe,
-            Op::Kill { .. } | Op::Unkill | Op::Flatten { .. } => spec.role == Role::Admin,
+            Op::Kill { .. } | Op::Unkill | Op::Flatten { .. } | Op::ClearOrder { .. } => {
+                spec.role == Role::Admin
+            }
             _ => true,
         };
         if !allowed {
@@ -677,6 +785,14 @@ impl<B: Broker> Session<B> {
             Op::Flatten { reason } => {
                 self.hold = Some(Vec::new());
                 let result = self.flatten(&spec.name, &rid, &reason);
+                self.release(ci, response(&rid, name, &result?));
+            }
+            Op::ClearOrder {
+                client_order_id,
+                reason,
+            } => {
+                self.hold = Some(Vec::new());
+                let result = self.clear(&spec.name, &client_order_id, &reason, true);
                 self.release(ci, response(&rid, name, &result?));
             }
             Op::Unkill => {
@@ -1054,7 +1170,15 @@ impl<B: Broker> Session<B> {
         let cid = intent.client_order_id.clone();
         let sha = intent.sha256();
         let symbols = intent.legs.iter().map(|l| l.symbol.clone()).collect();
-        let st = OrderState::admitted(client.into(), rid.into(), Some(sha.clone()), symbols);
+        let tif = Some(if intent.on_close { "cls" } else { "day" }.to_owned());
+        let st = OrderState::admitted(
+            client.into(),
+            rid.into(),
+            Some(sha.clone()),
+            symbols,
+            tif,
+            Some(self.ts()),
+        );
         self.orders.insert(cid.clone(), st);
         if intent.has_open() {
             self.minute.push_back(Instant::now());
@@ -1540,6 +1664,8 @@ impl<B: Broker> Session<B> {
                         self.reconcile_order(bo)?;
                     }
                 }
+                // Cleared orders are not open, so they are never listed here.
+                Phase::Cleared => {}
                 // Still open. Found now: settled by the order's state. A 404 or any
                 // other failure leaves it absent and counted: only evidence settles it.
                 Phase::Absent => {
@@ -1587,6 +1713,114 @@ impl<B: Broker> Session<B> {
             .n("orders_checked", checked)
             .done();
         self.status(&Obj::new().raw("resync", &resync).done())
+    }
+
+    /// The two broker checks of a clear. Both always run, so a shown order is reported as
+    /// shown even when the other check fails. Returns each check, the number of orders
+    /// the listing returned, and the raw by-id answer when it is a 404.
+    fn clear_checks(&mut self, cid: &str, critical: bool) -> (Seen, Seen, usize, String) {
+        let (open, listed) = if self.budget.take(critical) {
+            match self.b.open_orders() {
+                Ok(r) => {
+                    let seen = r
+                        .value
+                        .iter()
+                        .find(|o| o.client_order_id == cid)
+                        .map_or(Seen::Absent, |o| Seen::Shows(o.status.clone()));
+                    (seen, r.value.len())
+                }
+                Err(e) => (self.failed(&e), 0),
+            }
+        } else {
+            (Seen::Failed("throttled".into()), 0)
+        };
+        let (by_id, raw) = if self.budget.take(critical) {
+            match self.b.order(&OrderRef::Client(cid.to_owned())) {
+                Ok(r) => match r.value {
+                    Some(o) => (Seen::Shows(o.status), String::from("null")),
+                    None => (Seen::Absent, r.raw),
+                },
+                Err(e) => (self.failed(&e), String::from("null")),
+            }
+        } else {
+            (Seen::Failed("throttled".into()), String::from("null"))
+        };
+        (open, by_id, listed, raw)
+    }
+
+    /// A failed broker check; a 429 holds the budget back as it does for any query.
+    fn failed(&mut self, e: &BrokerError) -> Seen {
+        if e.http_status == 429 {
+            self.budget.block(e.retry_after_ms);
+        }
+        Seen::Failed(e.code.clone())
+    }
+
+    /// Clears an unresolved order that the broker does not show (section 5). Returns the
+    /// `ok` or `not_cleared` outcome. `critical` is the budget class of the broker checks:
+    /// an operator's clear is critical, the automatic clear is poll traffic.
+    fn clear(
+        &mut self,
+        requester: &str,
+        cid: &str,
+        reason: &str,
+        critical: bool,
+    ) -> Result<String, String> {
+        let Some(st) = self.orders.get(cid) else {
+            return Ok(not_cleared("unknown_order", "null"));
+        };
+        if !st.open() {
+            return Ok(not_cleared("not_unresolved", "null"));
+        }
+        let (open, by_id, listed, raw) = self.clear_checks(cid, critical);
+        if let Err(r) = clear_verdict(&open, &by_id) {
+            return Ok(refused_clear(&r));
+        }
+        if let Some(st) = self.orders.get_mut(cid) {
+            st.phase = Phase::Cleared;
+        }
+        self.pending.retain(|p| p.cid != cid);
+        let broker = Obj::new()
+            .raw(
+                "open_orders",
+                &Obj::new().s("result", "absent").n("listed", listed).done(),
+            )
+            .raw(
+                "by_id",
+                &Obj::new()
+                    .s("result", "absent")
+                    .raw("broker_raw", &raw)
+                    .done(),
+            )
+            .done();
+        let body = Obj::new()
+            .s("client_order_id", cid)
+            .s("requester", requester)
+            .s("reason", reason)
+            .raw("broker", &broker)
+            .done();
+        self.emit(self.ts(), "cleared", &body, Aud::Prefix(cid.to_owned()))?;
+        Ok(outcome("ok").s("client_order_id", cid).done())
+    }
+
+    /// Clears each unresolved day order whose session has passed, when the broker shows
+    /// nothing. Runs on the poll, after `recheck_absent`, so it needs no timer of its own.
+    fn clear_day_orders(&mut self) -> Result<(), String> {
+        let now = self.ts();
+        let mut cids: Vec<String> = self
+            .orders
+            .iter()
+            .filter(|(_, s)| {
+                matches!(s.phase, Phase::Unknown | Phase::Absent)
+                    && day_order_expired(s.tif.as_deref(), s.submitted, now)
+            })
+            .map(|(c, _)| c.clone())
+            .collect();
+        cids.sort();
+        for cid in cids {
+            self.clear(GATEWAY, &cid, "day_order_after_session", false)?;
+        }
+        Ok(())
     }
 
     fn resolve(&mut self, now: Instant) -> Result<(), String> {
@@ -1689,6 +1923,7 @@ impl<B: Broker> Session<B> {
                     }
                 }
                 self.recheck_absent()?;
+                self.clear_day_orders()?;
             }
             let halted = matches!(self.killed, Some((KillLevel::HaltAll, _)));
             if !halted && self.cfg.state.join("KILL").exists() {
@@ -1740,7 +1975,85 @@ fn line_aud(v: &Value) -> Aud {
 
 #[cfg(test)]
 mod tests {
-    use super::close_check;
+    use super::{Refusal, Seen, clear_verdict, close_check, day_order_expired};
+    use crate::safety::{days_from_civil, et_ns};
+
+    fn shows(s: &str) -> Seen {
+        Seen::Shows(s.into())
+    }
+
+    fn failed(s: &str) -> Seen {
+        Seen::Failed(s.into())
+    }
+
+    #[test]
+    fn a_clear_needs_both_checks_to_answer_and_neither_to_show_the_order() {
+        assert_eq!(clear_verdict(&Seen::Absent, &Seen::Absent), Ok(()));
+        assert_eq!(
+            clear_verdict(&shows("new"), &Seen::Absent),
+            Err(Refusal::Shows {
+                check: "open_orders",
+                status: "new".into()
+            })
+        );
+        assert_eq!(
+            clear_verdict(&Seen::Absent, &shows("filled")),
+            Err(Refusal::Shows {
+                check: "by_id",
+                status: "filled".into()
+            })
+        );
+        assert_eq!(
+            clear_verdict(&failed("broker_error"), &Seen::Absent),
+            Err(Refusal::Unreachable {
+                check: "open_orders",
+                code: "broker_error".into()
+            })
+        );
+        assert_eq!(
+            clear_verdict(&Seen::Absent, &failed("throttled")),
+            Err(Refusal::Unreachable {
+                check: "by_id",
+                code: "throttled".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_shown_order_refuses_even_when_the_other_check_fails() {
+        assert_eq!(
+            clear_verdict(&failed("broker_error"), &shows("accepted")),
+            Err(Refusal::Shows {
+                check: "by_id",
+                status: "accepted".into()
+            })
+        );
+        assert_eq!(
+            clear_verdict(&shows("new"), &failed("broker_error")),
+            Err(Refusal::Shows {
+                check: "open_orders",
+                status: "new".into()
+            })
+        );
+    }
+
+    #[test]
+    fn only_a_day_order_past_its_new_york_date_is_auto_cleared() {
+        let d = days_from_civil(2026, 10, 16);
+        let at = |d: i64, min: i64| et_ns(d, min);
+        let sub = Some(at(d, 10 * 60));
+        // Later the same New York day, even after the close: not yet.
+        assert!(!day_order_expired(Some("day"), sub, at(d, 23 * 60)));
+        // The next New York date: past its session.
+        assert!(day_order_expired(Some("day"), sub, at(d + 1, 0)));
+        // A closing-auction order, a good-til-canceled order, or an unknown
+        // time-in-force never is, however old it is.
+        assert!(!day_order_expired(Some("cls"), sub, at(d + 5, 0)));
+        assert!(!day_order_expired(Some("gtc"), sub, at(d + 5, 0)));
+        assert!(!day_order_expired(None, sub, at(d + 5, 0)));
+        // A submit time that was never journaled is never expired.
+        assert!(!day_order_expired(Some("day"), None, at(d + 5, 0)));
+    }
 
     #[test]
     fn a_close_is_allowed_up_to_the_held_side_only() {

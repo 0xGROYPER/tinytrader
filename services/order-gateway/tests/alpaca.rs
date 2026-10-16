@@ -23,7 +23,11 @@ fn rig(name: &str) -> Rig {
 
 /// A rig whose profile is the default with `max_open` 10, then `profile` applied.
 fn rig_with(name: &str, profile: impl FnOnce(&mut Profile)) -> Rig {
-    let fake = Fake::start();
+    boot(Fake::start(), root(name), 1, profile)
+}
+
+/// Starts a gateway on `state` against `fake`, once the stream has listened `listening` times.
+fn boot(fake: Fake, state: PathBuf, listening: usize, profile: impl FnOnce(&mut Profile)) -> Rig {
     let creds = Credentials::from_env_text(&format!(
         "export APCA_API_KEY_ID={KEY}\nAPCA_API_SECRET_KEY=\"{SECRET}\"\n"
     ))
@@ -34,14 +38,20 @@ fn rig_with(name: &str, profile: impl FnOnce(&mut Profile)) -> Rig {
         reconnect_max: Duration::from_millis(200),
     };
     let broker = AlpacaPaper::new(Endpoints::loopback(fake.addr).unwrap(), creds, opts);
-    let state = root(name);
     let mut cfg = config(state.clone());
     cfg.account = "alpaca-paper-test".into();
     cfg.profile.max_open = 10;
     profile(&mut cfg.profile);
     let gw = start(cfg, broker).unwrap();
-    fake.wait_listening(1);
+    fake.wait_listening(listening);
     Rig { fake, gw, state }
+}
+
+/// Stops the gateway and starts another on the same state root and fake broker.
+fn restart(r: Rig, listening: usize) -> Rig {
+    let Rig { fake, gw, state } = r;
+    gw.stop().unwrap();
+    boot(fake, state, listening, |_| {})
 }
 
 /// A client that has seen the startup resync and the resync after the first `listening`.
@@ -707,4 +717,177 @@ fn an_option_close_is_checked_against_the_contracts_held_on_its_leg() {
     let v = c.submit("o2", &single("wse-o2", CALL, "sell", "close", 1, "1.00"));
     assert_eq!(v["outcome"], "accepted");
     assert_eq!(posts(&r.fake).len(), 1);
+}
+
+/// The operator's clear: an admin client, a reason, and the broker's two answers.
+fn clear_req(ops: &mut Conn, rid: &str, cid: &str, reason: &str) -> Value {
+    ops.req(
+        "clear_order",
+        rid,
+        &format!(r#""client_order_id":"{cid}","reason":"{reason}""#),
+    )
+    .0
+}
+
+#[test]
+fn a_manual_clear_is_refused_while_the_broker_shows_the_order() {
+    let r = rig_with("alpaca-clear-shown", |p| p.max_open = 1);
+    let mut c = ready(&r.gw, "reactor");
+    let mut ops = ready(&r.gw, "ops");
+    absent_submit(&r, &mut c, "wse-shown");
+    // The broker turns up the order. The poll's lookup settles it as an ordinary
+    // working order, and the operator's clear is refused on what the broker shows.
+    r.fake.appear(&format!(
+        r#"{{"client_order_id":"wse-shown","symbol":"{CALL}","qty":"1","side":"buy","limit_price":"1.25","position_intent":"buy_to_open"}}"#
+    ));
+    wait_resolved(&mut c);
+    let v = clear_req(&mut ops, "k1", "wse-shown", "operator check");
+    assert_eq!(
+        (v["outcome"].as_str(), v["reason"].as_str()),
+        (Some("not_cleared"), Some("broker_shows_order")),
+        "{v}"
+    );
+    assert_eq!(
+        (
+            v["detail"]["check"].as_str(),
+            v["detail"]["status"].as_str()
+        ),
+        (Some("open_orders"), Some("accepted")),
+        "{v}"
+    );
+    assert_eq!(c.req("open_orders", "q1", "").0["unresolved"], 0);
+}
+
+#[test]
+fn a_manual_clear_is_refused_as_unreachable_when_a_broker_check_fails() {
+    let r = rig("alpaca-clear-down");
+    let mut c = ready(&r.gw, "reactor");
+    let mut ops = ready(&r.gw, "ops");
+    absent_submit(&r, &mut c, "wse-down");
+    // The open-orders check fails; the by-id check says 404. One failed check is enough.
+    r.fake.next(
+        "GET",
+        "/v2/orders?status=open",
+        Act::Respond(500, Vec::new(), "{}".into()),
+    );
+    let v = clear_req(&mut ops, "k1", "wse-down", "operator check");
+    assert_eq!(
+        (v["reason"].as_str(), v["detail"]["check"].as_str()),
+        (Some("broker_unreachable"), Some("open_orders")),
+        "{v}"
+    );
+    // Nothing was cleared: the order still counts as unresolved.
+    assert_eq!(c.req("open_orders", "q1", "").0["unresolved"], 1);
+}
+
+#[test]
+fn a_manual_clear_is_accepted_when_both_checks_show_nothing_and_is_journaled() {
+    let r = rig("alpaca-clear-ok");
+    let mut c = ready(&r.gw, "reactor");
+    let mut ops = ready(&r.gw, "ops");
+    absent_submit(&r, &mut c, "wse-clr");
+    let v = clear_req(&mut ops, "k1", "wse-clr", "stuck after the 502");
+    assert_eq!(
+        (v["outcome"].as_str(), v["client_order_id"].as_str()),
+        (Some("ok"), Some("wse-clr")),
+        "{v}"
+    );
+    let ev = ops.event("cleared", |v| v["client_order_id"] == "wse-clr");
+    assert_eq!(
+        (ev["requester"].as_str(), ev["reason"].as_str()),
+        (Some("ops"), Some("stuck after the 502")),
+        "{ev}"
+    );
+    assert_eq!(ev["broker"]["open_orders"]["result"], "absent");
+    assert_eq!(ev["broker"]["by_id"]["result"], "absent");
+    assert_eq!(c.req("open_orders", "q1", "").0["unresolved"], 0);
+    let lines = journal(&r.state);
+    let cleared: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains(r#""kind":"cleared""#))
+        .collect();
+    assert_eq!(cleared.len(), 1, "{lines:?}");
+    assert!(
+        cleared[0].contains(r#""requester":"ops""#),
+        "{}",
+        cleared[0]
+    );
+}
+
+#[test]
+fn only_an_admin_clears_and_a_clear_needs_a_reason() {
+    let r = rig("alpaca-clear-roles");
+    let mut c = ready(&r.gw, "reactor");
+    let mut watch = ready(&r.gw, "watch");
+    let mut ops = ready(&r.gw, "ops");
+    absent_submit(&r, &mut c, "wse-role");
+    for who in [&mut c, &mut watch] {
+        let (v, _) = who.req(
+            "clear_order",
+            "x1",
+            r#""client_order_id":"wse-role","reason":"try""#,
+        );
+        assert_eq!(
+            (v["outcome"].as_str(), v["code"].as_str()),
+            (Some("error"), Some("forbidden")),
+            "{v}"
+        );
+    }
+    let v = clear_req(&mut ops, "x2", "wse-role", "   ");
+    assert_eq!(v["code"], "invalid_request", "{v}");
+    let v = clear_req(&mut ops, "x3", "wse-none", "test");
+    assert_eq!(
+        (v["outcome"].as_str(), v["reason"].as_str()),
+        (Some("not_cleared"), Some("unknown_order")),
+        "{v}"
+    );
+    // Still unresolved after every refusal.
+    assert_eq!(c.req("open_orders", "q1", "").0["unresolved"], 1);
+}
+
+#[test]
+fn a_cleared_order_does_not_count_toward_max_open_and_its_leg_closes() {
+    let r = rig_with("alpaca-clear-cap", |p| p.max_open = 1);
+    let mut c = ready(&r.gw, "reactor");
+    let mut ops = ready(&r.gw, "ops");
+    r.fake.hold(&[(CALL, 1)]);
+    absent_submit(&r, &mut c, "wse-cap");
+    assert_eq!(
+        c.submit("r2", &buy("wse-next"))["detail"]["cap"],
+        "open_orders"
+    );
+    assert_eq!(
+        clear_req(&mut ops, "k1", "wse-cap", "test")["outcome"],
+        "ok"
+    );
+    // The free slot takes an open on another leg; the cleared leg has no pending order,
+    // so its close goes (the position is held).
+    let v = c.submit("r3", &single("wse-put", PUT_A, "buy", "open", 1, "1.00"));
+    assert_eq!(v["outcome"], "accepted", "{v}");
+    let v = c.submit(
+        "r4",
+        &single("wse-cap-close", CALL, "sell", "close", 1, "1.00"),
+    );
+    assert_eq!(v["outcome"], "accepted", "{v}");
+}
+
+#[test]
+fn a_cleared_id_stays_reserved_and_stays_cleared_across_a_restart() {
+    let r = rig("alpaca-clear-restart");
+    let mut c = ready(&r.gw, "reactor");
+    let mut ops = ready(&r.gw, "ops");
+    absent_submit(&r, &mut c, "wse-rs");
+    assert_eq!(clear_req(&mut ops, "k1", "wse-rs", "test")["outcome"], "ok");
+    let r = restart(r, 2);
+    let mut c = ready(&r.gw, "reactor");
+    assert_eq!(c.req("open_orders", "q1", "").0["unresolved"], 0);
+    // The id is reserved: the same intent is a duplicate, and nothing is sent.
+    let before = posts(&r.fake).len();
+    assert_eq!(c.submit("r2", &buy("wse-rs"))["outcome"], "duplicate");
+    assert_eq!(posts(&r.fake).len(), before);
+    let cleared = journal(&r.state)
+        .iter()
+        .filter(|l| l.contains(r#""kind":"cleared""#))
+        .count();
+    assert_eq!(cleared, 1);
 }

@@ -250,6 +250,11 @@ pub(crate) enum Op {
     Flatten {
         reason: String,
     },
+    /// Clear an unresolved order the broker does not show (section 5).
+    ClearOrder {
+        client_order_id: String,
+        reason: String,
+    },
     Advance(u64),
 }
 
@@ -394,6 +399,17 @@ pub(crate) fn parse_line(bytes: &[u8]) -> Result<Line, LineError> {
             "flatten" => Op::Flatten {
                 reason: f.string("reason")?,
             },
+            "clear_order" => {
+                let client_order_id = f.string("client_order_id")?;
+                let reason = f.string("reason")?;
+                if reason.trim().is_empty() {
+                    return Err(invalid("reason", "a non-empty reason"));
+                }
+                Op::ClearOrder {
+                    client_order_id,
+                    reason,
+                }
+            }
             "advance" => Op::Advance(f.int("to_ts", 0, u64::MAX)?),
             _ => return Err(invalid("type", "unknown request type")),
         };
