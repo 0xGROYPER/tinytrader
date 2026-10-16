@@ -62,6 +62,10 @@
 //!   account's gateway state and the console's open orders), `POST
 //!   /api/orders/{account}` (`{order, confirm: account}`) and `POST
 //!   /api/orders/{account}/{client_order_id}/cancel`.
+//!   Every order route (those, and an account's flatten and resume) also
+//!   needs `CONSOLE_ORDER_LOGINS` (the Tailscale logins allowed to send,
+//!   comma-separated) and `CONSOLE_ORDER_TOKEN` (or `_FILE`), which the page
+//!   sends as `X-Order-Token`. Either unset refuses them (`OrderGate`).
 //! - `CONSOLE_PAGE`: serve the page from this file, and its modules and
 //!   libraries from beside it, read on each request, instead of the copies
 //!   built in (optional; lets the page change without a rebuild).
@@ -135,6 +139,18 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    let order_gate = match OrderGate::from_env() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("console: {e}");
+            std::process::exit(2);
+        }
+    };
+    if !order_gate.open() {
+        eprintln!(
+            "console: orders are refused until CONSOLE_ORDER_LOGINS and CONSOLE_ORDER_TOKEN (or _FILE) are set"
+        );
+    }
     let config = PollerConfig {
         topology: env("CONSOLE_TOPOLOGY", "topology.json"),
         docker: std::env::var("CONSOLE_DOCKER")
@@ -278,19 +294,8 @@ async fn main() {
         .route("/api/profiles/{id}", get(profiles_get))
         .route("/api/accounts/gateways", get(gateways_list))
         .route("/api/orders", get(orders_list))
-        .route("/api/orders/{account}", axum::routing::post(order_submit))
-        .route(
-            "/api/orders/{account}/{id}/cancel",
-            axum::routing::post(order_cancel),
-        )
-        .route(
-            "/api/accounts/{account}/flatten",
-            axum::routing::post(account_flatten),
-        )
-        .route(
-            "/api/accounts/{account}/resume",
-            axum::routing::post(account_resume),
-        )
+        // Sending and cancelling orders, flatten and resume: behind OrderGate.
+        .merge(order_routes(order_gate))
         // The console's writes (jobs, the queue, drive approval, reminders, flatten) can't be
         // forged by another page open in the browser.
         .layer(axum::middleware::from_fn(
@@ -766,6 +771,101 @@ async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
     no_store(axum::Json(
         json!({ "trading": can, "prefix": gateways::PREFIX, "accounts": out }),
     ))
+}
+
+/// Who may send an order. Every order route (submit, cancel, flatten, resume)
+/// needs both checks, before any gateway call:
+///
+/// - the Tailscale login: `tailscale serve` sets `Tailscale-User-Login` on
+///   what it forwards, and it must be one of `CONSOLE_ORDER_LOGINS`
+///   (comma-separated, exact match). Empty or unset refuses every order.
+/// - the order token: `X-Order-Token` must equal `CONSOLE_ORDER_TOKEN` (or the
+///   file `CONSOLE_ORDER_TOKEN_FILE` names). Unset refuses every order. The
+///   login header alone isn't enough: anything on this Mac can send it to
+///   127.0.0.1:8080, so the token is what stops a local process.
+///
+/// Reads (`GET /api/orders`, the account lists) stay open. Refusals say
+/// nothing about which check failed.
+#[derive(Clone)]
+struct OrderGate {
+    logins: Vec<String>,
+    token: Option<String>,
+}
+
+impl OrderGate {
+    fn from_env() -> Result<Self, String> {
+        let logins = env("CONSOLE_ORDER_LOGINS", "")
+            .split(',')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let token = tinytrader_observe::optional_secret("CONSOLE_ORDER_TOKEN")?;
+        Ok(Self { logins, token })
+    }
+
+    /// Whether any order can be sent at all.
+    fn open(&self) -> bool {
+        !self.logins.is_empty() && self.token.is_some()
+    }
+
+    /// Why an order request is refused, as (status, reason), if it is.
+    fn refuse(&self, headers: &axum::http::HeaderMap) -> Option<(StatusCode, &'static str)> {
+        let login = headers.get("tailscale-user-login").and_then(|v| v.to_str().ok());
+        if !login.is_some_and(|l| self.logins.iter().any(|a| a == l)) {
+            return Some((StatusCode::FORBIDDEN, "not allowed"));
+        }
+        // No token configured: refused (fail closed), not allowed.
+        let Some(want) = self.token.as_deref() else {
+            return Some((StatusCode::UNAUTHORIZED, "not allowed"));
+        };
+        let got = headers
+            .get("x-order-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if constant_time_eq(got.as_bytes(), want.as_bytes()) {
+            None
+        } else {
+            Some((StatusCode::UNAUTHORIZED, "not allowed"))
+        }
+    }
+}
+
+/// Compare without stopping at the first difference (the time taken says
+/// nothing about how much of a guess was right).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+/// Middleware: refuse an order request the [`OrderGate`] doesn't allow.
+async fn order_gate(
+    AxumState(gate): AxumState<OrderGate>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    match gate.refuse(req.headers()) {
+        Some((status, why)) => (status, axum::Json(json!({ "error": why }))).into_response(),
+        None => next.run(req).await,
+    }
+}
+
+/// The order routes, each behind the [`OrderGate`].
+fn order_routes(gate: OrderGate) -> Router<Arc<App>> {
+    Router::new()
+        .route("/api/orders/{account}", axum::routing::post(order_submit))
+        .route(
+            "/api/orders/{account}/{id}/cancel",
+            axum::routing::post(order_cancel),
+        )
+        .route(
+            "/api/accounts/{account}/flatten",
+            axum::routing::post(account_flatten),
+        )
+        .route(
+            "/api/accounts/{account}/resume",
+            axum::routing::post(account_resume),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(gate, order_gate))
 }
 
 /// Send one of the Spread builder's orders to a paper account's gateway as

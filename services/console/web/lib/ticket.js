@@ -12,6 +12,7 @@ import { fleet, svcState } from './fleet.js';
 import { get, stream } from './cache.js';
 import { esc } from './format.js';
 import { notSentText } from './orders.js';
+import { orderFetch } from './api.js';
 
 const OCC = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/;
 const r2 = x => Math.round(x * 100) / 100;
@@ -170,7 +171,7 @@ export function createTicket(box, hooks = {}) {
     t.sending = true; t.confirm = 0; draw(true);
     const me = t;
     try {
-      const r = await fetch(`/api/orders/${encodeURIComponent(me.acct)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: me.acct, live, order }) });
+      const r = await orderFetch(`/api/orders/${encodeURIComponent(me.acct)}`, { confirm: me.acct, live, order });
       const v = await r.json().catch(() => ({})), o = outcome(v, r.ok);
       me.result = o.html; me.done = !o.again;
       hooks.onSent?.(v);

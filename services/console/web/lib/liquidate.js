@@ -10,6 +10,7 @@
 import { fleet } from './fleet.js';
 import { get, stream } from './cache.js';
 import { notSentText } from './orders.js';
+import { orderFetch } from './api.js';
 
 const OCC = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/;
 const r2 = x => Math.round(x * 100) / 100;
@@ -98,7 +99,7 @@ export function priced(o, q, market) {
 export async function send(account, live, o, p) {
   const order = { legs: o.legs, qty: o.qty, effect: 'close', type: p.type, [p.type === 'market' ? 'ref_price' : 'limit_price']: p.price };
   try {
-    const r = await fetch(`/api/orders/${encodeURIComponent(account)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: account, live, order }) });
+    const r = await orderFetch(`/api/orders/${encodeURIComponent(account)}`, { confirm: account, live, order });
     const v = await r.json().catch(() => ({}));
     if (!r.ok || v.error) return { ok: false, text: `not sent: ${v.error || r.status}` };
     if (v.outcome === 'accepted') return { ok: true, text: `sent (${v.status || 'new'})` };
@@ -112,6 +113,6 @@ export async function send(account, live, o, p) {
 /** Cancel the console's own open orders on an account (ids tt-): how many were asked to cancel. */
 export async function cancelOurs(account, orders) {
   const ours = (orders || []).filter(o => (o.client_order_id || '').startsWith('tt-'));
-  await Promise.all(ours.map(o => fetch(`/api/orders/${encodeURIComponent(account)}/${encodeURIComponent(o.client_order_id)}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => null)));
+  await Promise.all(ours.map(o => orderFetch(`/api/orders/${encodeURIComponent(account)}/${encodeURIComponent(o.client_order_id)}/cancel`, {}).catch(() => null)));
   return ours.length;
 }
