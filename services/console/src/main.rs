@@ -8,6 +8,8 @@
 //!   from the Docker Engine API, plus each service's `/health`, `/metrics`
 //!   and optional `/recent` endpoints. With `?since=G&epoch=E` (the last
 //!   answer's), only the service fields changed since (see `delta`).
+//!   Each account in a service's `accounts` carries `age_ms`: the console's
+//!   clock now minus the account's `updated_at`, or null.
 //!
 //! A background task refreshes the snapshot every two seconds, so any number
 //! of viewers cost one round of polling. The console never writes to Docker
@@ -59,7 +61,7 @@
 //!   the account's gateway; an account without one (live) can't be flattened.
 //!   With `CONSOLE_TRADE_TOKEN` (or `_FILE`), the console's trade client
 //!   `console` sends the Spread builder's orders: `GET /api/orders` (each
-//!   account's gateway state and the console's open orders), `POST
+//!   account's gateway state, its `unresolved` count and the console's open orders), `POST
 //!   /api/orders/{account}` (`{order, confirm: account}`) and `POST
 //!   /api/orders/{account}/{client_order_id}/cancel`.
 //!   Every order route (those, and an account's flatten and resume) also
@@ -440,11 +442,36 @@ async fn state(
 ) -> Response {
     let since = q.get("since").and_then(|v| v.parse().ok());
     let epoch = q.get("epoch").and_then(|v| v.parse().ok());
-    no_store(axum::Json(app.delta.answer(
-        app.poller.snapshot_json(),
-        since,
-        epoch,
-    )))
+    let mut state = app.delta.answer(app.poller.snapshot_json(), since, epoch);
+    add_account_ages(&mut state, tinytrader_observe::unix_seconds());
+    no_store(axum::Json(state))
+}
+
+/// Adds `age_ms` to each account a service serves (`services.<id>.accounts.accounts[]`):
+/// this server's clock now minus the account's `updated_at` (its last successful
+/// poll), in whole milliseconds, or null without one. Computed here, so the
+/// age does not depend on the clock of the device reading it.
+fn add_account_ages(state: &mut serde_json::Value, now: f64) {
+    let Some(services) = state.get_mut("services").and_then(|s| s.as_object_mut()) else {
+        return;
+    };
+    for svc in services.values_mut() {
+        let Some(accounts) = svc
+            .pointer_mut("/accounts/accounts")
+            .and_then(|a| a.as_array_mut())
+        else {
+            continue;
+        };
+        for account in accounts {
+            let age = account
+                .get("updated_at")
+                .and_then(|t| t.as_f64())
+                .map(|at| ((now - at) * 1000.0).max(0.0).round() as i64);
+            if let Some(obj) = account.as_object_mut() {
+                obj.insert("age_ms".into(), json!(age));
+            }
+        }
+    }
 }
 
 /// Live tail of a service's events, forwarded from the service.
@@ -763,7 +790,9 @@ async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
                     .filter(|o| o["client_order_id"].as_str().is_some_and(|i| i.starts_with(gateways::PREFIX)))
                     .map(|o| json!({ "client_order_id": o["client_order_id"], "status": o["status"], "filled_qty": o["filled_qty"], "avg_price": o["avg_price"], "legs": o["legs"], "limit_price": o["broker_raw"]["limit_price"], "qty": o["broker_raw"]["qty"], "submitted_at": o["broker_raw"]["submitted_at"] }))
                     .collect();
-                json!({ "account": account, "state": w["state"], "environment": w["environment"], "orders": mine })
+                // The gateway's count of orders that have not resolved (new opens are blocked); null when it doesn't say.
+                let unresolved = r.as_ref().map_or(serde_json::Value::Null, |r| r["unresolved"].clone());
+                json!({ "account": account, "state": w["state"], "environment": w["environment"], "unresolved": unresolved, "orders": mine })
             }
             Err(e) => json!({ "account": account, "error": e }),
         });
