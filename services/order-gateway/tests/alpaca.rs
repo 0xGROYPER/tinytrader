@@ -234,14 +234,10 @@ fn lost_response_resolves_by_lookup_without_resend() {
 fn a_failed_lookup_leaves_the_order_unknown_not_absent() {
     let r = rig("alpaca-lookup-error");
     let mut c = ready(&r.gw, "reactor");
-    r.fake.next("POST", "/v2/orders", Act::Lost);
-    let v = c.submit("r1", &buy("wse-err"));
-    assert_eq!(
-        (v["outcome"].as_str(), v["reason"].as_str()),
-        (Some("unknown"), Some("connection"))
-    );
     // The broker is failing, which is not the same as saying the order is missing:
-    // every lookup gets a 500, so the order is unresolved, not absent.
+    // every lookup gets a 500, so the order is unresolved, not absent. The submit's
+    // reply is a 502 and the broker never stores the order, so no lookup can find it.
+    // That keeps the test about failed lookups and nothing else.
     for _ in 0..3 {
         r.fake.next(
             "GET",
@@ -249,13 +245,23 @@ fn a_failed_lookup_leaves_the_order_unknown_not_absent() {
             Act::Respond(500, Vec::new(), "{}".into()),
         );
     }
+    r.fake.reply("POST", "/v2/orders", 502, "<html>bad gateway</html>");
+    let v = c.submit("r1", &buy("wse-err"));
+    assert_eq!(
+        (v["outcome"].as_str(), v["reason"].as_str()),
+        (Some("unknown"), Some("http_5xx"))
+    );
     let res = c.event("resolution", |v| v["client_order_id"] == "wse-err");
     assert_eq!(
         (res["outcome"].as_str(), res["window_ms"].as_u64()),
         (Some("unresolved"), Some(80))
     );
     assert!(r.fake.count("GET", "/v2/orders:by_client_order_id") >= 3);
-    // Still unknown and open: a stream event for the order settles it.
+    // Still unknown and open. The order reaches the broker later, and its stream
+    // event settles it.
+    r.fake.appear(&format!(
+        r#"{{"client_order_id":"wse-err","symbol":"{CALL}","qty":"1","side":"buy","limit_price":"1.25","position_intent":"buy_to_open"}}"#
+    ));
     r.fake.event("wse-err", "new", "new");
     let o = c.order_event("wse-err", "new");
     assert_eq!(o["source"], "stream");

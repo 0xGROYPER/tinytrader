@@ -3,6 +3,12 @@
 //! (a temporary file, flushed, then renamed), so an edit is never half
 //! saved. The first start seeds it from a Markdown roadmap, if one is given.
 //!
+//! The file may be kept in a git checkout and changed under the console (a
+//! pull, a checkout): a change on disk is read again before the next answer
+//! or edit, so an edit never writes over it. A file that can't be read (a
+//! merge left half done) is never replaced: edits are refused until it's
+//! fixed.
+//!
 //! `GET /api/reminders` returns `{ lists: [{ id, name, color }], items: [{ id,
 //! list, title, notes, flagged, done, done_at, created_at }] }`; `POST
 //! /api/reminders` takes one change (`{ "op": … }`, see [`Reminders::apply`])
@@ -21,7 +27,40 @@ pub const COLORS: [&str; 7] = [
 
 pub struct Reminders {
     path: PathBuf,
-    doc: Mutex<Value>,
+    held: Mutex<Held>,
+}
+
+/// The document, and the file's modification time and size when it was last
+/// read or written.
+struct Held {
+    doc: Value,
+    stamp: Stamp,
+    /// Why the file on disk can't be used, while it can't.
+    broken: Option<String>,
+}
+
+type Stamp = Option<(std::time::SystemTime, u64)>;
+
+fn stamp(path: &Path) -> Stamp {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+/// The document in the file: `None` if there is no file.
+///
+/// # Errors
+/// The file can't be read, or isn't a reminders document.
+fn read(path: &Path) -> Result<Option<Value>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let doc: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !(doc["lists"].is_array() && doc["items"].is_array()) {
+        return Err(format!("{}: not a reminders document", path.display()));
+    }
+    Ok(Some(doc))
 }
 
 fn now() -> f64 {
@@ -48,26 +87,54 @@ fn text(v: &Value, max: usize) -> Option<String> {
 impl Reminders {
     /// Open the reminders at `path`, seeding a new file from `seed` (a
     /// Markdown roadmap) when there is none.
-    pub fn open(path: PathBuf, seed: Option<&Path>) -> Self {
-        let doc = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .unwrap_or_else(|| {
-                let doc = seed.and_then(|p| std::fs::read_to_string(p).ok()).map_or_else(
-                    || json!({ "lists": [{ "id": 1, "name": "Reminders", "color": COLORS[4] }], "items": [] }),
-                    |md| from_markdown(&md),
-                );
-                let _ = write(&path, &doc);
-                doc
-            });
-        Self {
+    ///
+    /// # Errors
+    /// The file is there but can't be read: it's left as it is.
+    pub fn open(path: PathBuf, seed: Option<&Path>) -> Result<Self, String> {
+        let doc = if let Some(doc) = read(&path)? {
+            doc
+        } else {
+            let doc = seed.and_then(|p| std::fs::read_to_string(p).ok()).map_or_else(
+                || json!({ "lists": [{ "id": 1, "name": "Reminders", "color": COLORS[4] }], "items": [] }),
+                |md| from_markdown(&md),
+            );
+            let _ = write(&path, &doc);
+            doc
+        };
+        Ok(Self {
+            held: Mutex::new(Held {
+                doc,
+                stamp: stamp(&path),
+                broken: None,
+            }),
             path,
-            doc: Mutex::new(doc),
+        })
+    }
+
+    /// The document, read again first if the file changed on disk.
+    fn current(&self) -> std::sync::MutexGuard<'_, Held> {
+        let mut held = lock(&self.held);
+        let now = stamp(&self.path);
+        if now != held.stamp {
+            match read(&self.path) {
+                Ok(Some(doc)) => {
+                    held.doc = doc;
+                    held.broken = None;
+                }
+                // Gone: the next edit writes it again.
+                Ok(None) => held.broken = None,
+                Err(e) => {
+                    eprintln!("console: reminders: {e}");
+                    held.broken = Some(e);
+                }
+            }
+            held.stamp = now;
         }
+        held
     }
 
     pub fn get(&self) -> Value {
-        lock(&self.doc).clone()
+        self.current().doc.clone()
     }
 
     /// Apply one change and save. Changes:
@@ -80,8 +147,13 @@ impl Reminders {
     /// If the change is malformed or names something that doesn't exist, or
     /// the file can't be written (the change is then not kept).
     pub fn apply(&self, change: &Value) -> Result<Value, String> {
-        let mut doc = lock(&self.doc);
-        let mut next = doc.clone();
+        let mut held = self.current();
+        if let Some(e) = &held.broken {
+            return Err(format!(
+                "the reminders file can't be read, so isn't changed: {e}"
+            ));
+        }
+        let mut next = held.doc.clone();
         let id = change["id"].as_u64();
         let find = |doc: &mut Value, key: &str, id: Option<u64>| -> Result<usize, String> {
             doc[key]
@@ -184,8 +256,9 @@ impl Reminders {
             other => return Err(format!("unknown change {other:?}")),
         }
         write(&self.path, &next)?;
-        *doc = next;
-        Ok(doc.clone())
+        held.stamp = stamp(&self.path);
+        held.doc = next;
+        Ok(held.doc.clone())
     }
 }
 
@@ -322,7 +395,7 @@ mod tests {
     fn edits_are_saved_and_checked() {
         let dir = std::env::temp_dir().join(format!("tinytrader-reminders-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let r = Reminders::open(dir.join("r.json"), None);
+        let r = Reminders::open(dir.join("r.json"), None).unwrap();
         let doc = r
             .apply(&json!({ "op": "add_item", "list": 1, "title": "Buy drives" }))
             .unwrap();
@@ -337,8 +410,50 @@ mod tests {
             r.apply(&json!({ "op": "delete_list", "id": 1 })).is_err(),
             "not empty"
         );
-        let reopened = Reminders::open(dir.join("r.json"), None);
+        let reopened = Reminders::open(dir.join("r.json"), None).unwrap();
         assert_eq!(reopened.get()["items"][0]["done"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn follows_the_file_and_never_overwrites_a_broken_one() {
+        let dir =
+            std::env::temp_dir().join(format!("tinytrader-reminders-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("r.json");
+        let r = Reminders::open(path.clone(), None).unwrap();
+        r.apply(&json!({ "op": "add_item", "list": 1, "title": "Mine" }))
+            .unwrap();
+        // Changed on disk (a pull): read again, and the next edit builds on it.
+        let mut pulled = r.get();
+        pulled["items"][0]["title"] = json!("Pulled");
+        std::fs::write(&path, serde_json::to_string_pretty(&pulled).unwrap()).unwrap();
+        assert_eq!(r.get()["items"][0]["title"], "Pulled");
+        r.apply(&json!({ "op": "add_item", "list": 1, "title": "Next" }))
+            .unwrap();
+        let on_disk = read(&path).unwrap().unwrap();
+        assert_eq!(on_disk["items"][0]["title"], "Pulled");
+        assert_eq!(on_disk["items"][1]["title"], "Next");
+        // A merge left half done: edits refused, the file left alone.
+        let conflicted = "<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> other\n";
+        std::fs::write(&path, conflicted).unwrap();
+        assert!(
+            r.apply(&json!({ "op": "add_item", "list": 1, "title": "Lost" }))
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), conflicted);
+        assert!(Reminders::open(path.clone(), None).is_err());
+        // Fixed: edits work again.
+        std::fs::write(&path, serde_json::to_string(&on_disk).unwrap()).unwrap();
+        r.apply(&json!({ "op": "delete_item", "id": on_disk["items"][1]["id"] }))
+            .unwrap();
+        assert_eq!(
+            read(&path).unwrap().unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
