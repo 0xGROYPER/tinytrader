@@ -187,6 +187,57 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// A fresh ledger file under the temp dir, named for the test.
+    fn scratch(test: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("tinytrader-ledger-{test}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        d.join("submissions.jsonl")
+    }
+
+    fn request() -> String {
+        fingerprint(
+            "OPRA.PILLAR",
+            "cmbp-1",
+            &["SPY.OPT".into()],
+            "2026-10-01",
+            "2026-10-02",
+        )
+    }
+
+    #[test]
+    fn a_timed_out_submission_stays_blocked_until_reconciled_as_not_made() {
+        let path = scratch("timeout-not-made");
+        let r = request();
+        let mut l = Ledger::open(&path).unwrap();
+        l.append(entry(&r, "sending", None)).unwrap();
+        // The request timed out after it was sent: uncertain, not failed.
+        l.append(entry(&r, "uncertain", None)).unwrap();
+        assert_eq!(l.blocking(&r).map(|e| e.state.as_str()), Some("uncertain"));
+        assert_eq!(l.unresolved().len(), 1);
+        // Reconciliation finds no such job: recorded as never made.
+        l.append(entry(&r, "not-submitted", None)).unwrap();
+        assert!(l.blocking(&r).is_none());
+        assert!(l.unresolved().is_empty());
+        assert!(l.submitted().is_empty());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_sending_step_without_an_outcome_blocks_after_a_restart() {
+        // The process stopped between writing "sending" and the outcome.
+        let path = scratch("crash-after-sending");
+        let r = request();
+        Ledger::open(&path)
+            .unwrap()
+            .append(entry(&r, "sending", None))
+            .unwrap();
+        let l = Ledger::open(&path).unwrap();
+        assert_eq!(l.blocking(&r).map(|e| e.state.as_str()), Some("sending"));
+        assert_eq!(l.unresolved().len(), 1);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
     #[test]
     fn symbols_are_compared_in_any_order() {
         assert_eq!(

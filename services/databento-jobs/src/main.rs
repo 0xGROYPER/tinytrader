@@ -83,6 +83,19 @@ struct Args {
 /// How long a price stays good for submitting.
 const QUOTE_TTL: Duration = Duration::from_secs(15 * 60);
 
+/// Transport bounds for calls to Databento. They only keep a stuck request
+/// from holding the service; they decide nothing about a job. A submission
+/// that times out is uncertain (see `ledger`), not failed.
+const DATABENTO_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DATABENTO_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The HTTP client settings for Databento's API, bounded by `request` in total.
+fn databento_http(request: Duration) -> reqwest::ClientBuilder {
+    reqwest::ClientBuilder::new()
+        .connect_timeout(DATABENTO_CONNECT_TIMEOUT)
+        .timeout(request)
+}
+
 /// A request as the form sends it.
 #[derive(Clone, Debug, Deserialize)]
 struct Request {
@@ -172,7 +185,9 @@ struct Transfer {
 }
 
 struct Jobs {
-    db: tokio::sync::Mutex<HistoricalClient>,
+    /// Cloned for each call (it shares its connection pool), so no lock is
+    /// held while a request to Databento is in flight.
+    db: HistoricalClient,
     key: String,
     http: reqwest::Client,
     store: String,
@@ -235,10 +250,10 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let db = match HistoricalClient::builder()
-        .key(&key)
-        .and_then(databento::historical::ClientBuilder::build)
-    {
+    let db = match HistoricalClient::builder().key(&key).and_then(|b| {
+        b.http_client_builder(databento_http(DATABENTO_REQUEST_TIMEOUT))
+            .build()
+    }) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("databento-jobs: {e}");
@@ -246,7 +261,7 @@ async fn main() {
         }
     };
     let jobs = Arc::new(Jobs {
-        db: tokio::sync::Mutex::new(db),
+        db,
         key,
         http: reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -472,7 +487,7 @@ struct Refreshed {
 
 async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
     let short = {
-        let mut db = jobs.db.lock().await;
+        let mut db = jobs.db.clone();
         db.batch()
             .list_jobs(&ListJobsParams::default())
             .await
@@ -504,7 +519,7 @@ async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
             Some(j) if j.state == JobState::Done => j,
             known => {
                 let fetched = {
-                    let mut db = jobs.db.lock().await;
+                    let mut db = jobs.db.clone();
                     db.batch().get_job_details(&s.id).await
                 };
                 match (fetched, known) {
@@ -525,7 +540,7 @@ async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
             && held[&job.id].is_null()
             && !lock(&jobs.delivered).contains_key(&job.id)
         {
-            let files = jobs.db.lock().await.batch().list_files(&job.id).await;
+            let files = jobs.db.clone().batch().list_files(&job.id).await;
             if let Ok(files) = files {
                 lock(&jobs.delivered).insert(job.id.clone(), files.iter().map(|f| f.size).sum());
             }
@@ -626,7 +641,7 @@ fn jobs_view(jobs: &Jobs) -> Value {
 }
 
 async fn datasets(AxState(jobs): AxState<Shared>) -> Reply {
-    let mut db = jobs.db.lock().await;
+    let mut db = jobs.db.clone();
     match db.metadata().list_datasets(None).await {
         Ok(d) => (StatusCode::OK, Json(json!({ "datasets": d }))),
         Err(e) => refused(StatusCode::BAD_GATEWAY, e.to_string()),
@@ -639,7 +654,7 @@ struct DatasetQuery {
 }
 
 async fn schemas(AxState(jobs): AxState<Shared>, Query(q): Query<DatasetQuery>) -> Reply {
-    let mut db = jobs.db.lock().await;
+    let mut db = jobs.db.clone();
     match db.metadata().list_schemas(&q.dataset).await {
         Ok(s) => (
             StatusCode::OK,
@@ -658,7 +673,7 @@ async fn cost(jobs: &Jobs, c: &Checked) -> Result<(f64, u64), String> {
         .stype_in(c.stype_in)
         .date_time_range(c.start..c.end)
         .build();
-    let mut db = jobs.db.lock().await;
+    let mut db = jobs.db.clone();
     let usd = db
         .metadata()
         .get_cost(&params)
@@ -677,7 +692,7 @@ async fn cost(jobs: &Jobs, c: &Checked) -> Result<(f64, u64), String> {
 /// missing.
 async fn availability(jobs: &Jobs, c: &Checked) -> Result<Vec<String>, String> {
     use databento::historical::metadata::{DatasetCondition, GetDatasetConditionParams};
-    let mut db = jobs.db.lock().await;
+    let mut db = jobs.db.clone();
     let mut warnings = Vec::new();
     match db.metadata().get_dataset_range(&c.dataset).await {
         Ok(r) => {
@@ -862,7 +877,7 @@ async fn submit(AxState(jobs): AxState<Shared>, Json(s): Json<Submit>) -> Reply 
         .date_time_range(checked.start..checked.end)
         .build();
     let submitted = {
-        let mut db = jobs.db.lock().await;
+        let mut db = jobs.db.clone();
         db.batch().submit_job(&params).await
     };
     match submitted {
@@ -926,7 +941,7 @@ async fn submit(AxState(jobs): AxState<Shared>, Json(s): Json<Submit>) -> Reply 
 
 async fn download(AxState(jobs): AxState<Shared>, UrlPath(job): UrlPath<String>) -> Reply {
     let details = {
-        let mut db = jobs.db.lock().await;
+        let mut db = jobs.db.clone();
         db.batch().get_job_details(&job).await
     };
     match details {
@@ -994,7 +1009,7 @@ fn start_download(jobs: &Shared, job: String) {
 /// Stream every file of a done job into the store, then have it filed.
 async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
     let files = {
-        let mut db = jobs.db.lock().await;
+        let mut db = jobs.db.clone();
         db.batch()
             .list_files(job)
             .await
@@ -1299,5 +1314,35 @@ mod tests {
             .check()
             .is_err()
         );
+    }
+
+    /// A Databento that accepts connections and never answers must not hang
+    /// the client: the call fails within its bound, so the submission is
+    /// recorded as uncertain instead of holding the service.
+    #[tokio::test]
+    async fn a_silent_databento_fails_within_the_request_bound() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let mut db = HistoricalClient::builder()
+            .key("db-00000000000000000000000000000")
+            .unwrap()
+            .base_url(format!("http://{addr}").parse().unwrap())
+            .http_client_builder(databento_http(Duration::from_millis(300)))
+            .build()
+            .unwrap();
+        let answer = tokio::time::timeout(
+            Duration::from_secs(10),
+            db.batch().list_jobs(&ListJobsParams::default()),
+        )
+        .await
+        .expect("the call hung past its bound");
+        assert!(answer.is_err());
     }
 }
