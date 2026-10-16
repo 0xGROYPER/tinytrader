@@ -68,6 +68,28 @@ pub(crate) fn occ(symbol: &str) -> Option<(&str, i64)> {
     (back == (y, u32::try_from(m).ok()?, u32::try_from(d).ok()?)).then_some((&symbol[..root], days))
 }
 
+/// The parts of an option that its maximum loss needs.
+pub(crate) struct Contract<'a> {
+    pub root: &'a str,
+    /// Days since the epoch.
+    pub expiry: i64,
+    pub put: bool,
+    /// Whole cents; `None` when the strike has a fraction of a cent.
+    pub strike_cents: Option<i64>,
+}
+
+/// The contract of a valid compact OCC symbol.
+pub(crate) fn contract(symbol: &str) -> Option<Contract<'_>> {
+    let (root, expiry) = occ(symbol)?;
+    let mills: i64 = symbol[root.len() + 7..].parse().ok()?;
+    Some(Contract {
+        root,
+        expiry,
+        put: symbol.as_bytes()[root.len() + 6] == b'P',
+        strike_cents: (mills % 10 == 0).then_some(mills / 10),
+    })
+}
+
 /// Parses a decimal price with at most two decimal places into cents.
 pub(crate) fn parse_cents(s: &str) -> Option<i64> {
     let (neg, body) = s.strip_prefix('-').map_or((false, s), |b| (true, b));
@@ -307,10 +329,381 @@ impl Intent {
     }
 }
 
+/// What an opening intent can lose, and what it costs to open.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaxLoss {
+    /// The most the intent can lose, in cents, for its whole quantity.
+    pub cents: u64,
+    /// The debit the buyer pays, in cents, for its whole quantity. `None` for a credit,
+    /// a short leg, or any intent with no debit.
+    pub premium_cents: Option<u64>,
+}
+
+/// The most an opening intent can lose, or the reason it cannot be bounded: a naked short
+/// call or share is `max_loss_unbounded`; any shape not listed below is `max_loss_unknown`.
+/// A long option or share loses its premium. A vertical loses its debit, or its width
+/// less the credit when its long strike is the outer one (the short leg can then go
+/// against it). An iron condor loses its wider wing less the credit. A naked short put
+/// loses its strike less the credit. A closing leg is not classified: a combo's one limit
+/// prices every leg, so a close cannot be taken out of it. A partial close is not an
+/// intent property; the caller passes the open quantity that remains, since the loss is
+/// linear in quantity and zero once nothing remains open.
+pub fn max_loss(intent: &Intent) -> Result<MaxLoss, &'static str> {
+    let limit = i128::from(intent.limit_cents);
+    let (per_unit, debit) = if intent.combo {
+        (combo_loss(intent)?, intent.limit_cents > 0)
+    } else {
+        (single_loss(&intent.legs[0], limit)?, intent.legs[0].buy)
+    };
+    let mult = i128::from(intent.multiplier());
+    let qty = i128::from(intent.qty);
+    // Nothing left open (a full close of the opening quantity) has no loss.
+    let cents = if intent.qty == 0 {
+        0
+    } else {
+        u64::try_from(per_unit * qty * mult)
+            .ok()
+            .filter(|v| *v > 0)
+            .ok_or("max_loss_unknown")?
+    };
+    let premium_cents = debit
+        .then(|| u64::try_from(limit * qty * mult).ok())
+        .flatten();
+    Ok(MaxLoss {
+        cents,
+        premium_cents,
+    })
+}
+
+/// The loss per unit of a single opening leg, in cents of price (signed).
+fn single_loss(leg: &Leg, limit: i128) -> Result<i128, &'static str> {
+    if !leg.open {
+        return Err("max_loss_unknown");
+    }
+    if leg.buy {
+        return Ok(limit);
+    }
+    if leg.equity {
+        return Err("max_loss_unbounded");
+    }
+    match contract(&leg.symbol) {
+        Some(c) if c.put => Ok(strike_of(&c)? - limit),
+        Some(_) => Err("max_loss_unbounded"),
+        None => Err("max_loss_unknown"),
+    }
+}
+
+/// The loss per parent unit of a combo, in cents of price (signed). A combo's limit is
+/// signed: positive for a debit, negative for a credit. A combo with a closing leg is
+/// unknown: its one limit prices every leg together, so the closing leg's price cannot be
+/// taken out and the opening legs cannot be sized alone. Nothing is netted against it.
+fn combo_loss(intent: &Intent) -> Result<i128, &'static str> {
+    let legs = &intent.legs;
+    let limit = i128::from(intent.limit_cents);
+    // A roll, which both opens and closes, is not one of the shapes below.
+    if legs.iter().any(|l| !l.open) {
+        return Err("max_loss_unknown");
+    }
+    // Long options only: the payoff is never below zero, so the debit is the loss.
+    if legs.iter().all(|l| l.buy) {
+        return Ok(limit);
+    }
+    if legs.iter().any(|l| l.ratio != 1) {
+        return Err("max_loss_unknown");
+    }
+    let cs = legs
+        .iter()
+        .map(|l| contract(&l.symbol).ok_or("max_loss_unknown"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if cs
+        .iter()
+        .any(|c| c.root != cs[0].root || c.expiry != cs[0].expiry)
+    {
+        return Err("max_loss_unknown");
+    }
+    match legs.len() {
+        // A vertical: the debit, or the width less the credit when the long strike is
+        // the inner one (a credit spread, or a debit spread the wrong way round).
+        2 => {
+            let (short, long) = wing(legs, &cs, cs[0].put)?;
+            let outer = if cs[0].put {
+                long > short
+            } else {
+                long < short
+            };
+            let width = (long - short).abs();
+            Ok(limit + if outer { 0 } else { width })
+        }
+        // An iron condor or butterfly with a credit: only one wing can be breached at
+        // expiry, so the wider wing less the credit is the loss. The put wing must sit
+        // at or below the call wing.
+        4 => {
+            let (sp, lp) = wing(legs, &cs, true)?;
+            let (sc, lc) = wing(legs, &cs, false)?;
+            if sp <= lp || sc >= lc || sp > sc || limit >= 0 {
+                return Err("max_loss_unknown");
+            }
+            Ok((sp - lp).max(lc - sc) + limit)
+        }
+        _ => Err("max_loss_unknown"),
+    }
+}
+
+/// The short and long strikes of the two legs of one type, in cents.
+fn wing(legs: &[Leg], cs: &[Contract], put: bool) -> Result<(i128, i128), &'static str> {
+    let of: Vec<usize> = (0..cs.len()).filter(|&i| cs[i].put == put).collect();
+    let &[a, b] = of.as_slice() else {
+        return Err("max_loss_unknown");
+    };
+    if legs[a].buy == legs[b].buy {
+        return Err("max_loss_unknown");
+    }
+    let (short, long) = if legs[a].buy { (b, a) } else { (a, b) };
+    Ok((strike_of(&cs[short])?, strike_of(&cs[long])?))
+}
+
+fn strike_of(c: &Contract) -> Result<i128, &'static str> {
+    c.strike_cents.map(i128::from).ok_or("max_loss_unknown")
+}
+
 pub(crate) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes.iter().fold(String::new(), |mut s, b| {
         let _ = write!(s, "{b:02x}");
         s
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Intent, Leg, MaxLoss, max_loss};
+
+    fn max_loss_cents(o: &Intent) -> Result<u64, &'static str> {
+        max_loss(o).map(|m| m.cents)
+    }
+
+    const C575: &str = "SPY261005C00575000";
+    const C580: &str = "SPY261005C00580000";
+    const C585: &str = "SPY261005C00585000";
+    const C580_NOV: &str = "SPY261012C00580000";
+    const P565: &str = "SPY261005P00565000";
+    const P570: &str = "SPY261005P00570000";
+    const P570_ODD: &str = "SPY261005P00570005";
+
+    fn leg(symbol: &str, buy: bool, open: bool) -> Leg {
+        Leg {
+            symbol: symbol.into(),
+            equity: false,
+            ratio: 1,
+            buy,
+            open,
+        }
+    }
+
+    fn share(buy: bool, open: bool) -> Leg {
+        Leg {
+            symbol: "AAPL".into(),
+            equity: true,
+            ratio: 1,
+            buy,
+            open,
+        }
+    }
+
+    /// A limit intent: `limit` in cents, signed for a combo (+ debit, - credit).
+    fn order(legs: Vec<Leg>, limit: i64, qty: u32) -> Intent {
+        Intent {
+            client_order_id: "wse-t".into(),
+            combo: legs.len() > 1,
+            legs,
+            qty,
+            limit_cents: limit,
+            market: false,
+            on_close: false,
+        }
+    }
+
+    #[test]
+    fn a_single_long_is_its_premium() {
+        // $1.25 a contract, 10 contracts: $1,250, as before.
+        let o = order(vec![leg(C580, true, true)], 125, 10);
+        assert_eq!(max_loss_cents(&o), Ok(125 * 10 * 100));
+        let s = order(vec![share(true, true)], 22_250, 12);
+        assert_eq!(max_loss_cents(&s), Ok(22_250 * 12));
+        assert_eq!(max_loss(&o).unwrap().premium_cents, Some(125 * 10 * 100));
+    }
+
+    #[test]
+    fn a_credit_spread_loses_its_width_less_the_credit() {
+        // Sell 570 put, buy 565 put, $1.00 credit: $5 wide, so $4 a share at risk.
+        let o = order(
+            vec![leg(P570, false, true), leg(P565, true, true)],
+            -100,
+            10,
+        );
+        assert_eq!(max_loss_cents(&o), Ok(400 * 10 * 100));
+        // A call credit spread: sell 580, buy 585 for $1.00.
+        let c = order(vec![leg(C580, false, true), leg(C585, true, true)], -100, 1);
+        assert_eq!(max_loss_cents(&c), Ok(400 * 100));
+        // A credit is received, not paid: no premium.
+        assert_eq!(max_loss(&o).unwrap().premium_cents, None);
+    }
+
+    #[test]
+    fn a_debit_vertical_loses_its_debit() {
+        // A call debit spread: buy 580, sell 585 for $1.50.
+        let call = order(vec![leg(C580, true, true), leg(C585, false, true)], 150, 3);
+        assert_eq!(max_loss_cents(&call), Ok(150 * 3 * 100));
+        assert_eq!(max_loss(&call).unwrap().premium_cents, Some(150 * 3 * 100));
+        // A put debit spread: buy 570, sell 565 for $2.00.
+        let put = order(vec![leg(P570, true, true), leg(P565, false, true)], 200, 1);
+        assert_eq!(max_loss_cents(&put), Ok(200 * 100));
+    }
+
+    #[test]
+    fn a_debit_with_the_long_inside_loses_the_width_too() {
+        // Buy 585, sell 580 calls for a $1.00 debit: the short leg is in the money first.
+        let o = order(vec![leg(C585, true, true), leg(C580, false, true)], 100, 1);
+        assert_eq!(max_loss_cents(&o), Ok((500 + 100) * 100));
+    }
+
+    #[test]
+    fn a_credit_worth_more_than_the_width_is_unknown() {
+        let o = order(vec![leg(P570, false, true), leg(P565, true, true)], -600, 1);
+        assert_eq!(max_loss_cents(&o), Err("max_loss_unknown"));
+    }
+
+    #[test]
+    fn an_iron_condor_loses_its_wider_wing_less_the_credit() {
+        // Puts 565/570 (5 wide), calls 575/585 (10 wide), $2.00 credit.
+        let o = order(
+            vec![
+                leg(P565, true, true),
+                leg(P570, false, true),
+                leg(C575, false, true),
+                leg(C585, true, true),
+            ],
+            -200,
+            1,
+        );
+        assert_eq!(max_loss_cents(&o), Ok((1000 - 200) * 100));
+        // A debit on the same wings is not a credit condor: unknown.
+        let debit = order(
+            vec![
+                leg(P565, true, true),
+                leg(P570, false, true),
+                leg(C575, false, true),
+                leg(C585, true, true),
+            ],
+            200,
+            1,
+        );
+        assert_eq!(max_loss_cents(&debit), Err("max_loss_unknown"));
+    }
+
+    #[test]
+    fn a_naked_short_call_or_share_is_unbounded() {
+        let call = order(vec![leg(C580, false, true)], 125, 1);
+        assert_eq!(max_loss_cents(&call), Err("max_loss_unbounded"));
+        let short = order(vec![share(false, true)], 22_250, 1);
+        assert_eq!(max_loss_cents(&short), Err("max_loss_unbounded"));
+    }
+
+    #[test]
+    fn a_naked_short_put_is_its_strike_less_the_credit() {
+        // Sell the 570 put for $1.00: $569 a share at risk.
+        let o = order(vec![leg(P570, false, true)], 100, 2);
+        assert_eq!(max_loss_cents(&o), Ok((57_000 - 100) * 2 * 100));
+        assert_eq!(max_loss(&o).unwrap().premium_cents, None);
+    }
+
+    #[test]
+    fn a_shape_that_is_not_classified_is_unknown() {
+        // A butterfly (1:2:1) is not two verticals of one-to-one legs.
+        let mut fly = [
+            leg(C575, true, true),
+            leg(C580, false, true),
+            leg(C585, true, true),
+        ];
+        fly[1].ratio = 2;
+        assert_eq!(
+            max_loss_cents(&order(fly.to_vec(), -100, 1)),
+            Err("max_loss_unknown")
+        );
+        // A roll: a close with an open.
+        let roll = order(vec![leg(C580, true, true), leg(P570, false, false)], 100, 1);
+        assert_eq!(max_loss_cents(&roll), Err("max_loss_unknown"));
+        // A calendar: the legs expire on different dates.
+        let cal = order(
+            vec![leg(C580, true, true), leg(C580_NOV, false, true)],
+            100,
+            1,
+        );
+        assert_eq!(max_loss_cents(&cal), Err("max_loss_unknown"));
+        // A strike with a fraction of a cent, and a symbol that is not an option.
+        let odd = order(vec![leg(P570_ODD, false, true)], 100, 1);
+        assert_eq!(max_loss_cents(&odd), Err("max_loss_unknown"));
+        let bad = order(vec![leg("SPY261005X00580000", false, true)], 100, 1);
+        assert_eq!(max_loss_cents(&bad), Err("max_loss_unknown"));
+    }
+
+    #[test]
+    fn a_long_combo_of_options_loses_its_debit() {
+        // A long straddle: buy the 580 call and the 570 put for $10.00.
+        let o = order(vec![leg(C580, true, true), leg(P570, true, true)], 1000, 1);
+        assert_eq!(max_loss_cents(&o), Ok(1000 * 100));
+    }
+
+    #[test]
+    fn a_partial_close_leaves_the_remaining_open_quantity() {
+        // Long 10 calls at $1.25, 4 closed: the remaining 6 are what can still be lost.
+        let full = order(vec![leg(C580, true, true)], 125, 10);
+        let rest = order(vec![leg(C580, true, true)], 125, 6);
+        assert_eq!(max_loss_cents(&full), Ok(125 * 10 * 100));
+        assert_eq!(max_loss_cents(&rest), Ok(125 * 6 * 100));
+        assert_eq!(max_loss(&rest).unwrap().premium_cents, Some(125 * 6 * 100));
+    }
+
+    #[test]
+    fn a_full_close_leaves_no_loss() {
+        // Nothing remains open, so the loss and the premium are zero: a long option paid
+        // nothing more, and a credit spread has no loss left.
+        let long = order(vec![leg(C580, true, true)], 125, 0);
+        assert_eq!(
+            max_loss(&long),
+            Ok(MaxLoss {
+                cents: 0,
+                premium_cents: Some(0)
+            })
+        );
+        let spread = order(vec![leg(P570, false, true), leg(P565, true, true)], -100, 0);
+        assert_eq!(max_loss_cents(&spread), Ok(0));
+    }
+
+    #[test]
+    fn a_closing_leg_is_never_netted_against_an_opening_leg() {
+        // A close beside an open is one limit for both, so neither leg is sized alone.
+        // The close does not offset the open put, and the open does not offset the close.
+        let credit = order(
+            vec![leg(P570, false, true), leg(P565, true, false)],
+            -100,
+            1,
+        );
+        assert_eq!(max_loss_cents(&credit), Err("max_loss_unknown"));
+        let debit = order(vec![leg(C580, true, true), leg(C585, false, false)], 150, 1);
+        assert_eq!(max_loss_cents(&debit), Err("max_loss_unknown"));
+        // A closing leg alone is never an opening intent, so it has no loss to bound.
+        let close = order(vec![leg(C580, false, false)], 125, 1);
+        assert_eq!(max_loss_cents(&close), Err("max_loss_unknown"));
+    }
+
+    #[test]
+    fn a_naked_call_beside_a_long_put_is_unknown_not_a_vertical() {
+        // A call sold with a long call is a vertical, not a naked call.
+        let covered = order(vec![leg(C580, false, true), leg(C585, true, true)], -100, 1);
+        assert_eq!(max_loss_cents(&covered), Ok(400 * 100));
+        // A naked short call next to a long put is neither: unknown, not priced as premium.
+        let mixed = order(vec![leg(C580, false, true), leg(P570, true, true)], -100, 1);
+        assert_eq!(max_loss_cents(&mixed), Err("max_loss_unknown"));
+    }
 }

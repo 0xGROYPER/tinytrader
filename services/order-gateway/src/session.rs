@@ -5,7 +5,7 @@ use crate::broker::{
     Broker, BrokerError, BrokerOrder, CancelResult, FlattenResult, OrderRef, OrderUpdate,
     SubmitResult, Update, normalize_event, status_event, terminal,
 };
-use crate::intent::{Intent, hex, occ};
+use crate::intent::{Intent, hex, max_loss, occ};
 use crate::journal::Journal;
 use crate::protocol::{
     Invalid, KillLevel, Obj, Op, arr, error_line, invalid_detail, quote, request_error, response,
@@ -1116,10 +1116,15 @@ impl<B: Broker> Session<B> {
             return Some(not_sent("leg_pending", &detail));
         }
         let p = &self.cfg.profile;
-        let notional =
-            intent.limit_cents.unsigned_abs() * u64::from(intent.qty) * intent.multiplier();
-        let open = self.orders.values().filter(|o| o.open()).count();
         let opening = intent.has_open();
+        // An opening intent is capped at what it can lose; a close is never checked.
+        let loss = if opening {
+            max_loss(intent).map(|m| m.cents)
+        } else {
+            Ok(0)
+        };
+        let notional = loss.unwrap_or(0);
+        let open = self.orders.values().filter(|o| o.open()).count();
         let minute_ago = Instant::now().checked_sub(Duration::from_mins(1));
         self.minute.retain(|t| minute_ago.is_none_or(|m| *t > m));
         self.closes.retain(|t| minute_ago.is_none_or(|m| *t > m));
@@ -1153,6 +1158,13 @@ impl<B: Broker> Session<B> {
         ];
         if let Some((_, name)) = hit.iter().find(|(h, _)| *h) {
             return Some(cap(name));
+        }
+        if let Err(reason) = loss {
+            let symbols = arr(intent.legs.iter().map(|l| quote(&l.symbol)));
+            return Some(not_sent(
+                reason,
+                &Obj::new().raw("symbols", &symbols).done(),
+            ));
         }
         let admitted = if opening {
             self.budget.take(true)

@@ -143,6 +143,8 @@ fn close_on(cid: &str, symbol: &str) -> String {
 
 /// A fourth option, for a close on a leg with no order of its own.
 const FAR: &str = "SPY261005C00590000";
+const CALL_585: &str = "SPY261005C00585000";
+const PUT_C: &str = "SPY261005P00565000";
 
 #[test]
 fn a_close_is_not_counted_toward_the_daily_cap() {
@@ -472,6 +474,83 @@ fn closing_orders_pass_the_notional_and_open_order_caps() {
         c.submit("o1", &buy("wse-o1"))["detail"]["cap"],
         "open_orders"
     );
+    gw.stop().unwrap();
+}
+
+/// A $5-wide put credit spread (sell 570, buy 565) for $1.00.
+fn wide_credit_spread(cid: &str, qty: u32) -> String {
+    combo(
+        cid,
+        &[(PUT_A, 1, "sell", "open"), (PUT_C, 1, "buy", "open")],
+        qty,
+        "-1.00",
+    )
+}
+
+#[test]
+fn an_opening_credit_spread_is_held_to_its_maximum_loss() {
+    // $5 wide at a $1.00 credit: $4 a share at risk. The $1,000 cap admits 2 units
+    // (a $800 maximum loss) where the premium check admitted 10 ($1,000 of credit).
+    let mut cfg = config(root("max-loss-spread"));
+    cfg.profile.max_notional_cents = 100_000;
+    let gw = scripted(cfg, &clocked_holding());
+    let mut c = Conn::open(&gw, "reactor", None);
+    assert_eq!(
+        cap_name(&c.submit("w10", &wide_credit_spread("wse-w10", 10))),
+        Some("notional".into())
+    );
+    assert_eq!(
+        c.submit("w3", &wide_credit_spread("wse-w3", 3))["detail"]["cap"],
+        "notional"
+    );
+    assert_eq!(
+        c.submit("w2", &wide_credit_spread("wse-w2", 2))["outcome"],
+        "accepted"
+    );
+    gw.stop().unwrap();
+}
+
+#[test]
+fn a_naked_short_call_is_refused_as_unbounded() {
+    let gw = scripted(config(root("max-loss-naked")), &clocked_holding());
+    let mut c = Conn::open(&gw, "reactor", None);
+    let r = c.submit("n1", &single("wse-n1", CALL, "sell", "open", 1, "1.25"));
+    assert_eq!(
+        (r["reason"].as_str(), r["detail"]["symbols"][0].as_str()),
+        (Some("max_loss_unbounded"), Some(CALL))
+    );
+    gw.stop().unwrap();
+}
+
+#[test]
+fn a_shape_without_a_bound_is_refused_as_unknown() {
+    // A butterfly with its middle ratio at 2 is not two verticals: no bound is claimed.
+    let gw = scripted(config(root("max-loss-unknown")), &clocked_holding());
+    let mut c = Conn::open(&gw, "reactor", None);
+    let fly = combo(
+        "wse-fly",
+        &[
+            (CALL, 1, "buy", "open"),
+            (CALL_585, 2, "sell", "open"),
+            (FAR, 1, "buy", "open"),
+        ],
+        1,
+        "1.00",
+    );
+    let r = c.submit("f1", &fly);
+    assert_eq!(r["reason"], "max_loss_unknown", "{r}");
+    gw.stop().unwrap();
+}
+
+#[test]
+fn a_close_is_not_held_to_the_maximum_loss() {
+    // Selling a held call to close is a naked short's shape; a close is never bounded.
+    let mut cfg = config(root("max-loss-close"));
+    cfg.profile.max_notional_cents = 1;
+    let gw = scripted(cfg, &clocked_holding());
+    let mut c = Conn::open(&gw, "reactor", None);
+    let r = c.submit("cc", &single("wse-cc", CALL, "sell", "close", 10, "2.51"));
+    assert_eq!(r["outcome"], "accepted", "{r}");
     gw.stop().unwrap();
 }
 
