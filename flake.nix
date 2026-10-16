@@ -93,6 +93,8 @@
                   observe.port = 9120;
                   environment.STORE_DISCOVER = "/mnt";
                   writablePaths = [ "/mnt" ];
+                  # Writes need this bearer token (docs/store-api.md); reads stay open.
+                  secrets.STORE_WRITE_TOKEN = "/run/secrets/store-write-token";
                 };
                 tinytrader.services.console = {
                   enable = true;
@@ -108,6 +110,8 @@
                   package = packages.databento-jobs;
                   observe.port = 9121;
                   secrets.DATABENTO_API_KEY = "/run/secrets/databento-api-key";
+                  # The store's write token, for its uploads and filing.
+                  secrets.JOBS_STORE_TOKEN = "/run/secrets/store-write-token";
                 };
                 # The host's own monitor (nix/watch.nix): its services and
                 # disks, pushed to an ntfy-style URL when something is wrong.

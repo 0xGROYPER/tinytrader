@@ -16,6 +16,9 @@
 //!   Downloading an already purchased job never charges again.
 //!
 //! The API key comes from `DATABENTO_API_KEY` or `DATABENTO_API_KEY_FILE`.
+//! The store's write token, when the store requires one, from
+//! `JOBS_STORE_TOKEN` or `JOBS_STORE_TOKEN_FILE`: sent, as a bearer token, on
+//! the uploads and filing only, never to Databento.
 
 mod ledger;
 
@@ -173,6 +176,8 @@ struct Jobs {
     key: String,
     http: reqwest::Client,
     store: String,
+    /// The store's write token, if it requires one.
+    store_token: Option<String>,
     quotes: Mutex<HashMap<String, Quote>>,
     transfers: Mutex<HashMap<String, Transfer>>,
     /// Jobs submitted here, downloaded once done.
@@ -195,6 +200,16 @@ struct Jobs {
     next_quote: AtomicU64,
 }
 
+impl Jobs {
+    /// A write to the store, with its token when it requires one.
+    fn store_write(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.store_token {
+            Some(t) => req.bearer_auth(t),
+            None => req,
+        }
+    }
+}
+
 type Shared = Arc<Jobs>;
 type Reply = (StatusCode, Json<Value>);
 
@@ -208,6 +223,13 @@ async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let key = match secret("DATABENTO_API_KEY") {
         Ok(k) => k,
+        Err(e) => {
+            eprintln!("databento-jobs: {e}");
+            std::process::exit(2);
+        }
+    };
+    let store_token = match tinytrader_observe::optional_secret("JOBS_STORE_TOKEN") {
+        Ok(t) => t,
         Err(e) => {
             eprintln!("databento-jobs: {e}");
             std::process::exit(2);
@@ -231,6 +253,7 @@ async fn main() {
             .build()
             .expect("http client"),
         store: args.store.trim_end_matches('/').to_owned(),
+        store_token,
         quotes: Mutex::default(),
         transfers: Mutex::default(),
         follow: Mutex::default(),
@@ -1074,11 +1097,10 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
             "files": files.iter().map(|f| json!({ "filename": f.filename, "size": f.size, "hash": f.hash })).collect::<Vec<_>>(),
         });
         let r = jobs
-            .http
-            .put(format!(
+            .store_write(jobs.http.put(format!(
                 "{}/incoming/databento/{job}/manifest.json",
                 jobs.store
-            ))
+            )))
             .body(manifest.to_string())
             .send()
             .await
@@ -1095,8 +1117,10 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
         t.file.clear();
     });
     let r = jobs
-        .http
-        .post(format!("{}/incorporate/databento/{job}", jobs.store))
+        .store_write(
+            jobs.http
+                .post(format!("{}/incorporate/databento/{job}", jobs.store)),
+        )
         .send()
         .await
         .map_err(|e| format!("store: {e}"))?;
@@ -1209,11 +1233,10 @@ async fn copy(
     });
     let sha = hash.trim_start_matches("sha256:");
     let put = jobs
-        .http
-        .put(format!(
+        .store_write(jobs.http.put(format!(
             "{}/incoming/databento/{job}/{name}?size={size}&sha256={sha}",
             jobs.store
-        ))
+        )))
         .body(reqwest::Body::wrap_stream(body))
         .send();
     tokio::pin!(put);

@@ -567,6 +567,18 @@ pub fn secret(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|_| format!("set {name} or {name}_FILE"))
 }
 
+/// An optional secret: as [`secret`], but `None` when neither `NAME` nor
+/// `NAME_FILE` is set (or the value is empty).
+///
+/// # Errors
+/// If `NAME_FILE` is set but can't be read.
+pub fn optional_secret(name: &str) -> Result<Option<String>, String> {
+    if std::env::var_os(format!("{name}_FILE")).is_none() && std::env::var_os(name).is_none() {
+        return Ok(None);
+    }
+    secret(name).map(|s| Some(s.trim().to_owned()).filter(|s| !s.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

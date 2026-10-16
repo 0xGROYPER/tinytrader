@@ -299,8 +299,13 @@ fn write_batches(
 }
 
 /// Hand a batch folder to the store: every file into its incoming area
-/// (checked by size and SHA-256 on arrival), then file it.
-pub async fn file(http: &reqwest::Client, store: &str, batch_dir: &Path) -> Result<Value, String> {
+/// (checked by size and SHA-256 on arrival), then file it. `token` is the
+/// store's write token, when it requires one.
+pub async fn file(http: &reqwest::Client, store: &str, token: Option<&str>, batch_dir: &Path) -> Result<Value, String> {
+    let write = |req: reqwest::RequestBuilder| match token {
+        Some(t) => req.bearer_auth(t),
+        None => req,
+    };
     let id = batch_dir.file_name().and_then(|n| n.to_str()).ok_or("bad batch folder")?;
     let mut names: Vec<String> = std::fs::read_dir(batch_dir)
         .map_err(|e| e.to_string())?
@@ -310,8 +315,7 @@ pub async fn file(http: &reqwest::Client, store: &str, batch_dir: &Path) -> Resu
     for name in &names {
         let bytes = tokio::fs::read(batch_dir.join(name)).await.map_err(|e| e.to_string())?;
         let hash = format!("{:x}", Sha256::digest(&bytes));
-        let r = http
-            .put(format!("{store}/incoming/alpaca/{id}/{name}?size={}&sha256={hash}", bytes.len()))
+        let r = write(http.put(format!("{store}/incoming/alpaca/{id}/{name}?size={}&sha256={hash}", bytes.len())))
             .body(bytes)
             .send()
             .await
@@ -320,8 +324,7 @@ pub async fn file(http: &reqwest::Client, store: &str, batch_dir: &Path) -> Resu
             return Err(format!("store refused {name}: {} {}", r.status(), r.text().await.unwrap_or_default()));
         }
     }
-    let r = http
-        .post(format!("{store}/incorporate/alpaca/{id}"))
+    let r = write(http.post(format!("{store}/incorporate/alpaca/{id}")))
         .send()
         .await
         .map_err(|e| format!("store: {e}"))?;

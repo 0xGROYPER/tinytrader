@@ -18,8 +18,14 @@
 //!   the DBN files the volumes hold by logical name, `<volume>/<path>`;
 //!   `GET /files/{volume}/{path}` sends one. Read-only, finished files only.
 //!
+//! - **Writes** (the uploads, filing, adopting and approving drives) are
+//!   refused from a web page of another origin, and, when a token is
+//!   configured (`STORE_WRITE_TOKEN`, or the file `STORE_WRITE_TOKEN_FILE`
+//!   names), need it as `Authorization: Bearer <token>`. Reads stay open.
+//!   Without a token, writes are open to whatever can reach the store.
+//!
 //! It runs natively (under launchd on a Mac), not in a container, so it sees
-//! the real disks, and binds to loopback by default.
+//! the real disks, and binds to loopback by default (`STORE_LISTEN`).
 
 mod catalog;
 mod ingest;
@@ -43,6 +49,7 @@ use futures_util::StreamExt as _;
 use ingest::Volume;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tinytrader_observe::guard::WriteToken;
 use tinytrader_observe::{Events, Observer, State, listen_address, unix_seconds};
 
 /// The tinytrader data store.
@@ -105,6 +112,15 @@ fn refused(code: StatusCode, why: impl Into<String>) -> Reply {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+    // Writes (uploads, filing, adopting, approving drives) need this bearer
+    // token when it is configured; reads stay open.
+    let write_token = match WriteToken::from_env("STORE_WRITE_TOKEN") {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("store: {e}");
+            std::process::exit(2);
+        }
+    };
     let volumes: Vec<Volume> = args
         .volumes
         .iter()
@@ -130,17 +146,7 @@ async fn main() {
         critical: args.critical,
         floor: args.floor,
     };
-    let store = Arc::new(Store {
-        volumes: std::sync::RwLock::new(volumes),
-        discover: args.discover.clone(),
-        limits,
-        catalog: Mutex::new(json!({ "generated_at": null, "roots": [] })),
-        events: Events::default(),
-        rescan: tokio::sync::Notify::new(),
-        bytes_in: AtomicU64::new(0),
-        batches_in: AtomicU64::new(0),
-        filing: tokio::sync::Mutex::new(()),
-    });
+    let store = Store::new(volumes, args.discover.clone(), limits);
     let listen = listen_address("STORE_LISTEN", "127.0.0.1:9120");
     let observer = Observer::new("store", env!("CARGO_PKG_VERSION"));
     let names = store
@@ -152,6 +158,7 @@ async fn main() {
     observer.describe(json!({
         "role": format!("The data store: ingests provider downloads into the standard layout and catalogs {names}."),
         "streams": { "catalog": "/catalog", "events": "/events" },
+        "writes": if write_token.required() { "bearer token" } else { "open" },
         "schedule": [
             { "name": "Store", "kind": "always", "when": "always (launchd keeps it running)" },
             { "name": "Catalog rescan", "kind": "interval", "every_seconds": args.rescan_seconds, "when": format!("every {} min, and after each filing", args.rescan_seconds / 60) },
@@ -195,24 +202,7 @@ async fn main() {
         });
     }
 
-    let app = Router::new()
-        .route(
-            "/catalog",
-            get(|AxState(s): AxState<Shared>| async move { Json(lock(&s.catalog).clone()) }),
-        )
-        .route("/incoming", get(list_incoming))
-        .route("/incoming/{provider}/{batch}/{file}", put(upload))
-        .route("/incorporate/{provider}/{batch}", post(incorporate))
-        .route("/batches/{provider}", get(batches))
-        .route("/adopt/{provider}", post(adopt))
-        .route("/volumes/approve", post(approve))
-        .route("/files", get(list_files))
-        .route("/files/{volume}/{*path}", get(send_file))
-        // Filing and drive approval can't be triggered by a web page.
-        .layer(axum::middleware::from_fn(
-            tinytrader_observe::guard::same_origin_writes,
-        ))
-        .with_state(store.clone())
+    let app = router(store.clone(), write_token.clone())
         .merge(observer.router())
         .merge(store.events.router());
     let listener = match tokio::net::TcpListener::bind(&listen).await {
@@ -222,7 +212,14 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    eprintln!("store: {names}; endpoints on http://{listen}");
+    eprintln!(
+        "store: {names}; endpoints on http://{listen}; writes {}",
+        if write_token.required() {
+            "need the bearer token (STORE_WRITE_TOKEN)"
+        } else {
+            "open (no STORE_WRITE_TOKEN)"
+        }
+    );
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             eprintln!("store: http server stopped: {e}");
@@ -237,6 +234,32 @@ async fn main() {
             () = store.rescan.notified() => {}
         }
     }
+}
+
+/// The store's own endpoints. Writes can't be triggered by a web page of
+/// another origin, and need the bearer token when one is configured.
+fn router(store: Shared, token: WriteToken) -> Router {
+    Router::new()
+        .route(
+            "/catalog",
+            get(|AxState(s): AxState<Shared>| async move { Json(lock(&s.catalog).clone()) }),
+        )
+        .route("/incoming", get(list_incoming))
+        .route("/incoming/{provider}/{batch}/{file}", put(upload))
+        .route("/incorporate/{provider}/{batch}", post(incorporate))
+        .route("/batches/{provider}", get(batches))
+        .route("/adopt/{provider}", post(adopt))
+        .route("/volumes/approve", post(approve))
+        .route("/files", get(list_files))
+        .route("/files/{volume}/{*path}", get(send_file))
+        .layer(axum::middleware::from_fn(
+            tinytrader_observe::guard::same_origin_writes,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            token,
+            tinytrader_observe::guard::token_writes,
+        ))
+        .with_state(store)
 }
 
 /// Rescan every volume into the catalog.
@@ -317,6 +340,20 @@ async fn scan(store: &Shared, observer: &Observer) {
 }
 
 impl Store {
+    fn new(volumes: Vec<Volume>, discover: Option<PathBuf>, limits: Thresholds) -> Shared {
+        Arc::new(Self {
+            volumes: std::sync::RwLock::new(volumes),
+            discover,
+            limits,
+            catalog: Mutex::new(json!({ "generated_at": null, "roots": [] })),
+            events: Events::default(),
+            rescan: tokio::sync::Notify::new(),
+            bytes_in: AtomicU64::new(0),
+            batches_in: AtomicU64::new(0),
+            filing: tokio::sync::Mutex::new(()),
+        })
+    }
+
     fn volumes(&self) -> Vec<Volume> {
         self.volumes
             .read()
@@ -787,4 +824,91 @@ fn today() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    /// A store over one empty volume, served on a free loopback port.
+    async fn serve(token: WriteToken) -> (String, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "tinytrader-store-test-auth-{}-{}",
+            std::process::id(),
+            token.required()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let volume = Volume {
+            name: "v".into(),
+            path: dir.clone(),
+            writable: true,
+        };
+        let limits = Thresholds {
+            warning: 100.0,
+            critical: 100.0,
+            floor: 100.0,
+        };
+        let app = router(Store::new(vec![volume], None, limits), token);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr, dir)
+    }
+
+    /// One HTTP/1.1 request; the response's status code.
+    async fn status(addr: &str, method: &str, path: &str, auth: Option<&str>, body: &str) -> u16 {
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let auth = auth.map_or(String::new(), |a| format!("authorization: {a}\r\n"));
+        let req = format!(
+            "{method} {path} HTTP/1.1\r\nhost: {addr}\r\n{auth}content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        out.split(' ').nth(1).unwrap().parse().unwrap()
+    }
+
+    const UPLOAD: &str = "/incoming/databento/B1/notes.txt?size=2";
+    const APPROVE: &str = r#"{"path":"/nowhere","name":"x"}"#;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn writes_need_the_token_when_one_is_set() {
+        let (addr, dir) = serve(WriteToken::new("s3cret").unwrap()).await;
+        let good = Some("Bearer s3cret");
+        assert_eq!(status(&addr, "PUT", UPLOAD, None, "hi").await, 401);
+        assert_eq!(
+            status(&addr, "PUT", UPLOAD, Some("Bearer nope"), "hi").await,
+            401
+        );
+        assert_eq!(status(&addr, "PUT", UPLOAD, good, "hi").await, 200);
+        assert!(dir.join("Databento").exists(), "the upload arrived");
+        for (path, body) in [
+            ("/incorporate/databento/B1", ""),
+            ("/adopt/databento", APPROVE),
+            ("/volumes/approve", APPROVE),
+        ] {
+            assert_eq!(status(&addr, "POST", path, None, body).await, 401, "{path}");
+            // Past the guard, the store answers for itself (not 401).
+            assert_ne!(status(&addr, "POST", path, good, body).await, 401, "{path}");
+        }
+        // Reads stay open.
+        for path in ["/catalog", "/files", "/incoming", "/batches/databento"] {
+            assert_eq!(status(&addr, "GET", path, None, "").await, 200, "{path}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn without_a_token_writes_are_as_before() {
+        let (addr, dir) = serve(WriteToken::open()).await;
+        assert_eq!(status(&addr, "PUT", UPLOAD, None, "hi").await, 200);
+        assert_eq!(
+            status(&addr, "POST", "/volumes/approve", None, APPROVE).await,
+            404
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
