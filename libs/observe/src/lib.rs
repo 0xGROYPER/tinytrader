@@ -435,12 +435,21 @@ impl Series {
                 s.keys.remove(&k);
             }
         }
-        let k = s.keys.entry(key.to_owned()).or_insert(SeriesKey {
-            samples: VecDeque::new(),
-            last_sample_ms: f64::NEG_INFINITY,
-            updated_ms: now_ms,
-            updates: 0,
-        });
+        // The key is copied once, when it is first seen.
+        if !s.keys.contains_key(key) {
+            s.keys.insert(
+                key.to_owned(),
+                SeriesKey {
+                    samples: VecDeque::new(),
+                    last_sample_ms: f64::NEG_INFINITY,
+                    updated_ms: now_ms,
+                    updates: 0,
+                },
+            );
+        }
+        let Some(k) = s.keys.get_mut(key) else {
+            return;
+        };
         k.updated_ms = now_ms;
         k.updates += 1;
         if now_ms - k.last_sample_ms >= interval {

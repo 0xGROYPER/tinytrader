@@ -120,9 +120,9 @@ impl Quotes {
 
     /// The quotes whose symbols pass `keep`, by compact symbol, forgetting
     /// instruments that no longer have a definition (expired).
-    pub fn matching(
+    pub fn matching<'s>(
         &self,
-        symbol_of: impl Fn(u32) -> Option<String>,
+        symbol_of: impl Fn(u32) -> Option<&'s str>,
         keep: impl Fn(&str) -> bool,
     ) -> Vec<(String, Quote)> {
         let mut by_id = self.lock();
@@ -131,7 +131,7 @@ impl Quotes {
             let Some(raw) = symbol_of(*id) else {
                 return false;
             };
-            let s = compact(&raw);
+            let s = compact(raw);
             if keep(&s) {
                 out.push((s, *q));
             }

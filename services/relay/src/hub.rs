@@ -138,7 +138,7 @@ impl Reference {
             .iter()
             .filter(|((_, k), _)| *k == kind)
             .filter_map(|((id, _), rec)| {
-                let s = crate::quotes::compact(&self.symbol(*id)?);
+                let s = crate::quotes::compact(self.symbol(*id)?);
                 keep(&s).then_some(())?;
                 let q = i64::from_le_bytes(
                     rec.get(offset_of!(StatMsg, quantity)..)?
@@ -157,8 +157,8 @@ impl Reference {
             .collect()
     }
 
-    /// The instrument's symbol, from its definition.
-    fn symbol(&self, id: u32) -> Option<String> {
+    /// The instrument's symbol, from its definition (borrowed: no copy per record).
+    fn symbol(&self, id: u32) -> Option<&str> {
         let (_, def) = self.definitions.get(&id)?;
         let at = offset_of!(InstrumentDefMsg, raw_symbol);
         let raw = def.get(at..at + 71)?;
@@ -166,7 +166,6 @@ impl Reference {
         std::str::from_utf8(&raw[..end])
             .ok()
             .filter(|s| !s.is_empty())
-            .map(str::to_owned)
     }
 }
 
@@ -212,6 +211,12 @@ pub struct Hub {
     pub records: AtomicU64,
     /// When the last record arrived from the provider, ns since the epoch (0: none yet).
     pub last_record_ns: AtomicU64,
+    /// How far behind the provider the relay read its latest record: the
+    /// time it was published less the provider's receive time (ns; 0: none yet).
+    pub behind_ns: AtomicU64,
+    /// The worst of those in the current minute, and that minute (since the epoch).
+    behind_peak_ns: AtomicU64,
+    behind_peak_minute: AtomicU64,
     pub bytes: AtomicU64,
     pub reconnects: AtomicU64,
     /// Times the provider skipped records because the relay read too slowly.
@@ -246,6 +251,9 @@ impl Hub {
             next_client: AtomicU64::new(0),
             records: AtomicU64::new(0),
             last_record_ns: AtomicU64::new(0),
+            behind_ns: AtomicU64::new(0),
+            behind_peak_ns: AtomicU64::new(0),
+            behind_peak_minute: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             reconnects: AtomicU64::new(0),
             upstream_skips: AtomicU64::new(0),
@@ -297,6 +305,28 @@ impl Hub {
         let e = protocol::error(ErrorCode::SkippedRecordsAfterSlowReading, why);
         let _ = tokio::time::timeout(Duration::from_secs(1), out.write_all(&e)).await;
         let _ = tokio::time::timeout(Duration::from_secs(1), out.shutdown()).await;
+    }
+
+    /// The provider received the latest record just published at `recv_ns`:
+    /// how far behind the relay is reading, in ns.
+    pub fn received(&self, recv_ns: u64) -> u64 {
+        let now = protocol::now_ns();
+        let behind = now.saturating_sub(recv_ns);
+        self.behind_ns.store(behind, Ordering::Relaxed);
+        let minute = now / 60_000_000_000;
+        if self.behind_peak_minute.swap(minute, Ordering::Relaxed) == minute {
+            self.behind_peak_ns.fetch_max(behind, Ordering::Relaxed);
+        } else {
+            self.behind_peak_ns.store(behind, Ordering::Relaxed);
+        }
+        behind
+    }
+
+    /// The worst lag in the current or the previous minute, in ns (None: no record lately).
+    pub fn behind_peak(&self) -> Option<u64> {
+        let minute = protocol::now_ns() / 60_000_000_000;
+        (self.behind_peak_minute.load(Ordering::Relaxed) + 1 >= minute)
+            .then(|| self.behind_peak_ns.load(Ordering::Relaxed))
     }
 
     /// Send records to every live client, keeping any reference records.
@@ -355,10 +385,10 @@ impl Hub {
             };
             let id = u32_at(rec, offset_of!(RecordHeader, instrument_id)).unwrap_or(0);
             if let Some(symbol) = reference.symbol(id) {
-                self.series.push(&symbol, px as f64 / 1e9);
+                self.series.push(symbol, px as f64 / 1e9);
                 let ts = u64_at(rec, offset_of!(RecordHeader, ts_event)).unwrap_or(0);
                 self.bars.trade(
-                    &symbol,
+                    symbol,
                     ts,
                     px as f64 / 1e9,
                     u64::from(u32_at(rec, size).unwrap_or(0)),

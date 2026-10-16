@@ -195,7 +195,7 @@ impl Tape {
 
     /// Take every `mbp-1` trade, and every change to the top of book, from
     /// a chunk of DBN records; `symbol_of` names an instrument.
-    pub fn absorb(&self, chunk: &[u8], symbol_of: impl Fn(u32) -> Option<String>) {
+    pub fn absorb<'s>(&self, chunk: &[u8], symbol_of: impl Fn(u32) -> Option<&'s str>) {
         let mut guard = self.lock();
         let (seq, books) = &mut *guard;
         take(seq, books, chunk, &symbol_of, false);
@@ -212,13 +212,13 @@ impl Tape {
         {
             return false;
         }
-        take(seq, books, chunk, &|_| Some(symbol.to_owned()), true);
+        take(seq, books, chunk, &|_| Some(symbol), true);
         true
     }
 
     /// Take a watched symbol's records (encoded `mbp-1`, not forwarded).
     pub fn absorb_watched(&self, chunk: &[u8], symbol: &str) {
-        self.absorb(chunk, |_| Some(symbol.to_owned()));
+        self.absorb(chunk, |_| Some(symbol));
     }
 
     /// A symbol's ticks after `after` (or its latest `limit`), oldest first,
@@ -253,11 +253,11 @@ impl Tape {
 }
 
 /// Take a chunk's `mbp-1` trades and top-of-book changes into the books.
-fn take(
+fn take<'s>(
     seq: &mut u64,
     books: &mut HashMap<String, Book>,
     chunk: &[u8],
-    symbol_of: &dyn Fn(u32) -> Option<String>,
+    symbol_of: &dyn Fn(u32) -> Option<&'s str>,
     hist: bool,
 ) {
     let lv = offset_of!(Mbp1Msg, levels);
@@ -286,7 +286,13 @@ fn take(
         let Some(symbol) = symbol_of(id) else {
             continue;
         };
-        let book = books.entry(symbol).or_default();
+        // A symbol is copied once, when its book is made.
+        if !books.contains_key(symbol) {
+            books.insert(symbol.to_owned(), Book::default());
+        }
+        let Some(book) = books.get_mut(symbol) else {
+            continue;
+        };
         let top = (px(b), px(a), bz, az);
         let trade = if rec.get(offset_of!(Mbp1Msg, action)) == Some(&b'T') {
             match (
@@ -446,7 +452,7 @@ mod tests {
     #[test]
     fn keeps_trades_and_quote_changes_in_order() {
         let tape = Tape::default();
-        let name = |id: u32| (id == 7).then(|| "SPY".to_owned());
+        let name = |id: u32| (id == 7).then_some("SPY");
         let d = 1_000_000_000i64;
         let mut chunk = mbp(7, 1, b'M', UNDEF_PRICE, 0, 777 * d, 778 * d);
         chunk.extend(mbp(7, 2, b'M', UNDEF_PRICE, 0, 777 * d, 778 * d)); // unchanged: dropped
@@ -489,7 +495,7 @@ mod tests {
                 900 * d,
             ));
         }
-        tape.absorb(&chunk, |_| Some("SPY".to_owned()));
+        tape.absorb(&chunk, |_| Some("SPY"));
         let (ticks, ..) = tape.read("SPY", None, 10);
         assert_eq!(ticks.iter().filter(|t| t.trade.is_some()).count(), 5);
         assert_eq!(ticks.iter().filter(|t| t.trade.is_none()).count(), 10);
@@ -503,7 +509,7 @@ mod tests {
         for i in 0..(KEEP as u64 + 10) {
             chunk.extend(mbp(7, i, b'T', 1_000_000_000, 1, 0, 0));
         }
-        tape.absorb(&chunk, |_| Some("SPY".to_owned()));
+        tape.absorb(&chunk, |_| Some("SPY"));
         let (ticks, ..) = tape.read("SPY", Some(0), usize::MAX);
         assert_eq!(ticks.len(), KEEP);
         assert_eq!(ticks[0].seq, 11);

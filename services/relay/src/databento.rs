@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use databento::LiveClient;
 use databento::dbn::{
-    ErrorCode, ErrorMsg, RecordRef, SType, Schema, SystemCode, SystemMsg, VersionUpgradePolicy,
+    Cmbp1Msg, ErrorCode, ErrorMsg, Mbp1Msg, RecordRef, SType, Schema, SystemCode, SystemMsg,
+    VersionUpgradePolicy,
 };
 use databento::live::Subscription;
 use futures_util::future::BoxFuture;
@@ -24,6 +25,9 @@ use crate::source::{Feed, Source};
 
 /// Records are passed to clients in chunks of about this many bytes.
 const CHUNK: usize = 64 * 1024;
+
+/// Reading this far behind the provider is reported in the health detail.
+const BEHIND: Duration = Duration::from_secs(1);
 
 pub struct Databento {
     pub key: String,
@@ -85,6 +89,8 @@ impl Databento {
             self.symbols.join(",")
         );
         let mut gaps = Gaps::default();
+        // Whether the health detail says the relay is behind, and when it last said so.
+        let (mut said_behind, mut said_at) = (false, Instant::now());
         loop {
             let mut chunk = Vec::with_capacity(CHUNK);
             let mut n = 0;
@@ -103,6 +109,19 @@ impl Databento {
             }
             if !chunk.is_empty() {
                 hub.publish(chunk, n);
+            }
+            if let Some(recv) = gaps.last_recv.take() {
+                let behind = Duration::from_nanos(hub.received(recv));
+                let late = behind >= BEHIND;
+                if late != said_behind || (late && said_at.elapsed() >= Duration::from_secs(1)) {
+                    let detail = if late {
+                        format!("live, {:.1} s behind Databento", behind.as_secs_f64())
+                    } else {
+                        "live".to_owned()
+                    };
+                    observer.set_state(State::Ready, &detail);
+                    (said_behind, said_at) = (late, Instant::now());
+                }
             }
         }
     }
@@ -168,6 +187,9 @@ impl Source for Databento {
 struct Gaps {
     last_ts: u64,
     skipped_since: Option<u64>,
+    /// When the provider received the latest quote taken (not reference
+    /// records, which are replayed from earlier in the day).
+    last_recv: Option<u64>,
 }
 
 impl Gaps {
@@ -190,6 +212,13 @@ impl Gaps {
         }
         if r.get::<ErrorMsg>().is_none() && r.get::<SystemMsg>().is_none() {
             self.last_ts = ts;
+        }
+        if let Some(recv) = r
+            .get::<Cmbp1Msg>()
+            .map(|m| m.ts_recv)
+            .or_else(|| r.get::<Mbp1Msg>().map(|m| m.ts_recv))
+        {
+            self.last_recv = Some(recv);
         }
         chunk.extend_from_slice(r.as_ref());
         *n += 1;
@@ -246,5 +275,33 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
+    }
+
+    #[test]
+    fn how_far_behind_is_read_from_the_provider_receive_time() {
+        let hub = Hub::new(
+            Metadata::builder()
+                .dataset("OPRA.PILLAR".to_owned())
+                .schema(None)
+                .start(0)
+                .stype_in(None)
+                .stype_out(SType::InstrumentId)
+                .build(),
+            8,
+            Duration::from_secs(10),
+        );
+        let mut gaps = Gaps::default();
+        let (mut chunk, mut n) = (Vec::new(), 0);
+        let mut q = quote(100);
+        let received = crate::protocol::now_ns() - 3_000_000_000;
+        q.ts_recv = received;
+        gaps.take(&hub, RecordRef::from(&q), &mut chunk, &mut n);
+        assert_eq!(gaps.last_recv, Some(received));
+        let behind = hub.received(received);
+        assert!((3_000_000_000..4_000_000_000).contains(&behind), "{behind}");
+        assert_eq!(hub.behind_peak(), Some(behind));
+        // A smaller lag later in the minute leaves the peak.
+        hub.received(crate::protocol::now_ns());
+        assert_eq!(hub.behind_peak(), Some(behind));
     }
 }
