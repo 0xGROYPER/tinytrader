@@ -71,7 +71,12 @@ impl Bars {
             return;
         }
         let t = ts / 1_000_000_000 / 60 * 60;
-        let minutes = inner.live.entry(symbol.to_owned()).or_default();
+        if !inner.live.contains_key(symbol) {
+            inner.live.insert(symbol.to_owned(), Default::default());
+        }
+        let Some(minutes) = inner.live.get_mut(symbol) else {
+            return;
+        };
         minutes
             .entry(t)
             .and_modify(|b| {

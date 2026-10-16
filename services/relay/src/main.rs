@@ -406,6 +406,22 @@ fn register_metrics(observer: &Observer, hub: &Arc<Hub>) {
                 protocol::now_ns().saturating_sub(last) as f64 / 1e9,
             );
         }
+        if last > 0 {
+            w.gauge(
+                "tinytrader_relay_behind_seconds",
+                "How far behind the provider the relay read its latest quote: when it was published less when the provider received it.",
+                &[],
+                c(&hub.behind_ns) / 1e9,
+            );
+        }
+        if let Some(peak) = hub.behind_peak() {
+            w.gauge(
+                "tinytrader_relay_behind_peak_seconds",
+                "The most the relay fell behind the provider in this minute or the last.",
+                &[],
+                peak as f64 / 1e9,
+            );
+        }
         w.counter(
             "tinytrader_relay_records_total",
             "Records received from the provider.",
