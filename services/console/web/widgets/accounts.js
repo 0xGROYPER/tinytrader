@@ -24,7 +24,7 @@ import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { askHeld } from '../lib/position.js';
 import { createTicket, tradable, routed, occLabel } from '../lib/ticket.js';
-import { plan, quotes, priced, send, cancelOurs } from '../lib/liquidate.js';
+import { plan, quotes, priced, send, cancelOurs, hold, holdOf } from '../lib/liquidate.js';
 import { get } from '../lib/cache.js';
 
 /** An account's option positions by underlying and expiry, for the Spread builder's payoff. */
@@ -105,8 +105,11 @@ function liquidatePanel(a) {
   if (!name || !tradable(name)) return '';
   const { orders, left } = plan(a.positions);
   const L = liq[name];
-  const button = orders.length ? `<div class="acct-actions"><button type="button" class="btn liq-btn" data-liq-open="${esc(name)}"${L?.stage === 'sending' ? ' disabled' : ''}>Liquidate</button></div>` : '';
-  if (!L) return button;
+  // An unknown result may be live: nothing is sent here until the account is read again (lib/liquidate.js).
+  const held = holdOf(name, a);
+  const heldNote = held ? `<p class="neg" style="margin:0 0 6px;font-size:12px">A result from the last run is unknown and may be live. Open orders must be re-read before anything is sent to this account. ${esc(held)}</p>` : '';
+  const button = orders.length ? `<div class="acct-actions"><button type="button" class="btn liq-btn" data-liq-open="${esc(name)}"${L?.stage === 'sending' || held ? ' disabled' : ''}>Liquidate</button></div>` : '';
+  if (!L) return heldNote + button;
   const live = a.environment === 'live';
   const legsOf = o => o.legs.map(l => `<span class="${l.side === 'buy' ? 'pos' : 'neg'}">${l.side === 'buy' ? '+' : '−'}${l.ratio * o.qty}</span> ${esc(occLabel(l.symbol))}`).join('<br>');
   const priceOf = o => {
@@ -130,10 +133,10 @@ function liquidatePanel(a) {
     : `<b>Close every option position in ${esc(a.label || name)}${live ? ' (LIVE, real money)' : ''}: ${orders.length} order${orders.length > 1 ? 's' : ''}.</b>`;
   const seg = L.stage === 'review' ? `<span class="tk-seg" role="group" aria-label="Price"><button type="button" data-liq-type="limit" data-liq="${esc(name)}" aria-pressed="${!L.market}" title="The natural and 5% (at least $0.05) past it: fills like market unless the quotes jump">Marketable limit</button><button type="button" data-liq-type="market" data-liq="${esc(name)}" aria-pressed="${L.market}" title="Fills at whatever the market gives">Market</button></span>` : '';
   const acts = L.stage === 'review'
-    ? `<button type="button" class="btn liq-btn" data-liq-go="${esc(name)}"${orders.length && L.q ? '' : ' disabled'}>${confirming ? `Confirm: liquidate ${esc(name)} for real` : 'Liquidate now'}</button><button type="button" class="btn small" data-liq-cancel="${esc(name)}">${confirming ? 'Not yet' : 'Cancel'}</button>`
-    : L.stage === 'done' ? `<button type="button" class="btn small" data-liq-cancel="${esc(name)}">Done</button>${orders.length ? `<button type="button" class="btn small danger" data-liq-open="${esc(name)}">Again for what's left</button>` : ''}` : '';
+    ? `<button type="button" class="btn liq-btn" data-liq-go="${esc(name)}"${orders.length && L.q && !held ? '' : ' disabled'}>${confirming ? `Confirm: liquidate ${esc(name)} for real` : 'Liquidate now'}</button><button type="button" class="btn small" data-liq-cancel="${esc(name)}">${confirming ? 'Not yet' : 'Cancel'}</button>`
+    : L.stage === 'done' ? `<button type="button" class="btn small" data-liq-cancel="${esc(name)}">Done</button>${orders.length ? `<button type="button" class="btn small danger" data-liq-open="${esc(name)}"${held ? ' disabled' : ''}>Again for what's left</button>` : ''}` : '';
   return `<div class="acct-flat liq${live ? ' liq-live' : ''}">${head}${seg}
-    <div class="scroll"><table class="pos-tbl"><tbody>${rows}</tbody></table></div>${notes}
+    <div class="scroll"><table class="pos-tbl"><tbody>${rows}</tbody></table></div>${heldNote}${notes}
     <div class="acct-actions">${acts}</div></div>`;
 }
 
@@ -363,6 +366,7 @@ function mount(el, single = false, book = false) {
   async function liquidate(d) {
     const name = d.liqOpen || d.liq || d.liqGo || d.liqCancel, L = liq[name];
     if (d.liqOpen) {
+      if (L?.stage === 'sending') return; // a run is in flight: its sends are not repeated
       liq[name] = { stage: 'review', market: false, confirm: 0, q: null };
       update();
       const a = accountOf(name), q = await quotes(plan(a?.positions).orders);
@@ -374,6 +378,7 @@ function mount(el, single = false, book = false) {
     if (d.liqType) { L.market = d.liqType === 'market'; L.confirm = 0; update(); return; }
     if (!d.liqGo || L.stage !== 'review') return;
     const a = accountOf(name), live = a?.environment === 'live';
+    if (holdOf(name, a)) { update(); return; }
     if (live && L.confirm <= Date.now()) { L.confirm = Date.now() + 6000; update(); setTimeout(update, 6100); return; }
     const { orders } = plan(a?.positions);
     L.stage = 'sending'; L.sent = orders; L.results = orders.map(() => null); update();
@@ -388,6 +393,8 @@ function mount(el, single = false, book = false) {
       L.results[i] = p ? await send(name, live, o, p) : { ok: false, text: 'not sent: no quote on every leg' };
       update();
     }));
+    // An order that may be live holds the account until its open orders are read again (lib/liquidate.js).
+    hold(name, accountOf(name)?.updated_at, L.results.filter(r => r.maybe).map(r => r.id || null));
     L.stage = 'done'; update();
   }
 

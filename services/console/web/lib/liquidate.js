@@ -94,19 +94,28 @@ export function priced(o, q, market) {
   return { natural, type: 'limit', price: sent(n) };
 }
 
-/** Send one closing order as the console's trade client; its outcome in a few words, and whether it's working. */
+const UNSURE = 'unknown: it may have reached the broker; check the open orders before sending again';
+
+/**
+ * Send one closing order as the console's trade client: its outcome in a few
+ * words, whether it's working, and `maybe` when it may have reached the broker
+ * (the account then waits for a re-read, see holdOf). `id` is the order's client
+ * id when the answer names it. Only accepted, rejected and not_sent are known.
+ */
 export async function send(account, live, o, p) {
   const order = { legs: o.legs, qty: o.qty, effect: 'close', type: p.type, [p.type === 'market' ? 'ref_price' : 'limit_price']: p.price };
   try {
     const r = await fetch(`/api/orders/${encodeURIComponent(account)}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: account, live, order }) });
     const v = await r.json().catch(() => ({}));
-    if (!r.ok || v.error) return { ok: false, text: `not sent: ${v.error || r.status}` };
-    if (v.outcome === 'accepted') return { ok: true, text: `sent (${v.status || 'new'})` };
-    if (v.outcome === 'rejected') return { ok: false, text: `rejected: ${v.message || v.code || ''}` };
-    if (v.outcome === 'not_sent') return { ok: false, text: `not sent: ${notSentText(v.reason || '', v.detail)}` };
-    if (v.outcome === 'unknown') return { ok: false, text: 'unknown: it may have reached the broker; check the open orders before sending again' };
-    return { ok: false, text: String(v.outcome || 'no answer') };
-  } catch (e) { return { ok: false, text: `not known whether it was sent (${e.message}); check the open orders` }; }
+    const id = v.client_order_id || v.current?.client_order_id;
+    if (v.outcome === 'rejected') return { ok: false, text: `rejected: ${v.message || v.code || ''}`, id };
+    if (v.outcome === 'not_sent') return { ok: false, text: `not sent: ${notSentText(v.reason || '', v.detail)}`, id };
+    if (!r.ok || v.error) return { ok: false, text: `${UNSURE} (the console answered ${v.error || r.status})`, maybe: true, id };
+    if (v.outcome === 'accepted') return { ok: true, text: `sent (${v.status || 'new'})`, id };
+    if (v.outcome === 'unknown') return { ok: false, text: UNSURE, maybe: true, id };
+    if (v.outcome === 'duplicate') return { ok: false, text: 'duplicate: this order was already sent; check the open orders before sending again', maybe: true, id };
+    return { ok: false, text: `${v.outcome || 'no answer'}: ${UNSURE}`, maybe: true, id };
+  } catch (e) { return { ok: false, text: `not known whether it was sent (${e.message}); check the open orders`, maybe: true }; }
 }
 
 /** Cancel the console's own open orders on an account (ids tt-): how many were asked to cancel. */
@@ -114,4 +123,35 @@ export async function cancelOurs(account, orders) {
   const ours = (orders || []).filter(o => (o.client_order_id || '').startsWith('tt-'));
   await Promise.all(ours.map(o => fetch(`/api/orders/${encodeURIComponent(account)}/${encodeURIComponent(o.client_order_id)}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => null)));
   return ours.length;
+}
+
+// An account whose last run had an order that may be live (see send's maybe)
+// is held: no run is sent to it until its open orders are read again after the
+// run, and each such order is in them or has had 30 s to show. Kept in the
+// browser, so a reload does not clear it; cleared only by that re-read.
+const HELD = 'tt-liq-held', SETTLE_MS = 30e3;
+let held = {};
+try { const v = JSON.parse(localStorage.getItem(HELD) || '{}'); if (v && typeof v === 'object') held = v; } catch (_) { /* kept in memory only */ }
+const keep = () => { try { localStorage.setItem(HELD, JSON.stringify(held)); } catch (_) { /* kept in memory only */ } };
+
+/** Hold `account` after a run: `ids` are the maybe-live orders' client ids (null where none was named), `base` the account's updated_at when the run ended. */
+export function hold(account, base, ids) {
+  if (!ids.length) return;
+  held[account] = { at: Date.now(), base: base ?? null, ids };
+  keep();
+}
+
+/** Why `account` may not be sent to yet, or '' when it may; `a` is the account as the snapshot has it now. */
+export function holdOf(account, a) {
+  const h = held[account];
+  if (!h) return '';
+  // Re-read: the account service's updated_at moved past the run's, with open orders in that read.
+  const read = Array.isArray(a?.orders) && typeof a.updated_at === 'number' && (h.base == null || a.updated_at > h.base);
+  if (!read) return 'The account has not been read since then.';
+  const open = new Set(a.orders.map(o => o.client_order_id));
+  const settled = h.ids.every(id => (id && open.has(id)) || Date.now() - h.at >= SETTLE_MS);
+  if (!settled) return 'The unknown order is not in the open orders yet; it stays held for 30 seconds after the run.';
+  delete held[account];
+  keep();
+  return '';
 }
