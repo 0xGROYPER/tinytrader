@@ -132,6 +132,7 @@ The relay answers with a DBN v3 stream: a metadata header (dataset, schema,
 | Provider connection lost | `SystemMsg`, text `upstream-down since=<ns>`; heartbeats continue |
 | Provider connection restored | `SystemMsg`, text `upstream-up gap_from=<ns> gap_to=<ns>` |
 | Provider skipped records (the relay read too slowly; the connection stayed up) | `SystemMsg`, text `upstream-gap gap_from=<ns> gap_to=<ns>`, before the first record after the skip. The provider's own slow-reader error and warning are not passed on: they use the codes the relay sends a client it drops. |
+| Stayed behind the provider (5 s or more behind, or skipped, for 30 s without catching up) | The relay drops the session and opens a fresh one at once, at most once in 5 minutes: `upstream-down since=<ns>`, then `upstream-up gap_from=<ns> gap_to=<ns>`. It logs why, with the Databento session id. |
 | Outside active hours (provider disconnected on purpose) | `SystemMsg`, text `off-schedule until=<ns>`; heartbeats continue |
 | Active hours begin | `SystemMsg`, text `on-schedule` (not a gap) |
 | Client falling behind (queue half full) | `SystemMsg`, code `SlowReaderWarning` |

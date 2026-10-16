@@ -80,15 +80,25 @@ impl Databento {
         Ok(client)
     }
 
-    async fn stream(&self, hub: &Hub, observer: &Observer) -> Result<(), String> {
-        let mut client = self.session(hub.heartbeat()).await?;
+    /// Relay the session until it ends: Databento closes it, it fails, or
+    /// (when `may_drop` allows) it stays behind long enough to be dropped
+    /// for a fresh one.
+    async fn stream(&self, hub: &Hub, observer: &Observer, may_drop: bool) -> End {
+        let mut client = match self.session(hub.heartbeat()).await {
+            Ok(c) => c,
+            Err(e) => return End::Failed(e),
+        };
         hub.upstream_up();
         observer.set_state(State::Ready, "live");
+        // The session id lets Databento's support look the session up.
+        let session = client.session_id().to_owned();
         eprintln!(
-            "relay: Databento session live for {}",
+            "relay: Databento session live for {} (session {session})",
             self.symbols.join(",")
         );
         let mut gaps = Gaps::default();
+        let mut stall = Stall::default();
+        let mut minute = Minute::new(Instant::now());
         // Whether the health detail says the relay is behind, and when it last said so.
         let (mut said_behind, mut said_at) = (false, Instant::now());
         loop {
@@ -96,22 +106,32 @@ impl Databento {
             let mut n = 0;
             match client.next_record().await {
                 Ok(Some(r)) => gaps.take(hub, r, &mut chunk, &mut n),
-                Ok(None) => return Ok(()),
-                Err(e) => return Err(format!("Databento session failed: {e}")),
+                Ok(None) => return End::Closed,
+                Err(e) => return End::Failed(format!("Databento session failed: {e}")),
             }
             // Take whatever else is already buffered, up to a chunk.
             while chunk.len() < CHUNK {
                 match client.try_next_record() {
                     Ok(Some(r)) => gaps.take(hub, r, &mut chunk, &mut n),
                     Ok(None) => break,
-                    Err(e) => return Err(format!("Databento session failed: {e}")),
+                    Err(e) => return End::Failed(format!("Databento session failed: {e}")),
                 }
             }
+            let now = Instant::now();
+            minute.records += n;
+            minute.bytes += chunk.len() as u64;
             if !chunk.is_empty() {
                 hub.publish(chunk, n);
             }
-            if let Some(recv) = gaps.last_recv.take() {
-                let behind = Duration::from_nanos(hub.received(recv));
+            let skipped = std::mem::take(&mut gaps.skipped);
+            minute.skips += u64::from(skipped);
+            let behind = gaps
+                .last_recv
+                .take()
+                .map(|recv| Duration::from_nanos(hub.received(recv)));
+            if let Some(behind) = behind {
+                minute.worst = minute.worst.max(behind);
+                minute.latest = behind;
                 let late = behind >= BEHIND;
                 if late != said_behind || (late && said_at.elapsed() >= Duration::from_secs(1)) {
                     let detail = if late {
@@ -120,10 +140,127 @@ impl Databento {
                         "live".to_owned()
                     };
                     observer.set_state(State::Ready, &detail);
-                    (said_behind, said_at) = (late, Instant::now());
+                    (said_behind, said_at) = (late, now);
                 }
             }
+            if let Some(line) = minute.roll(now) {
+                eprintln!("relay: {line}");
+            }
+            if let Some(stalled) = stall.note(now, behind, skipped)
+                && may_drop
+            {
+                return End::Stalled(format!(
+                    "behind Databento (or skipped by it) for {:.0} s without catching up, {:.1} s behind now (session {session}; {}); dropping the session for a fresh one",
+                    stalled.as_secs_f64(),
+                    minute.latest.as_secs_f64(),
+                    minute.so_far(now),
+                ));
+            }
         }
+    }
+}
+
+/// How a session ended.
+enum End {
+    Closed,
+    Failed(String),
+    /// Dropped for staying behind: a fresh session is opened at once.
+    Stalled(String),
+}
+
+/// Falling this far behind the provider counts toward a stall.
+const STALL_BEHIND: Duration = Duration::from_secs(5);
+/// Behind (or skipped by the provider) this long without catching up: the
+/// session is dropped and a fresh one opened. On 2026-10-16 two sessions
+/// fell 15-20 s behind at the open and never caught up in over an hour,
+/// while fresh sessions ran at full rate at once.
+const STALL_FOR: Duration = Duration::from_secs(30);
+/// Caught up (under a second behind, nothing skipped) this long ends a stall.
+const CAUGHT_UP_FOR: Duration = Duration::from_secs(10);
+/// At most one stall reconnect this often, so a feed genuinely too heavy to
+/// keep up with doesn't become a loop of reconnects (each replays the day's
+/// reference data).
+const STALL_EVERY: Duration = Duration::from_secs(300);
+
+/// Whether the session has stayed behind without catching up.
+#[derive(Default)]
+struct Stall {
+    since: Option<Instant>,
+    caught_up_since: Option<Instant>,
+}
+
+impl Stall {
+    /// After a chunk: how far behind it was (if it held a quote) and whether
+    /// the provider skipped records. How long the session has been stalled,
+    /// once that is `STALL_FOR` or more.
+    fn note(&mut self, now: Instant, behind: Option<Duration>, skipped: bool) -> Option<Duration> {
+        let late = behind.is_some_and(|b| b >= STALL_BEHIND);
+        if late || skipped {
+            self.caught_up_since = None;
+            self.since.get_or_insert(now);
+        } else if behind.is_some_and(|b| b < BEHIND) {
+            let caught = *self.caught_up_since.get_or_insert(now);
+            if now.duration_since(caught) >= CAUGHT_UP_FOR {
+                self.since = None;
+            }
+        } else if behind.is_some() {
+            // Between a second and STALL_BEHIND: neither stalled nor caught up.
+            self.caught_up_since = None;
+        }
+        self.since
+            .map(|s| now.duration_since(s))
+            .filter(|d| *d >= STALL_FOR)
+    }
+}
+
+/// The last minute of the session, for one log line a minute: what came in,
+/// how far behind, and what the provider skipped.
+struct Minute {
+    from: Instant,
+    records: u64,
+    bytes: u64,
+    skips: u64,
+    worst: Duration,
+    latest: Duration,
+}
+
+impl Minute {
+    fn new(from: Instant) -> Self {
+        Self {
+            from,
+            records: 0,
+            bytes: 0,
+            skips: 0,
+            worst: Duration::ZERO,
+            latest: Duration::ZERO,
+        }
+    }
+
+    fn so_far(&self, now: Instant) -> String {
+        let secs = now.duration_since(self.from).as_secs_f64().max(1e-3);
+        format!(
+            "{:.0} records/s, {:.2} MB/s, worst {:.1} s behind, {} skips over {secs:.0} s",
+            self.records as f64 / secs,
+            self.bytes as f64 / secs / 1e6,
+            self.worst.as_secs_f64(),
+            self.skips,
+        )
+    }
+
+    /// Once a minute has passed: its line, and a new minute begun.
+    fn roll(&mut self, now: Instant) -> Option<String> {
+        (now.duration_since(self.from) >= Duration::from_secs(60)).then(|| {
+            let line = format!(
+                "last minute {}, {:.1} s behind now",
+                self.so_far(now),
+                self.latest.as_secs_f64()
+            );
+            *self = Self {
+                latest: self.latest,
+                ..Self::new(now)
+            };
+            line
+        })
     }
 }
 
@@ -148,31 +285,39 @@ impl Source for Databento {
     ) -> BoxFuture<'static, ()> {
         Box::pin(async move {
             let mut backoff = Duration::from_secs(1);
+            let mut last_drop: Option<Instant> = None;
             loop {
                 let end = hours.wait_until_active(&hub, &observer).await;
                 let began = Instant::now();
+                let may_drop = last_drop.is_none_or(|t| t.elapsed() >= STALL_EVERY);
                 // At the end of the active window the session is dropped, which
                 // disconnects it.
                 let outcome = tokio::select! {
-                    r = self.stream(&hub, &observer) => Some(r),
+                    r = self.stream(&hub, &observer, may_drop) => Some(r),
                     () = hours::until(end) => None,
                 };
                 let Some(outcome) = outcome else {
                     continue;
                 };
                 hub.upstream_down();
-                let why = match outcome {
-                    Ok(()) => "Databento closed the session".to_owned(),
-                    Err(e) => e,
+                let (why, wait) = match outcome {
+                    End::Closed => ("Databento closed the session".to_owned(), backoff),
+                    End::Failed(e) => (e, backoff),
+                    End::Stalled(e) => {
+                        last_drop = Some(Instant::now());
+                        (e, Duration::ZERO)
+                    }
                 };
-                eprintln!("relay: {why}; reconnecting in {}s", backoff.as_secs());
+                eprintln!("relay: {why}; reconnecting in {}s", wait.as_secs());
                 observer.record_error(&why);
                 observer.set_state(State::Degraded, &format!("{why}; reconnecting"));
                 if began.elapsed() > Duration::from_secs(60) {
                     backoff = Duration::from_secs(1);
                 }
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
+                tokio::time::sleep(wait).await;
+                if !wait.is_zero() {
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                }
             }
         })
     }
@@ -190,6 +335,8 @@ struct Gaps {
     /// When the provider received the latest quote taken (not reference
     /// records, which are replayed from earlier in the day).
     last_recv: Option<u64>,
+    /// Whether the provider skipped records since this was last taken.
+    skipped: bool,
 }
 
 impl Gaps {
@@ -198,6 +345,7 @@ impl Gaps {
             && e.code().ok() == Some(ErrorCode::SkippedRecordsAfterSlowReading)
         {
             self.skipped_since.get_or_insert(self.last_ts);
+            self.skipped = true;
             return;
         }
         if let Some(m) = r.get::<SystemMsg>()
@@ -303,5 +451,66 @@ mod tests {
         // A smaller lag later in the minute leaves the peak.
         hub.received(crate::protocol::now_ns());
         assert_eq!(hub.behind_peak(), Some(behind));
+    }
+
+    #[test]
+    fn a_session_behind_for_30_s_is_dropped_but_a_burst_is_not() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let behind = |s: u64| Some(Duration::from_secs(s));
+
+        // 15 s behind and never catching up (2026-10-16): dropped at 30 s.
+        let mut stall = Stall::default();
+        for s in 0..30 {
+            assert_eq!(stall.note(at(s), behind(15), s % 3 == 0), None, "{s}");
+        }
+        assert_eq!(
+            stall.note(at(30), behind(15), false),
+            Some(Duration::from_secs(30))
+        );
+
+        // A burst at the open that catches up within 20 s: never dropped.
+        let mut stall = Stall::default();
+        for s in 0..20 {
+            assert_eq!(stall.note(at(s), behind(8), true), None);
+        }
+        for s in 20..100 {
+            assert_eq!(
+                stall.note(at(s), Some(Duration::from_millis(200)), false),
+                None,
+                "{s}"
+            );
+        }
+        // Caught up for 10 s ends the stall: a new one starts the count again.
+        for s in 100..129 {
+            assert_eq!(stall.note(at(s), behind(6), false), None, "{s}");
+        }
+        assert!(stall.note(at(130), behind(6), false).is_some());
+
+        // Chunks without a quote (reference records) don't end a stall.
+        let mut stall = Stall::default();
+        stall.note(at(0), behind(10), false);
+        for s in 1..40 {
+            stall.note(at(s), None, false);
+        }
+        assert!(stall.note(at(40), None, false).is_some());
+    }
+
+    #[test]
+    fn a_minute_line_says_rate_lag_and_skips() {
+        let t0 = Instant::now();
+        let mut m = Minute::new(t0);
+        m.records = 6_000_000;
+        m.bytes = 480_000_000;
+        m.skips = 3;
+        m.worst = Duration::from_millis(2500);
+        m.latest = Duration::from_millis(200);
+        assert_eq!(m.roll(t0 + Duration::from_secs(59)), None);
+        let line = m.roll(t0 + Duration::from_secs(60)).unwrap();
+        assert_eq!(
+            line,
+            "last minute 100000 records/s, 8.00 MB/s, worst 2.5 s behind, 3 skips over 60 s, 0.2 s behind now"
+        );
+        assert_eq!((m.records, m.skips), (0, 0));
     }
 }
