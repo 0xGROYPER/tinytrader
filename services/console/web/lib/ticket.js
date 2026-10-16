@@ -26,6 +26,11 @@ const band = n => Math.max(0.05, r2(Math.abs(n) * 0.05));
 let routing = /** @type {any} */ (null), routingAt = 0, asking = /** @type {Promise<void> | null} */ (null);
 /** Whether an account can be traded from the console. @param {string} name */
 export const tradable = name => !!name && !!routing?.trading && (routing.accounts || []).some(x => x.account === name && !x.error);
+/** How many of an account's orders the gateway says have not resolved (0 when it doesn't say, or isn't a number). @param {string} name */
+export const unresolvedOf = name => {
+  const n = name ? (routing?.accounts || []).find(x => x.account === name)?.unresolved : 0;
+  return typeof n === 'number' && n > 0 ? n : 0;
+};
 /** Routing, read if it's 15 seconds old; then `done` (every caller waiting on the read). */
 export function routed(done) {
   if (asking) { asking.then(done); return; }

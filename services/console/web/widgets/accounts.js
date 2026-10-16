@@ -24,7 +24,7 @@ import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { askHeld } from '../lib/position.js';
-import { createTicket, tradable, routed, occLabel } from '../lib/ticket.js';
+import { createTicket, tradable, routed, occLabel, unresolvedOf } from '../lib/ticket.js';
 import { plan, quotes, priced, send, cancelOurs, hold, holdOf, reread, fitted } from '../lib/liquidate.js';
 import { get } from '../lib/cache.js';
 import { orderFetch } from '../lib/api.js';
@@ -248,6 +248,9 @@ function accountCard(svc, a, pick, book = false) {
     return `<article class="${pick ? 'acct acct-one' : 'card acct'}">${head}<p class="muted" style="margin:0">${esc(err ? 'Cannot read the account: ' + err : 'Waiting for the first reading…')}</p></article>`;
   }
   const pos = a.positions || [];
+  // The gateway's count of unresolved orders: opens are refused until they resolve (closes are not blocked here).
+  const unresolved = unresolvedOf(a.name);
+  const unresolvedNote = unresolved ? `<p class="neg" style="margin:0 0 6px;font-size:12px">${unresolved} order${unresolved > 1 ? 's' : ''} unresolved on this account: new opens are blocked until they resolve.</p>` : '';
   const stats = [['Cash', money(acc.cash, cur)], ['Buying power', money(acc.buying_power, cur)]];
   if (acc.long_market_value) stats.push(['Long', money(acc.long_market_value, cur)]);
   if (acc.short_market_value) stats.push(['Short', money(acc.short_market_value, cur)]);
@@ -263,7 +266,7 @@ function accountCard(svc, a, pick, book = false) {
     <td style="color:var(--fg)" title="${esc(p.symbol)}">${esc(shortSym(p.symbol))}</td><td>${esc(String(p.qty ?? '—'))}</td>${pick ? `<td>${px(p.avg_entry_price)}</td><td>${px(p.current_price)}</td>` : ''}<td>${money(p.market_value, cur)}</td>
     <td class="${tone(p.unrealized_pl)}" title="${pct(p.unrealized_plpc)}">${signed(p.unrealized_pl, cur)}</td>
     <td class="${tone(p.change_today)} acct-today">${pct(p.change_today)}</td></tr>`).join('');
-  return `<article class="${pick ? 'acct acct-one' : 'card acct'}">${head}
+  return `<article class="${pick ? 'acct acct-one' : 'card acct'}">${head}${unresolvedNote}
     <div class="acct-stats">${stats.map(([k, v]) => `<span>${k} <b>${v}</b></span>`).join('')}</div>
     ${book ? '' : `<div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2" data-height="${pick ? 90 : 56}"></div>`}
     ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Position</th><th>Qty</th>${pick ? '<th>Avg</th><th>Last</th>' : ''}<th>Value</th><th>P/L</th><th class="acct-today">Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
@@ -392,18 +395,21 @@ function mount(el, single = false, book = false) {
       for (let j = from; j < orders.length; j++) L.results[j] = { ok: false, text: 'not sent: the positions could not be re-read' };
     };
     // Read first: if the account can't be read, nothing is cancelled or sent.
-    if (!await reread(name)) unread(0, 'The positions could not be re-read, so nothing was sent.');
+    const first = await reread(name);
+    if (!first.account) unread(0, `${first.why}; nothing was sent.`);
     else {
       // Our own working orders hold contracts: cancelled, then gone from the account (at most 5 s).
       if (await cancelOurs(name, a?.orders)) {
         for (let i = 0; i < 25 && (accountOf(name)?.orders || []).some(o => (o.client_order_id || '').startsWith('tt-')); i++) await new Promise(r => setTimeout(r, 200));
       }
+      // The account's updated_at as the cancel step leaves it: each later read must be from this poll or a newer one (null refuses every read).
+      const cancelledAt = accountOf(name)?.updated_at ?? null;
       // Fresh quotes, then the orders one at a time: each is checked against a fresh read just before it is sent.
       L.q = await quotes(orders);
       for (let i = 0; i < orders.length; i++) {
-        const fresh = await reread(name);
-        if (!fresh) { unread(i, 'The positions could not be re-read before an order, so the rest were not sent.'); break; }
-        const f = fitted(orders[i], fresh);
+        const fresh = await reread(name, cancelledAt);
+        if (!fresh.account) { unread(i, `${fresh.why}; the rest were not sent.`); break; }
+        const f = fitted(orders[i], fresh.account);
         L.left.push(...f.left);
         if (!f.order) { L.results[i] = { ok: false, text: `not sent: ${[...new Set(f.left.map(x => x.why))].join('; ')}` }; update(); continue; }
         const p = priced(f.order, L.q, L.market);
