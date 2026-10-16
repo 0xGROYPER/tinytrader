@@ -1598,6 +1598,34 @@ impl<B: Broker> Session<B> {
         Ok(())
     }
 
+    /// Looks up each absent order by client ID on the poll interval, so an
+    /// absent order settles without waiting for a stream reconnect. Found: it
+    /// is reconciled from its state. A second 404: gone. Any other error: it
+    /// stays absent and is counted until a later check.
+    fn recheck_absent(&mut self) -> Result<(), String> {
+        let mut cids: Vec<String> = self
+            .orders
+            .iter()
+            .filter(|(_, s)| matches!(s.phase, Phase::Absent))
+            .map(|(c, _)| c.clone())
+            .collect();
+        cids.sort();
+        for cid in cids {
+            self.budget.charge();
+            if let Ok(r) = self.b.order(&OrderRef::Client(cid.clone())) {
+                match r.value {
+                    Some(bo) => self.reconcile_order(bo)?,
+                    None => {
+                        if let Some(st) = self.orders.get_mut(&cid) {
+                            st.phase = Phase::Gone;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn tick(&mut self) -> Result<(), String> {
         self.drain()?;
         let now = Instant::now();
@@ -1612,13 +1640,16 @@ impl<B: Broker> Session<B> {
             self.last_poll = now;
             if !self.gate_ok {
                 self.reconcile(false)?;
-            } else if self.degraded {
-                self.budget.charge();
-                if let Ok(r) = self.b.open_orders() {
-                    for bo in r.value {
-                        self.reconcile_order(bo)?;
+            } else {
+                if self.degraded {
+                    self.budget.charge();
+                    if let Ok(r) = self.b.open_orders() {
+                        for bo in r.value {
+                            self.reconcile_order(bo)?;
+                        }
                     }
                 }
+                self.recheck_absent()?;
             }
             let halted = matches!(self.killed, Some((KillLevel::HaltAll, _)));
             if !halted && self.cfg.state.join("KILL").exists() {
