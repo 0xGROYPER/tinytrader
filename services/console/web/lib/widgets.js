@@ -1,14 +1,22 @@
 import { prof, painted } from './profile.js';
+import { collect } from './channels.js';
 
 // The widget registry (decision 0010). A widget registers a title and a
 // mount(el) that builds into the element it's given and returns an
 // instance: update() after each poll, dispose() when its panel goes.
 const registry = new Map();
 
+// What a mount subscribes to on the channels (lib/channels.js) ends with the
+// panel: its dispose() ends those subscriptions too.
 /** @param {string} name @param {WidgetDef} def */
 export function defineWidget(name, def) {
   if (registry.has(name)) throw new Error(`widget ${name} is defined twice`);
-  registry.set(name, def);
+  registry.set(name, { ...def, mount(el) {
+    const { value: inst, end } = collect(() => def.mount(el));
+    const dispose = inst.dispose;
+    inst.dispose = () => { dispose?.call(inst); end(); };
+    return inst;
+  } });
 }
 /** @type {(name: string) => WidgetDef | undefined} */
 export const widget = name => registry.get(name);

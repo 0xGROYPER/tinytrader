@@ -1,7 +1,8 @@
 // The open workspace's theme, which its widgets follow: symbols (the
 // watchlist, charts, news) and news keywords. A workspace without one
 // leaves widgets as they are. Also the symbol picked last (in the
-// watchlist), which charts follow.
+// watchlist), which charts follow: the focus channel (lib/channels.js).
+import { publish, read } from './channels.js';
 
 /** @typedef {{ symbols: string[], keywords: string[], layers?: string[] }} Theme */
 
@@ -11,8 +12,6 @@ export const DEFAULT_LAYERS = ['econ', 'earnings'];
 
 /** @type {Theme | null} */
 let current = null;
-/** @type {string | null} */
-let focus = null;
 
 /** The open workspace's theme, if it has one. */
 export const theme = () => current;
@@ -20,13 +19,13 @@ export const theme = () => current;
 /** Set by the shell when a workspace opens or its theme is edited. @param {Theme | null} t */
 export function setTheme(t) {
   current = t && (t.symbols.length || t.keywords.length) ? t : null;
-  if (focus && !current?.symbols.includes(focus)) focus = null;
+  if (focused() && !current?.symbols.includes(focused())) publish('focus', null);
 }
 
 /** The symbol picked last, which charts follow. */
-export const focused = () => focus;
+export const focused = () => read('focus');
 /** @param {string | null} s */
-export function setFocus(s) { focus = s; }
+export function setFocus(s) { publish('focus', s); }
 
 /** "USO, xle  gld" as ["USO", "XLE", "GLD"]: letters, digits and dots, at most 50. @param {string} text */
 export const parseSymbols = text => [...new Set(text.toUpperCase().split(/[\s,]+/).filter(s => /^[A-Z0-9.]{1,10}$/.test(s)))].slice(0, 50);
