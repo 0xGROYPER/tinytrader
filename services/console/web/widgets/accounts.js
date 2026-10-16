@@ -1,10 +1,11 @@
 // Accounts: a card per brokerage account (live first) with equity, the day's
 // change, balances, an equity chart, the largest positions and every open
-// order however it was placed (the console's can be cancelled here). A paper
-// account with an order gateway also gets Flatten (close every position at
-// market, through the gateway, after typing the account's name) and, while
-// its gateway halts opens, Resume opening. An account with an order gateway
-// gets Close… on each option group: the order ticket (lib/ticket.js), at
+// order however it was placed (the console's can be cancelled here). An account
+// with an order gateway also gets Flatten (close every position at market,
+// through the gateway, after typing the account's name) and, while its gateway
+// halts opens, Resume opening. Live accounts get both too: they send the order
+// token, and Resume is confirmed by typing the name. An account with an order
+// gateway gets Close… on each option group: the order ticket (lib/ticket.js), at
 // market or a limit, sent as the console's trade client (POST
 // /api/orders/{account}). A new order is built in the Spread builder:
 // Spread builder on a card opens it with that account picked for its ticket.
@@ -59,8 +60,10 @@ async function readGateways(update) {
   } catch (_) { gateways = {}; }
   update();
 }
-// Flatten in progress per account: {stage: 'confirm' | 'busy' | 'done', typed, result, error}.
+// Flatten or resume in progress per account: {stage: 'confirm' | 'busy' | 'done', what: 'flatten' | 'resume', typed, result, error}.
 const flat = {};
+// Whether an account trades live: anything but paper (its environment, as the console reads it).
+const liveAcct = a => a?.environment !== 'paper';
 async function post(path, body, live = false) {
   const r = await orderFetch(path, body, 'POST', {}, live);
   let v = null; try { v = await r.json(); } catch (_) {}
@@ -70,28 +73,34 @@ async function post(path, body, live = false) {
 
 function flattenPanel(a) {
   const name = a?.name, g = name && gateways[name];
-  if (a?.environment === 'live' || g?.environment === 'live') return '';
   if (!g) return '';
   if (g.error) return `<p class="muted acct-note" title="${esc(g.error)}">Order gateway unreachable.</p>`;
   const f = flat[name] || {};
-  const halted = g.state === 'killed';
+  const live = liveAcct(a), halted = g.state === 'killed';
   const buttons = `<div class="acct-actions">
     <button type="button" class="btn small danger" data-flat-open="${esc(name)}"${f.stage === 'busy' ? ' disabled' : ''}>Flatten</button>
     ${halted ? `<button type="button" class="btn small" data-flat-resume="${esc(name)}">Resume opening</button><span class="pill p-warn">opens halted</span>` : ''}</div>`;
+  if (f.stage === 'confirm' && f.what === 'resume') {
+    return `<div class="acct-flat">
+      <b>Allow opening orders again in ${esc(a.label || name)}${live ? ' (LIVE, real money)' : ''}?</b>
+      <label style="font-size:12px">Type <b>${esc(name)}</b> to confirm <input class="acct-flat-input" data-flat-typed="${esc(name)}" value="${esc(f.typed || '')}" autocomplete="off" spellcheck="false"></label>
+      <div class="acct-actions"><button type="button" class="btn small" data-flat-go="${esc(name)}"${f.typed === name ? '' : ' disabled'}>Resume now</button>
+      <button type="button" class="btn small" data-flat-cancel="${esc(name)}">Cancel</button></div></div>`;
+  }
   if (f.stage === 'confirm') {
     const pos = a.positions || [];
     return `<div class="acct-flat">
-      <b>Close every position in ${esc(a.label || name)} at market?</b>
+      <b>Close every position in ${esc(a.label || name)}${live ? ' (LIVE, real money)' : ''} at market?</b>
       <p class="muted" style="margin:0;font-size:12px">${pos.length ? pos.map(p => `${esc(p.symbol)} ${esc(String(p.qty))}`).join(', ') : 'No positions now; open orders are cancelled.'}</p>
       <p class="muted" style="margin:0;font-size:12px">Open orders are cancelled first. Options close at whatever the spread is. New opening orders stay refused until Resume opening.</p>
       <label style="font-size:12px">Type <b>${esc(name)}</b> to confirm <input class="acct-flat-input" data-flat-typed="${esc(name)}" value="${esc(f.typed || '')}" autocomplete="off" spellcheck="false"></label>
       <div class="acct-actions"><button type="button" class="btn small danger" data-flat-go="${esc(name)}"${f.typed === name ? '' : ' disabled'}>Flatten now</button>
       <button type="button" class="btn small" data-flat-cancel="${esc(name)}">Cancel</button></div></div>`;
   }
-  if (f.stage === 'busy') return `<div class="acct-flat"><b>Flattening ${esc(name)}…</b></div>`;
+  if (f.stage === 'busy') return `<div class="acct-flat"><b>${f.what === 'resume' ? 'Resuming' : 'Flattening'} ${esc(name)}…</b></div>`;
   if (f.stage === 'done') {
     const rows = (f.result?.positions || []).map(p => `<tr><td style="color:var(--fg)">${esc(p.symbol)}</td><td>${p.status === 200 ? 'closing order placed' : esc(String(p.broker_raw?.message || p.status))}</td></tr>`).join('');
-    const head = f.error ? `<b class="neg">Flatten failed: ${esc(f.error)}</b>`
+    const head = f.error ? `<b class="neg">${f.what === 'resume' ? 'Resume' : 'Flatten'} failed: ${esc(f.error)}</b>`
       : f.result?.outcome === 'ok' ? `<b>Flatten sent${rows ? '' : ': nothing to close'}.</b>`
       : `<b class="neg">Flatten ${esc(f.result?.outcome || '')}: ${esc(f.result?.reason || f.result?.message || '')}</b> <span class="muted">Check positions before trying again.</span>`;
     return `<div class="acct-flat">${head}${rows ? `<table class="pos-tbl"><tbody>${rows}</tbody></table>` : ''}
@@ -355,17 +364,23 @@ function mount(el, single = false, book = false) {
       update(); return;
     }
     if (d.liqOpen || d.liqType || d.liqGo || d.liqCancel) { liquidate(d); return; }
-    if (d.flatOpen) { flat[d.flatOpen] = { stage: 'confirm', typed: '' }; update(); el.querySelector(`[data-flat-typed="${CSS.escape(d.flatOpen)}"]`)?.focus(); }
+    if (d.flatOpen) { flat[d.flatOpen] = { stage: 'confirm', what: 'flatten', typed: '' }; update(); el.querySelector(`[data-flat-typed="${CSS.escape(d.flatOpen)}"]`)?.focus(); }
     else if (d.flatCancel) { delete flat[d.flatCancel]; update(); }
     else if (d.flatGo) {
-      const name = d.flatGo;
-      flat[name] = { stage: 'busy' }; update();
-      try { flat[name] = { stage: 'done', result: await post(`/api/accounts/${encodeURIComponent(name)}/flatten`, { confirm: name, reason: 'flatten from the console' }) }; }
-      catch (err) { flat[name] = { stage: 'done', error: err.message }; }
+      const name = d.flatGo, resume = flat[name]?.what === 'resume', live = liveAcct(accountOf(name));
+      flat[name] = { stage: 'busy', what: resume ? 'resume' : 'flatten' }; update();
+      try {
+        const v = resume ? await post(`/api/accounts/${encodeURIComponent(name)}/resume`, { confirm: name, reason: 'resumed from the console' }, live)
+          : await post(`/api/accounts/${encodeURIComponent(name)}/flatten`, { confirm: name, reason: 'flatten from the console' }, live);
+        flat[name] = resume ? {} : { stage: 'done', result: v };
+      }
+      catch (err) { flat[name] = { stage: 'done', what: resume ? 'resume' : 'flatten', error: err.message }; }
       gwAt = 0; update();
     } else if (d.flatResume) {
-      try { await post(`/api/accounts/${encodeURIComponent(d.flatResume)}/resume`, { reason: 'resumed from the console' }); }
-      catch (err) { flat[d.flatResume] = { stage: 'done', error: err.message }; }
+      // A live account's resume is confirmed by typing its name first.
+      if (liveAcct(accountOf(d.flatResume))) { flat[d.flatResume] = { stage: 'confirm', what: 'resume', typed: '' }; update(); el.querySelector(`[data-flat-typed="${CSS.escape(d.flatResume)}"]`)?.focus(); return; }
+      try { await post(`/api/accounts/${encodeURIComponent(d.flatResume)}/resume`, { confirm: d.flatResume, reason: 'resumed from the console' }); }
+      catch (err) { flat[d.flatResume] = { stage: 'done', what: 'resume', error: err.message }; }
       gwAt = 0; update();
     }
   };
