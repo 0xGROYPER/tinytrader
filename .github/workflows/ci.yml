@@ -1,0 +1,82 @@
+# Continuous integration: every push to any branch and every pull request.
+#
+#   nix-linux   nix flake check on x86_64-linux: the generic (no-leaks) check,
+#               the console's type check, the Rust tests and clippy (crane), and
+#               evaluation of every output, the example NixOS host included.
+#   nix-macos   the same checks built for aarch64-darwin (the services must
+#               build and pass their tests on macOS too).
+#   cargo       cargo test and cargo clippy with the toolchain pinned in
+#               rust-toolchain.toml (rustup reads it), with a Cargo cache: a
+#               faster, more readable signal than the Nix build.
+#   fmt         cargo fmt --check. Advisory until the tree is formatted: see
+#               the note on the step.
+#
+# Branch protection on main requires: nix-linux, nix-macos, cargo.
+name: ci
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  nix-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          determinate: false # upstream Nix: no FlakeHub login, which needs an account
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+        with:
+          use-flakehub: false # the GitHub Actions cache only
+      - name: nix flake check
+        run: nix flake check --keep-going --print-build-logs
+
+  nix-macos:
+    runs-on: macos-latest # aarch64
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          determinate: false # upstream Nix: no FlakeHub login, which needs an account
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+        with:
+          use-flakehub: false # the GitHub Actions cache only
+      - name: nix flake check
+        run: nix flake check --keep-going --print-build-logs
+
+  cargo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc --version
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- --deny warnings
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc --version
+      - name: cargo fmt --check
+        # Advisory: main is not rustfmt-clean yet (cargo fmt --all would
+        # reformat a handful of files), so a diff is a warning and the job
+        # stays green. Once it is clean, delete continue-on-error and add fmt
+        # to the required checks.
+        continue-on-error: true
+        run: cargo fmt --all --check || { echo "::warning::cargo fmt --check found unformatted files (advisory)"; exit 1; }

@@ -1,5 +1,6 @@
 //! Reactor `FakeBroker` scenario matrix through the real gateway over TCP (scripted mode).
 mod support;
+use serde_json::Value;
 use support::*;
 
 fn script(rules: &str) -> String {
@@ -212,7 +213,15 @@ fn http_429_blocks_until_retry_after_and_is_never_resent() {
     assert_eq!(r["reason"], "throttled");
     let (q, _) = c.req("account", "r3", "");
     assert_eq!(q["code"], "throttled");
-    let res = c.event("resolution", |v| v["client_order_id"] == "wse-429");
+    // The resolution (due after the 20-80 ms resolve offsets) can arrive
+    // before the r2 or r3 response, which read past it; look there first.
+    let is_res = |v: &Value| v["kind"] == "resolution" && v["client_order_id"] == "wse-429";
+    let seen = c
+        .lines
+        .iter()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .find(|v| is_res(v));
+    let res = seen.unwrap_or_else(|| c.event("resolution", |v| v["client_order_id"] == "wse-429"));
     assert_eq!(res["outcome"], "absent_after");
     std::thread::sleep(std::time::Duration::from_millis(1100));
     assert_eq!(c.submit("r4", &buy("wse-after"))["outcome"], "accepted");
