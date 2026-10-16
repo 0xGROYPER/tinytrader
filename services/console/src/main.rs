@@ -69,10 +69,14 @@
 //!   (`/api/profiles`); by default `profiles/` beside `CONSOLE_REMINDERS`.
 //! - `CONSOLE_PREFS`: a JSON file of the page's settings that follow the user
 //!   between devices (`/api/prefs`); by default `prefs.json` beside
-//!   `CONSOLE_REMINDERS`.
+//!   `CONSOLE_REMINDERS`. `CONSOLE_PREFS_DEFAULTS`: a read-only JSON file of
+//!   the same keys, used where the settings have none, such as curated views
+//!   kept in a deployment's repository and written by
+//!   `scripts/prefs-promote` (optional).
 //! - `CONSOLE_REMINDERS`: a JSON file for the roadmap's reminders, which the
-//!   console edits (`/api/reminders`); `CONSOLE_REMINDERS_SEED`: a Markdown
-//!   roadmap to start it from (optional).
+//!   console edits (`/api/reminders`); it may be a file in a git checkout,
+//!   and is read again when it changes on disk. `CONSOLE_REMINDERS_SEED`: a
+//!   Markdown roadmap to start it from when there is no file (optional).
 
 mod collections;
 mod delta;
@@ -206,18 +210,27 @@ async fn main() {
                             .map(|d| d.join("prefs.json"))
                     })
             })
-            .map(prefs::Prefs::open),
+            .map(|p| {
+                let defaults = std::env::var("CONSOLE_PREFS_DEFAULTS")
+                    .ok()
+                    .filter(|s| !s.is_empty());
+                prefs::Prefs::open(p, defaults.as_deref().map(std::path::Path::new))
+            }),
         reminders: std::env::var("CONSOLE_REMINDERS")
             .ok()
             .filter(|s| !s.is_empty())
-            .map(|p| {
+            .and_then(|p| {
                 let seed = std::env::var("CONSOLE_REMINDERS_SEED")
                     .ok()
                     .filter(|s| !s.is_empty());
+                // An unreadable file is left for the operator to fix, and
+                // reminders are off until then.
                 reminders::Reminders::open(
                     std::path::PathBuf::from(p),
                     seed.as_deref().map(std::path::Path::new),
                 )
+                .map_err(|e| eprintln!("console: reminders off: {e}"))
+                .ok()
             }),
     });
 

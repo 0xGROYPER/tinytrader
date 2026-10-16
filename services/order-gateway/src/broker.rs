@@ -171,6 +171,10 @@ pub struct SessionDay {
     pub close: String,
 }
 
+/// The most orders one open-orders listing returns. The listing is one request with no
+/// paging, so a listing of this many may be cut short.
+pub const OPEN_ORDERS_LIMIT: usize = 500;
+
 /// One broker account. Every call is synchronous and makes at most one send.
 #[expect(
     clippy::missing_errors_doc,

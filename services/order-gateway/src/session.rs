@@ -2,13 +2,14 @@
 //! forwards and correlates requests, never resends, resolves unknown outcomes by
 //! lookup, reconciles after restarts and stream drops, and fans out journaled events.
 use crate::broker::{
-    Broker, BrokerError, BrokerOrder, CancelResult, FlattenResult, OrderRef, OrderUpdate,
-    SubmitResult, Update, normalize_event, status_event, terminal,
+    Broker, BrokerError, BrokerOrder, CancelResult, FlattenResult, OPEN_ORDERS_LIMIT, OrderRef,
+    OrderUpdate, SubmitResult, Update, normalize_event, status_event, terminal,
 };
 use crate::intent::{Intent, hex, max_loss, occ};
 use crate::journal::Journal;
 use crate::protocol::{
-    Invalid, KillLevel, Obj, Op, arr, error_line, invalid_detail, quote, request_error, response,
+    Invalid, KillLevel, Obj, Op, arr, error_line, invalid, invalid_detail, quote, request_error,
+    response,
 };
 use crate::safety::{Budget, et_day};
 use crate::server::{Config, Outbox, Role};
@@ -249,23 +250,31 @@ fn close_check(held: Option<i64>, requested: u64, buy: bool) -> Result<(), &'sta
     }
 }
 
-/// A day order is past its session once its New York trading date has moved past the
-/// date it was submitted. Only a journaled `day` order qualifies: good-til-canceled,
-/// `cls` and an unknown time-in-force are never auto-cleared.
-pub(crate) fn day_order_expired(tif: Option<&str>, submitted: Option<u64>, now: u64) -> bool {
+/// An order is past its session once its New York trading date has moved past the date
+/// it was submitted. Only a journaled `day` or `cls` order qualifies: good-til-canceled
+/// and an unknown time-in-force are never auto-cleared.
+pub(crate) fn session_order_expired(tif: Option<&str>, submitted: Option<u64>, now: u64) -> bool {
     match (tif, submitted) {
-        (Some("day"), Some(at)) => et_day(now) > et_day(at),
+        (Some("day" | "cls"), Some(at)) => et_day(now) > et_day(at),
         _ => false,
     }
 }
 
+/// Whether an open-orders listing of `len` entries may be cut short by its limit. The
+/// listing has no paging, so a full page can hide orders.
+pub(crate) fn listing_full(len: usize) -> bool {
+    len >= OPEN_ORDERS_LIMIT
+}
+
 /// One broker check of a client order id: the status when the broker shows the order,
-/// a clean absence, or the failure's code.
+/// a clean absence, the failure's code, or a listing that is too full to rule the order
+/// out.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Seen {
     Absent,
     Shows(String),
     Failed(String),
+    Unreliable(String),
 }
 
 /// Why a clear is refused. `check` names the broker call: `open_orders` or `by_id`.
@@ -290,7 +299,7 @@ pub(crate) fn clear_verdict(open: &Seen, by_id: &Seen) -> Result<(), Refusal> {
         return Err(r);
     }
     for (check, seen) in [("open_orders", open), ("by_id", by_id)] {
-        if let Seen::Failed(code) = seen {
+        if let Seen::Failed(code) | Seen::Unreliable(code) = seen {
             return Err(Refusal::Unreachable {
                 check,
                 code: code.clone(),
@@ -307,17 +316,50 @@ fn not_cleared(reason: &str, detail: &str) -> String {
         .done()
 }
 
-fn refused_clear(r: &Refusal) -> String {
+/// The refusal's reason and detail, as a `not_cleared` outcome and a journal line carry them.
+fn refusal_parts(r: &Refusal) -> (&'static str, String) {
     match r {
-        Refusal::Shows { check, status } => not_cleared(
+        Refusal::Shows { check, status } => (
             "broker_shows_order",
-            &Obj::new().s("check", check).s("status", status).done(),
+            Obj::new().s("check", check).s("status", status).done(),
         ),
-        Refusal::Unreachable { check, code } => not_cleared(
+        Refusal::Unreachable { check, code } => (
             "broker_unreachable",
-            &Obj::new().s("check", check).s("code", code).done(),
+            Obj::new().s("check", check).s("code", code).done(),
         ),
     }
+}
+
+/// A clear that was not made: the outcome's reason and detail, and the broker results
+/// it was decided on, when the broker was consulted.
+struct Refused {
+    reason: &'static str,
+    detail: String,
+    broker: Option<String>,
+}
+
+impl Refused {
+    fn plain(reason: &'static str) -> Self {
+        Self {
+            reason,
+            detail: "null".into(),
+            broker: None,
+        }
+    }
+}
+
+/// The two broker checks of a refused clear, as the journal records them.
+fn broker_checks(open: &Seen, listed: usize, by_id: &Seen, raw: &str) -> String {
+    let check = |seen: &Seen| match seen {
+        Seen::Absent => Obj::new().s("result", "absent"),
+        Seen::Shows(status) => Obj::new().s("result", "shows").s("status", status),
+        Seen::Unreliable(code) => Obj::new().s("result", "unreliable").s("code", code),
+        Seen::Failed(code) => Obj::new().s("result", "failed").s("code", code),
+    };
+    Obj::new()
+        .raw("open_orders", &check(open).n("listed", listed).done())
+        .raw("by_id", &check(by_id).raw("broker_raw", raw).done())
+        .done()
 }
 
 fn broker_error_obj(kind: &str, e: &BrokerError) -> Obj {
@@ -758,7 +800,24 @@ impl<B: Broker> Session<B> {
             _ => true,
         };
         if !allowed {
-            self.reply(ci, request_error(&rid, name, "forbidden", "null"));
+            let line = request_error(&rid, name, "forbidden", "null");
+            if let Op::ClearOrder {
+                client_order_id,
+                reason,
+            } = &op
+            {
+                self.hold = Some(Vec::new());
+                let journaled = self.refuse(
+                    &spec.name,
+                    client_order_id,
+                    reason,
+                    &Refused::plain("forbidden"),
+                );
+                self.release(ci, line);
+                journaled?;
+            } else {
+                self.reply(ci, line);
+            }
             return Ok(());
         }
         match op {
@@ -792,8 +851,20 @@ impl<B: Broker> Session<B> {
                 reason,
             } => {
                 self.hold = Some(Vec::new());
-                let result = self.clear(&spec.name, &client_order_id, &reason, true);
-                self.release(ci, response(&rid, name, &result?));
+                if reason.trim().is_empty() {
+                    let detail = invalid_detail(&invalid("reason", "a non-empty reason"));
+                    let refusal = Refused {
+                        reason: "invalid_request",
+                        detail: detail.clone(),
+                        broker: None,
+                    };
+                    let journaled = self.refuse(&spec.name, &client_order_id, &reason, &refusal);
+                    self.release(ci, request_error(&rid, name, "invalid_request", &detail));
+                    journaled?;
+                } else {
+                    let result = self.clear_request(&spec.name, &client_order_id, &reason);
+                    self.release(ci, response(&rid, name, &result?));
+                }
             }
             Op::Unkill => {
                 self.killed = None;
@@ -1734,11 +1805,13 @@ impl<B: Broker> Session<B> {
         let (open, listed) = if self.budget.take(critical) {
             match self.b.open_orders() {
                 Ok(r) => {
-                    let seen = r
-                        .value
-                        .iter()
-                        .find(|o| o.client_order_id == cid)
-                        .map_or(Seen::Absent, |o| Seen::Shows(o.status.clone()));
+                    let seen = match r.value.iter().find(|o| o.client_order_id == cid) {
+                        Some(o) => Seen::Shows(o.status.clone()),
+                        None if listing_full(r.value.len()) => {
+                            Seen::Unreliable("listing_full".into())
+                        }
+                        None => Seen::Absent,
+                    };
                     (seen, r.value.len())
                 }
                 Err(e) => (self.failed(&e), 0),
@@ -1768,25 +1841,74 @@ impl<B: Broker> Session<B> {
         Seen::Failed(e.code.clone())
     }
 
-    /// Clears an unresolved order that the broker does not show (section 5). Returns the
-    /// `ok` or `not_cleared` outcome. `critical` is the budget class of the broker checks:
-    /// an operator's clear is critical, the automatic clear is poll traffic.
+    /// An operator's `clear_order`: the `ok` or `not_cleared` outcome. A refused clear is
+    /// journaled as `clear_refused`, whatever the refusal.
+    fn clear_request(
+        &mut self,
+        requester: &str,
+        cid: &str,
+        reason: &str,
+    ) -> Result<String, String> {
+        match self.clear(requester, cid, reason, true)? {
+            Ok(()) => Ok(outcome("ok").s("client_order_id", cid).done()),
+            Err(r) => {
+                self.refuse(requester, cid, reason, &r)?;
+                Ok(not_cleared(r.reason, &r.detail))
+            }
+        }
+    }
+
+    /// Journals a clear request that was refused, with the requester's name and the
+    /// reason it was given. Visible to the same clients as a `cleared` event.
+    fn refuse(
+        &mut self,
+        requester: &str,
+        cid: &str,
+        request_reason: &str,
+        r: &Refused,
+    ) -> Result<(), String> {
+        let mut body = Obj::new()
+            .s("client_order_id", cid)
+            .s("requester", requester)
+            .s("request_reason", request_reason)
+            .s("reason", r.reason)
+            .raw("detail", &r.detail);
+        if let Some(broker) = &r.broker {
+            body = body.raw("broker", broker);
+        }
+        let aud = if cid.is_empty() {
+            Aud::Client(requester.to_owned())
+        } else {
+            Aud::Prefix(cid.to_owned())
+        };
+        self.emit(self.ts(), "clear_refused", &body.done(), aud)
+    }
+
+    /// Clears an unresolved order that the broker does not show (section 5). Emits
+    /// `cleared` and returns `Ok(Ok(()))`, or returns why the clear was refused. `critical`
+    /// is the budget class of the broker checks: an operator's clear is critical, the
+    /// automatic clear is poll traffic.
     fn clear(
         &mut self,
         requester: &str,
         cid: &str,
         reason: &str,
         critical: bool,
-    ) -> Result<String, String> {
+    ) -> Result<Result<(), Refused>, String> {
         let Some(st) = self.orders.get(cid) else {
-            return Ok(not_cleared("unknown_order", "null"));
+            return Ok(Err(Refused::plain("unknown_order")));
         };
         if !st.open() {
-            return Ok(not_cleared("not_unresolved", "null"));
+            return Ok(Err(Refused::plain("not_unresolved")));
         }
         let (open, by_id, listed, raw) = self.clear_checks(cid, critical);
-        if let Err(r) = clear_verdict(&open, &by_id) {
-            return Ok(refused_clear(&r));
+        if let Err(refusal) = clear_verdict(&open, &by_id) {
+            let (why, detail) = refusal_parts(&refusal);
+            return Ok(Err(Refused {
+                reason: why,
+                detail,
+                broker: Some(broker_checks(&open, listed, &by_id, &raw)),
+            }));
         }
         if let Some(st) = self.orders.get_mut(cid) {
             st.phase = Phase::Cleared;
@@ -1812,11 +1934,12 @@ impl<B: Broker> Session<B> {
             .raw("broker", &broker)
             .done();
         self.emit(self.ts(), "cleared", &body, Aud::Prefix(cid.to_owned()))?;
-        Ok(outcome("ok").s("client_order_id", cid).done())
+        Ok(Ok(()))
     }
 
-    /// Clears each unresolved day order whose session has passed, when the broker shows
-    /// nothing. Runs on the poll, after `recheck_absent`, so it needs no timer of its own.
+    /// Clears each unresolved day or cls order whose session has passed, when the broker
+    /// shows nothing. Runs on the poll, after `recheck_absent`, so it needs no timer of its
+    /// own. A refused automatic clear leaves the order alone and is not journaled.
     fn clear_day_orders(&mut self) -> Result<(), String> {
         let now = self.ts();
         let mut cids: Vec<String> = self
@@ -1824,13 +1947,13 @@ impl<B: Broker> Session<B> {
             .iter()
             .filter(|(_, s)| {
                 matches!(s.phase, Phase::Unknown | Phase::Absent)
-                    && day_order_expired(s.tif.as_deref(), s.submitted, now)
+                    && session_order_expired(s.tif.as_deref(), s.submitted, now)
             })
             .map(|(c, _)| c.clone())
             .collect();
         cids.sort();
         for cid in cids {
-            self.clear(GATEWAY, &cid, "day_order_after_session", false)?;
+            let _refused = self.clear(GATEWAY, &cid, "day_order_after_session", false)?;
         }
         Ok(())
     }
@@ -1987,7 +2110,7 @@ fn line_aud(v: &Value) -> Aud {
 
 #[cfg(test)]
 mod tests {
-    use super::{Refusal, Seen, clear_verdict, close_check, day_order_expired};
+    use super::{Refusal, Seen, clear_verdict, close_check, listing_full, session_order_expired};
     use crate::safety::{days_from_civil, et_ns};
 
     fn shows(s: &str) -> Seen {
@@ -2050,21 +2173,49 @@ mod tests {
     }
 
     #[test]
-    fn only_a_day_order_past_its_new_york_date_is_auto_cleared() {
+    fn only_a_day_or_cls_order_past_its_new_york_date_is_auto_cleared() {
         let d = days_from_civil(2026, 10, 16);
         let at = |d: i64, min: i64| et_ns(d, min);
         let sub = Some(at(d, 10 * 60));
         // Later the same New York day, even after the close: not yet.
-        assert!(!day_order_expired(Some("day"), sub, at(d, 23 * 60)));
+        assert!(!session_order_expired(Some("day"), sub, at(d, 23 * 60)));
+        assert!(!session_order_expired(Some("cls"), sub, at(d, 23 * 60)));
         // The next New York date: past its session.
-        assert!(day_order_expired(Some("day"), sub, at(d + 1, 0)));
-        // A closing-auction order, a good-til-canceled order, or an unknown
-        // time-in-force never is, however old it is.
-        assert!(!day_order_expired(Some("cls"), sub, at(d + 5, 0)));
-        assert!(!day_order_expired(Some("gtc"), sub, at(d + 5, 0)));
-        assert!(!day_order_expired(None, sub, at(d + 5, 0)));
+        assert!(session_order_expired(Some("day"), sub, at(d + 1, 0)));
+        assert!(session_order_expired(Some("cls"), sub, at(d + 1, 0)));
+        // A good-til-canceled order or an unknown time-in-force never is, however old it is.
+        assert!(!session_order_expired(Some("gtc"), sub, at(d + 5, 0)));
+        assert!(!session_order_expired(None, sub, at(d + 5, 0)));
         // A submit time that was never journaled is never expired.
-        assert!(!day_order_expired(Some("day"), None, at(d + 5, 0)));
+        assert!(!session_order_expired(Some("day"), None, at(d + 5, 0)));
+        assert!(!session_order_expired(Some("cls"), None, at(d + 5, 0)));
+    }
+
+    #[test]
+    fn a_full_open_orders_listing_may_hide_orders() {
+        assert!(!listing_full(0));
+        assert!(!listing_full(499));
+        assert!(listing_full(500));
+        assert!(listing_full(501));
+    }
+
+    #[test]
+    fn a_full_listing_is_unreliable_and_refuses_the_clear_unless_a_check_shows_the_order() {
+        let full = Seen::Unreliable("listing_full".into());
+        assert_eq!(
+            clear_verdict(&full, &Seen::Absent),
+            Err(Refusal::Unreachable {
+                check: "open_orders",
+                code: "listing_full".into()
+            })
+        );
+        assert_eq!(
+            clear_verdict(&full, &shows("new")),
+            Err(Refusal::Shows {
+                check: "by_id",
+                status: "new".into()
+            })
+        );
     }
 
     #[test]

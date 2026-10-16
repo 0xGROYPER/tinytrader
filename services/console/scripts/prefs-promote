@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Promote the console's current views into a defaults file, to review and commit.
+
+    prefs-promote FILE              the views (below) into FILE
+    prefs-promote FILE KEY...       these settings into FILE instead
+    prefs-promote --from PREFS FILE [KEY...]
+                                    from a settings file (CONSOLE_PREFS, as
+                                    copied from a backup) instead of the console
+    prefs-promote --reset FILE      drop the console's own copy of each
+                                    setting FILE holds, so FILE's apply
+
+FILE is what the console reads as CONSOLE_PREFS_DEFAULTS: one JSON object of
+setting → value, the views as readable JSON rather than the page's strings,
+keys sorted, so a promotion diffs cleanly. Settings FILE already has and the
+promotion doesn't name are kept. Day-to-day changes stay in the console's own
+settings (CONSOLE_PREFS) until promoted; nothing here commits.
+
+FILE is meant to be committed, so nothing that looks like a credential is
+written: a value under a key such as "token" or "secret", or a long unbroken
+string of letters and digits, stops the promotion and is named (--force
+writes it anyway, once you've checked it isn't one).
+
+--reset is for after FILE changed some other way (pulled, edited by hand):
+the console's saved settings win over the defaults, so those it has for
+FILE's keys are removed. Tabs already open take the change when reloaded.
+
+The console is http://127.0.0.1:8080 unless CONSOLE_URL says otherwise.
+"""
+import hashlib
+import json
+import os
+import re
+import sys
+import urllib.request
+
+BASE = os.environ.get("CONSOLE_URL", "http://127.0.0.1:8080").rstrip("/")
+
+# The views, their folders and the markers that say which ready-made ones
+# are installed, the Cross-asset board, the watchlists and the theme: what's
+# chosen on purpose and rarely changes. Alerts stay runtime (they fire and are
+# cleared, often within a day).
+VIEWS = [
+    "tinytrader-workspaces",
+    "tinytrader-ready",
+    "tinytrader-tree",
+    "tinytrader-tree-2",
+    "tinytrader-folders",
+    "tinytrader-watch-views",
+    "tinytrader-board",
+    "tinytrader-watchlists",
+    "tinytrader-theme",
+    "tinytrader-palette",
+]
+
+
+def get(path):
+    with urllib.request.urlopen(BASE + path, timeout=30) as r:
+        return json.load(r)
+
+
+def readable(text):
+    """A setting as the page keeps it (a string), as JSON where it is JSON."""
+    try:
+        v = json.loads(text)
+    except (TypeError, ValueError):
+        return text
+    # A JSON string or null stays as the text it was, so it serves back the same.
+    return text if v is None or isinstance(v, str) else v
+
+
+def version(text):
+    """The console's version of a setting: the SHA-256 of its text."""
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def load(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+SECRET_KEY = re.compile(r"token|secret|password|passwd|api.?key|credential|authorization", re.I)
+SECRET_TEXT = re.compile(r"[A-Za-z0-9+/_=-]{32,}")
+
+
+def suspicious(v, where):
+    """Where in a value something looks like a credential."""
+    if isinstance(v, dict):
+        for k, x in v.items():
+            if SECRET_KEY.search(k) and x not in (None, "", False):
+                yield f"{where}.{k}"
+            else:
+                yield from suspicious(x, f"{where}.{k}")
+    elif isinstance(v, list):
+        for i, x in enumerate(v):
+            yield from suspicious(x, f"{where}[{i}]")
+    elif isinstance(v, str) and SECRET_TEXT.search(v):
+        yield where
+
+
+def promote(path, keys, current, force):
+    out = load(path)
+    for k in keys:
+        if isinstance(current.get(k), str):
+            out[k] = readable(current[k])
+        else:
+            out.pop(k, None)
+    found = [w for k in keys if k in out for w in suspicious(out[k], k)]
+    if found and not force:
+        print("not written: these look like credentials (--force if they aren't):", file=sys.stderr)
+        for w in found:
+            print(f"  {w}", file=sys.stderr)
+        return 1
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(out, f, indent=2, sort_keys=True, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+    print(f"{len(keys)} setting(s) into {path}; review with git diff, then commit")
+    return 0
+
+
+def reset(path):
+    current = get("/api/prefs")
+    for k in sorted(load(path)):
+        if not isinstance(current.get(k), str):
+            continue
+        req = urllib.request.Request(
+            f"{BASE}/api/prefs/{k}", data=b"null", method="PUT",
+            headers={"content-type": "application/json", "if-match": version(current[k])})
+        with urllib.request.urlopen(req, timeout=30):
+            pass
+        print(f"reset {k}")
+
+
+def main(args):
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0 if args else 2
+    if args[0] == "--reset":
+        if len(args) != 2:
+            print("usage: prefs-promote --reset FILE", file=sys.stderr)
+            return 2
+        reset(args[1])
+        return 0
+    force = "--force" in args
+    args = [a for a in args if a != "--force"]
+    if args[0] == "--from":
+        if len(args) < 3:
+            print("usage: prefs-promote --from PREFS FILE [KEY...]", file=sys.stderr)
+            return 2
+        with open(args[1]) as f:
+            current = json.load(f)
+        args = args[2:]
+    else:
+        current = get("/api/prefs")
+    return promote(args[0], args[1:] or VIEWS, current, force)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -600,33 +600,87 @@ fn a_day_order_left_unresolved_is_cleared_once_its_session_has_passed() {
     assert_eq!(cleared_for(&state, "wse-day"), 1);
 }
 
-#[test]
-fn a_closing_auction_order_is_never_auto_cleared() {
-    let state = root("cls-kept");
-    let mut cfg = config(state.clone());
+/// A closing-auction (`cls`) stock limit buy on KO, which the test profile allows.
+fn closing_auction_buy(cid: &str) -> String {
+    format!(
+        r#"{{"client_order_id":"{cid}","shape":"single","instrument":{{"class":"equity","symbol":"KO"}},"side":"buy","effect":"open","qty":1,"type":"limit","limit_price":"60.00","time_in_force":"cls"}}"#
+    )
+}
+
+fn config_with_ko(state: std::path::PathBuf) -> order_gateway::Config {
+    let mut cfg = config(state);
     cfg.profile.equities = vec!["KO".into()];
+    cfg
+}
+
+#[test]
+fn a_closing_auction_order_left_unresolved_is_cleared_once_its_session_has_passed() {
+    let state = root("cls-clear");
+    // The first submit never reaches the broker, so every lookup is a 404.
+    let script =
+        format!(r#"{{"clock_ts":{T0},"rules":[{{"nth":1,"submit":"error_before_send"}}]}}"#);
+    let gw = scripted(config_with_ko(state.clone()), &script);
+    let mut c = Conn::open(&gw, "reactor", None);
+    assert_eq!(
+        c.submit("r1", &closing_auction_buy("wse-cls"))["outcome"],
+        "unknown"
+    );
+    c.event("resolution", |v| {
+        v["client_order_id"] == "wse-cls" && v["outcome"] == "absent_after"
+    });
+    // Same session: still counted, and not cleared.
+    assert_eq!(c.req("open_orders", "q0", "").0["unresolved"], 1);
+    assert_eq!(cleared_for(&state, "wse-cls"), 0);
+    // The New York date moves on, and the broker still has nothing.
+    c.req("advance", "a1", &format!(r#""to_ts":{}"#, T0 + DAY));
+    let ev = c.event("cleared", |v| v["client_order_id"] == "wse-cls");
+    assert_eq!(
+        (ev["requester"].as_str(), ev["reason"].as_str()),
+        (Some("gateway"), Some("day_order_after_session")),
+        "{ev}"
+    );
+    assert_eq!(c.req("open_orders", "q1", "").0["unresolved"], 0);
+    gw.stop().unwrap();
+    assert_eq!(cleared_for(&state, "wse-cls"), 1);
+}
+
+#[test]
+fn a_day_and_a_closing_auction_order_from_a_prior_session_clear_on_the_same_poll() {
+    let state = root("cls-and-day");
     // Two submits never reach the broker: a day option and a closing-auction stock.
     let script = format!(
         r#"{{"clock_ts":{T0},"rules":[{{"nth":1,"submit":"error_before_send"}},{{"nth":2,"submit":"error_before_send"}}]}}"#
     );
-    let gw = scripted(cfg, &script);
+    let gw = scripted(config_with_ko(state.clone()), &script);
     let mut c = Conn::open(&gw, "reactor", None);
-    c.submit("r1", &buy("wse-d"));
-    let cls = r#"{"client_order_id":"wse-cls","shape":"single","instrument":{"class":"equity","symbol":"KO"},"side":"buy","effect":"open","qty":1,"type":"limit","limit_price":"60.00","time_in_force":"cls"}"#;
-    assert_eq!(c.submit("r2", cls)["outcome"], "unknown");
+    assert_eq!(c.submit("r1", &buy("wse-d"))["outcome"], "unknown");
+    // Each resolution is awaited before the next request: a request reads and discards
+    // the events that arrive before its response, so a later wait would never see them.
     c.event("resolution", |v| {
         v["client_order_id"] == "wse-d" && v["outcome"] == "absent_after"
     });
+    assert_eq!(
+        c.submit("r2", &closing_auction_buy("wse-cls"))["outcome"],
+        "unknown"
+    );
     c.event("resolution", |v| {
         v["client_order_id"] == "wse-cls" && v["outcome"] == "absent_after"
     });
     c.req("advance", "a1", &format!(r#""to_ts":{}"#, T0 + DAY));
-    // The day order goes on the same poll that considers the closing-auction order.
-    c.event("cleared", |v| v["client_order_id"] == "wse-d");
-    let (q, _) = c.req("open_orders", "q1", "");
-    assert_eq!(q["unresolved"], 1, "{q}");
+    // Both are past their session, and both are cleared on the same poll. Waiting on the
+    // unresolved count, not on each event, since an event read by one wait is not seen by the next.
+    let mut q = c.req("open_orders", "q1", "").0;
+    for n in 0..40 {
+        if q["unresolved"] == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        q = c.req("open_orders", &format!("q{}", n + 2), "").0;
+    }
+    assert_eq!(q["unresolved"], 0, "{q}");
     gw.stop().unwrap();
-    assert_eq!(cleared_for(&state, "wse-cls"), 0);
+    assert_eq!(cleared_for(&state, "wse-d"), 1);
+    assert_eq!(cleared_for(&state, "wse-cls"), 1);
 }
 
 #[test]
@@ -654,12 +708,20 @@ fn a_day_order_the_broker_still_shows_is_left_alone() {
     assert_eq!(cleared_for(&state, "wse-live"), 0);
 }
 
+/// The journaled `clear_refused` lines for one client order id.
+fn refused_for(state: &std::path::Path, cid: &str) -> Vec<serde_json::Value> {
+    let needle = format!(r#""client_order_id":"{cid}""#);
+    journal(state)
+        .iter()
+        .filter(|l| l.contains(r#""kind":"clear_refused""#) && l.contains(&needle))
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
 #[test]
 fn a_clear_is_for_admins_and_refuses_what_the_broker_shows() {
-    let gw = scripted(
-        config(root("clear-sim")),
-        &format!(r#"{{"clock_ts":{T0}}}"#),
-    );
+    let state = root("clear-sim");
+    let gw = scripted(config(state.clone()), &format!(r#"{{"clock_ts":{T0}}}"#));
     let mut c = Conn::open(&gw, "reactor", None);
     let mut ops = Conn::open(&gw, "ops", None);
     assert_eq!(c.submit("r1", &buy("wse-ok"))["outcome"], "accepted");
@@ -696,4 +758,112 @@ fn a_clear_is_for_admins_and_refuses_what_the_broker_shows() {
         r#""client_order_id":"wse-ok","reason":" ""#,
     );
     assert_eq!(v["code"], "invalid_request", "{v}");
+    gw.stop().unwrap();
+    // Every request is journaled, refused or not, with who asked and why.
+    let refused = refused_for(&state, "wse-ok");
+    let shape: Vec<(&str, &str, &str)> = refused
+        .iter()
+        .map(|r| {
+            (
+                r["requester"].as_str().unwrap(),
+                r["reason"].as_str().unwrap(),
+                r["request_reason"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("reactor", "forbidden", "try"),
+            ("ops", "broker_shows_order", "test"),
+            ("ops", "invalid_request", " "),
+        ],
+        "{refused:?}"
+    );
+    assert_eq!(refused[0]["detail"], serde_json::Value::Null);
+    assert_eq!(refused[1]["detail"]["check"], "open_orders");
+    assert_eq!(refused[1]["broker"]["open_orders"]["result"], "shows");
+    assert_eq!(refused[1]["broker"]["open_orders"]["status"], "new");
+    assert_eq!(refused[2]["detail"]["path"], "reason");
+    let unknown = refused_for(&state, "wse-none");
+    assert_eq!(unknown.len(), 1, "{unknown:?}");
+    assert_eq!(unknown[0]["reason"], "unknown_order");
+}
+
+#[test]
+fn a_full_open_orders_listing_stops_both_the_automatic_and_the_operator_clear() {
+    let state = root("listing-full");
+    // Two submits never reach the broker: a day option and a closing-auction stock.
+    let first = format!(
+        r#"{{"clock_ts":{T0},"rules":[{{"nth":1,"submit":"error_before_send"}},{{"nth":2,"submit":"error_before_send"}}]}}"#
+    );
+    let gw = scripted(config_with_ko(state.clone()), &first);
+    let mut c = Conn::open(&gw, "reactor", None);
+    assert_eq!(c.submit("r1", &buy("wse-day"))["outcome"], "unknown");
+    // Each resolution is awaited before the next request: a request reads and discards
+    // the events that arrive before its response, so a later wait would never see them.
+    c.event("resolution", |v| {
+        v["client_order_id"] == "wse-day" && v["outcome"] == "absent_after"
+    });
+    assert_eq!(
+        c.submit("r2", &closing_auction_buy("wse-cls"))["outcome"],
+        "unknown"
+    );
+    c.event("resolution", |v| {
+        v["client_order_id"] == "wse-cls" && v["outcome"] == "absent_after"
+    });
+    gw.stop().unwrap();
+    // The next New York date. The broker's open listing is full: 500 other orders, so
+    // the listing may hide either order.
+    let others = (0..500)
+        .map(|i| {
+            format!(
+                r#"{{"client_order_id":"other-{i}","symbol":"{CALL}","side":"buy","qty":1,"limit_price":"1.25"}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let next = format!(r#"{{"clock_ts":{},"orders":[{others}]}}"#, T0 + DAY);
+    let gw = scripted(config_with_ko(state.clone()), &next);
+    let mut ops = Conn::open(&gw, "ops", None);
+    // The operator's clear is refused: the listing cannot rule the order out.
+    let (v, _) = ops.req(
+        "clear_order",
+        "x1",
+        r#""client_order_id":"wse-day","reason":"test""#,
+    );
+    assert_eq!(
+        (
+            v["reason"].as_str(),
+            v["detail"]["check"].as_str(),
+            v["detail"]["code"].as_str()
+        ),
+        (
+            Some("broker_unreachable"),
+            Some("open_orders"),
+            Some("listing_full")
+        ),
+        "{v}"
+    );
+    // Let several polls run: the automatic clear must leave both orders alone.
+    std::thread::sleep(Duration::from_millis(300));
+    gw.stop().unwrap();
+    assert_eq!(cleared_for(&state, "wse-day"), 0);
+    assert_eq!(cleared_for(&state, "wse-cls"), 0);
+    let refused = refused_for(&state, "wse-day");
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0]["broker"]["open_orders"]["result"], "unreliable");
+    let automatic = journal(&state)
+        .iter()
+        .filter(|l| {
+            l.contains(r#""kind":"clear_refused""#) && l.contains(r#""requester":"gateway""#)
+        })
+        .count();
+    assert_eq!(automatic, 0);
+    // A restart reads the refusals and changes no state: both orders stay unresolved.
+    let gw = scripted(config_with_ko(state.clone()), &next);
+    let mut c = Conn::open(&gw, "reactor", None);
+    let (q, _) = c.req("open_orders", "q9", "");
+    assert_eq!(q["unresolved"], 2, "{q}");
+    gw.stop().unwrap();
 }

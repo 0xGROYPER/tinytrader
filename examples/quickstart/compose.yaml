@@ -1,7 +1,9 @@
 # tinytrader quickstart: a toy collector and the console, on one machine.
-#   ../../nix/build-images.sh ticker console   # once, and after changes (needs only Docker)
-#   docker compose up
+#   docker compose up -d
 #   open http://localhost:8080
+# Pulls the published images (ghcr.io/dawson-shay/tinytrader-<service>:main).
+# To build them from this checkout instead, or use Nix-built images, see
+# README.md, "Images".
 name: tinytrader-quickstart
 
 # Every service: restarts, rotated logs (Docker keeps them forever by
@@ -14,7 +16,7 @@ x-service: &service
 
 services:
   ticker:
-    image: tinytrader/ticker:nix
+    image: ${TINYTRADER_IMAGE_PREFIX:-ghcr.io/dawson-shay/tinytrader-}ticker:${TINYTRADER_TAG:-main}
     labels:
       tinytrader.observe: "9105"
     environment:
@@ -28,20 +30,20 @@ services:
     cpus: 1.0
 
   console:
-    image: tinytrader/console:nix
+    image: ${TINYTRADER_IMAGE_PREFIX:-ghcr.io/dawson-shay/tinytrader-}console:${TINYTRADER_TAG:-main}
     labels:
       tinytrader.observe: "8080"
     environment:
       CONSOLE_LISTEN: 0.0.0.0:8080
       CONSOLE_TOPOLOGY: /etc/tinytrader/topology.json
       CONSOLE_DOCKER: http://docker-proxy:2375
-      CONSOLE_COMPOSE_PROJECT: tinytrader-quickstart
+      CONSOLE_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-tinytrader-quickstart}
       CONSOLE_COLLECTIONS: Docs=/srv/docs
     volumes:
       - ./topology.json:/etc/tinytrader/topology.json:ro
       - ../../docs:/srv/docs:ro
     ports:
-      - "127.0.0.1:8080:8080"   # this machine only
+      - "127.0.0.1:${CONSOLE_PORT:-8080}:8080"   # this machine only
     depends_on: [ticker, docker-proxy]
     <<: *service
     mem_limit: 256m

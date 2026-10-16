@@ -8,9 +8,12 @@
 > (`nix flake check`), and the NixOS module and generated systemd units
 > exist. Since 2026-10-07 container images are built by Nix too
 > (`nix/images.nix`); on a Mac, or with Docker alone, `nix/build-images.sh`
-> builds them inside Docker's Linux VM, so there is one build. The
+> builds them inside Docker's Linux VM, so there is one build. Since
+> 2026-10-16 the published images (`ghcr.io`) are built with Cargo from a
+> `Dockerfile` instead, so the examples need only Docker; the Nix images
+> remain for Nix users. The
 > nix-darwin module (`darwinModules.services`) runs the same service
-> definitions as launchd agents on macOS.
+> definitions as launchd agents (or boot-time daemons) on macOS.
 
 ## Context
 

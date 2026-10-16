@@ -8,8 +8,8 @@ pub mod trading;
 
 use crate::broker::{
     AccountInfo, Broker, BrokerError, BrokerOrder, CancelResult, Capabilities, Closing,
-    FlattenResult, MarketClock, OrderRef, OrderUpdate, Position, Query, Reply, SessionDay,
-    SubmitResult, Update,
+    FlattenResult, MarketClock, OPEN_ORDERS_LIMIT, OrderRef, OrderUpdate, Position, Query, Reply,
+    SessionDay, SubmitResult, Update,
 };
 use crate::intent::{Intent, fmt_cents};
 use crate::protocol::{Obj, arr, quote};
@@ -424,7 +424,9 @@ impl Broker for AlpacaPaper {
     }
 
     fn open_orders(&mut self) -> Query<Vec<BrokerOrder>> {
-        self.orders("/v2/orders?status=open&nested=true&limit=500")
+        self.orders(&format!(
+            "/v2/orders?status=open&nested=true&limit={OPEN_ORDERS_LIMIT}"
+        ))
     }
 
     fn orders_since(&mut self, after_ts: u64) -> Query<Vec<BrokerOrder>> {

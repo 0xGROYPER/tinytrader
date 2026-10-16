@@ -35,8 +35,9 @@ disappeared was skipped.
   protocol and may trade real money: they are judged by their containers'
   state and restarts only. URLs on the gateways' ports are refused.
 - **It runs as `tinytrader.services.watch`**, the generic service definition:
-  a launchd agent on macOS, a systemd unit on Linux, with its secrets as
-  credentials (`WATCH_NOTIFY_FILE`, `WATCH_HEARTBEAT_FILE`).
+  a launchd agent on macOS (or, with `launchd = "daemon"`, a boot-time
+  daemon; it finds native services run as either), a systemd unit on Linux,
+  with its secrets as credentials (`WATCH_NOTIFY_FILE`, `WATCH_HEARTBEAT_FILE`).
 - **The console's rule for down** (libs/fleet `ServiceState::status`, and the
   page's `statusOf`) now includes a restarting container and a service
   reporting `failed`; its notices also say when a container it had seen is

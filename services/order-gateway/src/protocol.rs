@@ -402,9 +402,6 @@ pub(crate) fn parse_line(bytes: &[u8]) -> Result<Line, LineError> {
             "clear_order" => {
                 let client_order_id = f.string("client_order_id")?;
                 let reason = f.string("reason")?;
-                if reason.trim().is_empty() {
-                    return Err(invalid("reason", "a non-empty reason"));
-                }
                 Op::ClearOrder {
                     client_order_id,
                     reason,
