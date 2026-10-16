@@ -28,7 +28,6 @@
         "relay"
         "order-gateway"
         "queue"
-        "ai-proxy"
       ];
       image =
         name:

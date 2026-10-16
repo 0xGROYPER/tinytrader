@@ -64,7 +64,6 @@ Cargo or Nix, see [Building and testing](#building-and-testing).
 | `services/order-gateway` | The order gateway (`tinytrader.gateway/1`): the only holder of a broker account's keys; validation, caps, a kill switch and a hash-chained journal ([its README](services/order-gateway/README.md)) |
 | `services/queue` | The job queue: work that runs later or when the machine can spare it, from templates the deployment defines ([decision 0012](docs/decisions/0012-job-queue.md)) |
 | `nix/watch.nix` | `watch`: a host's own monitor (Docker, containers, health, native services, disks), pushed to an ntfy-style URL, with a heartbeat ping after each run ([decision 0015](docs/decisions/0015-host-watch.md)) |
-| `nix/ai-proxy.nix` | `ai-proxy`: a local OpenAI-compatible AI endpoint on loopback |
 | `infra/modules` | `tinytrader.services.<name>`: NixOS modules (systemd units) and the same definitions as nix-darwin launchd agents or boot-time daemons |
 | `nix/` | Flake modules: Rust builds, images, checks |
 | `examples/` | Complete deployments you can run or copy |
