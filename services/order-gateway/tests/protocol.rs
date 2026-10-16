@@ -1,7 +1,7 @@
 //! Protocol conformance: a golden NDJSON transcript, framing and handshake errors,
 //! strict request validation, roles and event visibility, loopback-only binding.
 mod support;
-use order_gateway::check_paths;
+use order_gateway::{SimBroker, check_paths, start};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -246,6 +246,21 @@ fn roles_and_event_visibility() {
     );
     assert!(c.lines.iter().all(|l| !l.contains("oth-1")));
     gw.stop().unwrap();
+}
+
+#[test]
+fn listen_any_is_the_only_way_to_bind_outside_loopback() {
+    let mut refused = config(root("listen-any-refused"));
+    refused.listen = "0.0.0.0:0".parse().unwrap();
+    let err = start(refused, SimBroker::scripted("{}").unwrap())
+        .err()
+        .expect("a non-loopback listen without --listen-any is refused");
+    assert!(err.contains("loopback"), "{err}");
+
+    let mut allowed = config(root("listen-any-allowed"));
+    allowed.listen = "0.0.0.0:0".parse().unwrap();
+    allowed.listen_any = true;
+    assert!(start(allowed, SimBroker::scripted("{}").unwrap()).is_ok());
 }
 
 #[test]

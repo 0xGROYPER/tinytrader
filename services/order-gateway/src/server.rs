@@ -96,8 +96,12 @@ pub struct Config {
     pub account: String,
     /// `paper` (live is out of scope for v1).
     pub environment: String,
-    /// Loopback listen address.
+    /// Listen address: loopback, unless `listen_any` is set.
     pub listen: SocketAddr,
+    /// Allows a non-loopback listen address, for a container whose port is
+    /// published to loopback by the host (`--listen-any`). The state-root check
+    /// still applies.
+    pub listen_any: bool,
     /// Durable state root (journal, lock, `KILL`).
     pub state: PathBuf,
     /// Clients bound to this account.
@@ -418,7 +422,11 @@ impl Gateway {
 /// # Errors
 /// Path refusal, lock contention, journal corruption or bind failure.
 pub fn start<B: Broker + Send + 'static>(cfg: Config, broker: B) -> Result<Gateway, String> {
-    check_paths(cfg.listen, &cfg.state)?;
+    if cfg.listen_any {
+        check_state(&cfg.state)?;
+    } else {
+        check_paths(cfg.listen, &cfg.state)?;
+    }
     let (journal, recovered) = Journal::open(&cfg.state, &cfg.account)?;
     let listener =
         TcpListener::bind(cfg.listen).map_err(|e| format!("bind {}: {e}", cfg.listen))?;

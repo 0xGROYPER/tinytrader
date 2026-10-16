@@ -45,6 +45,7 @@ pub fn config(state: PathBuf) -> Config {
         account: "sim-1".into(),
         environment: "paper".into(),
         listen: "127.0.0.1:0".parse().unwrap(),
+        listen_any: false,
         state,
         clients: clients(),
         profile: Profile::default(),
