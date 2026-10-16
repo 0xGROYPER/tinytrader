@@ -309,6 +309,47 @@ fn a_stream_event_settles_an_absent_order() {
     assert_eq!(c.submit("r3", &buy("wse-next"))["outcome"], "accepted");
 }
 
+/// Polls `open_orders` until nothing is unresolved, with no stream event sent.
+fn wait_resolved(c: &mut Conn) -> Value {
+    let t = Instant::now();
+    let mut n = 0;
+    loop {
+        n += 1;
+        let (q, _) = c.req("open_orders", &format!("w{n}"), "");
+        if q["unresolved"] == 0 {
+            return q;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "still unresolved: {q}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_periodic_check_settles_an_absent_order_the_broker_now_shows() {
+    let r = rig_with("alpaca-absent-periodic", |p| p.max_open = 1);
+    let mut c = ready(&r.gw, "reactor");
+    absent_submit(&r, &mut c, "wse-pc");
+    r.fake.appear(&format!(
+        r#"{{"client_order_id":"wse-pc","symbol":"{CALL}","qty":"1","side":"buy","limit_price":"1.25","position_intent":"buy_to_open"}}"#
+    ));
+    // No stream event: the poll's lookup finds it. It is working, so it still counts.
+    wait_resolved(&mut c);
+    assert_eq!(c.submit("r2", &buy("wse-next"))["detail"]["cap"], "open_orders");
+}
+
+#[test]
+fn a_periodic_check_clears_an_absent_order_the_broker_never_shows() {
+    let r = rig_with("alpaca-absent-gone", |p| p.max_open = 1);
+    let mut c = ready(&r.gw, "reactor");
+    absent_submit(&r, &mut c, "wse-gone");
+    // Two 404s (the submit's window, then the poll's check) mean it is gone.
+    wait_resolved(&mut c);
+    assert_eq!(c.submit("r2", &buy("wse-next"))["outcome"], "accepted");
+}
+
 #[test]
 fn a_close_waits_for_pending_orders_on_its_leg_and_opens_do_not() {
     let r = rig("alpaca-leg-guard");

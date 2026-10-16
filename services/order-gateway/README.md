@@ -162,6 +162,7 @@ A known `client_order_id` with a *different* intent is `not_sent{duplicate_confl
    - The order **stays open** until it is settled. It uses a `max_open` slot, blocks closes on its legs ([section 8](#8-rate-budget-and-caps)) and counts in `unresolved`.
    - A stream event for it settles it: a terminal state (`canceled`, `rejected`, `filled`, ...) stops it counting, and any other state makes it an ordinary open order.
    - A reconciliation settles it too. It looks the order up again: found, and it is an ordinary order; a second 404, and it is no longer open.
+   - While the gateway is connected to the broker, every poll interval (`poll`, default 1 s) looks up each absent order again, with the same rule, so an absent order settles without waiting for a stream reconnect or a restart. Each check is one budget charge per absent order.
    - A restart does not keep the absent state. The order comes back unknown and is looked up again, so it stays open until then.
    - What to do next is the client's decision.
 5. If the last lookup fails (a timeout, a 5xx, a connection error or a 429), the gateway emits `resolution{outcome:"unresolved", window_ms}`. Nothing is known about the order, so it is **unknown**, not absent:
