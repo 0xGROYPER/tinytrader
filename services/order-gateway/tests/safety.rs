@@ -574,14 +574,16 @@ fn a_day_and_a_closing_auction_order_from_a_prior_session_clear_on_the_same_poll
     );
     let gw = scripted(config_with_ko(state.clone()), &script);
     let mut c = Conn::open(&gw, "reactor", None);
-    c.submit("r1", &buy("wse-d"));
+    assert_eq!(c.submit("r1", &buy("wse-d"))["outcome"], "unknown");
+    // Each resolution is awaited before the next request: a request reads and discards
+    // the events that arrive before its response, so a later wait would never see them.
+    c.event("resolution", |v| {
+        v["client_order_id"] == "wse-d" && v["outcome"] == "absent_after"
+    });
     assert_eq!(
         c.submit("r2", &closing_auction_buy("wse-cls"))["outcome"],
         "unknown"
     );
-    c.event("resolution", |v| {
-        v["client_order_id"] == "wse-d" && v["outcome"] == "absent_after"
-    });
     c.event("resolution", |v| {
         v["client_order_id"] == "wse-cls" && v["outcome"] == "absent_after"
     });
@@ -719,13 +721,15 @@ fn a_full_open_orders_listing_stops_both_the_automatic_and_the_operator_clear() 
     let gw = scripted(config_with_ko(state.clone()), &first);
     let mut c = Conn::open(&gw, "reactor", None);
     assert_eq!(c.submit("r1", &buy("wse-day"))["outcome"], "unknown");
+    // Each resolution is awaited before the next request: a request reads and discards
+    // the events that arrive before its response, so a later wait would never see them.
+    c.event("resolution", |v| {
+        v["client_order_id"] == "wse-day" && v["outcome"] == "absent_after"
+    });
     assert_eq!(
         c.submit("r2", &closing_auction_buy("wse-cls"))["outcome"],
         "unknown"
     );
-    c.event("resolution", |v| {
-        v["client_order_id"] == "wse-day" && v["outcome"] == "absent_after"
-    });
     c.event("resolution", |v| {
         v["client_order_id"] == "wse-cls" && v["outcome"] == "absent_after"
     });
