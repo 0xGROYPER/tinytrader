@@ -64,10 +64,13 @@
 //!   account's gateway state, its `unresolved` count and the console's open orders), `POST
 //!   /api/orders/{account}` (`{order, confirm: account}`) and `POST
 //!   /api/orders/{account}/{client_order_id}/cancel`.
-//!   Every order route (those, and an account's flatten and resume) also
-//!   needs `CONSOLE_ORDER_LOGINS` (the Tailscale logins allowed to send,
-//!   comma-separated) and `CONSOLE_ORDER_TOKEN` (or `_FILE`), which the page
-//!   sends as `X-Order-Token`. Either unset refuses them (`OrderGate`).
+//!   Every write route also needs `CONSOLE_ORDER_LOGINS` (the Tailscale logins
+//!   allowed to write, comma-separated) and `CONSOLE_ORDER_TOKEN` (or `_FILE`),
+//!   which the page sends as `X-Order-Token`. Either unset refuses them
+//!   (`WriteGate`). The write routes are the order routes (those, and an
+//!   account's flatten and resume), the jobs service's and the queue's POST
+//!   (and the queue's PATCH) routes, drive approval, and POST `/api/reminders`
+//!   and `/api/profiles`. Their GET routes stay open.
 //! - `CONSOLE_PAGE`: serve the page from this file, and its modules and
 //!   libraries from beside it, read on each request, instead of the copies
 //!   built in (optional; lets the page change without a rebuild).
@@ -141,16 +144,16 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let order_gate = match OrderGate::from_env() {
+    let write_gate = match WriteGate::from_env() {
         Ok(g) => g,
         Err(e) => {
             eprintln!("console: {e}");
             std::process::exit(2);
         }
     };
-    if !order_gate.open() {
+    if !write_gate.open() {
         eprintln!(
-            "console: orders are refused until CONSOLE_ORDER_LOGINS and CONSOLE_ORDER_TOKEN (or _FILE) are set"
+            "console: writes are refused until CONSOLE_ORDER_LOGINS and CONSOLE_ORDER_TOKEN (or _FILE) are set"
         );
     }
     let config = PollerConfig {
@@ -273,31 +276,17 @@ async fn main() {
         .route("/api/stream/{service}/{stream}", get(stream))
         .route("/api/collections", get(list_collections))
         .route("/api/collections/{id}/{index}", get(collection_doc))
-        .route("/api/jobs/{*rest}", get(jobs_proxy).post(jobs_proxy))
-        .route(
-            "/api/queue/{*rest}",
-            get(queue_proxy).post(queue_proxy).patch(queue_proxy),
-        )
-        .route(
-            "/api/store/volumes/approve",
-            axum::routing::post(store_approve),
-        )
-        .route("/api/reminders", get(reminders_get).post(reminders_post))
+        .route("/api/jobs/{*rest}", get(jobs_proxy))
+        .route("/api/queue/{*rest}", get(queue_proxy))
+        .route("/api/reminders", get(reminders_get))
         .route("/api/prefs", get(prefs_get))
         .route("/api/prefs/{key}", axum::routing::put(prefs_put))
-        .route(
-            "/api/profiles",
-            get(profiles_list)
-                .post(profiles_post)
-                .layer(axum::extract::DefaultBodyLimit::max(
-                    profiles::MAX_BYTES + 1024,
-                )),
-        )
+        .route("/api/profiles", get(profiles_list))
         .route("/api/profiles/{id}", get(profiles_get))
         .route("/api/accounts/gateways", get(gateways_list))
         .route("/api/orders", get(orders_list))
-        // Sending and cancelling orders, flatten and resume: behind OrderGate.
-        .merge(order_routes(order_gate))
+        // Every write, including the orders, behind WriteGate.
+        .merge(write_routes(write_gate))
         // The console's writes (jobs, the queue, drive approval, reminders, flatten) can't be
         // forged by another page open in the browser.
         .layer(axum::middleware::from_fn(
@@ -802,26 +791,26 @@ async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
     ))
 }
 
-/// Who may send an order. Every order route (submit, cancel, flatten, resume)
-/// needs both checks, before any gateway call:
+/// Who may write. Every write route (see [`write_routes`]: orders, flatten and
+/// resume, the jobs service, the queue, drive approval, reminders, profiles)
+/// needs both checks, before anything is forwarded or sent to a gateway:
 ///
 /// - the Tailscale login: `tailscale serve` sets `Tailscale-User-Login` on
 ///   what it forwards, and it must be one of `CONSOLE_ORDER_LOGINS`
-///   (comma-separated, exact match). Empty or unset refuses every order.
+///   (comma-separated, exact match). Empty or unset refuses every write.
 /// - the order token: `X-Order-Token` must equal `CONSOLE_ORDER_TOKEN` (or the
-///   file `CONSOLE_ORDER_TOKEN_FILE` names). Unset refuses every order. The
+///   file `CONSOLE_ORDER_TOKEN_FILE` names). Unset refuses every write. The
 ///   login header alone isn't enough: anything on this Mac can send it to
 ///   127.0.0.1:8080, so the token is what stops a local process.
 ///
-/// Reads (`GET /api/orders`, the account lists) stay open. Refusals say
-/// nothing about which check failed.
+/// GET routes stay open. Refusals say nothing about which check failed.
 #[derive(Clone)]
-struct OrderGate {
+struct WriteGate {
     logins: Vec<String>,
     token: Option<String>,
 }
 
-impl OrderGate {
+impl WriteGate {
     fn from_env() -> Result<Self, String> {
         let logins = env("CONSOLE_ORDER_LOGINS", "")
             .split(',')
@@ -833,12 +822,12 @@ impl OrderGate {
         Ok(Self { logins, token })
     }
 
-    /// Whether any order can be sent at all.
+    /// Whether any write can be made at all.
     fn open(&self) -> bool {
         !self.logins.is_empty() && self.token.is_some()
     }
 
-    /// Why an order request is refused, as (status, reason), if it is.
+    /// Why a write request is refused, as (status, reason), if it is.
     fn refuse(&self, headers: &axum::http::HeaderMap) -> Option<(StatusCode, &'static str)> {
         let login = headers.get("tailscale-user-login").and_then(|v| v.to_str().ok());
         if !login.is_some_and(|l| self.logins.iter().any(|a| a == l)) {
@@ -866,9 +855,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
 }
 
-/// Middleware: refuse an order request the [`OrderGate`] doesn't allow.
-async fn order_gate(
-    AxumState(gate): AxumState<OrderGate>,
+/// Middleware: refuse a write the [`WriteGate`] doesn't allow.
+async fn write_gate(
+    AxumState(gate): AxumState<WriteGate>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
@@ -878,8 +867,11 @@ async fn order_gate(
     }
 }
 
-/// The order routes, each behind the [`OrderGate`].
-fn order_routes(gate: OrderGate) -> Router<Arc<App>> {
+/// The write routes, each behind the [`WriteGate`]: orders (submit, cancel,
+/// flatten, resume), the jobs service and the queue (POST, and PATCH for the
+/// queue), drive approval, reminders and profile recordings. Their GET routes
+/// are merged in separately and stay open.
+fn write_routes(gate: WriteGate) -> Router<Arc<App>> {
     Router::new()
         .route("/api/orders/{account}", axum::routing::post(order_submit))
         .route(
@@ -894,7 +886,23 @@ fn order_routes(gate: OrderGate) -> Router<Arc<App>> {
             "/api/accounts/{account}/resume",
             axum::routing::post(account_resume),
         )
-        .route_layer(axum::middleware::from_fn_with_state(gate, order_gate))
+        .route("/api/jobs/{*rest}", axum::routing::post(jobs_proxy))
+        .route(
+            "/api/queue/{*rest}",
+            axum::routing::post(queue_proxy).patch(queue_proxy),
+        )
+        .route(
+            "/api/store/volumes/approve",
+            axum::routing::post(store_approve),
+        )
+        .route("/api/reminders", axum::routing::post(reminders_post))
+        .route(
+            "/api/profiles",
+            axum::routing::post(profiles_post).layer(axum::extract::DefaultBodyLimit::max(
+                profiles::MAX_BYTES + 1024,
+            )),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(gate, write_gate))
 }
 
 /// Send one of the Spread builder's orders to a paper account's gateway as
@@ -1112,4 +1120,58 @@ fn no_store(body: impl IntoResponse) -> Response {
 
 fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ME: &str = "me@example.net";
+
+    fn headers(login: Option<&'static str>, token: Option<&'static str>) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        if let Some(l) = login {
+            h.insert("tailscale-user-login", axum::http::HeaderValue::from_static(l));
+        }
+        if let Some(t) = token {
+            h.insert("x-order-token", axum::http::HeaderValue::from_static(t));
+        }
+        h
+    }
+
+    /// The status a request with these headers is refused with, if it is.
+    fn refused(
+        gate: &WriteGate,
+        login: Option<&'static str>,
+        token: Option<&'static str>,
+    ) -> Option<StatusCode> {
+        gate.refuse(&headers(login, token)).map(|r| r.0)
+    }
+
+    #[test]
+    fn write_gate_needs_the_login_and_the_token() {
+        let gate = WriteGate {
+            logins: vec![ME.to_owned()],
+            token: Some("secret".to_owned()),
+        };
+        assert!(gate.open());
+        // A wrong or missing login is forbidden, whatever the token.
+        assert_eq!(refused(&gate, None, Some("secret")), Some(StatusCode::FORBIDDEN));
+        assert_eq!(refused(&gate, Some("other"), Some("secret")), Some(StatusCode::FORBIDDEN));
+        // The right login with a wrong or missing token is unauthorized.
+        assert_eq!(refused(&gate, Some(ME), None), Some(StatusCode::UNAUTHORIZED));
+        assert_eq!(refused(&gate, Some(ME), Some("guess")), Some(StatusCode::UNAUTHORIZED));
+        // Both right: let through.
+        assert_eq!(refused(&gate, Some(ME), Some("secret")), None);
+    }
+
+    #[test]
+    fn write_gate_without_a_token_refuses_everything() {
+        let gate = WriteGate {
+            logins: vec![ME.to_owned()],
+            token: None,
+        };
+        assert!(!gate.open());
+        assert_eq!(refused(&gate, Some(ME), Some("anything")), Some(StatusCode::UNAUTHORIZED));
+    }
 }
