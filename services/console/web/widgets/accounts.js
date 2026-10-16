@@ -10,8 +10,9 @@
 // Spread builder on a card opens it with that account picked for its ticket.
 // Liquidate (any account the console trades, live too) closes every option
 // position at once (lib/liquidate.js): the orders it will send are shown with
-// their prices, the console's own open orders are cancelled first, and a live
-// account asks once more.
+// their prices, the console's own open orders are cancelled first, each order
+// is checked against a fresh read just before it is sent, and a live account
+// asks once more.
 //
 // Account (one account): the same for one account, picked at its top (the
 // live account until another is picked, kept with the panel), with room for
@@ -24,7 +25,7 @@ import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { askHeld } from '../lib/position.js';
 import { createTicket, tradable, routed, occLabel } from '../lib/ticket.js';
-import { plan, quotes, priced, send, cancelOurs, hold, holdOf } from '../lib/liquidate.js';
+import { plan, quotes, priced, send, cancelOurs, hold, holdOf, reread, fitted } from '../lib/liquidate.js';
 import { get } from '../lib/cache.js';
 
 /** An account's option positions by underlying and expiry, for the Spread builder's payoff. */
@@ -126,6 +127,8 @@ function liquidatePanel(a) {
     ours ? `Cancels the console's ${ours} open order${ours > 1 ? 's' : ''} first.` : '',
     theirs ? `<span class="neg">${theirs} open order${theirs > 1 ? 's' : ''} placed elsewhere stay${theirs > 1 ? '' : 's'}, and can keep a contract from closing: cancel ${theirs > 1 ? 'them' : 'it'} where ${theirs > 1 ? 'they were' : 'it was'} placed.</span>` : '',
     left.length ? `Left out: ${left.map(x => `${esc(occLabel(x.symbol))} (${esc(x.why)})`).join(', ')}.` : '',
+    L?.left?.length ? `Left out at send, from a fresh read: ${L.left.map(x => `${esc(occLabel(x.symbol))} (${esc(x.why)})`).join(', ')}.` : '',
+    L?.error ? `<span class="neg">${esc(L.error)}</span>` : '',
   ].filter(Boolean).map(x => `<p class="muted" style="margin:0;font-size:12px">${x}</p>`).join('');
   const confirming = L.confirm > Date.now();
   const head = L.stage === 'done' ? `<b>Liquidate ${esc(a.label || name)}: ${L.results.filter(r => r.ok).length} of ${L.results.length} sent.</b>`
@@ -381,18 +384,32 @@ function mount(el, single = false, book = false) {
     if (holdOf(name, a)) { update(); return; }
     if (live && L.confirm <= Date.now()) { L.confirm = Date.now() + 6000; update(); setTimeout(update, 6100); return; }
     const { orders } = plan(a?.positions);
-    L.stage = 'sending'; L.sent = orders; L.results = orders.map(() => null); update();
-    // Our own working orders hold contracts: cancelled, then gone from the account (at most 5 s).
-    if (await cancelOurs(name, a?.orders)) {
-      for (let i = 0; i < 25 && (accountOf(name)?.orders || []).some(o => (o.client_order_id || '').startsWith('tt-')); i++) await new Promise(r => setTimeout(r, 200));
+    // Set before any await: a second run cannot start while this one reads or sends.
+    L.stage = 'sending'; L.sent = orders; L.results = orders.map(() => null); L.left = []; L.error = ''; update();
+    const unread = (from, text) => {
+      L.error = text;
+      for (let j = from; j < orders.length; j++) L.results[j] = { ok: false, text: 'not sent: the positions could not be re-read' };
+    };
+    // Read first: if the account can't be read, nothing is cancelled or sent.
+    if (!await reread(name)) unread(0, 'The positions could not be re-read, so nothing was sent.');
+    else {
+      // Our own working orders hold contracts: cancelled, then gone from the account (at most 5 s).
+      if (await cancelOurs(name, a?.orders)) {
+        for (let i = 0; i < 25 && (accountOf(name)?.orders || []).some(o => (o.client_order_id || '').startsWith('tt-')); i++) await new Promise(r => setTimeout(r, 200));
+      }
+      // Fresh quotes, then the orders one at a time: each is checked against a fresh read just before it is sent.
+      L.q = await quotes(orders);
+      for (let i = 0; i < orders.length; i++) {
+        const fresh = await reread(name);
+        if (!fresh) { unread(i, 'The positions could not be re-read before an order, so the rest were not sent.'); break; }
+        const f = fitted(orders[i], fresh);
+        L.left.push(...f.left);
+        if (!f.order) { L.results[i] = { ok: false, text: `not sent: ${[...new Set(f.left.map(x => x.why))].join('; ')}` }; update(); continue; }
+        const p = priced(f.order, L.q, L.market);
+        L.results[i] = p ? await send(name, live, f.order, p) : { ok: false, text: 'not sent: no quote on every leg' };
+        update();
+      }
     }
-    // Fresh quotes, then every order at once.
-    L.q = await quotes(orders);
-    await Promise.all(orders.map(async (o, i) => {
-      const p = priced(o, L.q, L.market);
-      L.results[i] = p ? await send(name, live, o, p) : { ok: false, text: 'not sent: no quote on every leg' };
-      update();
-    }));
     // An order that may be live holds the account until its open orders are read again (lib/liquidate.js).
     hold(name, accountOf(name)?.updated_at, L.results.filter(r => r.maybe).map(r => r.id || null));
     L.stage = 'done'; update();

@@ -6,7 +6,10 @@
 // order leaves a short leg uncovered on its own. Each is priced at the
 // marketable limit (the natural and 5%, at least $0.05, past it), or sent at
 // market, from the chain's quotes read just before sending. Stock positions
-// and contracts already expired are left out, and said so.
+// and contracts already expired are left out, and said so. Each order is
+// checked against a fresh read of the account just before it is sent
+// (reread, fitted), so a leg already closed, or covered by a working order,
+// is left out.
 import { fleet } from './fleet.js';
 import { get, stream } from './cache.js';
 import { notSentText } from './orders.js';
@@ -123,6 +126,47 @@ export async function cancelOurs(account, orders) {
   const ours = (orders || []).filter(o => (o.client_order_id || '').startsWith('tt-'));
   await Promise.all(ours.map(o => fetch(`/api/orders/${encodeURIComponent(account)}/${encodeURIComponent(o.client_order_id)}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => null)));
   return ours.length;
+}
+
+/**
+ * The account as the account service has it now, read the way the widget
+ * refreshes (GET /api/state): its positions and open orders, or null when either
+ * can't be read. Never the snapshot the page already holds.
+ */
+export async function reread(account) {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    if (!r.ok) return null;
+    const v = await r.json();
+    for (const s of Object.values(v.services || {})) {
+      const a = (s?.accounts?.accounts || []).find(x => x?.name === account);
+      if (a) return Array.isArray(a.positions) && Array.isArray(a.orders) ? a : null;
+    }
+    return null;
+  } catch (_) { return null; }
+}
+
+/**
+ * `o` as the fresh account `a` allows: its units cut to what each leg still
+ * holds on the side it closes, so no leg can flip. No order when a leg is flat
+ * or covered by a working tt- order; `left` gives each such leg's reason.
+ * @param {Close} o @param {{ positions: any[], orders: any[] }} a
+ * @returns {{ order: Close | null, left: { symbol: string, why: string }[] }}
+ */
+export function fitted(o, a) {
+  const working = new Set(a.orders.filter(x => (x.client_order_id || '').startsWith('tt-')).flatMap(x => (x.legs?.length ? x.legs : [x]).map(l => l.symbol)));
+  const covered = o.legs.filter(l => working.has(l.symbol));
+  if (covered.length) return { order: null, left: covered.map(l => ({ symbol: l.symbol, why: 'covered by a working order' })) };
+  // A sell closes a long, a buy closes a short: the contracts held on that side, in this order's ratio.
+  const fits = o.legs.map(l => {
+    const q = +(a.positions.find(p => p.symbol === l.symbol)?.qty || 0);
+    return Math.floor((l.side === 'sell' ? Math.max(0, q) : Math.max(0, -q)) / l.ratio);
+  });
+  const flat = o.legs.filter((l, i) => !fits[i]);
+  if (flat.length) return { order: null, left: flat.map(l => ({ symbol: l.symbol, why: 'already flat' })) };
+  const units = Math.min(o.qty, ...fits);
+  const short = o.legs.filter((l, i) => fits[i] < o.qty);
+  return { order: units < o.qty ? { ...o, qty: units } : o, left: short.map(l => ({ symbol: l.symbol, why: `smaller than planned: ${units} of ${o.qty} sent` })) };
 }
 
 // An account whose last run had an order that may be live (see send's maybe)
