@@ -24,10 +24,13 @@ pub struct Profile {
     pub max_open: usize,
     /// |limit| × qty × the multiplier (100 an option contract, 1 a share), in cents.
     pub max_notional_cents: i64,
-    /// Admitted submits in any 60 s.
+    /// Admitted opening submits in any 60 s. Closes are not counted.
     pub submits_per_min: usize,
-    /// Admitted submits per UTC day.
+    /// Admitted opening submits per UTC day. Closes are not counted.
     pub submits_per_day: usize,
+    /// Admitted close submits in any 60 s, counted apart from the opens, so a
+    /// buggy loop cannot flood the broker with closes.
+    pub closes_per_min: usize,
     /// Consecutive broker rejects that trip `halt_opens`.
     pub max_rejects: u32,
     /// Requests per minute for this account process.
@@ -48,6 +51,7 @@ impl Default for Profile {
             max_notional_cents: 250_000,
             submits_per_min: 60,
             submits_per_day: 500,
+            closes_per_min: 30,
             max_rejects: 5,
             budget_per_min: 150,
             min_options_level: 3,
@@ -119,6 +123,17 @@ impl Budget {
             1.0 + self.per_min * 0.2
         };
         if self.blocked() || self.tokens < floor {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+    /// Takes one critical token for a close. A 429 backoff holds opens, not
+    /// closes: this ignores `blocked`, but still needs a token above zero, so the
+    /// bucket bounds closes as it bounds everything else.
+    pub(crate) fn take_close(&mut self) -> bool {
+        self.refill();
+        if self.tokens < 1.0 {
             return false;
         }
         self.tokens -= 1.0;

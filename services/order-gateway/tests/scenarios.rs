@@ -213,8 +213,9 @@ fn http_429_blocks_until_retry_after_and_is_never_resent() {
     assert_eq!(r["reason"], "throttled");
     let (q, _) = c.req("account", "r3", "");
     assert_eq!(q["code"], "throttled");
-    // The resolution (due after the 20-80 ms resolve offsets) can arrive
-    // before the r2 or r3 response, which read past it; look there first.
+    // The lookups are refused by the budget while the 429 backoff runs, so the
+    // resolution comes after it: the broker's 404 (the 429 never stored the
+    // order) is what makes it absent. Look at lines already read first.
     let is_res = |v: &Value| v["kind"] == "resolution" && v["client_order_id"] == "wse-429";
     let seen = c
         .lines
@@ -222,7 +223,10 @@ fn http_429_blocks_until_retry_after_and_is_never_resent() {
         .map(|l| serde_json::from_str::<Value>(l).unwrap())
         .find(|v| is_res(v));
     let res = seen.unwrap_or_else(|| c.event("resolution", |v| v["client_order_id"] == "wse-429"));
-    assert_eq!(res["outcome"], "absent_after");
+    assert_eq!(
+        (res["outcome"].as_str(), res["window_ms"].as_u64()),
+        (Some("absent_after"), Some(80))
+    );
     std::thread::sleep(std::time::Duration::from_millis(1100));
     assert_eq!(c.submit("r4", &buy("wse-after"))["outcome"], "accepted");
     assert_eq!(sends(&mut c, "r5"), 2);

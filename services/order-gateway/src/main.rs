@@ -21,7 +21,7 @@ const HELP: &str = "order-gateway --account NAME --broker sim|alpaca-paper|alpac
     [--sim-script FILE] [--sim-quotes DBN_FILE|tcp:HOST:PORT]
     [--underlyings SPY,..] [--any-underlying-client NAME ...] [--equities AAPL,..] [--allow-short]
     [--max-open N] [--max-legs N] [--max-notional DOLLARS]
-    [--submits-per-min N] [--submits-per-day N] [--max-rejects N] [--budget N] [--min-options-level N]
+    [--submits-per-min N] [--submits-per-day N] [--closes-per-min N] [--max-rejects N] [--budget N] [--min-options-level N]
     [--resolve-ms 1000,2000,4000] [--test-stall-after-admitted]
 Serves one broker account on a loopback port (tinytrader.gateway/1, NDJSON). The sim broker runs
 scripted (--sim-script) or against DBN quotes (--sim-quotes; client-clocked with `advance`).
@@ -199,6 +199,11 @@ fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
             take("--submits-per-day"),
             "--submits-per-day",
             d.submits_per_day,
+        )?,
+        closes_per_min: n(
+            take("--closes-per-min"),
+            "--closes-per-min",
+            d.closes_per_min,
         )?,
         max_rejects: n32(take("--max-rejects"), "--max-rejects", d.max_rejects)?,
         budget_per_min: n32(take("--budget"), "--budget", d.budget_per_min)?,
