@@ -31,6 +31,10 @@
 #                         WATCH_DISK_MIN_FREE_GIB free (10) high priority; a
 #                         path that isn't its own mount (an unplugged drive)
 #                         is high priority too
+#   WATCH_FRESH           files a scheduled job touches when it succeeds, as
+#                         NAME:MAX_AGE_SECONDS:PATH (e.g.
+#                         backup:108000:/var/lib/backup/last-backup): one
+#                         missing or older than its max age is a warning
 #
 # Alerting: a problem must be seen two runs in a row before it is sent; it is
 # sent again every WATCH_REPEAT_HIGH seconds (default 1800) while high
@@ -80,7 +84,7 @@
           gnugrep
         ];
         text = builtins.readFile ./watch.sh;
-        meta.description = "A host's monitor: Docker, containers, health, native services and disks, pushed to ntfy";
+        meta.description = "A host's monitor: Docker, containers, health, native services, disks and job freshness, pushed to ntfy";
       };
     };
 }

@@ -52,6 +52,16 @@ says "not-there: missing"
 WATCH_DISK_MIN_FREE_GIB=0 WATCH_DISKS="$work" run; WATCH_DISK_MIN_FREE_GIB=0 WATCH_DISKS="$work" run
 says "not mounted (it is part of"
 
+echo "== a job's stamp: missing or stale is a warning; fresh is fine"
+WATCH_FRESH="backup:3600:$work/stamp" run; WATCH_FRESH="backup:3600:$work/stamp" run
+says "backup: never done"
+touch -d "@$(( $(date +%s) - 7300 ))" "$work/stamp"
+WATCH_FRESH="backup:3600:$work/stamp" run; says "backup: last done 2 h ago (limit 1 h)"
+touch "$work/stamp"
+WATCH_FRESH="backup:3600:$work/stamp" run; says "resolved"
+WATCH_FRESH="backup:3600" run; WATCH_FRESH="backup:3600" run; says "not NAME:SECONDS:PATH"
+run
+
 echo "== containers expected without a Docker socket is a problem"
 WATCH_SERVICES="a,b" run; says "2 containers expected but no WATCH_DOCKER_SOCKET"
 

@@ -66,6 +66,8 @@ if [ -n "${WATCH_SERVICES_FROM:-}" ]; then
 fi
 native="$(words <<<"${WATCH_NATIVE:-}")"
 disks="$(words <<<"${WATCH_DISKS:-}")"
+# Files that must have changed recently: NAME:MAX_AGE_SECONDS:PATH each.
+fresh="$(words <<<"${WATCH_FRESH:-}")"
 
 for url in "$console" "$store"; do
   [ -n "$url" ] || continue
@@ -232,6 +234,26 @@ check_disks() {
   done <<<"$disks"
 }
 
+# Each WATCH_FRESH file: missing, or not modified for its max age, is a
+# warning (a nightly job that didn't run, or failed before its stamp).
+check_fresh() {
+  local e name max path mtime age now="$1"
+  while read -r e; do
+    [ -n "$e" ] || continue
+    name="${e%%:*}"; e="${e#*:}"; max="${e%%:*}"; path="${e#*:}"
+    if [ -z "$name" ] || ! [[ "$max" =~ ^[0-9]+$ ]] || [ -z "$path" ] || [ "$path" = "$max" ]; then
+      problem "fresh-config" high "WATCH_FRESH entry not NAME:SECONDS:PATH: $name:$e"
+      continue
+    fi
+    if ! mtime="$(stat -c %Y -- "$path" 2>/dev/null)"; then
+      problem "fresh:$name" warn "$name: never done ($path is missing)"
+      continue
+    fi
+    age=$(( now - mtime ))
+    [ "$age" -le "$max" ] || problem "fresh:$name" warn "$name: last done $(( age / 3600 )) h ago (limit $(( max / 3600 )) h)"
+  done <<<"$fresh"
+}
+
 # POST a notice: TITLE PRIORITY TAGS BODY. Fails when it isn't delivered.
 notify() {
   local url
@@ -263,6 +285,7 @@ run_once() {
   check_store "$now"
   check_native
   check_disks
+  check_fresh "$now"
 
   # Forget when services no longer degraded became so.
   degraded="$(jq -c --arg keys "$degraded_keys" '($keys | split("\n")) as $k | with_entries(select(.key as $x | $k | index($x)))' <<<"$degraded")"
