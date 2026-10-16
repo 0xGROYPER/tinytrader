@@ -9,7 +9,7 @@
 #               rust-toolchain.toml (rustup reads it), with a Cargo cache: a
 #               faster, more readable signal than the Nix build.
 #   fmt         cargo fmt --check. Advisory until the tree is formatted: see
-#               the note on the job.
+#               the note on the step.
 #
 # Branch protection on main requires: nix-linux, nix-macos, cargo.
 name: ci
@@ -29,7 +29,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          determinate: false # upstream Nix: no FlakeHub login, which needs an account
       - uses: DeterminateSystems/magic-nix-cache-action@v15
+        with:
+          use-flakehub: false # the GitHub Actions cache only
       - name: nix flake check
         run: nix flake check --keep-going --print-build-logs
 
@@ -39,7 +43,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          determinate: false # upstream Nix: no FlakeHub login, which needs an account
       - uses: DeterminateSystems/magic-nix-cache-action@v15
+        with:
+          use-flakehub: false # the GitHub Actions cache only
       - name: nix flake check
         run: nix flake check --keep-going --print-build-logs
 
@@ -61,13 +69,14 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Advisory: main is not rustfmt-clean yet (cargo fmt --all would reformat
-    # a handful of files). Once it is, delete this line and add fmt to the
-    # required checks.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Install the pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustc --version
       - name: cargo fmt --check
-        run: cargo fmt --all --check
+        # Advisory: main is not rustfmt-clean yet (cargo fmt --all would
+        # reformat a handful of files), so a diff is a warning and the job
+        # stays green. Once it is clean, delete continue-on-error and add fmt
+        # to the required checks.
+        continue-on-error: true
+        run: cargo fmt --all --check || { echo "::warning::cargo fmt --check found unformatted files (advisory)"; exit 1; }
