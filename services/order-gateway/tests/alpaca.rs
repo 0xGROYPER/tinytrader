@@ -234,14 +234,9 @@ fn lost_response_resolves_by_lookup_without_resend() {
 fn a_failed_lookup_leaves_the_order_unknown_not_absent() {
     let r = rig("alpaca-lookup-error");
     let mut c = ready(&r.gw, "reactor");
-    r.fake.next("POST", "/v2/orders", Act::Lost);
-    let v = c.submit("r1", &buy("wse-err"));
-    assert_eq!(
-        (v["outcome"].as_str(), v["reason"].as_str()),
-        (Some("unknown"), Some("connection"))
-    );
     // The broker is failing, which is not the same as saying the order is missing:
-    // every lookup gets a 500, so the order is unresolved, not absent.
+    // every lookup gets a 500, so the order is unresolved, not absent. The 500s are
+    // queued before the submit, so the first lookup cannot reach the fake unscripted.
     for _ in 0..3 {
         r.fake.next(
             "GET",
@@ -249,6 +244,12 @@ fn a_failed_lookup_leaves_the_order_unknown_not_absent() {
             Act::Respond(500, Vec::new(), "{}".into()),
         );
     }
+    r.fake.next("POST", "/v2/orders", Act::Lost);
+    let v = c.submit("r1", &buy("wse-err"));
+    assert_eq!(
+        (v["outcome"].as_str(), v["reason"].as_str()),
+        (Some("unknown"), Some("connection"))
+    );
     let res = c.event("resolution", |v| v["client_order_id"] == "wse-err");
     assert_eq!(
         (res["outcome"].as_str(), res["window_ms"].as_u64()),
