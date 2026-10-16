@@ -4,7 +4,7 @@ The console can run with everything on the page measured while you use it, so sl
 
 ## Turning it on
 
-- Open the console with `#profile` at the end of its address (for example `https://<mac>.<tailnet>.ts.net/#profile`), or
+- Open the console with `#profile` at the end of its address (for example `https://<console-host>/#profile`), or
 - press ⌘K and choose **Profile mode: turn on**.
 
 It stays on for that browser tab until **Turn off** in its bar (which reloads the page, so nothing stays wrapped).

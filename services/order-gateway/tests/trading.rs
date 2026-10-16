@@ -11,7 +11,7 @@ fn endpoints_are_paper_loopback_or_the_one_live_pair() {
     assert_eq!(p.rest(), "https://paper-api.alpaca.markets");
     assert_eq!(p.stream(), "wss://paper-api.alpaca.markets/stream");
     assert_eq!(p.environment(), "paper");
-    assert!(Endpoints::loopback("10.0.0.1:80".parse().unwrap()).is_none());
+    assert!(Endpoints::loopback("192.0.2.1:80".parse().unwrap()).is_none());
     let l = Endpoints::loopback("127.0.0.1:9".parse().unwrap()).unwrap();
     assert_eq!(l.stream(), "ws://127.0.0.1:9/stream");
     let l = Endpoints::live();
