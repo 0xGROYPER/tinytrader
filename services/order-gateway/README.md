@@ -236,6 +236,8 @@ The broker's `capabilities` declare its tick rules, and the gateway refuses an i
 
 A close leg is checked against the orders the gateway holds for its symbol before anything is sent. If any open, unknown or absent order has that symbol, the whole intent is `not_sent{leg_pending, detail.symbols}` ([section 8](#8-rate-budget-and-caps)).
 
+Each close leg is also checked against the broker's position for its symbol, read once before the send. A close may not exceed what is held: a sell needs at least that many shares or contracts long, a buy at least that many short. A close that does is `not_sent{close_exceeds_position}`, with `detail.symbol`, `requested_qty` (the leg's quantity: `qty`, times `ratio` for a combo leg) and `held_qty`. If the position cannot be read, the close is `not_sent{position_unknown}` (fail closed). Opens are not checked this way. A fill between the read and the send is not covered.
+
 `qty`, `ratio_qty` and `limit_price` are sent as strings. The byte form follows Reactor's `orders.py` field order (compact JSON): a single is `{symbol, qty, side, type, limit_price, time_in_force, client_order_id, position_intent}`; an MLEG is `{order_class, qty, type, time_in_force, limit_price, client_order_id, legs:[{symbol, ratio_qty, side, position_intent}]}`. `limit_price` always has two decimal places.
 
 ## 7. Events
@@ -479,6 +481,8 @@ The same resync runs after every `trade_updates` reconnect. An order in phase `s
 - `killed`
 - `not_ready`
 - `leg_pending` (with `detail.symbols`: a close on a leg that has an open or unresolved order)
+- `close_exceeds_position` (with `detail.symbol`, `requested_qty`, `held_qty`: a close larger than the position held, including a close of a flat symbol)
+- `position_unknown` (with `detail.symbol`, `requested_qty`, `code`: the position read failed, so the close is refused)
 - `throttled`
 - `duplicate_conflict`
 

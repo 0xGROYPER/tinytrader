@@ -215,6 +215,19 @@ fn cap(name: &str) -> String {
     not_sent("cap", &Obj::new().s("cap", name).done())
 }
 
+/// Whether a close of `requested` on one leg may be sent. `held` is the broker's signed
+/// position (long positive), `None` when it could not be read. A sell closes only a long
+/// and a buy only a short, and never more than is held.
+fn close_check(held: Option<i64>, requested: u64, buy: bool) -> Result<(), &'static str> {
+    let held = i128::from(held.ok_or("position_unknown")?);
+    let closable = if buy { -held } else { held };
+    if closable >= i128::from(requested) {
+        Ok(())
+    } else {
+        Err("close_exceeds_position")
+    }
+}
+
 fn broker_error_obj(kind: &str, e: &BrokerError) -> Obj {
     outcome(kind)
         .n("http_status", e.http_status)
@@ -867,7 +880,46 @@ impl<B: Broker> Session<B> {
         if let Some(o) = self.refusal(client, prefix, &intent) {
             return self.outcome_event(client, rid, Some(&intent.client_order_id), o);
         }
+        if let Some(o) = self.close_refusal(&intent) {
+            return self.outcome_event(client, rid, Some(&intent.client_order_id), o);
+        }
         self.forward(client, rid, &intent)
+    }
+
+    /// Each close leg against the broker's position, read once before the send. This
+    /// does I/O, so it runs after `refusal`. A position that cannot be read refuses.
+    fn close_refusal(&mut self, intent: &Intent) -> Option<String> {
+        if intent.legs.iter().all(|l| l.open) {
+            return None;
+        }
+        // A 429 backoff holds opens, not closes, so the read takes a close token.
+        let read = if self.budget.take_close() {
+            self.b.positions()
+        } else {
+            Err(BrokerError::local("throttled", ""))
+        };
+        for l in intent.legs.iter().filter(|l| !l.open) {
+            let requested = u64::from(intent.qty) * u64::from(l.ratio);
+            let base = Obj::new()
+                .s("symbol", &l.symbol)
+                .n("requested_qty", requested);
+            let (held, detail) = match &read {
+                Ok(r) => {
+                    let held: i64 = r
+                        .value
+                        .iter()
+                        .filter(|p| p.symbol == l.symbol)
+                        .map(|p| p.qty)
+                        .sum();
+                    (Some(held), base.n("held_qty", held))
+                }
+                Err(e) => (None, base.s("code", &e.code)),
+            };
+            if let Err(reason) = close_check(held, requested, l.buy) {
+                return Some(not_sent(reason, &detail.done()));
+            }
+        }
+        None
     }
 
     /// Every check that runs before any I/O, in contract order.
@@ -935,7 +987,11 @@ impl<B: Broker> Session<B> {
             .legs
             .iter()
             .filter(|l| {
-                !l.open && self.orders.values().any(|o| o.open() && o.symbols.contains(&l.symbol))
+                !l.open
+                    && self
+                        .orders
+                        .values()
+                        .any(|o| o.open() && o.symbols.contains(&l.symbol))
             })
             .map(|l| quote(&l.symbol))
             .collect();
@@ -1679,5 +1735,38 @@ fn line_aud(v: &Value) -> Aud {
         "submit" | "cancel" | "client" => Aud::Client(s("client")),
         "order" | "resolution" => Aud::Prefix(s("client_order_id")),
         _ => Aud::All,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::close_check;
+
+    #[test]
+    fn a_close_is_allowed_up_to_the_held_side_only() {
+        // A sell closes a long; a buy closes a short.
+        assert_eq!(close_check(Some(10), 10, false), Ok(()));
+        assert_eq!(
+            close_check(Some(10), 11, false),
+            Err("close_exceeds_position")
+        );
+        assert_eq!(close_check(Some(-3), 3, true), Ok(()));
+        assert_eq!(
+            close_check(Some(-3), 4, true),
+            Err("close_exceeds_position")
+        );
+        // A sell against a short, or a buy against a long, opens instead of closing.
+        assert_eq!(
+            close_check(Some(-3), 1, false),
+            Err("close_exceeds_position")
+        );
+        assert_eq!(close_check(Some(3), 1, true), Err("close_exceeds_position"));
+        // Flat is never closable; an unreadable position is never closable.
+        assert_eq!(
+            close_check(Some(0), 1, false),
+            Err("close_exceeds_position")
+        );
+        assert_eq!(close_check(None, 1, false), Err("position_unknown"));
+        assert_eq!(close_check(None, 1, true), Err("position_unknown"));
     }
 }

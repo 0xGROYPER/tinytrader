@@ -67,6 +67,8 @@ pub struct State {
     pub ws_auth: Vec<String>,
     pub keys_seen: Vec<String>,
     execs: u64,
+    /// Positions for `GET /v2/positions` when a test sets them; the fixture otherwise.
+    pub holdings: Option<String>,
 }
 
 pub struct Fake {
@@ -244,6 +246,21 @@ impl Fake {
     /// Scripts the next request whose method matches and whose path starts with `path`.
     pub fn next(&self, method: &str, path: &str, act: Act) {
         self.lock().next.push((method.into(), path.into(), act));
+    }
+
+    /// Sets what `GET /v2/positions` returns from now on: `(symbol, signed qty)` pairs.
+    pub fn hold(&self, positions: &[(&str, i64)]) {
+        let list: Vec<String> = positions
+            .iter()
+            .map(|(s, q)| {
+                format!(
+                    r#"{{"symbol":"{s}","qty":"{}","side":"{}","avg_entry_price":"10.00"}}"#,
+                    q.abs(),
+                    if *q < 0 { "short" } else { "long" }
+                )
+            })
+            .collect();
+        self.lock().holdings = Some(format!("[{}]", list.join(",")));
     }
 
     pub fn reply(&self, method: &str, path: &str, status: u16, body: &str) {
@@ -491,7 +508,10 @@ fn route(g: &mut State, method: &str, path: &str, body: &str) -> (u16, String) {
             (207, format!("[{}]", out.join(",")))
         }
         ("GET", "/v2/account") => (200, fixture!("account.json").into()),
-        ("GET", "/v2/positions") => (200, fixture!("positions.json").into()),
+        ("GET", "/v2/positions") => (
+            200,
+            g.holdings.clone().unwrap_or_else(|| fixture!("positions.json").into()),
+        ),
         // Liquidate all: one market order per position (Alpaca answers 207).
         ("DELETE", "/v2/positions") => (
             207,

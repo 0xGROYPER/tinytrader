@@ -238,7 +238,12 @@ fn consecutive_rejects_trip_halt_opens() {
     let mut cfg = config(root("rejects"));
     cfg.profile.max_rejects = 2;
     let rule = r#"{"submit":{"reject":{"http":403,"code":40310000,"message":"no"}}}"#;
-    let text = script("").replace(r#""rules":[]"#, &format!(r#""default":{rule}"#));
+    let text = script("")
+        .replace(r#""rules":[]"#, &format!(r#""default":{rule}"#))
+        .replace(
+            r#""quotes""#,
+            &format!(r#""positions":{{"{CALL}":1}},"quotes""#),
+        );
     let gw = scripted(cfg, &text);
     let mut c = Conn::open(&gw, "reactor", None);
     c.submit("r1", &buy("wse-1"));

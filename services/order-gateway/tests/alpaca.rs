@@ -271,7 +271,8 @@ fn a_failed_lookup_leaves_the_order_unknown_not_absent() {
 /// A submit whose POST gets a 502 and never reaches the fake, so every lookup is a
 /// 404: the order ends up absent, not unknown.
 fn absent_submit(r: &Rig, c: &mut Conn, cid: &str) {
-    r.fake.reply("POST", "/v2/orders", 502, "<html>bad gateway</html>");
+    r.fake
+        .reply("POST", "/v2/orders", 502, "<html>bad gateway</html>");
     let v = c.submit("r-abs", &buy(cid));
     assert_eq!(v["outcome"], "unknown");
     let res = c.event("resolution", |v| v["client_order_id"] == cid);
@@ -343,7 +344,10 @@ fn a_periodic_check_settles_an_absent_order_the_broker_now_shows() {
     ));
     // No stream event: the poll's lookup finds it. It is working, so it still counts.
     wait_resolved(&mut c);
-    assert_eq!(c.submit("r2", &buy("wse-next"))["detail"]["cap"], "open_orders");
+    assert_eq!(
+        c.submit("r2", &buy("wse-next"))["detail"]["cap"],
+        "open_orders"
+    );
 }
 
 #[test]
@@ -377,6 +381,7 @@ fn a_404_never_clears_an_absent_order_however_many_checks_return_it() {
 fn a_close_waits_for_pending_orders_on_its_leg_and_opens_do_not() {
     let r = rig("alpaca-leg-guard");
     let mut c = ready(&r.gw, "reactor");
+    r.fake.hold(&[(PUT_A, 1)]);
     absent_submit(&r, &mut c, "wse-p1");
     // The close is on the pending order's leg: refused whole, and not sent.
     let v = c.submit("r2", &single("wse-p2", CALL, "sell", "close", 1, "1.00"));
@@ -394,6 +399,7 @@ fn a_close_waits_for_pending_orders_on_its_leg_and_opens_do_not() {
 fn a_close_on_a_clear_leg_passes_the_day_cap_but_not_a_working_order_on_its_leg() {
     let r = rig_with("alpaca-leg-day", |p| p.submits_per_day = 1);
     let mut c = ready(&r.gw, "reactor");
+    r.fake.hold(&[(PUT_A, 1)]);
     assert_eq!(c.submit("d1", &buy("wse-d1"))["outcome"], "accepted");
     // The day's one open is used up, but PUT_A has no pending order.
     let v = c.submit("d2", &single("wse-d2", PUT_A, "sell", "close", 1, "1.00"));
@@ -635,4 +641,76 @@ fn flatten_sends_alpacas_liquidate_all_once() {
     assert_eq!(liquidations, ["/v2/positions?cancel_orders=true"]);
     // Opens are refused afterwards.
     assert_eq!(c.submit("r1", &support::buy("wse-1"))["reason"], "killed");
+}
+
+fn stock_close(cid: &str, symbol: &str, qty: u32) -> String {
+    format!(
+        r#"{{"client_order_id":"{cid}","shape":"single","instrument":{{"class":"equity","symbol":"{symbol}"}},"side":"sell","effect":"close","qty":{qty},"type":"limit","limit_price":"220.00","time_in_force":"day"}}"#
+    )
+}
+
+#[test]
+fn a_close_is_sent_only_up_to_the_position_the_broker_holds() {
+    let r = rig_with("alpaca-close-held", |p| {
+        p.equities = vec!["AAPL".into(), "KO".into(), "BRK.B".into()];
+    });
+    let mut c = ready(&r.gw, "reactor");
+    r.fake.hold(&[("AAPL", 10), ("KO", 10)]);
+    // A close equal to the held long is sent.
+    let v = c.submit("h1", &stock_close("wse-h1", "AAPL", 10));
+    assert_eq!(v["outcome"], "accepted");
+    assert_eq!(posts(&r.fake).len(), 1);
+    // A close larger than the held long is refused whole, and never sent.
+    let v = c.submit("h2", &stock_close("wse-h2", "KO", 11));
+    assert_eq!(
+        (
+            v["reason"].as_str(),
+            v["detail"]["symbol"].as_str(),
+            v["detail"]["requested_qty"].as_u64(),
+            v["detail"]["held_qty"].as_i64(),
+        ),
+        (
+            Some("close_exceeds_position"),
+            Some("KO"),
+            Some(11),
+            Some(10)
+        )
+    );
+    assert_eq!(posts(&r.fake).len(), 1, "the oversized close was not sent");
+    // A close on a flat symbol is refused as well.
+    let v = c.submit("h3", &stock_close("wse-h3", "BRK.B", 1));
+    assert_eq!(
+        (v["reason"].as_str(), v["detail"]["held_qty"].as_i64()),
+        (Some("close_exceeds_position"), Some(0))
+    );
+    // A position that cannot be read refuses the close (fail closed), and it is not sent.
+    r.fake.next(
+        "GET",
+        "/v2/positions",
+        Act::Respond(500, Vec::new(), r#"{"message":"unavailable"}"#.into()),
+    );
+    let v = c.submit("h4", &stock_close("wse-h4", "KO", 1));
+    assert_eq!(v["reason"], "position_unknown");
+    assert_eq!(v["detail"]["symbol"], "KO");
+    assert_eq!(posts(&r.fake).len(), 1, "the unreadable close was not sent");
+}
+
+#[test]
+fn an_option_close_is_checked_against_the_contracts_held_on_its_leg() {
+    let r = rig("alpaca-close-option");
+    let mut c = ready(&r.gw, "reactor");
+    r.fake.hold(&[(CALL, 1)]);
+    let v = c.submit("o1", &single("wse-o1", CALL, "sell", "close", 2, "1.00"));
+    assert_eq!(
+        (
+            v["reason"].as_str(),
+            v["detail"]["requested_qty"].as_u64(),
+            v["detail"]["held_qty"].as_i64(),
+        ),
+        (Some("close_exceeds_position"), Some(2), Some(1))
+    );
+    assert_eq!(posts(&r.fake).len(), 0, "the oversized close was not sent");
+    let v = c.submit("o2", &single("wse-o2", CALL, "sell", "close", 1, "1.00"));
+    assert_eq!(v["outcome"], "accepted");
+    assert_eq!(posts(&r.fake).len(), 1);
 }
