@@ -58,7 +58,7 @@
 //!   `paper-1=host.docker.internal:7701;paper-3=host.docker.internal:7700`, and
 //!   `CONSOLE_GATEWAY_TOKEN` (or `_FILE`), the operator's admin token for them
 //!   (optional). `/api/accounts/{account}/flatten` and `.../resume` act through
-//!   the account's gateway; an account without one (live) can't be flattened.
+//!   the account's gateway; an account without one can't be flattened.
 //!   With `CONSOLE_TRADE_TOKEN` (or `_FILE`), the console's trade client
 //!   `console` sends the Spread builder's orders: `GET /api/orders` (each
 //!   account's gateway state, its `unresolved` count and the console's open orders), `POST
@@ -70,6 +70,9 @@
 //!   needs `CONSOLE_ORDER_TOKEN` (or `_FILE`, one line of 64 hex characters)
 //!   in the page's `X-Order-Token`. Without that token, live orders are
 //!   refused and everything else still works. Paper orders need only the login.
+//!   A live account's flatten or resume also needs `confirm` naming the account.
+//!   Whether an account is live is the accounts service's `environment` for it
+//!   (`alpaca-account`): `live`, or anything else or missing, is live.
 //!   The write routes are the order routes (those, and an account's flatten
 //!   and resume), the jobs service's and the queue's POST (and the queue's
 //!   PATCH) routes, drive approval, POST `/api/reminders` and `/api/profiles`,
@@ -805,7 +808,8 @@ async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
 /// `CONSOLE_ORDER_TOKEN_FILE` names). The login header alone isn't enough
 /// for a live account: anything on this Mac can send it to 127.0.0.1:8080.
 /// Unset, live orders are refused with a message saying so. Whether an account
-/// is live is decided by its handler from the gateway, never from the request.
+/// is live is decided by its handler from the accounts service's environment
+/// (see [`account_environment`]), never from the request or the gateway.
 ///
 /// GET routes stay open. Refusals say nothing about which check failed, except
 /// that live orders are disabled when no token is configured.
@@ -837,13 +841,24 @@ impl WriteGate {
         Self { logins, token }
     }
 
-    /// Whether a write from `login`, carrying `token`, may go ahead. `live` is
-    /// whether the account it acts on is live; a paper write needs only the login.
-    fn decide(&self, login: Option<&str>, token: Option<&str>, live: bool) -> Option<Refusal> {
-        if !login.is_some_and(|l| self.logins.iter().any(|a| a == l)) {
+    /// Whether `login` is one of the allowed Tailscale logins.
+    fn login_allowed(&self, login: Option<&str>) -> bool {
+        login.is_some_and(|l| self.logins.iter().any(|a| a == l))
+    }
+
+    /// Whether a write from `login`, carrying `token`, may go ahead, for an
+    /// account whose accounts-service `environment` is `environment`. A paper
+    /// write needs only the login.
+    fn decide(
+        &self,
+        login: Option<&str>,
+        token: Option<&str>,
+        environment: Option<&str>,
+    ) -> Option<Refusal> {
+        if !self.login_allowed(login) {
             return Some((StatusCode::FORBIDDEN, "not allowed"));
         }
-        if !live {
+        if !is_live(environment) {
             return None;
         }
         let Some(want) = self.token.as_deref() else {
@@ -870,11 +885,16 @@ fn login_and_token(headers: &axum::http::HeaderMap) -> (Option<&str>, Option<&st
     )
 }
 
-/// The refusal response for a trade on an account (`live` as its handler decided), if any.
-fn refused_for(app: &App, headers: &axum::http::HeaderMap, live: bool) -> Option<Response> {
+/// The refusal response for a write on an account (its `environment` as its
+/// handler found it), if any.
+fn refused_for(
+    app: &App,
+    headers: &axum::http::HeaderMap,
+    environment: Option<&str>,
+) -> Option<Response> {
     let (login, token) = login_and_token(headers);
     app.gate
-        .decide(login, token, live)
+        .decide(login, token, environment)
         .map(|(status, why)| (status, axum::Json(json!({ "error": why }))).into_response())
 }
 
@@ -885,16 +905,21 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Middleware: refuse a write from a login that isn't allowed. The order token
-/// for a live account is checked by its handler, which knows whether it is live.
+/// for a live account is checked by its handler, which knows the account.
 async fn write_gate(
     AxumState(gate): AxumState<WriteGate>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
     let (login, _) = login_and_token(req.headers());
-    match gate.decide(login, None, false) {
-        Some((status, why)) => (status, axum::Json(json!({ "error": why }))).into_response(),
-        None => next.run(req).await,
+    if gate.login_allowed(login) {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::FORBIDDEN,
+            axum::Json(json!({ "error": "not allowed" })),
+        )
+            .into_response()
     }
 }
 
@@ -955,10 +980,11 @@ async fn order_submit(
         )
             .into_response();
     }
-    let live = is_live(&app, &account).await;
-    if let Some(refusal) = refused_for(&app, &headers, live) {
+    let environment = account_environment(&app, &account);
+    if let Some(refusal) = refused_for(&app, &headers, environment.as_deref()) {
         return refusal;
     }
+    let live = is_live(environment.as_deref());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -1004,7 +1030,8 @@ async fn order_cancel(
         )
             .into_response();
     }
-    if let Some(refusal) = refused_for(&app, &headers, is_live(&app, &account).await) {
+    let environment = account_environment(&app, &account);
+    if let Some(refusal) = refused_for(&app, &headers, environment.as_deref()) {
         return refusal;
     }
     trade_request(
@@ -1049,9 +1076,9 @@ async fn trade_request(
     }
 }
 
-/// Close every position of a paper account at market through its gateway:
-/// halts opens, cancels open orders, liquidates. The body must name the
-/// account in `confirm`.
+/// Close every position of an account at market through its gateway: halts
+/// opens, cancels open orders, liquidates. The body must name the account in
+/// `confirm`; a live account's flatten also needs the order token.
 async fn account_flatten(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path(account): axum::extract::Path<String>,
@@ -1059,19 +1086,16 @@ async fn account_flatten(
     body: axum::body::Bytes,
 ) -> Response {
     let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-    if ask["confirm"].as_str() != Some(account.as_str()) {
+    if !confirmed(&ask, &account) {
         return (
             StatusCode::BAD_REQUEST,
             axum::Json(json!({ "error": "type the account's name to confirm" })),
         )
             .into_response();
     }
-    let live = is_live(&app, &account).await;
-    if let Some(refusal) = refused_for(&app, &headers, live) {
+    let environment = account_environment(&app, &account);
+    if let Some(refusal) = refused_for(&app, &headers, environment.as_deref()) {
         return refusal;
-    }
-    if live {
-        return live_refused();
     }
     let reason = ask["reason"]
         .as_str()
@@ -1086,7 +1110,8 @@ async fn account_flatten(
     .await
 }
 
-/// Allow opening orders again on a paper account (the gateway's `unkill`).
+/// Allow opening orders again on an account (the gateway's `unkill`). A live
+/// account's resume also needs the order token and `confirm` naming the account.
 async fn account_resume(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path(account): axum::extract::Path<String>,
@@ -1094,12 +1119,16 @@ async fn account_resume(
     body: axum::body::Bytes,
 ) -> Response {
     let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-    let live = is_live(&app, &account).await;
-    if let Some(refusal) = refused_for(&app, &headers, live) {
+    let environment = account_environment(&app, &account);
+    if let Some(refusal) = refused_for(&app, &headers, environment.as_deref()) {
         return refusal;
     }
-    if live {
-        return live_refused();
+    if is_live(environment.as_deref()) && !confirmed(&ask, &account) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "type the account's name to confirm" })),
+        )
+            .into_response();
     }
     let reason = ask["reason"]
         .as_str()
@@ -1114,28 +1143,38 @@ async fn account_resume(
     .await
 }
 
-/// Whether an account trades live, from its gateway's welcome. An account with no
-/// gateway, or one that can't be reached, counts as live, so every trade on it
-/// needs the order token (fail closed).
-async fn is_live(app: &App, account: &str) -> bool {
-    match app
-        .gateways
-        .call(account, None, Duration::from_secs(5))
-        .await
-    {
-        Ok((w, _)) => w["environment"] != "paper",
-        Err(_) => true,
+/// Whether the body's `confirm` names the account exactly.
+fn confirmed(ask: &serde_json::Value, account: &str) -> bool {
+    ask["confirm"].as_str() == Some(account)
+}
+
+/// The account's `environment` as the accounts service reports it
+/// (`alpaca-account`, in each service's `accounts.accounts`, matched by
+/// `name`), from the console's latest snapshot. Its value only when every
+/// report agrees; `None` when no service reports the account, or they differ.
+fn account_environment(app: &App, account: &str) -> Option<String> {
+    let snapshot = app.poller.snapshot_json();
+    let reports: Vec<Option<String>> = snapshot["services"]
+        .as_object()
+        .into_iter()
+        .flat_map(|services| services.values())
+        .filter_map(|svc| svc.pointer("/accounts/accounts")?.as_array())
+        .flatten()
+        .filter(|a| a["name"].as_str() == Some(account))
+        .map(|a| a["environment"].as_str().map(str::to_owned))
+        .collect();
+    let first = reports.first()?;
+    if reports.iter().all(|r| r == first) {
+        first.clone()
+    } else {
+        None
     }
 }
 
-/// Flatten (sell everything at market) and Resume are for paper accounts only: a live
-/// account holds more than the console's orders.
-fn live_refused() -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        axum::Json(json!({ "error": "not offered for a live account from the console" })),
-    )
-        .into_response()
+/// Whether an account trades live, from its accounts-service `environment`:
+/// `paper` is paper; `live`, any other value, or none (unknown) is live.
+fn is_live(environment: Option<&str>) -> bool {
+    environment != Some("paper")
 }
 
 async fn gateway_request(
@@ -1190,41 +1229,61 @@ mod tests {
     #[test]
     fn a_paper_write_needs_only_the_login() {
         let g = gate(Some("secret"));
-        assert_eq!(g.decide(Some(ME), None, false), None);
+        assert_eq!(g.decide(Some(ME), None, Some("paper")), None);
         // A settings or reminder write is a paper-style write: the login is enough.
         let no_token = gate(None);
-        assert_eq!(no_token.decide(Some(ME), None, false), None);
+        assert_eq!(no_token.decide(Some(ME), None, Some("paper")), None);
     }
 
     #[test]
-    fn a_live_order_without_the_token_is_refused() {
+    fn environment_live_needs_the_token() {
         let g = gate(Some("secret"));
         assert_eq!(
-            g.decide(Some(ME), None, true),
+            g.decide(Some(ME), None, Some("live")),
             Some((StatusCode::UNAUTHORIZED, "not allowed"))
         );
         assert_eq!(
-            g.decide(Some(ME), Some("guess"), true),
+            g.decide(Some(ME), Some("guess"), Some("live")),
             Some((StatusCode::UNAUTHORIZED, "not allowed"))
         );
+        assert_eq!(g.decide(Some(ME), Some("secret"), Some("live")), None);
     }
 
     #[test]
-    fn a_live_order_with_the_token_passes() {
+    fn environment_missing_is_treated_as_live() {
         let g = gate(Some("secret"));
-        assert_eq!(g.decide(Some(ME), Some("secret"), true), None);
+        assert!(is_live(None));
+        assert!(is_live(Some("live")));
+        assert!(is_live(Some("sandbox")));
+        assert!(!is_live(Some("paper")));
+        assert_eq!(
+            g.decide(Some(ME), None, None),
+            Some((StatusCode::UNAUTHORIZED, "not allowed"))
+        );
+        assert_eq!(g.decide(Some(ME), Some("secret"), None), None);
     }
 
     #[test]
-    fn a_live_order_with_no_token_configured_says_so() {
+    fn a_live_write_with_no_token_configured_says_so() {
         let g = gate(None);
         assert_eq!(
-            g.decide(Some(ME), Some("anything"), true),
+            g.decide(Some(ME), Some("anything"), Some("live")),
             Some((
                 StatusCode::FORBIDDEN,
                 "live orders are disabled: the console has no order token configured",
             ))
         );
+    }
+
+    #[test]
+    fn a_live_flatten_needs_the_account_name_typed() {
+        let g = gate(Some("secret"));
+        // The token passes the gate; the typed confirmation is checked by the handler.
+        assert_eq!(g.decide(Some(ME), Some("secret"), Some("live")), None);
+        assert!(confirmed(&json!({ "confirm": "paper-1" }), "paper-1"));
+        assert!(!confirmed(&json!({ "confirm": "paper-2" }), "paper-1"));
+        assert!(!confirmed(&json!({ "confirm": "Paper-1" }), "paper-1"));
+        assert!(!confirmed(&json!({}), "paper-1"));
     }
 
     #[test]
@@ -1234,11 +1293,11 @@ mod tests {
             token: Some("secret".to_owned()),
         };
         assert_eq!(
-            g.decide(Some(ME), None, false),
+            g.decide(Some(ME), None, Some("paper")),
             Some((StatusCode::FORBIDDEN, "not allowed"))
         );
         assert_eq!(
-            g.decide(Some(ME), Some("secret"), true),
+            g.decide(Some(ME), Some("secret"), Some("live")),
             Some((StatusCode::FORBIDDEN, "not allowed"))
         );
     }
@@ -1247,15 +1306,15 @@ mod tests {
     fn a_wrong_or_missing_login_is_refused() {
         let g = gate(Some("secret"));
         assert_eq!(
-            g.decide(None, Some("secret"), true),
+            g.decide(None, Some("secret"), Some("live")),
             Some((StatusCode::FORBIDDEN, "not allowed"))
         );
         assert_eq!(
-            g.decide(Some("other@example.net"), None, false),
+            g.decide(Some("other@example.net"), None, Some("paper")),
             Some((StatusCode::FORBIDDEN, "not allowed"))
         );
         assert_eq!(
-            g.decide(Some("other@example.net"), Some("secret"), true),
+            g.decide(Some("other@example.net"), Some("secret"), Some("live")),
             Some((StatusCode::FORBIDDEN, "not allowed"))
         );
     }
