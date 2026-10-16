@@ -10,8 +10,13 @@ strategies and research live in your own repository, which uses tinytrader as a
 flake input. See [decision 0001](docs/decisions/0001-platform-and-deployment.md).
 
 > **Status:** early, in daily use by one deployment: live market data relays,
-> a data store, provider batch jobs, accounts, news, an economic calendar, a
-> console and a terminal view. Trading (decision 0009) is next.
+> a data store, provider batch jobs and history downloads, accounts, news, an
+> economic calendar, an order gateway, a job queue, a host monitor, a console
+> and a terminal view. The trading runtime ([decision 0009](docs/decisions/0009-trading-runtime.md))
+> is proposed.
+
+The documentation starts at [docs/](docs/README.md): tutorials, the
+console's widgets, the relay and store APIs, recovery, and the decisions.
 
 ## Try it
 
@@ -48,10 +53,14 @@ console the same way.
 | `services/alpaca-account` | Alpaca accounts' balances and positions, read only, and the market calendar |
 | `services/alpaca-data` | Market data for any symbol on request: stock snapshots, bars and option chains with IV and greeks (Alpaca) |
 | `services/alpaca-news` | Market news from Alpaca (supplied by Benzinga) |
+| `services/alpaca-history` | Alpaca's historical trades and quotes, a day at a time, into the store ([decision 0014](docs/decisions/0014-history-feeds.md)) |
 | `services/econ-calendar` | Scheduled US economic releases and FOMC decisions, from the agencies' own schedules |
-| `nix/watch.nix` | `watch`: a host's own monitor (Docker, containers, health, native services, disks), pushed to an ntfy-style URL, with a heartbeat ping after each run |
-| `infra/modules` | NixOS modules, such as `tinytrader.services.<name>` |
-| `nix/` | Flake modules: Rust builds and checks |
+| `services/order-gateway` | The order gateway (`tinytrader.gateway/1`): the only holder of a broker account's keys; validation, caps, a kill switch and a hash-chained journal ([its README](services/order-gateway/README.md)) |
+| `services/queue` | The job queue: work that runs later or when the machine can spare it, from templates the deployment defines ([decision 0012](docs/decisions/0012-job-queue.md)) |
+| `nix/watch.nix` | `watch`: a host's own monitor (Docker, containers, health, native services, disks), pushed to an ntfy-style URL, with a heartbeat ping after each run ([decision 0015](docs/decisions/0015-host-watch.md)) |
+| `nix/ai-proxy.nix` | `ai-proxy`: a local OpenAI-compatible AI endpoint on loopback |
+| `infra/modules` | `tinytrader.services.<name>`: NixOS modules (systemd units) and the same definitions as nix-darwin launchd agents |
+| `nix/` | Flake modules: Rust builds, images, checks |
 | `examples/` | Complete deployments you can run or copy |
 | `docs/` | Platform decisions and contracts |
 
@@ -65,6 +74,7 @@ operating system ([decision 0004](docs/decisions/0004-nix-not-nixos.md)):
 | Any OS with Docker | Docker Compose (see `examples/`) | `tinytrader.observe` container labels |
 | Any Linux with Nix | systemd unit files generated from `tinytrader.services` | `observe` addresses in the topology file |
 | NixOS | the `tinytrader.services` NixOS module | the topology file the module generates |
+| macOS with nix-darwin | the same `tinytrader.services` definitions as launchd agents (`darwinModules.services`) | `observe` addresses in the topology file |
 
 With `tinytrader.services`, giving a service `observe.port` is enough: it
 listens there, and the module writes `/etc/tinytrader/topology.json` listing it,
@@ -112,12 +122,28 @@ directly, with no console needed.
 }
 ```
 
-## Working here
+## Building and testing
 
 ```sh
-nix develop          # shell with the repo's tools
-nix flake check      # tests, lints, module evaluation, genericity check
-cargo test           # Rust workspace only
+nix develop                          # shell with the repo's tools (the toolchain in rust-toolchain.toml)
+cargo build -p console               # one service
+cargo test                           # the Rust workspace
+cargo fmt --all && cargo clippy --all-targets -- --deny warnings
+nix build .#store                    # a service as a Nix package
+nix/build-images.sh console relay    # container images, loaded into Docker as tinytrader/<name>:nix
+nix flake check                      # everything below
 ```
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing.
+`nix flake check` runs:
+
+| Check | What |
+|---|---|
+| `rust-tests`, `rust-clippy` | The workspace's tests and lints |
+| `console-types` | Type-checks the console's page |
+| `watch` | The host monitor's tests |
+| `generic` | Fails on deployment-specific details: home paths, tailnet names, private addresses, key material |
+
+and evaluates the NixOS and nix-darwin modules and the example host.
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing: tinytrader is a
+platform, and your hosts, data and secrets belong in your own repository.
