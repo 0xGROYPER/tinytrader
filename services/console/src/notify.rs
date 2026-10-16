@@ -117,7 +117,8 @@ pub async fn send(http: &reqwest::Client, url: &str, n: &Notice) -> Result<(), S
         })
         .send()
         .await
-        .map_err(|e| format!("notify: {e}"))?;
+        // The URL is the secret (CONSOLE_NOTIFY): keep it out of the error.
+        .map_err(|e| format!("notify: {}", e.without_url()))?;
     if r.status().is_success() {
         Ok(())
     } else {

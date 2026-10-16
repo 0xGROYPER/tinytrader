@@ -26,6 +26,7 @@ import { askHeld } from '../lib/position.js';
 import { createTicket, tradable, routed, occLabel } from '../lib/ticket.js';
 import { plan, quotes, priced, send, cancelOurs } from '../lib/liquidate.js';
 import { get } from '../lib/cache.js';
+import { orderFetch } from '../lib/api.js';
 
 /** An account's option positions by underlying and expiry, for the Spread builder's payoff. */
 const heldGroups = new Map();
@@ -60,7 +61,7 @@ async function readGateways(update) {
 // Flatten in progress per account: {stage: 'confirm' | 'busy' | 'done', typed, result, error}.
 const flat = {};
 async function post(path, body) {
-  const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await orderFetch(path, body);
   let v = null; try { v = await r.json(); } catch (_) {}
   if (!r.ok) throw new Error(v?.error || `${r.status} ${r.statusText}`);
   return v;
