@@ -37,7 +37,7 @@ The relay answers with a DBN v3 stream:
 2. Reference records: instrument definitions, and statistics where the source has them.
 3. Catch-up from `start`, where the source supports it:
    - **IEX:** Alpaca's historical trades and quotes from `start`, merged by event time and encoded exactly like live data.
-   - **OPRA:** none. Databento won't replay `cmbp-1` intraday, so the client is live from joining and the header's `start` says so. Today's quotes for one contract are available from [`/session`](#session-todays-replay-of-one-contract).
+   - **OPRA:** none. Databento won't replay `cmbp-1` intraday, so the client is live from joining and the header's `start` says so. Today's quotes for one contract are available from [`/session`](#get-session-todays-replay-of-one-contract).
 4. A `SystemMsg` with code `ReplayCompleted`.
 5. Live records.
 
@@ -77,7 +77,7 @@ Who is connected: `{"clients": [{client, account, peer, since, replay, condition
 One-minute bars, `{"symbol", "interval": 60, "bars": [[t, o, h, l, c, v], ...], "note"}`, `t` the minute's start.
 
 - **The relay's own symbols** (such as `SPY` on the IEX relay): built from the trades it relays, with history before the relay saw them where the source keeps it (Alpaca's).
-- **An option on an OPRA relay** (`symbol` in compact OCC, such as `SPY261012C00777000`): today's minutes of the contract's **mid**, from [`/session`](#session-todays-replay-of-one-contract)'s `cbbo-1m`. Each bar closes at the mid at the end of its minute and opens at the previous minute's, so high and low are the larger and smaller of the two; volume is 0. `days` is ignored.
+- **An option on an OPRA relay** (`symbol` in compact OCC, such as `SPY261012C00777000`): today's minutes of the contract's **mid**, from [`/session`](#get-session-todays-replay-of-one-contract)'s `cbbo-1m`. Each bar closes at the mid at the end of its minute and opens at the previous minute's, so high and low are the larger and smaller of the two; volume is 0. `days` is ignored.
 
 ### `GET /quotes`
 
