@@ -38,7 +38,9 @@
 //!   `Docs=/srv/docs;Research=/srv/research` (optional; see `collections.rs`)
 //! - `CONSOLE_NOTIFY`: a URL to POST a notice to when a service goes down or
 //!   comes back (ntfy-style: the body is the message, with `Title`, `Priority`
-//!   and `Tags` headers). Optional.
+//!   and `Tags` headers), or `CONSOLE_NOTIFY_FILE` naming a file holding it.
+//!   Optional. Down: a container exited, dead, restarting or gone, or a
+//!   service reporting `failed` (`notify.rs`).
 //! - `CONSOLE_STORE`: the store, e.g. `http://host.docker.internal:9120`, so
 //!   the Storage widget can approve a new drive (decision 0007). Only that
 //!   one call is passed through.
@@ -306,9 +308,17 @@ async fn main() {
 async fn poll_forever(app: Arc<App>, observer: Observer) {
     let mut tick = tokio::time::interval(Duration::from_secs(2));
     // Push notifications when a service goes down or comes back (CONSOLE_NOTIFY).
-    let notify = std::env::var("CONSOLE_NOTIFY")
-        .ok()
-        .filter(|u| !u.is_empty());
+    let notify = match tinytrader_observe::secret("CONSOLE_NOTIFY") {
+        Ok(u) if !u.is_empty() => Some(u),
+        Ok(_) => None,
+        // Unset is fine (no notices); a named file that can't be read is said.
+        Err(e) => {
+            if std::env::var_os("CONSOLE_NOTIFY_FILE").is_some() {
+                eprintln!("console: {e}; no notices");
+            }
+            None
+        }
+    };
     let (mut watch, http) = (notify::Watch::default(), reqwest::Client::new());
     loop {
         tick.tick().await;
