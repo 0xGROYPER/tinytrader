@@ -62,11 +62,10 @@ enum Phase {
     Sent,
     Unknown,
     Done,
-    /// Looked up and not found, but still open until a stream event or a reconcile
-    /// settles it. Not journaled: after a restart it is Unknown again.
+    /// Looked up and not found, but still open until a stream event or a lookup that
+    /// finds it settles it. A 404 never clears it. Not journaled: after a restart it
+    /// is Unknown again.
     Absent,
-    /// Absent, and a reconcile lookup found nothing again: no longer open.
-    Gone,
 }
 
 struct OrderState {
@@ -139,7 +138,6 @@ impl OrderState {
     fn open(&self) -> bool {
         match self.phase {
             Phase::Admitted | Phase::Sent | Phase::Unknown | Phase::Absent => true,
-            Phase::Gone => false,
             Phase::Done => !terminal(&self.status) && self.status != "not_sent",
         }
     }
@@ -1486,24 +1484,15 @@ impl<B: Broker> Session<B> {
                         self.reconcile_order(bo)?;
                     }
                 }
-                // Still open. Found now: settled by the order's state. A second 404
-                // is the reconcile's confirmation that it is gone. Any other failure
-                // leaves it absent.
+                // Still open. Found now: settled by the order's state. A 404 or any
+                // other failure leaves it absent and counted: only evidence settles it.
                 Phase::Absent => {
                     checked += 1;
                     self.budget.charge();
-                    if let Ok(r) = self.b.order(&OrderRef::Client(cid.clone())) {
-                        match r.value {
-                            Some(bo) => self.reconcile_order(bo)?,
-                            None => {
-                                if let Some(st) = self.orders.get_mut(&cid) {
-                                    st.phase = Phase::Gone;
-                                }
-                            }
-                        }
+                    if let Ok(Some(bo)) = self.b.order(&OrderRef::Client(cid)).map(|r| r.value) {
+                        self.reconcile_order(bo)?;
                     }
                 }
-                Phase::Gone => {}
             }
         }
         self.budget.charge();
@@ -1600,8 +1589,9 @@ impl<B: Broker> Session<B> {
 
     /// Looks up each absent order by client ID on the poll interval, so an
     /// absent order settles without waiting for a stream reconnect. Found: it
-    /// is reconciled from its state. A second 404: gone. Any other error: it
-    /// stays absent and is counted until a later check.
+    /// is reconciled from its state and settles. A 404 or any other error never
+    /// clears it: it stays absent and counted until a stream event or a later
+    /// lookup finds it.
     fn recheck_absent(&mut self) -> Result<(), String> {
         let mut cids: Vec<String> = self
             .orders
@@ -1612,15 +1602,8 @@ impl<B: Broker> Session<B> {
         cids.sort();
         for cid in cids {
             self.budget.charge();
-            if let Ok(r) = self.b.order(&OrderRef::Client(cid.clone())) {
-                match r.value {
-                    Some(bo) => self.reconcile_order(bo)?,
-                    None => {
-                        if let Some(st) = self.orders.get_mut(&cid) {
-                            st.phase = Phase::Gone;
-                        }
-                    }
-                }
+            if let Ok(Some(bo)) = self.b.order(&OrderRef::Client(cid)).map(|r| r.value) {
+                self.reconcile_order(bo)?;
             }
         }
         Ok(())

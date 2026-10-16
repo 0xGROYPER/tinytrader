@@ -341,13 +341,30 @@ fn a_periodic_check_settles_an_absent_order_the_broker_now_shows() {
 }
 
 #[test]
-fn a_periodic_check_clears_an_absent_order_the_broker_never_shows() {
-    let r = rig_with("alpaca-absent-gone", |p| p.max_open = 1);
+fn a_404_never_clears_an_absent_order_however_many_checks_return_it() {
+    let r = rig_with("alpaca-absent-404", |p| p.max_open = 1);
     let mut c = ready(&r.gw, "reactor");
-    absent_submit(&r, &mut c, "wse-gone");
-    // Two 404s (the submit's window, then the poll's check) mean it is gone.
-    wait_resolved(&mut c);
-    assert_eq!(c.submit("r2", &buy("wse-next"))["outcome"], "accepted");
+    absent_submit(&r, &mut c, "wse-404");
+    // Let the poll's lookup run several times, each one a 404 from the broker.
+    let before = r.fake.count("GET", "/v2/orders:by_client_order_id");
+    let t = Instant::now();
+    while r.fake.count("GET", "/v2/orders:by_client_order_id") < before + 5 {
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "the poll never looked again"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Still counted: it uses the open slot, and a close on its leg waits for it.
+    let (q, _) = c.req("open_orders", "q1", "");
+    assert_eq!(q["unresolved"], 1);
+    let v = c.submit("r2", &buy("wse-next"));
+    assert_eq!(v["detail"]["cap"], "open_orders");
+    let v = c.submit(
+        "r3",
+        &single("wse-404-close", CALL, "sell", "close", 1, "1.00"),
+    );
+    assert_eq!(v["reason"], "leg_pending");
 }
 
 #[test]
