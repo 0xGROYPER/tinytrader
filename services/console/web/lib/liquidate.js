@@ -4,7 +4,9 @@
 // group is one combo order of up to four legs, its legs reversed, ratios in
 // lowest terms. A bigger group is split into runs of four by expiry, type
 // and strike, so its spreads close together and no order leaves a short leg
-// uncovered on its own. Each is priced at the marketable limit (the natural
+// uncovered on its own. A pick that keeps a short while closing a long that
+// may cover it is named (uncovered), and sending waits for an explicit yes.
+// Each is priced at the marketable limit (the natural
 // and 5%, at least $0.05, past it), or sent at market, from the chain's
 // quotes read just before sending. Stock positions and contracts already
 // expired are left out, and said so.
@@ -74,6 +76,19 @@ export function plan(positions, pick) {
     }
   }
   return { orders, left };
+}
+
+/**
+ * The shorts a pick would leave uncovered: kept short contracts of an
+ * underlying and type (call or put) when the pick closes a long of the same
+ * underlying and type that could be covering them. Closing everything, or
+ * closing a short and keeping its long, leaves nothing uncovered.
+ * @param {Held[]} held @param {Set<string>} pick @returns {Held[]}
+ */
+export function uncovered(held, pick) {
+  const key = h => `${h.root}|${h.type}`;
+  const closingLong = new Set(held.filter(h => h.qty > 0 && pick.has(h.symbol)).map(key));
+  return held.filter(h => h.qty < 0 && !pick.has(h.symbol) && closingLong.has(key(h)));
 }
 
 /** Quotes for these contracts by symbol, one chain read per underlying and expiry. */

@@ -25,7 +25,7 @@ import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { askHeld } from '../lib/position.js';
 import { createTicket, tradable, routed, occLabel } from '../lib/ticket.js';
-import { closable, plan, quotes, priced, send, cancelOurs } from '../lib/liquidate.js';
+import { closable, plan, uncovered, quotes, priced, send, cancelOurs } from '../lib/liquidate.js';
 import { get } from '../lib/cache.js';
 
 /** An account's option positions by underlying and expiry, for the Spread builder's payoff. */
@@ -99,7 +99,7 @@ function flattenPanel(a) {
   return buttons;
 }
 
-// Liquidate per account: {stage: 'review' | 'sending' | 'done', market, confirm, q (quotes), pick (symbols ticked), sent, results}.
+// Liquidate per account: {stage: 'review' | 'sending' | 'done', market, confirm, q (quotes), pick (symbols ticked), ackNaked (yes to leaving shorts uncovered), sent, results}.
 const liq = {};
 function liquidatePanel(a) {
   const name = a?.name;
@@ -111,6 +111,8 @@ function liquidatePanel(a) {
   // Contracts no longer held drop out of the pick.
   for (const sym of L.pick) if (!held.some(h => h.symbol === sym)) L.pick.delete(sym);
   const { orders } = plan(a.positions, L.pick);
+  // Shorts the pick would leave without the long that covers them: said so, and sending waits for an explicit yes.
+  const naked = uncovered(held, L.pick), blocked = naked.length > 0 && !L.ackNaked;
   const live = a.environment === 'live';
   const legsOf = o => o.legs.map(l => `<span class="${l.side === 'buy' ? 'pos' : 'neg'}">${l.side === 'buy' ? '+' : '−'}${l.ratio * o.qty}</span> ${esc(occLabel(l.symbol))}`).join('<br>');
   const priceOf = o => {
@@ -135,6 +137,7 @@ function liquidatePanel(a) {
     ours ? `Cancels the console's ${ours} open order${ours > 1 ? 's' : ''} first.` : '',
     theirs ? `<span class="neg">${theirs} open order${theirs > 1 ? 's' : ''} placed elsewhere stay${theirs > 1 ? '' : 's'}, and can keep a contract from closing: cancel ${theirs > 1 ? 'them' : 'it'} where ${theirs > 1 ? 'they were' : 'it was'} placed.</span>` : '',
     left.length ? `Left out: ${left.map(x => `${esc(occLabel(x.symbol))} (${esc(x.why)})`).join(', ')}.` : '',
+    naked.length && L.stage === 'review' ? `<span class="neg"><b>Leaves uncovered:</b> ${naked.map(h => `−${Math.abs(h.qty)} ${esc(occLabel(h.symbol))}`).join(', ')}: a long it closes may be what covers ${naked.length > 1 ? 'them' : 'it'}. Tick ${naked.length > 1 ? 'them' : 'it'} too, or</span> <label class="liq-pick"><input type="checkbox" data-liq-ack="${esc(name)}"${L.ackNaked ? ' checked' : ''}> leave ${naked.length > 1 ? 'them' : 'it'} open uncovered</label>` : '',
   ].filter(Boolean).map(x => `<p class="muted" style="margin:0;font-size:12px">${x}</p>`).join('');
   const confirming = L.confirm > Date.now();
   const n = L.pick.size;
@@ -143,7 +146,7 @@ function liquidatePanel(a) {
     : `<b>Close option positions in ${esc(a.label || name)}${live ? ' (LIVE, real money)' : ''}: ${n} of ${held.length} ticked, ${orders.length} order${orders.length === 1 ? '' : 's'}.</b>`;
   const seg = L.stage === 'review' ? `<span class="tk-seg" role="group" aria-label="Price"><button type="button" data-liq-type="limit" data-liq="${esc(name)}" aria-pressed="${!L.market}" title="The natural and 5% (at least $0.05) past it: fills like market unless the quotes jump">Marketable limit</button><button type="button" data-liq-type="market" data-liq="${esc(name)}" aria-pressed="${L.market}" title="Fills at whatever the market gives">Market</button></span>` : '';
   const acts = L.stage === 'review'
-    ? `<button type="button" class="btn liq-btn" data-liq-go="${esc(name)}"${orders.length && L.q ? '' : ' disabled'}>${confirming ? `Confirm: close ${n} for real` : `Close ${n} now`}</button><button type="button" class="btn small" data-liq-cancel="${esc(name)}">${confirming ? 'Not yet' : 'Cancel'}</button>`
+    ? `<button type="button" class="btn liq-btn" data-liq-go="${esc(name)}"${orders.length && L.q && !blocked ? '' : ' disabled'}>${confirming ? `Confirm: close ${n} for real` : `Close ${n} now`}</button><button type="button" class="btn small" data-liq-cancel="${esc(name)}">${confirming ? 'Not yet' : 'Cancel'}</button>`
     : L.stage === 'done' ? `<button type="button" class="btn small" data-liq-cancel="${esc(name)}">Done</button>${held.length ? `<button type="button" class="btn small danger" data-liq-open="${esc(name)}">Again for what's left</button>` : ''}` : '';
   return `<div class="acct-flat liq${live ? ' liq-live' : ''}">${head}${seg}
     ${body}${notes}
@@ -377,7 +380,7 @@ function mount(el, single = false, book = false) {
     const name = d.liqOpen || d.liq || d.liqGo || d.liqCancel || d.liqAll || d.liqNone, L = liq[name];
     if (d.liqOpen) {
       const held = closable(accountOf(name)?.positions).held;
-      liq[name] = { stage: 'review', market: false, confirm: 0, q: null, pick: new Set(held.map(h => h.symbol)) };
+      liq[name] = { stage: 'review', market: false, confirm: 0, q: null, pick: new Set(held.map(h => h.symbol)), ackNaked: false };
       update();
       const q = await quotes(held.map(h => h.symbol));
       if (liq[name]?.stage === 'review') { liq[name].q = q; update(); }
@@ -386,7 +389,7 @@ function mount(el, single = false, book = false) {
     if (!L) return;
     if (d.liqAll || d.liqNone) {
       L.pick = new Set(d.liqAll ? closable(accountOf(name)?.positions).held.map(h => h.symbol) : []);
-      L.confirm = 0; update(); return;
+      L.confirm = 0; L.ackNaked = false; update(); return;
     }
     if (d.liqCancel) { if (L.confirm > Date.now()) L.confirm = 0; else delete liq[name]; update(); return; }
     if (d.liqType) { L.market = d.liqType === 'market'; L.confirm = 0; update(); return; }
@@ -395,6 +398,7 @@ function mount(el, single = false, book = false) {
     if (live && L.confirm <= Date.now()) { L.confirm = Date.now() + 6000; update(); setTimeout(update, 6100); return; }
     const { orders } = plan(a?.positions, L.pick);
     if (!orders.length) return;
+    if (uncovered(closable(a?.positions).held, L.pick).length && !L.ackNaked) { L.confirm = 0; update(); return; }
     L.stage = 'sending'; L.sent = orders; L.results = orders.map(() => null); update();
     // Our own working orders hold contracts: cancelled, then gone from the account (at most 5 s).
     if (await cancelOurs(name, a?.orders)) {
@@ -423,7 +427,13 @@ function mount(el, single = false, book = false) {
       const i = pick.indexOf('|'), L = liq[pick.slice(0, i)], sym = pick.slice(i + 1);
       if (!L || L.stage !== 'review') return;
       if (e.target.checked) L.pick.add(sym); else L.pick.delete(sym);
-      L.confirm = 0; update(); return;
+      L.confirm = 0; L.ackNaked = false; update(); return;
+    }
+    const ack = e.target.dataset?.liqAck;
+    if (ack) {
+      const L = liq[ack];
+      if (!L || L.stage !== 'review') return;
+      L.ackNaked = e.target.checked; L.confirm = 0; update(); return;
     }
     if (e.target.classList?.contains('acct-pick')) {
       want = e.target.value; e.target.blur();
