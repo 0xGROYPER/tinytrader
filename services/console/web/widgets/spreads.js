@@ -84,7 +84,13 @@ defineWidget('spreads', {
     // What the chain lists: kept from before at once (today's), then read.
     async function loadIndex() {
       const svc = chainService(), sym = my.sym;
-      if (!svc) { my.err = 'No service serves option chains (alpaca-data).'; render(); return; }
+      if (!svc) {
+        // The page can mount the builder before it has read the topology: look again shortly.
+        my.err = 'No service serves option chains (alpaca-data).'; render();
+        setTimeout(() => { if (my.alive && sym === my.sym && !my.index) loadIndex(); }, 1000);
+        return;
+      }
+      if (my.err.startsWith('No service')) my.err = '';
       const url = indexUrl(svc, sym), kept = peek(url)?.v;
       if (kept && !my.index) { my.index = kept; arrived(); }
       try {
