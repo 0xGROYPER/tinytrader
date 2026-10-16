@@ -1,5 +1,11 @@
-target
-.git
-result
-result-*
+# Only what the image build reads (Dockerfile): the Cargo workspace.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!apps
+!libs
+!services
+**/target
+**/node_modules
 **/.DS_Store

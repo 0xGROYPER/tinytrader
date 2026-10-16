@@ -8,13 +8,12 @@ You need Docker with Compose. No Nix, accounts or API keys.
 
 ```sh
 cd examples/quickstart
-../../nix/build-images.sh ticker console   # builds the images with Nix inside Docker
-docker compose up -d
-open http://localhost:8080        # or visit it in any browser
+docker compose up -d             # pulls the images; nothing to build
+open http://localhost:8080       # or visit it in any browser
 ```
 
-The first build compiles the services and takes a few minutes. Later starts
-take seconds.
+The first start downloads the images (about 15 MB each); later starts take
+seconds. To build the images yourself instead, see [Images](#images).
 
 ## What runs
 
@@ -26,6 +25,35 @@ take seconds.
 
 The graph is drawn from [`topology.json`](topology.json). Edit it and the
 console picks up the change within 30 seconds.
+
+## Images
+
+`docker compose up` pulls the published images,
+`ghcr.io/dawson-shay/tinytrader-<service>:main`, built from `main` for
+linux/amd64 and linux/arm64. Two variables choose others:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TINYTRADER_IMAGE_PREFIX` | `ghcr.io/dawson-shay/tinytrader-` | Image name before the service name |
+| `TINYTRADER_TAG` | `main` | Image tag: `main`, `sha-<short commit>`, or a release, `X.Y.Z` |
+
+**Build from this checkout** with the repository's `Dockerfile` (needs only
+Docker; the first build compiles the workspace and takes a few minutes):
+
+```sh
+docker compose -f compose.yaml -f compose.build.yaml up -d --build
+```
+
+**Nix images** (optional), built with Nix inside Docker and tagged
+`tinytrader/<service>:nix`:
+
+```sh
+../../nix/build-images.sh ticker console
+TINYTRADER_IMAGE_PREFIX=tinytrader/ TINYTRADER_TAG=nix docker compose up -d
+```
+
+`CONSOLE_PORT` moves the console from port 8080, for example when another
+console already uses it.
 
 ## Things to try
 

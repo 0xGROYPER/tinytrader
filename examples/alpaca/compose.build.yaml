@@ -1,0 +1,26 @@
+# Build the images from this checkout (the repository's Dockerfile) instead of
+# pulling the published ones:
+#   docker compose -f compose.yaml -f compose.build.yaml up -d --build
+# They are tagged tinytrader/<service>:local. The first build compiles the
+# workspace and takes a few minutes; later ones reuse Docker's build cache.
+services:
+  relay:
+    image: tinytrader/relay:local
+    build:
+      context: ../..
+      args: { SERVICE: relay }
+  alpaca-news:
+    image: tinytrader/alpaca-news:local
+    build:
+      context: ../..
+      args: { SERVICE: alpaca-news }
+  alpaca-account:
+    image: tinytrader/alpaca-account:local
+    build:
+      context: ../..
+      args: { SERVICE: alpaca-account }
+  console:
+    image: tinytrader/console:local
+    build:
+      context: ../..
+      args: { SERVICE: console }

@@ -20,21 +20,24 @@ flake input. See [decision 0001](docs/decisions/0001-platform-and-deployment.md)
 The documentation starts at [docs/](docs/README.md): tutorials, the
 console's widgets, the relay and store APIs, recovery, and the decisions.
 
-## Try it
+## Quick start with Docker
 
 [`examples/quickstart`](examples/quickstart/) runs a toy collector streaming
-live Coinbase prices and the tinytrader console, with only Docker:
+live Coinbase prices and the tinytrader console. It needs only Docker with
+Compose: the images are published prebuilt, so there is nothing to install or
+build.
 
 ```sh
-cd examples/quickstart
-../../nix/build-images.sh ticker console   # builds the images with Nix, inside Docker
-docker compose up -d
-# then open http://localhost:8080
+cd examples/quickstart && docker compose up
 ```
+
+Then open <http://localhost:8080>. `Ctrl-C` stops it; `docker compose down -v`
+removes it and its recorded data.
 
 Have a Databento or Alpaca account? [`examples/databento`](examples/databento/)
 and [`examples/alpaca`](examples/alpaca/) stream live market data into the
-console the same way.
+console the same way. To build the images from source instead, with Docker,
+Cargo or Nix, see [Building and testing](#building-and-testing).
 
 ## What's here
 
@@ -45,7 +48,8 @@ console the same way.
 | `libs/schedule` | Active hours on the market calendar, in New York time |
 | `libs/dbn` | tinytrader's DBN extension records (trade conditions) |
 | `libs/tinytrader` | The crates.io umbrella crate |
-| `nix/images.nix`, `nix/build-images.sh` | Container images of the services, built by Nix (inside Docker when Nix isn't installed) |
+| `Dockerfile`, `docker-bake.hcl` | Container images of the services, built with Cargo; published to `ghcr.io` by CI |
+| `nix/images.nix`, `nix/build-images.sh` | The same images built by Nix (inside Docker when Nix isn't installed) |
 | `apps/tui` | Terminal view of a deployment (Ratatui): overview, services, market chart, a live options book, data and hosts |
 | `services/console` | The operator console: workspaces of widgets (Dockview), docs and the roadmap |
 | `services/ticker` | Toy service used by the quickstart |
@@ -151,10 +155,40 @@ A service runs from its binary, taking its settings from the environment
 from `services/console/web/`. CI's `cargo` job builds and tests this way, with
 no Nix installed, so the Cargo path stays first-class.
 
+### With Docker
+
+The `Dockerfile` builds any service's image with Cargo in the official Rust
+image, onto a distroless base, as user 65532. `docker-bake.hcl` builds every
+service's image in one go, compiling the workspace once:
+
+```sh
+docker build --build-arg SERVICE=console -t tinytrader/console:local .
+docker buildx bake --load                   # every service, as tinytrader/<service>:local
+docker buildx bake --load ticker console    # some
+```
+
+Each example's `compose.build.yaml` builds its images this way
+(`docker compose -f compose.yaml -f compose.build.yaml up --build`).
+
+#### Publishing images
+
+The `images` workflow builds every service's image on each pull request (for
+linux/arm64 only, without pushing), and on each push to `main` and each
+`vX.Y.Z` tag builds them for linux/amd64 and linux/arm64 and publishes them as
+`ghcr.io/<owner>/tinytrader-<service>`, tagged `main` and `latest` (the same
+image), `sha-<short commit>`, and `X.Y.Z` and `X.Y` for releases. It pushes
+with the workflow's own `GITHUB_TOKEN`, so no secrets are needed.
+
+GitHub makes a package private when a workflow first pushes it. Once per
+package, after its first publish: open the package (the repository's
+**Packages** list, or your profile's **Packages** tab), then **Package
+settings**, **Change visibility**, **Public**. Until then, `docker compose
+up` fails to pull it with `denied` or `unauthorized`.
+
 ### With Nix (optional)
 
 Nix adds reproducible builds (every dependency pinned in `flake.lock`),
-container images without Dockerfiles, and the `tinytrader.services` modules for
+container images from the same pinned packages, and the `tinytrader.services` modules for
 NixOS, other Linux distributions and nix-darwin:
 
 ```sh
