@@ -149,12 +149,15 @@ impl Databento {
             if let Some(stalled) = stall.note(now, behind, skipped)
                 && may_drop
             {
-                return End::Stalled(format!(
-                    "behind Databento (or skipped by it) for {:.0} s without catching up, {:.1} s behind now (session {session}; {}); dropping the session for a fresh one",
-                    stalled.as_secs_f64(),
-                    minute.latest.as_secs_f64(),
-                    minute.so_far(now),
-                ));
+                return End::Stalled(
+                    format!(
+                        "behind Databento (or skipped by it) for {:.0} s without catching up, {:.1} s behind now (session {session}; {}); dropping the session for a fresh one",
+                        stalled.as_secs_f64(),
+                        minute.latest.as_secs_f64(),
+                        minute.so_far(now),
+                    ),
+                    gaps.last_ts,
+                );
             }
         }
     }
@@ -164,8 +167,9 @@ impl Databento {
 enum End {
     Closed,
     Failed(String),
-    /// Dropped for staying behind: a fresh session is opened at once.
-    Stalled(String),
+    /// Dropped for staying behind: a fresh session is opened at once. The
+    /// time is the exchange time of the last record it published (0 if none).
+    Stalled(String, u64),
 }
 
 /// Falling this far behind the provider counts toward a stall.
@@ -299,11 +303,18 @@ impl Source for Databento {
                 let Some(outcome) = outcome else {
                     continue;
                 };
-                hub.upstream_down();
+                // A stall's gap starts where the records published stop, in
+                // exchange time, as a skip's does. With nothing published in
+                // the session that is 0, as for a skip before any record: no
+                // exchange time is known, and clients get that 0.
+                match &outcome {
+                    End::Stalled(_, from) => hub.upstream_down_since(*from),
+                    _ => hub.upstream_down(),
+                }
                 let (why, wait) = match outcome {
                     End::Closed => ("Databento closed the session".to_owned(), backoff),
                     End::Failed(e) => (e, backoff),
-                    End::Stalled(e) => {
+                    End::Stalled(e, _) => {
                         last_drop = Some(Instant::now());
                         (e, Duration::ZERO)
                     }
@@ -423,6 +434,29 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
+    }
+
+    #[test]
+    fn a_stall_starts_the_gap_at_the_last_record_published() {
+        let hub = Hub::new(
+            Metadata::builder()
+                .dataset("OPRA.PILLAR".to_owned())
+                .schema(None)
+                .start(0)
+                .stype_in(None)
+                .stype_out(SType::InstrumentId)
+                .build(),
+            8,
+            Duration::from_secs(10),
+        );
+        let mut gaps = Gaps::default();
+        let (mut chunk, mut n) = (Vec::new(), 0);
+        for ts in [1_000, 2_000] {
+            gaps.take(&hub, RecordRef::from(&quote(ts)), &mut chunk, &mut n);
+        }
+        // What the stalled session reports as the gap start.
+        assert_eq!(gaps.last_ts, 2_000);
+        assert_eq!(n, 2);
     }
 
     #[test]

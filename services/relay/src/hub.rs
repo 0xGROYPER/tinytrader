@@ -479,13 +479,20 @@ impl Hub {
         }
     }
 
-    /// The provider connection was lost; tell clients once.
+    /// The provider connection was lost now; tell clients once.
     pub fn upstream_down(&self) {
+        self.upstream_down_since(protocol::now_ns());
+    }
+
+    /// The provider connection was lost, and records from `since` on are
+    /// missing: tell clients once. `since` is exchange time (the last record
+    /// published), so `upstream-up` repeats it as a `gap_from` clients can
+    /// refill from.
+    pub fn upstream_down_since(&self, since: u64) {
         let mut u = lock(&self.upstream);
         if matches!(*u, Upstream::Down(_) | Upstream::Off(_)) {
             return;
         }
-        let since = protocol::now_ns();
         *u = Upstream::Down(since);
         let text = format!("upstream-down since={since}");
         self.events.push(text.clone(), text.clone());
@@ -844,6 +851,36 @@ mod tests {
         let mut s = TcpStream::connect(addr).await.unwrap();
         s.write_all(line.as_bytes()).await.unwrap();
         AsyncDbnDecoder::new(s).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_stall_marks_the_gap_from_the_last_record_published() {
+        let hub = Hub::new(metadata(), 64, Duration::from_secs(1));
+        let mut rx = hub.tx.subscribe();
+        // Records with known exchange times, then the session stalls.
+        let record = |ts: u64| {
+            let m = SystemMsg::new(ts, None, "tick").unwrap();
+            databento::dbn::RecordRef::from(&m).as_ref().to_vec()
+        };
+        hub.publish(record(1_000), 1);
+        hub.publish(record(2_000), 1);
+        hub.upstream_down_since(2_000);
+        assert_eq!(hub.upstream(), Upstream::Down(2_000));
+        hub.upstream_up();
+        let mut texts = Vec::new();
+        while let Ok(chunk) = rx.try_recv() {
+            texts.push(String::from_utf8_lossy(&chunk).into_owned());
+        }
+        assert!(
+            texts.iter().any(|t| t.contains("upstream-down since=2000")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("upstream-up gap_from=2000 gap_to=")),
+            "{texts:?}"
+        );
     }
 
     #[tokio::test]
