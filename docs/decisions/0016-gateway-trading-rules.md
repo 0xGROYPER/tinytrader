@@ -45,9 +45,13 @@ open-position maximum losses and the protective stops it placed.
 
 - `user` is for a human trader's client. It applies:
   - a maximum loss at risk per correlation group, as a percentage of
-    start-of-day equity;
-  - an automatic protective exit at 2% of equity for each opening fill;
-  - a daily loss limit of 10% of start-of-day equity;
+    start-of-day equity (the default is set in ops);
+  - an automatic protective exit, at a loss of a set percentage of equity, on
+    each position (the default is set in ops);
+  - a daily loss limit, as a percentage of start-of-day equity (the default is
+    set in ops). It counts **realised losses plus open positions at current
+    prices**. Counting only realised losses would let an open loss run without
+    limit;
   - limit-only opening orders, so openings are never market orders.
 - `automated` is for strategy clients. It applies only the mechanical limits in
   the gateway's existing caps, unless the file gives it more.
@@ -69,8 +73,14 @@ open-position maximum losses and the protective stops it placed.
 
 **Protective stops.**
 
+- There is **one protective stop per position**, not one per fill. Partial
+  fills, adds and a second order on the same contract all feed the same
+  position. Whenever the position's quantity changes, the stop is cancelled
+  and replaced at the new size. Several stops of different sizes on one
+  position are never allowed.
 - A single-leg long option gets a broker `stop_limit` sell to close, GTC,
-  placed when the fill arrives. Its stop price puts the loss at 2% of equity.
+  placed when the position first opens. Its stop price puts the loss at the
+  profile's stop percentage of equity.
 - A multi-leg position cannot have a broker stop, so the gateway watches it.
   Quotes come from Alpaca option snapshots, called by the gateway with the
   same credentials. This keeps the gateway independent of the console and the
@@ -100,13 +110,18 @@ profiles are tested on paper accounts only, with tiny sizes.
 - The gateway gains a rules module, persistent state (start-of-day equity,
   the day's P&L, the stops it placed) and an options quote client that is
   separate from the market-data relays.
-- The request budget is shared with orders, so quote polls run at low priority
-  and are shed first.
+- The request budget is shared with orders. Quote checks for protective stops
+  take priority over other requests and are never shed. Anything else is shed
+  first. Watched spread stops matter most under load, so they are not dropped
+  when the budget is tight.
 - The `not_sent` contract gains a `rule` reason with the rule's name and its
   numbers. Its `detail` fields are additive.
 - The start-of-day equity is journaled. A restart reloads it, so a restart
   cannot reset the limit.
-- Foreign positions, meaning positions opened outside the gateway, have an
-  unknown maximum loss. Openings in their group are refused.
+- Positions opened outside the gateway, such as those held at rollout or
+  opened in Alpaca's app, count toward their group's maximum loss when it can
+  be computed from the broker's data: the cost basis of long options and
+  stock. Only a position whose maximum loss cannot be computed blocks openings
+  in its group. Such a block names the position and the reason.
 - A partial close is not assumed to carry zero risk. Its rule comes from the
   shared function, once it lands.
