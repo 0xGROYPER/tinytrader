@@ -194,13 +194,15 @@ fn market_orders_fill_at_the_touch() {
             &market(single("wse-m1", CALL, "buy", "open", 1, "1.00")),
         );
         assert_eq!(r["outcome"], "accepted", "{r}");
+        let ev = advance(c, T0 + 10 * MS);
+        assert_eq!(fill_price(&ev, "wse-m1").as_deref(), Some("2.00"));
+        // The close waits for the buy on its leg to fill, so it is sent after it.
         let r = c.submit(
             "r2",
             &market(single("wse-m2", CALL, "sell", "close", 1, "3.00")),
         );
         assert_eq!(r["outcome"], "accepted", "{r}");
-        let ev = advance(c, T0 + 10 * MS);
-        assert_eq!(fill_price(&ev, "wse-m1").as_deref(), Some("2.00"));
+        let ev = advance(c, T0 + 20 * MS);
         assert_eq!(fill_price(&ev, "wse-m2").as_deref(), Some("1.90"));
     });
 }

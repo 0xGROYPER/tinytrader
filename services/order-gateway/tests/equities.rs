@@ -24,7 +24,7 @@ fn cap_of(r: &serde_json::Value) -> (Option<&str>, Option<&str>) {
 #[test]
 fn stock_orders_follow_the_profile() {
     let mut cfg = config(root("equities"));
-    cfg.profile.equities = vec!["AAPL".into(), "BRK.B".into()];
+    cfg.profile.equities = vec!["AAPL".into(), "BRK.B".into(), "KO".into()];
     cfg.profile.max_open = 10;
     let gw = scripted(cfg, &format!(r#"{{"clock_ts":{T0}}}"#));
     let mut c = Conn::open(&gw, "reactor", None);
@@ -53,6 +53,7 @@ fn stock_orders_follow_the_profile() {
     );
 
     // Selling to open is a short sale: refused without --allow-short; selling to close isn't.
+    // The close is on KO, where no order of its own is working (AAPL's buy is).
     let r = c.submit(
         "r4",
         &stock("wse-4", "AAPL", "sell", "open", 1, "220.00", "day"),
@@ -61,7 +62,7 @@ fn stock_orders_follow_the_profile() {
     assert_eq!(
         c.submit(
             "r5",
-            &stock("wse-5", "AAPL", "sell", "close", 1, "220.00", "cls")
+            &stock("wse-5", "KO", "sell", "close", 1, "220.00", "cls")
         )["outcome"],
         "accepted"
     );

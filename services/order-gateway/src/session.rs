@@ -62,7 +62,11 @@ enum Phase {
     Sent,
     Unknown,
     Done,
+    /// Looked up and not found, but still open until a stream event or a reconcile
+    /// settles it. Not journaled: after a restart it is Unknown again.
     Absent,
+    /// Absent, and a reconcile lookup found nothing again: no longer open.
+    Gone,
 }
 
 struct OrderState {
@@ -75,6 +79,8 @@ struct OrderState {
     avg: Option<String>,
     legs: Option<String>,
     raw: Option<String>,
+    /// The intent's leg symbols, the keys a close is checked against.
+    symbols: Vec<String>,
     phase: Phase,
 }
 
@@ -93,8 +99,25 @@ fn journal_opens(v: &Value) -> bool {
     legs.iter().any(|l| l["effect"].as_str() != Some("close"))
 }
 
+/// The leg symbols of a journaled `admitted` intent, as `Leg::symbol` has them.
+fn journal_symbols(v: &Value) -> Vec<String> {
+    let intent = &v["intent"];
+    let legs: Vec<&Value> = match intent["legs"].as_array() {
+        Some(legs) if !legs.is_empty() => legs.iter().collect(),
+        _ => vec![intent],
+    };
+    legs.iter()
+        .filter_map(|l| l["instrument"]["symbol"].as_str().map(String::from))
+        .collect()
+}
+
 impl OrderState {
-    fn admitted(client: String, request_id: String, sha: Option<String>) -> Self {
+    fn admitted(
+        client: String,
+        request_id: String,
+        sha: Option<String>,
+        symbols: Vec<String>,
+    ) -> Self {
         let (status, phase) = (String::new(), Phase::Admitted);
         let (broker_id, avg, legs, raw) = (None, None, None, None);
         Self {
@@ -107,13 +130,16 @@ impl OrderState {
             avg,
             legs,
             raw,
+            symbols,
             phase,
         }
     }
+    /// Whether the order counts against the open cap and blocks closes on its legs.
+    /// An absent order does: only a stream event or a reconcile settles it.
     fn open(&self) -> bool {
         match self.phase {
-            Phase::Admitted | Phase::Sent | Phase::Unknown => true,
-            Phase::Absent => false,
+            Phase::Admitted | Phase::Sent | Phase::Unknown | Phase::Absent => true,
+            Phase::Gone => false,
             Phase::Done => !terminal(&self.status) && self.status != "not_sent",
         }
     }
@@ -292,7 +318,9 @@ impl<B: Broker> Session<B> {
                         self.day = (today, self.day.1 + 1);
                     }
                     let (c, r) = (text("client").unwrap_or_default(), text("request_id"));
-                    let st = OrderState::admitted(c, r.unwrap_or_default(), text("intent_sha256"));
+                    let symbols = journal_symbols(v);
+                    let sha = text("intent_sha256");
+                    let st = OrderState::admitted(c, r.unwrap_or_default(), sha, symbols);
                     self.orders.insert(cid, st);
                 }
                 phase => {
@@ -699,7 +727,13 @@ impl<B: Broker> Session<B> {
             }),
             Op::OpenOrders => self.b.open_orders().map(|r| {
                 let list = arr(r.value.iter().map(|o| order(o, &self.orders)));
-                (Obj::new().raw("orders", &list).done(), r.raw)
+                let unresolved = self
+                    .orders
+                    .values()
+                    .filter(|s| matches!(s.phase, Phase::Unknown | Phase::Absent))
+                    .count();
+                let o = Obj::new().raw("orders", &list).n("unresolved", unresolved);
+                (o.done(), r.raw)
             }),
             Op::Account => self.b.account().map(|r| {
                 let a = &r.value;
@@ -896,6 +930,21 @@ impl<B: Broker> Session<B> {
             let detail = Obj::new().s("level", level.name()).done();
             return Some(not_sent("killed", &detail));
         }
+        // A close waits until no order on its leg is still open or unresolved, so
+        // two closes cannot both count the same position. Any such leg refuses the
+        // whole intent. Opens are not checked here; the caps below cover them.
+        let pending: Vec<String> = intent
+            .legs
+            .iter()
+            .filter(|l| {
+                !l.open && self.orders.values().any(|o| o.open() && o.symbols.contains(&l.symbol))
+            })
+            .map(|l| quote(&l.symbol))
+            .collect();
+        if !pending.is_empty() {
+            let detail = Obj::new().raw("symbols", &arr(pending)).done();
+            return Some(not_sent("leg_pending", &detail));
+        }
         let p = &self.cfg.profile;
         let notional =
             intent.limit_cents.unsigned_abs() * u64::from(intent.qty) * intent.multiplier();
@@ -950,7 +999,8 @@ impl<B: Broker> Session<B> {
     fn forward(&mut self, client: &str, rid: &str, intent: &Intent) -> Result<String, String> {
         let cid = intent.client_order_id.clone();
         let sha = intent.sha256();
-        let st = OrderState::admitted(client.into(), rid.into(), Some(sha.clone()));
+        let symbols = intent.legs.iter().map(|l| l.symbol.clone()).collect();
+        let st = OrderState::admitted(client.into(), rid.into(), Some(sha.clone()), symbols);
         self.orders.insert(cid.clone(), st);
         if intent.has_open() {
             self.minute.push_back(Instant::now());
@@ -1429,13 +1479,31 @@ impl<B: Broker> Session<B> {
                         });
                     }
                 }
-                Phase::Done | Phase::Absent => {
+                Phase::Done => {
                     checked += 1;
                     self.budget.charge();
                     if let Ok(Some(bo)) = self.b.order(&OrderRef::Client(cid)).map(|r| r.value) {
                         self.reconcile_order(bo)?;
                     }
                 }
+                // Still open. Found now: settled by the order's state. A second 404
+                // is the reconcile's confirmation that it is gone. Any other failure
+                // leaves it absent.
+                Phase::Absent => {
+                    checked += 1;
+                    self.budget.charge();
+                    if let Ok(r) = self.b.order(&OrderRef::Client(cid.clone())) {
+                        match r.value {
+                            Some(bo) => self.reconcile_order(bo)?,
+                            None => {
+                                if let Some(st) = self.orders.get_mut(&cid) {
+                                    st.phase = Phase::Gone;
+                                }
+                            }
+                        }
+                    }
+                }
+                Phase::Gone => {}
             }
         }
         self.budget.charge();

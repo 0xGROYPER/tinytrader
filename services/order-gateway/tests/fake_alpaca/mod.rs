@@ -250,6 +250,15 @@ impl Fake {
         self.next(method, path, Act::Respond(status, Vec::new(), body.into()));
     }
 
+    /// Adds an order the broker has, as if it had reached it without a reply: a
+    /// lookup finds it from now on. `body` has the POST body's fields.
+    pub fn appear(&self, body: &str) {
+        let mut st = self.lock();
+        let id = format!("00000000-0000-4000-8000-{:012}", st.orders.len() + 1);
+        let v: Value = serde_json::from_str(body).unwrap();
+        st.orders.push(order_from(id, &v));
+    }
+
     pub fn count(&self, method: &str, path: &str) -> usize {
         let st = self.lock();
         st.log
