@@ -65,8 +65,9 @@ echo "== native services: launchd daemons (system) and agents (gui/<uid>)"
 # what `launchctl print` says of it.
 uid="$(id -u)"
 mkdir -p "$work/bin" "$work/launchd/system" "$work/launchd/gui/$uid"
+# (#!$BASH: the build sandbox on Linux has no /usr/bin/env.)
 cat > "$work/bin/launchctl" <<FAKE
-#!/usr/bin/env bash
+#!$BASH
 [ "\$1" = print ] && [ -f "$work/launchd/\$2" ] && exec cat "$work/launchd/\$2"
 echo "Could not find service \$2" >&2; exit 113
 FAKE
@@ -89,7 +90,7 @@ native; says "resolved"
 echo "== native services: systemd where there is no launchd"
 if ! command -v launchctl >/dev/null 2>&1; then
   rm "$work/bin/launchctl"
-  printf '#!/usr/bin/env bash\n[ "$2" = tinytrader-up.service ] && { echo active; exit 0; }\necho inactive; exit 3\n' > "$work/bin/systemctl"
+  printf '#!%s\n[ "$2" = tinytrader-up.service ] && { echo active; exit 0; }\necho inactive; exit 3\n' "$BASH" > "$work/bin/systemctl"
   chmod +x "$work/bin/systemctl"
   PATH="$work/bin:$PATH" WATCH_NATIVE="up down" run; PATH="$work/bin:$PATH" WATCH_NATIVE="up down" run
   says "down: inactive (systemd tinytrader-down)"
