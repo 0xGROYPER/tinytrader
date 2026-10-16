@@ -1232,8 +1232,20 @@ struct ScreenAsk {
     scan: Option<usize>,
 }
 
+/// An error and its causes: reqwest's "error decoding response body" alone
+/// doesn't say whether the body was cut off or wasn't JSON.
+fn causes(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut s = e.to_string();
+    let mut next = e.source();
+    while let Some(c) = next {
+        s = format!("{s}: {c}");
+        next = c.source();
+    }
+    s
+}
+
 /// Nasdaq's listings, fetched at most every 10 minutes (the last ones kept
-/// if Nasdaq doesn't answer).
+/// if Nasdaq doesn't answer, after one retry).
 async fn universe(app: &App) -> Result<Arc<Vec<screener::Stock>>, (StatusCode, String)> {
     let kept = lock(&app.screen).universe.clone();
     if let Some((at, u)) = &kept
@@ -1241,27 +1253,35 @@ async fn universe(app: &App) -> Result<Arc<Vec<screener::Stock>>, (StatusCode, S
     {
         return Ok(u.clone());
     }
-    let fetched = async {
+    let fetch = || async {
         let r = app
             .http
             .get(NASDAQ)
             // Nasdaq answers browsers only.
             .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15")
             .header("Accept", "application/json")
+            // The whole list is 2 MB, slow some nights: longer than the client's 20 s.
+            .timeout(Duration::from_secs(60))
             .send()
             .await
-            .map_err(|e| e.without_url().to_string())?;
+            .map_err(|e| causes(&e.without_url()))?;
         if !r.status().is_success() {
             return Err(format!("answered {}", r.status()));
         }
-        let v: Value = r.json().await.map_err(|e| e.without_url().to_string())?;
+        let v: Value = r.json().await.map_err(|e| causes(&e.without_url()))?;
         let list = screener::nasdaq(&v);
         if list.len() < 1000 {
             return Err(format!("only {} listings", list.len()));
         }
         Ok(list)
-    }
-    .await;
+    };
+    let fetched = match fetch().await {
+        Err(_) => {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            fetch().await
+        }
+        ok => ok,
+    };
     match (fetched, kept) {
         (Ok(list), _) => {
             let u = Arc::new(list);
