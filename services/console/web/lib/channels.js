@@ -4,6 +4,10 @@
 // current value at once, so a widget added later starts from what's current;
 // onChange() gives only later changes. A subscription made while a widget
 // mounts ends when the widget is disposed (collect(), used by defineWidget).
+// Only what mount() subscribes to synchronously is collected: a subscription
+// made after an await in mount() (or from a callback) outlives the widget, so
+// subscribe before the first await, or end it yourself in dispose().
+// A subscriber that throws is logged, and the others still hear the change.
 // The names and shapes are in types/console.d.ts (interface Channels).
 import { prof, channelPublished } from './profile.js';
 
@@ -24,7 +28,10 @@ export function publish(name, value) {
   if (Object.is(c.value, value)) return;
   c.value = value;
   if (prof.on) channelPublished(name);
-  for (const fn of [...c.subs]) if (c.subs.has(fn)) fn(value);
+  for (const fn of [...c.subs]) {
+    if (!c.subs.has(fn)) continue;
+    try { fn(value); } catch (e) { console.error(`channel ${name}: a subscriber threw`, e); }
+  }
 }
 
 /** A channel's current value. @template {keyof Channels} K @param {K} name @returns {Channels[K]} */
