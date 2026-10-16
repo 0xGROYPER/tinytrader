@@ -8,10 +8,17 @@ fn clocked() -> String {
     format!(r#"{{"clock_ts":{T0}}}"#)
 }
 
+/// The clock, and options held long: closes are checked against the position held.
+fn clocked_holding() -> String {
+    format!(
+        r#"{{"clock_ts":{T0},"positions":{{"{CALL}":10,"{PUT_A}":10,"{PUT_B}":10,"{FAR}":10}}}}"#
+    )
+}
+
 #[test]
 fn kill_levels_persist_across_restart_until_unkill() {
     let state = root("kill");
-    let gw = scripted(config(state.clone()), &clocked());
+    let gw = scripted(config(state.clone()), &clocked_holding());
     let mut c = Conn::open(&gw, "reactor", None);
     c.submit("r1", &buy("wse-1"));
     let mut ops = Conn::open(&gw, "ops", None);
@@ -29,7 +36,7 @@ fn kill_levels_persist_across_restart_until_unkill() {
     assert_eq!(c.submit("r4", &close)["reason"], "killed");
     gw.stop().unwrap();
 
-    let gw = scripted(config(state.clone()), &clocked());
+    let gw = scripted(config(state.clone()), &clocked_holding());
     let mut c = Conn::open(&gw, "reactor", None);
     assert_eq!(
         c.submit("r5", &close.replace("wse-4", "wse-5"))["reason"],
@@ -44,7 +51,7 @@ fn kill_levels_persist_across_restart_until_unkill() {
     gw.stop().unwrap();
 
     std::fs::write(state.join("KILL"), b"").unwrap();
-    let gw = scripted(config(state.clone()), &clocked());
+    let gw = scripted(config(state.clone()), &clocked_holding());
     let mut c = Conn::open(&gw, "reactor", None);
     let st = c.event("status", |v| v.get("kill").is_some());
     assert_eq!(
@@ -142,11 +149,14 @@ fn a_close_is_not_counted_toward_the_daily_cap() {
     let mut cfg = config(root("caps-day-close"));
     cfg.profile.submits_per_day = 1;
     cfg.profile.max_open = 10;
-    let gw = scripted(cfg, &clocked());
+    let gw = scripted(cfg, &clocked_holding());
     let mut c = Conn::open(&gw, "reactor", None);
     // Each close is on its own leg: a working close or open on a leg refuses a close there.
     assert_eq!(c.submit("c1", &close("wse-c1"))["outcome"], "accepted");
-    assert_eq!(c.submit("c2", &close_on("wse-c2", PUT_A))["outcome"], "accepted");
+    assert_eq!(
+        c.submit("c2", &close_on("wse-c2", PUT_A))["outcome"],
+        "accepted"
+    );
     assert_eq!(
         c.submit("o1", &buy("wse-o1"))["outcome"],
         "accepted",
@@ -169,10 +179,13 @@ fn closes_per_minute_refuses_closes_and_never_opens() {
     let mut cfg = config(root("closes-per-min"));
     cfg.profile.closes_per_min = 2;
     cfg.profile.max_open = 10;
-    let gw = scripted(cfg, &clocked());
+    let gw = scripted(cfg, &clocked_holding());
     let mut c = Conn::open(&gw, "reactor", None);
     assert_eq!(c.submit("c1", &close("wse-c1"))["outcome"], "accepted");
-    assert_eq!(c.submit("c2", &close_on("wse-c2", PUT_A))["outcome"], "accepted");
+    assert_eq!(
+        c.submit("c2", &close_on("wse-c2", PUT_A))["outcome"],
+        "accepted"
+    );
     assert_eq!(
         cap_name(&c.submit("c3", &close_on("wse-c3", PUT_B))),
         Some("closes_per_minute".into())
@@ -195,12 +208,12 @@ fn restart_counts_only_opens_toward_the_day() {
         cfg.profile.max_open = 10;
         cfg
     };
-    let gw = scripted(day_cap(1), &clocked());
+    let gw = scripted(day_cap(1), &clocked_holding());
     let mut c = Conn::open(&gw, "reactor", None);
     assert_eq!(c.submit("c1", &close("wse-c1"))["outcome"], "accepted");
     gw.stop().unwrap();
 
-    let gw = scripted(day_cap(1), &clocked());
+    let gw = scripted(day_cap(1), &clocked_holding());
     let mut c = Conn::open(&gw, "reactor", None);
     assert_eq!(
         c.submit("o1", &buy("wse-o1"))["outcome"],
@@ -209,7 +222,7 @@ fn restart_counts_only_opens_toward_the_day() {
     );
     gw.stop().unwrap();
 
-    let gw = scripted(day_cap(1), &clocked());
+    let gw = scripted(day_cap(1), &clocked_holding());
     let mut c = Conn::open(&gw, "reactor", None);
     assert_eq!(
         cap_name(&c.submit("o2", &buy("wse-o2"))),
@@ -223,7 +236,7 @@ fn restart_counts_only_opens_toward_the_day() {
 fn a_429_backoff_holds_opens_but_not_closes() {
     let rule =
         r#"{"client_order_id":"wse-429","submit":{"http_429":{"headers":{"Retry-After":"1"}}}}"#;
-    let script = format!(r#"{{"clock_ts":{T0},"rules":[{rule}]}}"#);
+    let script = format!(r#"{{"clock_ts":{T0},"positions":{{"{PUT_A}":1}},"rules":[{rule}]}}"#);
     let gw = scripted(config(root("backoff-close")), &script);
     let mut c = Conn::open(&gw, "reactor", None);
     let r = c.submit("r1", &buy("wse-429"));
@@ -393,8 +406,13 @@ fn flatten_closes_every_position_and_halts_opens() {
     // The resting open order was cancelled; opens stay refused, closes pass.
     c.order_event("wse-1", "canceled");
     assert_eq!(c.submit("r2", &buy("wse-2"))["reason"], "killed");
+    // Closes are not stopped by halt_opens, but nothing is held now: the close is refused.
     let close = single("wse-3", CALL, "sell", "close", 1, "1.00");
-    assert_eq!(c.submit("r3", &close)["outcome"], "accepted");
+    let r3 = c.submit("r3", &close);
+    assert_eq!(
+        (r3["reason"].as_str(), r3["detail"]["held_qty"].as_i64()),
+        (Some("close_exceeds_position"), Some(0))
+    );
     assert_eq!(ev["outcome"]["outcome"], "ok");
     gw.stop().unwrap();
 }
@@ -443,7 +461,7 @@ fn expiry_day_opens_go_to_the_broker() {
 fn closing_orders_pass_the_notional_and_open_order_caps() {
     let mut cfg = config(root("caps-close"));
     cfg.profile.max_open = 1;
-    let gw = scripted(cfg, &clocked());
+    let gw = scripted(cfg, &clocked_holding());
     let mut c = Conn::open(&gw, "reactor", None);
     assert_eq!(c.submit("a1", &buy("wse-a1"))["outcome"], "accepted");
     // Past the notional cap ($2,500) and with the one open order working on CALL: still sent.

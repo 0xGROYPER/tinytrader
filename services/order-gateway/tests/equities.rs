@@ -26,7 +26,11 @@ fn stock_orders_follow_the_profile() {
     let mut cfg = config(root("equities"));
     cfg.profile.equities = vec!["AAPL".into(), "BRK.B".into(), "KO".into()];
     cfg.profile.max_open = 10;
-    let gw = scripted(cfg, &format!(r#"{{"clock_ts":{T0}}}"#));
+    // One KO share is held, so the close on KO below is within the position.
+    let gw = scripted(
+        cfg,
+        &format!(r#"{{"clock_ts":{T0},"positions":{{"KO":1}}}}"#),
+    );
     let mut c = Conn::open(&gw, "reactor", None);
 
     // Allowlisted, on the close: 10 × $222.50 = $2,225, under the $2,500 cap at ×1.
