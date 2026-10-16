@@ -59,7 +59,7 @@ console the same way.
 | `services/queue` | The job queue: work that runs later or when the machine can spare it, from templates the deployment defines ([decision 0012](docs/decisions/0012-job-queue.md)) |
 | `nix/watch.nix` | `watch`: a host's own monitor (Docker, containers, health, native services, disks), pushed to an ntfy-style URL, with a heartbeat ping after each run ([decision 0015](docs/decisions/0015-host-watch.md)) |
 | `nix/ai-proxy.nix` | `ai-proxy`: a local OpenAI-compatible AI endpoint on loopback |
-| `infra/modules` | `tinytrader.services.<name>`: NixOS modules (systemd units) and the same definitions as nix-darwin launchd agents |
+| `infra/modules` | `tinytrader.services.<name>`: NixOS modules (systemd units) and the same definitions as nix-darwin launchd agents or boot-time daemons |
 | `nix/` | Flake modules: Rust builds, images, checks |
 | `examples/` | Complete deployments you can run or copy |
 | `docs/` | Platform decisions and contracts |
@@ -74,11 +74,19 @@ operating system ([decision 0004](docs/decisions/0004-nix-not-nixos.md)):
 | Any OS with Docker | Docker Compose (see `examples/`) | `tinytrader.observe` container labels |
 | Any Linux with Nix | systemd unit files generated from `tinytrader.services` | `observe` addresses in the topology file |
 | NixOS | the `tinytrader.services` NixOS module | the topology file the module generates |
-| macOS with nix-darwin | the same `tinytrader.services` definitions as launchd agents (`darwinModules.services`) | `observe` addresses in the topology file |
+| macOS with nix-darwin | the same `tinytrader.services` definitions as launchd agents or boot-time daemons (`darwinModules.services`) | `observe` addresses in the topology file |
 
 With `tinytrader.services`, giving a service `observe.port` is enough: it
 listens there, and the module writes `/etc/tinytrader/topology.json` listing it,
 on NixOS directly and in the `systemdUnits` output for other distributions.
+On macOS a service runs as the host's primary user, as a launchd agent by
+default: it starts when that user logs in. Give it `launchd = "daemon"` to run
+it as a launchd daemon instead (still as that user, with `HOME` and `USER`
+set), which starts at boot with no one logged in, so it comes back after a
+reboot or power cut. With FileVault on, boot waits for the disk to be
+unlocked at the login window either way. Switching a service to a daemon,
+activation stops the agent it was. `watch` finds a service either way.
+
 A service started any other way joins a deployment by being listed by address:
 
 ```json

@@ -178,17 +178,28 @@ check_store() {
   judge_health store "$st" "$(jq -r '.detail // ""' <<<"$body")" "$now"
 }
 
+# Native services: launchd jobs com.tinytrader.<name> where there is launchd
+# (macOS), else systemd units tinytrader-<name>. A launchd service is a daemon
+# (the system domain) or an agent of this user (gui/<uid>), so both are
+# looked in; reading either needs no root.
 check_native() {
-  local n out st
+  local n out st d where
   while read -r n; do
     [ -n "$n" ] || continue
-    if [ "$(uname -s)" = Darwin ]; then
-      if ! out="$(launchctl print "gui/$(id -u)/com.tinytrader.$n" 2>/dev/null)"; then
-        problem "native:$n" high "$n: not loaded (launchd com.tinytrader.$n)"
+    if command -v launchctl >/dev/null 2>&1; then
+      where=""
+      for d in system "gui/$(id -u)"; do
+        if out="$(launchctl print "$d/com.tinytrader.$n" 2>/dev/null)"; then
+          where="$d"
+          break
+        fi
+      done
+      if [ -z "$where" ]; then
+        problem "native:$n" high "$n: not loaded (launchd com.tinytrader.$n, neither a daemon nor an agent)"
         continue
       fi
       st="$(sed -nE 's/^[[:space:]]*state = (.*)$/\1/p' <<<"$out" | head -n1)"
-      [ "$st" = running ] || problem "native:$n" high "$n: ${st:-not running} (launchd)"
+      [ "$st" = running ] || problem "native:$n" high "$n: ${st:-not running} (launchd $where/com.tinytrader.$n)"
     else
       st="$(systemctl is-active "tinytrader-$n.service" 2>/dev/null || true)"
       [ "$st" = active ] || problem "native:$n" high "$n: ${st:-unknown} (systemd tinytrader-$n)"

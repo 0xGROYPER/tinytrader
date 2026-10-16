@@ -10,7 +10,7 @@
 > (`nix/images.nix`); on a Mac, or with Docker alone, `nix/build-images.sh`
 > builds them inside Docker's Linux VM, so there is one build. The
 > nix-darwin module (`darwinModules.services`) runs the same service
-> definitions as launchd agents on macOS.
+> definitions as launchd agents (or boot-time daemons) on macOS.
 
 ## Context
 
