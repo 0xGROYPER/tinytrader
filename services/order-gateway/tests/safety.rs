@@ -18,7 +18,8 @@ fn kill_levels_persist_across_restart_until_unkill() {
     let (r, _) = ops.req("kill", "k1", r#""level":"halt_opens","reason":"test""#);
     assert_eq!(r["state"], "killed");
     assert_eq!(c.submit("r2", &buy("wse-2"))["reason"], "killed");
-    let close = single("wse-3", CALL, "sell", "close", 1, "1.00");
+    // The resting buy on CALL is working, so the close goes on PUT_A.
+    let close = single("wse-3", PUT_A, "sell", "close", 1, "1.00");
     assert_eq!(c.submit("r3", &close)["outcome"], "accepted");
     ops.req("kill", "k2", r#""level":"halt_all","reason":"test""#);
     // halt_all cancels every open order.
@@ -115,6 +116,128 @@ fn each_cap_refuses_before_any_send() {
     let mut c = Conn::open(&gw, "reactor", None);
     c.submit("d1", &buy("wse-d1"));
     assert_eq!(cap(c.submit("d2", &buy("wse-d2"))), want("submits_per_day"));
+    gw.stop().unwrap();
+}
+
+/// The `cap` name of a refusal, or `None`.
+fn cap_name(r: &serde_json::Value) -> Option<String> {
+    (r["reason"] == "cap")
+        .then(|| r["detail"]["cap"].as_str().map(String::from))
+        .flatten()
+}
+
+fn close(cid: &str) -> String {
+    close_on(cid, CALL)
+}
+
+fn close_on(cid: &str, symbol: &str) -> String {
+    single(cid, symbol, "sell", "close", 1, "1.00")
+}
+
+/// A fourth option, for a close on a leg with no order of its own.
+const FAR: &str = "SPY261005C00590000";
+
+#[test]
+fn a_close_is_not_counted_toward_the_daily_cap() {
+    let mut cfg = config(root("caps-day-close"));
+    cfg.profile.submits_per_day = 1;
+    cfg.profile.max_open = 10;
+    let gw = scripted(cfg, &clocked());
+    let mut c = Conn::open(&gw, "reactor", None);
+    // Each close is on its own leg: a working close or open on a leg refuses a close there.
+    assert_eq!(c.submit("c1", &close("wse-c1"))["outcome"], "accepted");
+    assert_eq!(c.submit("c2", &close_on("wse-c2", PUT_A))["outcome"], "accepted");
+    assert_eq!(
+        c.submit("o1", &buy("wse-o1"))["outcome"],
+        "accepted",
+        "closes used none of the day's opens"
+    );
+    assert_eq!(
+        cap_name(&c.submit("o2", &buy("wse-o2"))),
+        Some("submits_per_day".into())
+    );
+    assert_eq!(
+        c.submit("c3", &close_on("wse-c3", FAR))["outcome"],
+        "accepted",
+        "a close passes the day cap the opens have used up"
+    );
+    gw.stop().unwrap();
+}
+
+#[test]
+fn closes_per_minute_refuses_closes_and_never_opens() {
+    let mut cfg = config(root("closes-per-min"));
+    cfg.profile.closes_per_min = 2;
+    cfg.profile.max_open = 10;
+    let gw = scripted(cfg, &clocked());
+    let mut c = Conn::open(&gw, "reactor", None);
+    assert_eq!(c.submit("c1", &close("wse-c1"))["outcome"], "accepted");
+    assert_eq!(c.submit("c2", &close_on("wse-c2", PUT_A))["outcome"], "accepted");
+    assert_eq!(
+        cap_name(&c.submit("c3", &close_on("wse-c3", PUT_B))),
+        Some("closes_per_minute".into())
+    );
+    assert_eq!(
+        c.submit("o1", &buy("wse-o1"))["outcome"],
+        "accepted",
+        "the closes budget is not the opens budget"
+    );
+    assert_eq!(sends(&mut c, "s1"), 3, "a refused close is never sent");
+    gw.stop().unwrap();
+}
+
+#[test]
+fn restart_counts_only_opens_toward_the_day() {
+    let state = root("day-restart");
+    let day_cap = |n: usize| {
+        let mut cfg = config(state.clone());
+        cfg.profile.submits_per_day = n;
+        cfg.profile.max_open = 10;
+        cfg
+    };
+    let gw = scripted(day_cap(1), &clocked());
+    let mut c = Conn::open(&gw, "reactor", None);
+    assert_eq!(c.submit("c1", &close("wse-c1"))["outcome"], "accepted");
+    gw.stop().unwrap();
+
+    let gw = scripted(day_cap(1), &clocked());
+    let mut c = Conn::open(&gw, "reactor", None);
+    assert_eq!(
+        c.submit("o1", &buy("wse-o1"))["outcome"],
+        "accepted",
+        "the day count rebuilt from the journal has no close in it"
+    );
+    gw.stop().unwrap();
+
+    let gw = scripted(day_cap(1), &clocked());
+    let mut c = Conn::open(&gw, "reactor", None);
+    assert_eq!(
+        cap_name(&c.submit("o2", &buy("wse-o2"))),
+        Some("submits_per_day".into()),
+        "an open journaled today still counts"
+    );
+    gw.stop().unwrap();
+}
+
+#[test]
+fn a_429_backoff_holds_opens_but_not_closes() {
+    let rule =
+        r#"{"client_order_id":"wse-429","submit":{"http_429":{"headers":{"Retry-After":"1"}}}}"#;
+    let script = format!(r#"{{"clock_ts":{T0},"rules":[{rule}]}}"#);
+    let gw = scripted(config(root("backoff-close")), &script);
+    let mut c = Conn::open(&gw, "reactor", None);
+    let r = c.submit("r1", &buy("wse-429"));
+    assert_eq!(r["reason"], "http_429_after_send");
+    assert_eq!(
+        c.submit("r2", &buy("wse-open"))["reason"],
+        "throttled",
+        "the backoff holds opens"
+    );
+    assert_eq!(
+        c.submit("r3", &close_on("wse-close", PUT_A))["outcome"],
+        "accepted",
+        "and does not hold closes"
+    );
     gw.stop().unwrap();
 }
 
@@ -323,9 +446,9 @@ fn closing_orders_pass_the_notional_and_open_order_caps() {
     let gw = scripted(cfg, &clocked());
     let mut c = Conn::open(&gw, "reactor", None);
     assert_eq!(c.submit("a1", &buy("wse-a1"))["outcome"], "accepted");
-    // Past the notional cap ($2,500) and with the one open order working: still sent.
-    let r = c.submit("x1", &single("wse-x1", CALL, "sell", "close", 10, "2.51"));
-    assert_ne!(r["reason"], "cap", "{r}");
+    // Past the notional cap ($2,500) and with the one open order working on CALL: still sent.
+    let r = c.submit("x1", &single("wse-x1", PUT_A, "sell", "close", 10, "2.51"));
+    assert_eq!(r["outcome"], "accepted", "{r}");
     // Opening is still held to both.
     assert_eq!(
         c.submit("o1", &buy("wse-o1"))["detail"]["cap"],

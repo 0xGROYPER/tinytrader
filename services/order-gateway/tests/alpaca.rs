@@ -5,7 +5,7 @@ mod support;
 
 use fake_alpaca::{Act, Fake, FakeOrder, KEY, SECRET};
 use order_gateway::trading::{Credentials, Endpoints};
-use order_gateway::{AlpacaOptions, AlpacaPaper, Gateway, start};
+use order_gateway::{AlpacaOptions, AlpacaPaper, Gateway, Profile, start};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -18,6 +18,11 @@ struct Rig {
 }
 
 fn rig(name: &str) -> Rig {
+    rig_with(name, |_| {})
+}
+
+/// A rig whose profile is the default with `max_open` 10, then `profile` applied.
+fn rig_with(name: &str, profile: impl FnOnce(&mut Profile)) -> Rig {
     let fake = Fake::start();
     let creds = Credentials::from_env_text(&format!(
         "export APCA_API_KEY_ID={KEY}\nAPCA_API_SECRET_KEY=\"{SECRET}\"\n"
@@ -33,6 +38,7 @@ fn rig(name: &str) -> Rig {
     let mut cfg = config(state.clone());
     cfg.account = "alpaca-paper-test".into();
     cfg.profile.max_open = 10;
+    profile(&mut cfg.profile);
     let gw = start(cfg, broker).unwrap();
     fake.wait_listening(1);
     Rig { fake, gw, state }
@@ -222,6 +228,156 @@ fn lost_response_resolves_by_lookup_without_resend() {
     assert_eq!(v["source"], "rest_reconcile");
     assert_eq!(posts(&r.fake).len(), 1);
     assert!(r.fake.count("GET", "/v2/orders:by_client_order_id") >= 1);
+}
+
+#[test]
+fn a_failed_lookup_leaves_the_order_unknown_not_absent() {
+    let r = rig("alpaca-lookup-error");
+    let mut c = ready(&r.gw, "reactor");
+    r.fake.next("POST", "/v2/orders", Act::Lost);
+    let v = c.submit("r1", &buy("wse-err"));
+    assert_eq!(
+        (v["outcome"].as_str(), v["reason"].as_str()),
+        (Some("unknown"), Some("connection"))
+    );
+    // The broker is failing, which is not the same as saying the order is missing:
+    // every lookup gets a 500, so the order is unresolved, not absent.
+    for _ in 0..3 {
+        r.fake.next(
+            "GET",
+            "/v2/orders:by_client_order_id",
+            Act::Respond(500, Vec::new(), "{}".into()),
+        );
+    }
+    let res = c.event("resolution", |v| v["client_order_id"] == "wse-err");
+    assert_eq!(
+        (res["outcome"].as_str(), res["window_ms"].as_u64()),
+        (Some("unresolved"), Some(80))
+    );
+    assert!(r.fake.count("GET", "/v2/orders:by_client_order_id") >= 3);
+    // Still unknown and open: a stream event for the order settles it.
+    r.fake.event("wse-err", "new", "new");
+    let o = c.order_event("wse-err", "new");
+    assert_eq!(o["source"], "stream");
+    assert_eq!(posts(&r.fake).len(), 1, "never resent");
+}
+
+/// A submit whose POST gets a 502 and never reaches the fake, so every lookup is a
+/// 404: the order ends up absent, not unknown.
+fn absent_submit(r: &Rig, c: &mut Conn, cid: &str) {
+    r.fake.reply("POST", "/v2/orders", 502, "<html>bad gateway</html>");
+    let v = c.submit("r-abs", &buy(cid));
+    assert_eq!(v["outcome"], "unknown");
+    let res = c.event("resolution", |v| v["client_order_id"] == cid);
+    assert_eq!(res["outcome"], "absent_after");
+}
+
+#[test]
+fn an_absent_order_still_counts_toward_max_open() {
+    let r = rig_with("alpaca-absent-cap", |p| p.max_open = 1);
+    let mut c = ready(&r.gw, "reactor");
+    absent_submit(&r, &mut c, "wse-abs");
+    let (q, _) = c.req("open_orders", "q1", "");
+    assert_eq!(q["unresolved"], 1);
+    let v = c.submit("r2", &buy("wse-next"));
+    assert_eq!(
+        (v["reason"].as_str(), v["detail"]["cap"].as_str()),
+        (Some("cap"), Some("open_orders"))
+    );
+    // Nothing refused was sent, and a close on its leg waits for the absent order.
+    assert_eq!(posts(&r.fake).len(), 1);
+    let v = c.submit("r3", &single("wse-close", CALL, "sell", "close", 1, "1.00"));
+    assert_eq!(v["reason"], "leg_pending");
+    assert_eq!(v["detail"]["symbols"][0], CALL);
+}
+
+#[test]
+fn a_stream_event_settles_an_absent_order() {
+    let r = rig_with("alpaca-absent-settle", |p| p.max_open = 1);
+    let mut c = ready(&r.gw, "reactor");
+    absent_submit(&r, &mut c, "wse-abs");
+    let v = c.submit("r2", &buy("wse-next"));
+    assert_eq!(v["detail"]["cap"], "open_orders");
+    // The order turns up on the stream and is cancelled: it no longer counts.
+    r.fake.appear(&format!(
+        r#"{{"client_order_id":"wse-abs","symbol":"{CALL}","qty":"1","side":"buy","limit_price":"1.25","position_intent":"buy_to_open"}}"#
+    ));
+    r.fake.event("wse-abs", "canceled", "canceled");
+    c.order_event("wse-abs", "canceled");
+    let (q, _) = c.req("open_orders", "q1", "");
+    assert_eq!(q["unresolved"], 0);
+    assert_eq!(c.submit("r3", &buy("wse-next"))["outcome"], "accepted");
+}
+
+/// Polls `open_orders` until nothing is unresolved, with no stream event sent.
+fn wait_resolved(c: &mut Conn) -> Value {
+    let t = Instant::now();
+    let mut n = 0;
+    loop {
+        n += 1;
+        let (q, _) = c.req("open_orders", &format!("w{n}"), "");
+        if q["unresolved"] == 0 {
+            return q;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "still unresolved: {q}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_periodic_check_settles_an_absent_order_the_broker_now_shows() {
+    let r = rig_with("alpaca-absent-periodic", |p| p.max_open = 1);
+    let mut c = ready(&r.gw, "reactor");
+    absent_submit(&r, &mut c, "wse-pc");
+    r.fake.appear(&format!(
+        r#"{{"client_order_id":"wse-pc","symbol":"{CALL}","qty":"1","side":"buy","limit_price":"1.25","position_intent":"buy_to_open"}}"#
+    ));
+    // No stream event: the poll's lookup finds it. It is working, so it still counts.
+    wait_resolved(&mut c);
+    assert_eq!(c.submit("r2", &buy("wse-next"))["detail"]["cap"], "open_orders");
+}
+
+#[test]
+fn a_periodic_check_clears_an_absent_order_the_broker_never_shows() {
+    let r = rig_with("alpaca-absent-gone", |p| p.max_open = 1);
+    let mut c = ready(&r.gw, "reactor");
+    absent_submit(&r, &mut c, "wse-gone");
+    // Two 404s (the submit's window, then the poll's check) mean it is gone.
+    wait_resolved(&mut c);
+    assert_eq!(c.submit("r2", &buy("wse-next"))["outcome"], "accepted");
+}
+
+#[test]
+fn a_close_waits_for_pending_orders_on_its_leg_and_opens_do_not() {
+    let r = rig("alpaca-leg-guard");
+    let mut c = ready(&r.gw, "reactor");
+    absent_submit(&r, &mut c, "wse-p1");
+    // The close is on the pending order's leg: refused whole, and not sent.
+    let v = c.submit("r2", &single("wse-p2", CALL, "sell", "close", 1, "1.00"));
+    assert_eq!(v["reason"], "leg_pending");
+    assert_eq!(v["detail"]["symbols"][0], CALL);
+    // A close on a leg with no pending order is not held by the guard.
+    let v = c.submit("r3", &single("wse-p3", PUT_A, "sell", "close", 1, "1.00"));
+    assert_eq!(v["outcome"], "accepted");
+    // An open on the pending leg is not held by the guard either.
+    assert_eq!(c.submit("r4", &buy("wse-p4"))["outcome"], "accepted");
+    assert_eq!(posts(&r.fake).len(), 3, "the refused close was never sent");
+}
+
+#[test]
+fn a_close_on_a_clear_leg_passes_the_day_cap_but_not_a_working_order_on_its_leg() {
+    let r = rig_with("alpaca-leg-day", |p| p.submits_per_day = 1);
+    let mut c = ready(&r.gw, "reactor");
+    assert_eq!(c.submit("d1", &buy("wse-d1"))["outcome"], "accepted");
+    // The day's one open is used up, but PUT_A has no pending order.
+    let v = c.submit("d2", &single("wse-d2", PUT_A, "sell", "close", 1, "1.00"));
+    assert_eq!(v["outcome"], "accepted");
+    // The open on CALL is still working, so a close on CALL waits for it.
+    let v = c.submit("d3", &single("wse-d3", CALL, "sell", "close", 1, "1.00"));
+    assert_eq!(v["reason"], "leg_pending");
 }
 
 #[test]
