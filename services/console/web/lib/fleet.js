@@ -24,12 +24,15 @@ export function statusOf(node) {
     return writer ? statusOf(writer) : 'idle';
   }
   const s = svcState(node.id), c = s.container, h = s.health;
-  if (c && ['exited', 'dead'].includes(c.state)) return 'crit';
+  // The same rule as libs/fleet's ServiceState::status: a restart loop or a
+  // service reporting failed is down.
+  if (c && ['exited', 'dead', 'restarting'].includes(c.state)) return 'crit';
   if (c && c.state && c.state !== 'running') return 'warn';
   if (h) {
     if (h.error) return c ? 'warn' : 'crit';
     if (h.body?.state === 'idle') return 'off';
     if (h.body?.state === 'starting') return 'start';
+    if (h.body?.state === 'failed') return 'crit';
     if (h.body?.state && h.body.state !== 'ready') return 'warn';
     return 'ok';
   }

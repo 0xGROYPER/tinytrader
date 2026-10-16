@@ -196,6 +196,11 @@ pub struct Health {
 }
 
 /// A summary status, the same rule the web console colours by.
+///
+/// Crit (down): a container exited, dead or restarting (a restart loop), a
+/// service reporting `failed`, or one with no container whose health doesn't
+/// answer. Warn: other container states, unreachable health beside a
+/// container, and other health states (`degraded`, `starting`, ...).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     Ok,
@@ -208,7 +213,7 @@ impl ServiceState {
     #[must_use]
     pub fn status(&self) -> Status {
         let c = self.container.as_ref().and_then(|c| c.state.as_deref());
-        if matches!(c, Some("exited" | "dead")) {
+        if matches!(c, Some("exited" | "dead" | "restarting")) {
             return Status::Crit;
         }
         if c.is_some_and(|s| s != "running") {
@@ -225,6 +230,7 @@ impl ServiceState {
             Some(h) => match h.body.as_ref().and_then(|b| b.state.as_deref()) {
                 Some("ready") | None => Status::Ok,
                 Some("idle") => Status::Idle,
+                Some("failed") => Status::Crit,
                 Some(_) => Status::Warn,
             },
             None if c.is_some() => Status::Ok,
@@ -289,6 +295,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(down.status(), Status::Crit);
+        let looping: ServiceState = serde_json::from_value(
+            json!({ "container": { "state": "restarting", "status": "Restarting (1) 3 seconds ago" } }),
+        )
+        .unwrap();
+        assert_eq!(looping.status(), Status::Crit, "a restart loop is down");
+        let failed: ServiceState = serde_json::from_value(json!({
+            "container": { "state": "running" },
+            "health": { "http_status": 503, "body": { "state": "failed", "detail": "feed lost" } }
+        }))
+        .unwrap();
+        assert_eq!(failed.status(), Status::Crit, "health failed is down");
+        let degraded: ServiceState = serde_json::from_value(json!({
+            "container": { "state": "running" },
+            "health": { "http_status": 503, "body": { "state": "degraded" } }
+        }))
+        .unwrap();
+        assert_eq!(degraded.status(), Status::Warn);
+        let paused: ServiceState =
+            serde_json::from_value(json!({ "container": { "state": "paused" } })).unwrap();
+        assert_eq!(paused.status(), Status::Warn);
         let unknown: ServiceState = serde_json::from_value(json!({})).unwrap();
         assert_eq!(unknown.status(), Status::Idle);
     }

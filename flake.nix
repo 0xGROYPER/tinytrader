@@ -31,6 +31,7 @@
         ./nix/web.nix
         ./nix/images.nix
         ./nix/ai-proxy.nix
+        ./nix/watch.nix
       ];
 
       flake = {
@@ -107,6 +108,20 @@
                   package = packages.databento-jobs;
                   observe.port = 9121;
                   secrets.DATABENTO_API_KEY = "/run/secrets/databento-api-key";
+                };
+                # The host's own monitor (nix/watch.nix): its services and
+                # disks, pushed to an ntfy-style URL when something is wrong.
+                tinytrader.services.watch = {
+                  enable = true;
+                  package = packages.watch;
+                  environment = {
+                    WATCH_CONSOLE = "http://127.0.0.1:8080";
+                    WATCH_STORE = "http://127.0.0.1:9120";
+                    WATCH_NATIVE = "ticker store console databento-jobs";
+                    WATCH_DISKS = "/ /mnt";
+                  };
+                  secrets.WATCH_NOTIFY = "/run/secrets/watch-notify";
+                  secrets.WATCH_HEARTBEAT = "/run/secrets/watch-heartbeat";
                 };
                 tinytrader.topology.overrides.focus = "ticker";
 

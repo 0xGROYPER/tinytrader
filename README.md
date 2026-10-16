@@ -49,6 +49,7 @@ console the same way.
 | `services/alpaca-data` | Market data for any symbol on request: stock snapshots, bars and option chains with IV and greeks (Alpaca) |
 | `services/alpaca-news` | Market news from Alpaca (supplied by Benzinga) |
 | `services/econ-calendar` | Scheduled US economic releases and FOMC decisions, from the agencies' own schedules |
+| `nix/watch.nix` | `watch`: a host's own monitor (Docker, containers, health, native services, disks), pushed to an ntfy-style URL, with a heartbeat ping after each run |
 | `infra/modules` | NixOS modules, such as `tinytrader.services.<name>` |
 | `nix/` | Flake modules: Rust builds and checks |
 | `examples/` | Complete deployments you can run or copy |
