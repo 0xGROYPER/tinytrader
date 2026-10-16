@@ -16,8 +16,8 @@
 // are merged in too; its views, if they differ, are kept aside in
 // `tinytrader-workspaces-before-sync`.
 //
-// A save goes through the order token like the other writes (lib/api.js). A
-// save the console refuses for any other reason is shown in the page's banner
+// A save is a write like the others (lib/api.js): it needs the console's login
+// allowlist, not the order token. A save the console refuses is shown in the page's banner
 // (`refusedNote`, tt-prefs-refused) until one goes through.
 
 import { orderFetch } from './api.js';
@@ -117,7 +117,7 @@ async function save(k, tries) {
     if (refusedNote) refuse('');
     return;
   }
-  if (r.status !== 409) { refuse(`Settings were not saved: the console refused the save (HTTP ${r.status}). The console's order token may be needed.`); return; }
+  if (r.status !== 409) { refuse(`Settings were not saved: the console refused the save (HTTP ${r.status}).`); return; }
   if (tries > 2) return;
   // Someone saved since: merge theirs with ours, keep it here, and save the merge.
   const theirs = (await r.json().catch(() => ({}))).current;

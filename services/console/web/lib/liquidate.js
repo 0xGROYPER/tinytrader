@@ -109,7 +109,7 @@ const UNSURE = 'unknown: it may have reached the broker; check the open orders b
 export async function send(account, live, o, p) {
   const order = { legs: o.legs, qty: o.qty, effect: 'close', type: p.type, [p.type === 'market' ? 'ref_price' : 'limit_price']: p.price };
   try {
-    const r = await orderFetch(`/api/orders/${encodeURIComponent(account)}`, { confirm: account, live, order });
+    const r = await orderFetch(`/api/orders/${encodeURIComponent(account)}`, { confirm: account, live, order }, 'POST', {}, live);
     const v = await r.json().catch(() => ({}));
     const id = v.client_order_id || v.current?.client_order_id;
     if (v.outcome === 'rejected') return { ok: false, text: `rejected: ${v.message || v.code || ''}`, id };
@@ -122,10 +122,10 @@ export async function send(account, live, o, p) {
   } catch (e) { return { ok: false, text: `not known whether it was sent (${e.message}); check the open orders`, maybe: true }; }
 }
 
-/** Cancel the console's own open orders on an account (ids tt-): how many were asked to cancel. */
-export async function cancelOurs(account, orders) {
+/** Cancel the console's own open orders on an account (ids tt-; `live` for a live account): how many were asked to cancel. */
+export async function cancelOurs(account, orders, live = false) {
   const ours = (orders || []).filter(o => (o.client_order_id || '').startsWith('tt-'));
-  await Promise.all(ours.map(o => orderFetch(`/api/orders/${encodeURIComponent(account)}/${encodeURIComponent(o.client_order_id)}/cancel`, {}).catch(() => null)));
+  await Promise.all(ours.map(o => orderFetch(`/api/orders/${encodeURIComponent(account)}/${encodeURIComponent(o.client_order_id)}/cancel`, {}, 'POST', {}, live).catch(() => null)));
   return ours.length;
 }
 

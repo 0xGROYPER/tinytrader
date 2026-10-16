@@ -6,27 +6,34 @@ export async function jobsApi(path, body) {
   if (!r.ok) throw new Error(v?.error || (r.status === 404 ? 'No jobs service is configured.' : `${r.status} ${r.statusText}`));
   return v;
 }
-// Writes carry the console's order token (CONSOLE_ORDER_TOKEN), which the
-// server requires for the writes it gates (WriteGate). It's kept on this
-// device once typed, and asked for the first time a write is sent; a refused
-// token (401) is forgotten, so the next send asks again. Storage can throw
-// (private windows): the page still works.
+// A live account's order, cancel, flatten or resume carries the console's order
+// token (CONSOLE_ORDER_TOKEN) as X-Order-Token; the server refuses it without
+// one. Every other write needs only the Tailscale login, so it sends no token.
+// The token is asked for at the first live write in a tab and kept for that
+// tab only (sessionStorage, or memory when storage is unavailable). A refused
+// token (401) is forgotten, so the next live write asks again. Storage can
+// throw (private windows): the page still works.
 const TOKEN_KEY = 'tinytrader-order-token';
 let orderTok = null;
-function orderToken() {
-  if (orderTok) return orderTok;
-  try { orderTok = localStorage.getItem(TOKEN_KEY) || null; } catch (_) {}
-  if (!orderTok) {
-    orderTok = (window.prompt('The console\'s order token (kept on this device):') || '').trim() || null;
-    try { if (orderTok) localStorage.setItem(TOKEN_KEY, orderTok); } catch (_) {}
-  }
-  return orderTok;
+function setToken(t) {
+  orderTok = t;
+  try { if (t) sessionStorage.setItem(TOKEN_KEY, t); else sessionStorage.removeItem(TOKEN_KEY); } catch (_) {}
 }
-/** A write request (`/api/orders/...`, flatten, resume, jobs, the queue, settings, ...): the response, as fetch gives it. `null` is sent as `null`; `extra` adds headers. */
-export async function orderFetch(path, body, method = 'POST', extra = {}) {
-  const t = orderToken();
+function getToken() {
+  try { return sessionStorage.getItem(TOKEN_KEY) || orderTok; } catch (_) { return orderTok; }
+}
+function liveToken() {
+  const have = getToken();
+  if (have) return have;
+  const t = (window.prompt('The console\'s order token, for a live account (kept for this tab only):') || '').trim() || null;
+  setToken(t);
+  return t;
+}
+/** A write request (`/api/orders/...`, flatten, resume, jobs, the queue, settings, ...): the response, as fetch gives it. `null` is sent as `null`; `extra` adds headers. `live` marks a write that acts on a live account, which sends the order token. */
+export async function orderFetch(path, body, method = 'POST', extra = {}, live = false) {
+  const t = live ? liveToken() : null;
   const r = await fetch(path, { method, headers: { 'content-type': 'application/json', ...extra, ...(t ? { 'x-order-token': t } : {}) }, body: JSON.stringify(body === undefined ? {} : body) });
-  if (r.status === 401) { orderTok = null; try { localStorage.removeItem(TOKEN_KEY); } catch (_) {} }
+  if (t && r.status === 401) setToken(null);
   return r;
 }
 // The job queue (decision 0012), through the console's /api/queue proxy.

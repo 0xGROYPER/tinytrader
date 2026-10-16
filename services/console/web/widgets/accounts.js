@@ -61,8 +61,8 @@ async function readGateways(update) {
 }
 // Flatten in progress per account: {stage: 'confirm' | 'busy' | 'done', typed, result, error}.
 const flat = {};
-async function post(path, body) {
-  const r = await orderFetch(path, body);
+async function post(path, body, live = false) {
+  const r = await orderFetch(path, body, 'POST', {}, live);
   let v = null; try { v = await r.json(); } catch (_) {}
   if (!r.ok) throw new Error(v?.error || `${r.status} ${r.statusText}`);
   return v;
@@ -349,7 +349,8 @@ function mount(el, single = false, book = false) {
     if (d.cancelOrder) {
       const [name, id] = d.cancelOrder.split('|');
       cancelling[d.cancelOrder] = 'Cancelling…'; update();
-      try { const v = await post(`/api/orders/${encodeURIComponent(name)}/${encodeURIComponent(id)}/cancel`, {}); cancelling[d.cancelOrder] = v.outcome === 'accepted' ? 'Cancel sent' : `Cancel ${v.outcome || 'failed'}`; }
+      const live = accountOf(name)?.environment === 'live';
+      try { const v = await post(`/api/orders/${encodeURIComponent(name)}/${encodeURIComponent(id)}/cancel`, {}, live); cancelling[d.cancelOrder] = v.outcome === 'accepted' ? 'Cancel sent' : `Cancel ${v.outcome || 'failed'}`; }
       catch (err) { cancelling[d.cancelOrder] = 'Cancel failed'; console.warn(err); }
       update(); return;
     }
@@ -399,7 +400,7 @@ function mount(el, single = false, book = false) {
     if (!first.account) unread(0, `${first.why}; nothing was sent.`);
     else {
       // Our own working orders hold contracts: cancelled, then gone from the account (at most 5 s).
-      if (await cancelOurs(name, a?.orders)) {
+      if (await cancelOurs(name, a?.orders, live)) {
         for (let i = 0; i < 25 && (accountOf(name)?.orders || []).some(o => (o.client_order_id || '').startsWith('tt-')); i++) await new Promise(r => setTimeout(r, 200));
       }
       // The account's updated_at as the cancel step leaves it: each later read must be from this poll or a newer one (null refuses every read).

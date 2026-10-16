@@ -176,7 +176,7 @@ export function createTicket(box, hooks = {}) {
     t.sending = true; t.confirm = 0; draw(true);
     const me = t;
     try {
-      const r = await orderFetch(`/api/orders/${encodeURIComponent(me.acct)}`, { confirm: me.acct, live, order });
+      const r = await orderFetch(`/api/orders/${encodeURIComponent(me.acct)}`, { confirm: me.acct, live, order }, 'POST', {}, live);
       const v = await r.json().catch(() => ({})), o = outcome(v, r.ok);
       me.result = o.html; me.done = !o.again;
       hooks.onSent?.(v);
