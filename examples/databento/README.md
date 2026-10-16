@@ -12,7 +12,6 @@ schema below cost on your plan before starting.
 ```sh
 cd examples/databento
 export DATABENTO_API_KEY=...          # from your Databento account
-../../nix/build-images.sh relay console   # builds the images with Nix inside Docker
 docker compose up -d
 open http://localhost:8080
 ```
@@ -31,6 +30,35 @@ environment. It is never written to disk or into the image.
 
 For example, `DATABENTO_DATASET=GLBX.MDP3 DATABENTO_SYMBOLS=ES.FUT docker compose up -d`.
 Prefer low-volume schemas such as `trades` while trying things out (`DATABENTO_SCHEMA=trades`; the default is `cmbp-1`).
+
+## Images
+
+`docker compose up` pulls the published images,
+`ghcr.io/dawson-shay/tinytrader-<service>:main`, built from `main` for
+linux/amd64 and linux/arm64. Two variables choose others:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TINYTRADER_IMAGE_PREFIX` | `ghcr.io/dawson-shay/tinytrader-` | Image name before the service name |
+| `TINYTRADER_TAG` | `main` | Image tag: `main`, `sha-<short commit>`, or a release, `X.Y.Z` |
+
+**Build from this checkout** with the repository's `Dockerfile` (needs only
+Docker; the first build compiles the workspace and takes a few minutes):
+
+```sh
+docker compose -f compose.yaml -f compose.build.yaml up -d --build
+```
+
+**Nix images** (optional), built with Nix inside Docker and tagged
+`tinytrader/<service>:nix`:
+
+```sh
+../../nix/build-images.sh relay console
+TINYTRADER_IMAGE_PREFIX=tinytrader/ TINYTRADER_TAG=nix docker compose up -d
+```
+
+`CONSOLE_PORT` moves the console from port 8080, for example when another
+console already uses it.
 
 ## What runs
 
