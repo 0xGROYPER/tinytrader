@@ -8,6 +8,8 @@
 //!   from the Docker Engine API, plus each service's `/health`, `/metrics`
 //!   and optional `/recent` endpoints. With `?since=G&epoch=E` (the last
 //!   answer's), only the service fields changed since (see `delta`).
+//!   Each account in a service's `accounts` carries `age_ms`: the console's
+//!   clock now minus the account's `updated_at`, or null.
 //!
 //! A background task refreshes the snapshot every two seconds, so any number
 //! of viewers cost one round of polling. The console never writes to Docker
@@ -59,9 +61,17 @@
 //!   the account's gateway; an account without one (live) can't be flattened.
 //!   With `CONSOLE_TRADE_TOKEN` (or `_FILE`), the console's trade client
 //!   `console` sends the Spread builder's orders: `GET /api/orders` (each
-//!   account's gateway state and the console's open orders), `POST
+//!   account's gateway state, its `unresolved` count and the console's open orders), `POST
 //!   /api/orders/{account}` (`{order, confirm: account}`) and `POST
 //!   /api/orders/{account}/{client_order_id}/cancel`.
+//!   Every write route also needs `CONSOLE_ORDER_LOGINS` (the Tailscale logins
+//!   allowed to write, comma-separated) and `CONSOLE_ORDER_TOKEN` (or `_FILE`),
+//!   which the page sends as `X-Order-Token`. Either unset refuses them
+//!   (`WriteGate`). The write routes are the order routes (those, and an
+//!   account's flatten and resume), the jobs service's and the queue's POST
+//!   (and the queue's PATCH) routes, drive approval, POST `/api/reminders`
+//!   and `/api/profiles`, and PUT `/api/prefs/{key}`. Their GET routes stay
+//!   open.
 //! - `CONSOLE_PAGE`: serve the page from this file, and its modules and
 //!   libraries from beside it, read on each request, instead of the copies
 //!   built in (optional; lets the page change without a rebuild).
@@ -135,6 +145,18 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    let write_gate = match WriteGate::from_env() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("console: {e}");
+            std::process::exit(2);
+        }
+    };
+    if !write_gate.open() {
+        eprintln!(
+            "console: writes are refused until CONSOLE_ORDER_LOGINS and CONSOLE_ORDER_TOKEN (or _FILE) are set"
+        );
+    }
     let config = PollerConfig {
         topology: env("CONSOLE_TOPOLOGY", "topology.json"),
         docker: std::env::var("CONSOLE_DOCKER")
@@ -255,42 +277,16 @@ async fn main() {
         .route("/api/stream/{service}/{stream}", get(stream))
         .route("/api/collections", get(list_collections))
         .route("/api/collections/{id}/{index}", get(collection_doc))
-        .route("/api/jobs/{*rest}", get(jobs_proxy).post(jobs_proxy))
-        .route(
-            "/api/queue/{*rest}",
-            get(queue_proxy).post(queue_proxy).patch(queue_proxy),
-        )
-        .route(
-            "/api/store/volumes/approve",
-            axum::routing::post(store_approve),
-        )
-        .route("/api/reminders", get(reminders_get).post(reminders_post))
+        .route("/api/jobs/{*rest}", get(jobs_proxy))
+        .route("/api/queue/{*rest}", get(queue_proxy))
+        .route("/api/reminders", get(reminders_get))
         .route("/api/prefs", get(prefs_get))
-        .route("/api/prefs/{key}", axum::routing::put(prefs_put))
-        .route(
-            "/api/profiles",
-            get(profiles_list)
-                .post(profiles_post)
-                .layer(axum::extract::DefaultBodyLimit::max(
-                    profiles::MAX_BYTES + 1024,
-                )),
-        )
+        .route("/api/profiles", get(profiles_list))
         .route("/api/profiles/{id}", get(profiles_get))
         .route("/api/accounts/gateways", get(gateways_list))
         .route("/api/orders", get(orders_list))
-        .route("/api/orders/{account}", axum::routing::post(order_submit))
-        .route(
-            "/api/orders/{account}/{id}/cancel",
-            axum::routing::post(order_cancel),
-        )
-        .route(
-            "/api/accounts/{account}/flatten",
-            axum::routing::post(account_flatten),
-        )
-        .route(
-            "/api/accounts/{account}/resume",
-            axum::routing::post(account_resume),
-        )
+        // Every write, including the orders, behind WriteGate.
+        .merge(write_routes(write_gate))
         // The console's writes (jobs, the queue, drive approval, reminders, flatten) can't be
         // forged by another page open in the browser.
         .layer(axum::middleware::from_fn(
@@ -435,11 +431,36 @@ async fn state(
 ) -> Response {
     let since = q.get("since").and_then(|v| v.parse().ok());
     let epoch = q.get("epoch").and_then(|v| v.parse().ok());
-    no_store(axum::Json(app.delta.answer(
-        app.poller.snapshot_json(),
-        since,
-        epoch,
-    )))
+    let mut state = app.delta.answer(app.poller.snapshot_json(), since, epoch);
+    add_account_ages(&mut state, tinytrader_observe::unix_seconds());
+    no_store(axum::Json(state))
+}
+
+/// Adds `age_ms` to each account a service serves (`services.<id>.accounts.accounts[]`):
+/// this server's clock now minus the account's `updated_at` (its last successful
+/// poll), in whole milliseconds, or null without one. Computed here, so the
+/// age does not depend on the clock of the device reading it.
+fn add_account_ages(state: &mut serde_json::Value, now: f64) {
+    let Some(services) = state.get_mut("services").and_then(|s| s.as_object_mut()) else {
+        return;
+    };
+    for svc in services.values_mut() {
+        let Some(accounts) = svc
+            .pointer_mut("/accounts/accounts")
+            .and_then(|a| a.as_array_mut())
+        else {
+            continue;
+        };
+        for account in accounts {
+            let age = account
+                .get("updated_at")
+                .and_then(|t| t.as_f64())
+                .map(|at| ((now - at) * 1000.0).max(0.0).round() as i64);
+            if let Some(obj) = account.as_object_mut() {
+                obj.insert("age_ms".into(), json!(age));
+            }
+        }
+    }
 }
 
 /// Live tail of a service's events, forwarded from the service.
@@ -758,7 +779,9 @@ async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
                     .filter(|o| o["client_order_id"].as_str().is_some_and(|i| i.starts_with(gateways::PREFIX)))
                     .map(|o| json!({ "client_order_id": o["client_order_id"], "status": o["status"], "filled_qty": o["filled_qty"], "avg_price": o["avg_price"], "legs": o["legs"], "limit_price": o["broker_raw"]["limit_price"], "qty": o["broker_raw"]["qty"], "submitted_at": o["broker_raw"]["submitted_at"] }))
                     .collect();
-                json!({ "account": account, "state": w["state"], "environment": w["environment"], "orders": mine })
+                // The gateway's count of orders that have not resolved (new opens are blocked); null when it doesn't say.
+                let unresolved = r.as_ref().map_or(serde_json::Value::Null, |r| r["unresolved"].clone());
+                json!({ "account": account, "state": w["state"], "environment": w["environment"], "unresolved": unresolved, "orders": mine })
             }
             Err(e) => json!({ "account": account, "error": e }),
         });
@@ -766,6 +789,121 @@ async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
     no_store(axum::Json(
         json!({ "trading": can, "prefix": gateways::PREFIX, "accounts": out }),
     ))
+}
+
+/// Who may write. Every write route (see [`write_routes`]: orders, flatten and
+/// resume, the jobs service, the queue, drive approval, reminders, profiles,
+/// settings) needs both checks, before anything is forwarded or sent to a gateway:
+///
+/// - the Tailscale login: `tailscale serve` sets `Tailscale-User-Login` on
+///   what it forwards, and it must be one of `CONSOLE_ORDER_LOGINS`
+///   (comma-separated, exact match). Empty or unset refuses every write.
+/// - the order token: `X-Order-Token` must equal `CONSOLE_ORDER_TOKEN` (or the
+///   file `CONSOLE_ORDER_TOKEN_FILE` names). Unset refuses every write. The
+///   login header alone isn't enough: anything on this Mac can send it to
+///   127.0.0.1:8080, so the token is what stops a local process.
+///
+/// GET routes stay open. Refusals say nothing about which check failed.
+#[derive(Clone)]
+struct WriteGate {
+    logins: Vec<String>,
+    token: Option<String>,
+}
+
+impl WriteGate {
+    fn from_env() -> Result<Self, String> {
+        let logins = env("CONSOLE_ORDER_LOGINS", "")
+            .split(',')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let token = tinytrader_observe::optional_secret("CONSOLE_ORDER_TOKEN")?;
+        Ok(Self { logins, token })
+    }
+
+    /// Whether any write can be made at all.
+    fn open(&self) -> bool {
+        !self.logins.is_empty() && self.token.is_some()
+    }
+
+    /// Why a write request is refused, as (status, reason), if it is.
+    fn refuse(&self, headers: &axum::http::HeaderMap) -> Option<(StatusCode, &'static str)> {
+        let login = headers.get("tailscale-user-login").and_then(|v| v.to_str().ok());
+        if !login.is_some_and(|l| self.logins.iter().any(|a| a == l)) {
+            return Some((StatusCode::FORBIDDEN, "not allowed"));
+        }
+        // No token configured: refused (fail closed), not allowed.
+        let Some(want) = self.token.as_deref() else {
+            return Some((StatusCode::UNAUTHORIZED, "not allowed"));
+        };
+        let got = headers
+            .get("x-order-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if constant_time_eq(got.as_bytes(), want.as_bytes()) {
+            None
+        } else {
+            Some((StatusCode::UNAUTHORIZED, "not allowed"))
+        }
+    }
+}
+
+/// Compare without stopping at the first difference (the time taken says
+/// nothing about how much of a guess was right).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+/// Middleware: refuse a write the [`WriteGate`] doesn't allow.
+async fn write_gate(
+    AxumState(gate): AxumState<WriteGate>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    match gate.refuse(req.headers()) {
+        Some((status, why)) => (status, axum::Json(json!({ "error": why }))).into_response(),
+        None => next.run(req).await,
+    }
+}
+
+/// The write routes, each behind the [`WriteGate`]: orders (submit, cancel,
+/// flatten, resume), the jobs service and the queue (POST, and PATCH for the
+/// queue), drive approval, reminders, profile recordings and settings (PUT).
+/// Their GET routes are merged in separately and stay open.
+fn write_routes(gate: WriteGate) -> Router<Arc<App>> {
+    Router::new()
+        .route("/api/orders/{account}", axum::routing::post(order_submit))
+        .route(
+            "/api/orders/{account}/{id}/cancel",
+            axum::routing::post(order_cancel),
+        )
+        .route(
+            "/api/accounts/{account}/flatten",
+            axum::routing::post(account_flatten),
+        )
+        .route(
+            "/api/accounts/{account}/resume",
+            axum::routing::post(account_resume),
+        )
+        .route("/api/jobs/{*rest}", axum::routing::post(jobs_proxy))
+        .route(
+            "/api/queue/{*rest}",
+            axum::routing::post(queue_proxy).patch(queue_proxy),
+        )
+        .route(
+            "/api/store/volumes/approve",
+            axum::routing::post(store_approve),
+        )
+        .route("/api/reminders", axum::routing::post(reminders_post))
+        .route("/api/prefs/{key}", axum::routing::put(prefs_put))
+        .route(
+            "/api/profiles",
+            axum::routing::post(profiles_post).layer(axum::extract::DefaultBodyLimit::max(
+                profiles::MAX_BYTES + 1024,
+            )),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(gate, write_gate))
 }
 
 /// Send one of the Spread builder's orders to a paper account's gateway as
@@ -983,4 +1121,58 @@ fn no_store(body: impl IntoResponse) -> Response {
 
 fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ME: &str = "me@example.net";
+
+    fn headers(login: Option<&'static str>, token: Option<&'static str>) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        if let Some(l) = login {
+            h.insert("tailscale-user-login", axum::http::HeaderValue::from_static(l));
+        }
+        if let Some(t) = token {
+            h.insert("x-order-token", axum::http::HeaderValue::from_static(t));
+        }
+        h
+    }
+
+    /// The status a request with these headers is refused with, if it is.
+    fn refused(
+        gate: &WriteGate,
+        login: Option<&'static str>,
+        token: Option<&'static str>,
+    ) -> Option<StatusCode> {
+        gate.refuse(&headers(login, token)).map(|r| r.0)
+    }
+
+    #[test]
+    fn write_gate_needs_the_login_and_the_token() {
+        let gate = WriteGate {
+            logins: vec![ME.to_owned()],
+            token: Some("secret".to_owned()),
+        };
+        assert!(gate.open());
+        // A wrong or missing login is forbidden, whatever the token.
+        assert_eq!(refused(&gate, None, Some("secret")), Some(StatusCode::FORBIDDEN));
+        assert_eq!(refused(&gate, Some("other"), Some("secret")), Some(StatusCode::FORBIDDEN));
+        // The right login with a wrong or missing token is unauthorized.
+        assert_eq!(refused(&gate, Some(ME), None), Some(StatusCode::UNAUTHORIZED));
+        assert_eq!(refused(&gate, Some(ME), Some("guess")), Some(StatusCode::UNAUTHORIZED));
+        // Both right: let through.
+        assert_eq!(refused(&gate, Some(ME), Some("secret")), None);
+    }
+
+    #[test]
+    fn write_gate_without_a_token_refuses_everything() {
+        let gate = WriteGate {
+            logins: vec![ME.to_owned()],
+            token: None,
+        };
+        assert!(!gate.open());
+        assert_eq!(refused(&gate, Some(ME), Some("anything")), Some(StatusCode::UNAUTHORIZED));
+    }
 }
