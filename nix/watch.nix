@@ -23,12 +23,18 @@
 #   WATCH_STORE           the store's /health, judged the same way
 #   WATCH_NATIVE          native tinytrader services (tinytrader.services
 #                         names): launchd com.tinytrader.<name> must be
-#                         running (macOS), systemd tinytrader-<name> active
+#                         running (macOS; found as a daemon, in the system
+#                         domain, or as an agent, in gui/<uid>), systemd
+#                         tinytrader-<name> active (elsewhere)
 #   WATCH_DISKS           mount points: WATCH_DISK_WARN % used (default 90)
 #                         is a warning, WATCH_DISK_CRIT % (95) or under
 #                         WATCH_DISK_MIN_FREE_GIB free (10) high priority; a
 #                         path that isn't its own mount (an unplugged drive)
 #                         is high priority too
+#   WATCH_FRESH           files a scheduled job touches when it succeeds, as
+#                         NAME:MAX_AGE_SECONDS:PATH (e.g.
+#                         backup:108000:/var/lib/backup/last-backup): one
+#                         missing or older than its max age is a warning
 #
 # Alerting: a problem must be seen two runs in a row before it is sent; it is
 # sent again every WATCH_REPEAT_HIGH seconds (default 1800) while high
@@ -55,7 +61,8 @@
 # Run it as a service like any other: tinytrader.services.watch = { enable =
 # true; package = tinytrader.packages.<system>.watch; environment = { ... };
 # secrets.WATCH_NOTIFY = ...; } (secrets on NixOS; on macOS, put them in the
-# environment from a wrapper, as darwin-services has no secrets).
+# environment from a wrapper, as darwin-services has no secrets; and give it
+# launchd = "daemon" there so it starts at boot, without a login).
 { ... }:
 {
   perSystem =
@@ -77,7 +84,7 @@
           gnugrep
         ];
         text = builtins.readFile ./watch.sh;
-        meta.description = "A host's monitor: Docker, containers, health, native services and disks, pushed to ntfy";
+        meta.description = "A host's monitor: Docker, containers, health, native services, disks and job freshness, pushed to ntfy";
       };
     };
 }

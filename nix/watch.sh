@@ -66,6 +66,8 @@ if [ -n "${WATCH_SERVICES_FROM:-}" ]; then
 fi
 native="$(words <<<"${WATCH_NATIVE:-}")"
 disks="$(words <<<"${WATCH_DISKS:-}")"
+# Files that must have changed recently: NAME:MAX_AGE_SECONDS:PATH each.
+fresh="$(words <<<"${WATCH_FRESH:-}")"
 
 for url in "$console" "$store"; do
   [ -n "$url" ] || continue
@@ -178,17 +180,28 @@ check_store() {
   judge_health store "$st" "$(jq -r '.detail // ""' <<<"$body")" "$now"
 }
 
+# Native services: launchd jobs com.tinytrader.<name> where there is launchd
+# (macOS), else systemd units tinytrader-<name>. A launchd service is a daemon
+# (the system domain) or an agent of this user (gui/<uid>), so both are
+# looked in; reading either needs no root.
 check_native() {
-  local n out st
+  local n out st d where
   while read -r n; do
     [ -n "$n" ] || continue
-    if [ "$(uname -s)" = Darwin ]; then
-      if ! out="$(launchctl print "gui/$(id -u)/com.tinytrader.$n" 2>/dev/null)"; then
-        problem "native:$n" high "$n: not loaded (launchd com.tinytrader.$n)"
+    if command -v launchctl >/dev/null 2>&1; then
+      where=""
+      for d in system "gui/$(id -u)"; do
+        if out="$(launchctl print "$d/com.tinytrader.$n" 2>/dev/null)"; then
+          where="$d"
+          break
+        fi
+      done
+      if [ -z "$where" ]; then
+        problem "native:$n" high "$n: not loaded (launchd com.tinytrader.$n, neither a daemon nor an agent)"
         continue
       fi
       st="$(sed -nE 's/^[[:space:]]*state = (.*)$/\1/p' <<<"$out" | head -n1)"
-      [ "$st" = running ] || problem "native:$n" high "$n: ${st:-not running} (launchd)"
+      [ "$st" = running ] || problem "native:$n" high "$n: ${st:-not running} (launchd $where/com.tinytrader.$n)"
     else
       st="$(systemctl is-active "tinytrader-$n.service" 2>/dev/null || true)"
       [ "$st" = active ] || problem "native:$n" high "$n: ${st:-unknown} (systemd tinytrader-$n)"
@@ -219,6 +232,26 @@ check_disks() {
       problem "disk:$m" warn "$m: $pct% full, $free GiB free"
     fi
   done <<<"$disks"
+}
+
+# Each WATCH_FRESH file: missing, or not modified for its max age, is a
+# warning (a nightly job that didn't run, or failed before its stamp).
+check_fresh() {
+  local e name max path mtime age now="$1"
+  while read -r e; do
+    [ -n "$e" ] || continue
+    name="${e%%:*}"; e="${e#*:}"; max="${e%%:*}"; path="${e#*:}"
+    if [ -z "$name" ] || ! [[ "$max" =~ ^[0-9]+$ ]] || [ -z "$path" ] || [ "$path" = "$max" ]; then
+      problem "fresh-config" high "WATCH_FRESH entry not NAME:SECONDS:PATH: $name:$e"
+      continue
+    fi
+    if ! mtime="$(stat -c %Y -- "$path" 2>/dev/null)"; then
+      problem "fresh:$name" warn "$name: never done ($path is missing)"
+      continue
+    fi
+    age=$(( now - mtime ))
+    [ "$age" -le "$max" ] || problem "fresh:$name" warn "$name: last done $(( age / 3600 )) h ago (limit $(( max / 3600 )) h)"
+  done <<<"$fresh"
 }
 
 # POST a notice: TITLE PRIORITY TAGS BODY. Fails when it isn't delivered.
@@ -252,6 +285,7 @@ run_once() {
   check_store "$now"
   check_native
   check_disks
+  check_fresh "$now"
 
   # Forget when services no longer degraded became so.
   degraded="$(jq -c --arg keys "$degraded_keys" '($keys | split("\n")) as $k | with_entries(select(.key as $x | $k | index($x)))' <<<"$degraded")"

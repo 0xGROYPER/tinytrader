@@ -51,6 +51,8 @@ jobs:
       - name: nix flake check
         run: nix flake check --keep-going --print-build-logs
 
+  # Plain Cargo, no Nix: keeps building and testing without Nix first-class
+  # (README, Building and testing).
   cargo:
     runs-on: ubuntu-latest
     timeout-minutes: 45

@@ -52,6 +52,16 @@ says "not-there: missing"
 WATCH_DISK_MIN_FREE_GIB=0 WATCH_DISKS="$work" run; WATCH_DISK_MIN_FREE_GIB=0 WATCH_DISKS="$work" run
 says "not mounted (it is part of"
 
+echo "== a job's stamp: missing or stale is a warning; fresh is fine"
+WATCH_FRESH="backup:3600:$work/stamp" run; WATCH_FRESH="backup:3600:$work/stamp" run
+says "backup: never done"
+touch -d "@$(( $(date +%s) - 7300 ))" "$work/stamp"
+WATCH_FRESH="backup:3600:$work/stamp" run; says "backup: last done 2 h ago (limit 1 h)"
+touch "$work/stamp"
+WATCH_FRESH="backup:3600:$work/stamp" run; says "resolved"
+WATCH_FRESH="backup:3600" run; WATCH_FRESH="backup:3600" run; says "not NAME:SECONDS:PATH"
+run
+
 echo "== containers expected without a Docker socket is a problem"
 WATCH_SERVICES="a,b" run; says "2 containers expected but no WATCH_DOCKER_SOCKET"
 
@@ -60,4 +70,41 @@ if WATCH_CONSOLE=http://127.0.0.1:7710 "$WATCH" --once 2> "$work/log"; then echo
 says "refusing http://127.0.0.1:7710"
 if WATCH_NEVER_PORTS="7700,7701" WATCH_STORE=http://127.0.0.1:7701 "$WATCH" --once 2> "$work/log"; then echo "FAIL: ran against 7701" >&2; exit 1; fi
 says "port 7701"
+echo "== native services: launchd daemons (system) and agents (gui/<uid>)"
+# A fake launchctl: a job is a file $work/launchd/<domain>/<label> holding
+# what `launchctl print` says of it.
+uid="$(id -u)"
+mkdir -p "$work/bin" "$work/launchd/system" "$work/launchd/gui/$uid"
+# (#!$BASH: the build sandbox on Linux has no /usr/bin/env.)
+cat > "$work/bin/launchctl" <<FAKE
+#!$BASH
+[ "\$1" = print ] && [ -f "$work/launchd/\$2" ] && exec cat "$work/launchd/\$2"
+echo "Could not find service \$2" >&2; exit 113
+FAKE
+chmod +x "$work/bin/launchctl"
+job() { printf '%s = {\n\tactive count = 1\n\tstate = %s\n\tpid = 1\n}\n' "${1##*/}" "$2" > "$work/launchd/$1"; }
+job system/com.tinytrader.watchd running
+job "gui/$uid/com.tinytrader.agent" running
+native() { PATH="$work/bin:$PATH" WATCH_NATIVE="watchd agent $*" run; }
+native; native; silent "a running daemon and a running agent"
+native gone; native gone; says "gone: not loaded (launchd com.tinytrader.gone, neither a daemon nor an agent)"
+native; says "resolved"
+job system/com.tinytrader.watchd "not running"
+native; native; says "watchd: not running (launchd system/com.tinytrader.watchd)"
+job system/com.tinytrader.watchd running
+job "gui/$uid/com.tinytrader.agent" exited
+native; native; says "agent: exited (launchd gui/$uid/com.tinytrader.agent)"
+job "gui/$uid/com.tinytrader.agent" running
+native; says "resolved"
+
+echo "== native services: systemd where there is no launchd"
+if ! command -v launchctl >/dev/null 2>&1; then
+  rm "$work/bin/launchctl"
+  printf '#!%s\n[ "$2" = tinytrader-up.service ] && { echo active; exit 0; }\necho inactive; exit 3\n' "$BASH" > "$work/bin/systemctl"
+  chmod +x "$work/bin/systemctl"
+  PATH="$work/bin:$PATH" WATCH_NATIVE="up down" run; PATH="$work/bin:$PATH" WATCH_NATIVE="up down" run
+  says "down: inactive (systemd tinytrader-down)"
+  if grep -qF "up: " "$work/log"; then echo "FAIL: an active unit was reported" >&2; exit 1; fi
+fi
+
 echo "watch: all checks passed"

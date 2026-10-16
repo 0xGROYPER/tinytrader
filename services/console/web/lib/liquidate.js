@@ -1,12 +1,15 @@
-// Liquidate: every option position in an account closed at once, as few
-// orders as the broker allows. Positions are grouped as Close… groups them
-// (underlying and expiry) and each group is one combo order of up to four
-// legs, its legs reversed, ratios in lowest terms; a bigger group is split
-// into runs of four by type and strike, so its spreads close together and no
-// order leaves a short leg uncovered on its own. Each is priced at the
-// marketable limit (the natural and 5%, at least $0.05, past it), or sent at
-// market, from the chain's quotes read just before sending. Stock positions
-// and contracts already expired are left out, and said so.
+// Liquidate: option positions in an account closed at once, as few orders
+// as the broker allows. Every position is offered with a box to tick (all
+// ticked to start); the ticked ones are grouped by underlying, and each
+// group is one combo order of up to four legs, its legs reversed, ratios in
+// lowest terms. A bigger group is split into runs of four by expiry, type
+// and strike, so its spreads close together and no order leaves a short leg
+// uncovered on its own. A pick that keeps a short while closing a long that
+// may cover it is named (uncovered), and sending waits for an explicit yes.
+// Each is priced at the marketable limit (the natural
+// and 5%, at least $0.05, past it), or sent at market, from the chain's
+// quotes read just before sending. Stock positions and contracts already
+// expired are left out, and said so.
 import { fleet } from './fleet.js';
 import { get, stream } from './cache.js';
 import { notSentText } from './orders.js';
@@ -24,13 +27,14 @@ const expired = expiry => { const n = ny(); return expiry < n.date || (expiry ==
 
 /**
  * @typedef {{ symbol: string, side: 'buy' | 'sell', ratio: number }} Leg
- * @typedef {{ title: string, root: string, expiry: string, legs: Leg[], qty: number }} Close
+ * @typedef {{ title: string, root: string, legs: Leg[], qty: number }} Close
+ * @typedef {{ symbol: string, root: string, expiry: string, type: string, strike: number, qty: number }} Held
  */
 
-/** The closing orders for an account's positions, and what they leave out. */
-export function plan(positions) {
-  /** @type {Map<string, { root: string, expiry: string, held: { symbol: string, type: string, strike: number, qty: number }[] }>} */
-  const groups = new Map();
+/** The option positions that can be closed, and what's left out (with why). */
+export function closable(positions) {
+  /** @type {Held[]} */
+  const held = [];
   const left = [];
   for (const p of positions || []) {
     const q = +p.qty, m = OCC.exec(p.symbol || '');
@@ -38,18 +42,35 @@ export function plan(positions) {
     if (!m) { left.push({ symbol: p.symbol, why: 'not an option (Flatten, or the broker, closes it)' }); continue; }
     const expiry = `20${m[2]}-${m[3]}-${m[4]}`;
     if (expired(expiry)) { left.push({ symbol: p.symbol, why: 'expired: it settles on its own' }); continue; }
-    const key = `${m[1]}|${expiry}`;
-    if (!groups.has(key)) groups.set(key, { root: m[1], expiry, held: [] });
-    groups.get(key).held.push({ symbol: p.symbol, type: m[5], strike: +m[6] / 1000, qty: q });
+    held.push({ symbol: p.symbol, root: m[1], expiry, type: m[5], strike: +m[6] / 1000, qty: q });
+  }
+  held.sort((a, b) => a.root.localeCompare(b.root) || a.expiry.localeCompare(b.expiry) || a.type.localeCompare(b.type) || a.strike - b.strike);
+  return { held, left };
+}
+
+const day = e => `${+e.slice(5, 7)}/${+e.slice(8)}`;
+
+/**
+ * The closing orders for an account's positions (only those whose symbols
+ * are in `pick`, when given), and what they leave out.
+ * @param {any[]} positions @param {Set<string>} [pick]
+ */
+export function plan(positions, pick) {
+  const { held, left } = closable(positions);
+  /** @type {Map<string, Held[]>} */
+  const groups = new Map();
+  for (const h of held) {
+    if (pick && !pick.has(h.symbol)) continue;
+    if (!groups.has(h.root)) groups.set(h.root, []);
+    groups.get(h.root).push(h);
   }
   /** @type {Close[]} */
   const orders = [];
-  for (const g of groups.values()) {
-    const held = g.held.sort((a, b) => a.type.localeCompare(b.type) || a.strike - b.strike);
-    for (let i = 0; i < held.length; i += 4) {
-      const run = held.slice(i, i + 4), unit = run.reduce((x, l) => gcd(x, Math.abs(l.qty)), 0) || 1;
+  for (const [root, hs] of groups) {
+    for (let i = 0; i < hs.length; i += 4) {
+      const run = hs.slice(i, i + 4), unit = run.reduce((x, l) => gcd(x, Math.abs(l.qty)), 0) || 1;
       orders.push({
-        title: `${g.root} ${+g.expiry.slice(5, 7)}/${+g.expiry.slice(8)}`, root: g.root, expiry: g.expiry, qty: unit,
+        title: `${root} ${[...new Set(run.map(l => day(l.expiry)))].join(', ')}`, root, qty: unit,
         legs: run.map(l => ({ symbol: l.symbol, side: l.qty > 0 ? 'sell' : 'buy', ratio: Math.abs(l.qty) / unit })),
       });
     }
@@ -57,15 +78,32 @@ export function plan(positions) {
   return { orders, left };
 }
 
-/** Quotes for the orders' contracts by symbol, one chain read per underlying and expiry. */
-export async function quotes(orders) {
+/**
+ * The shorts a pick would leave uncovered: kept short contracts of an
+ * underlying and type (call or put) when the pick closes a long of the same
+ * underlying and type that could be covering them. Closing everything, or
+ * closing a short and keeping its long, leaves nothing uncovered.
+ * @param {Held[]} held @param {Set<string>} pick @returns {Held[]}
+ */
+export function uncovered(held, pick) {
+  const key = h => `${h.root}|${h.type}`;
+  const closingLong = new Set(held.filter(h => h.qty > 0 && pick.has(h.symbol)).map(key));
+  return held.filter(h => h.qty < 0 && !pick.has(h.symbol) && closingLong.has(key(h)));
+}
+
+/** Quotes for these contracts by symbol, one chain read per underlying and expiry. */
+export async function quotes(symbols) {
   const svc = (fleet.topo?.services || []).find(s => s.chain)?.id;
   const out = new Map();
   if (!svc) return out;
-  const want = new Map(orders.map(o => [`${o.root}|${o.expiry}`, o]));
-  await Promise.all([...want.values()].map(async o => {
+  const want = new Map();
+  for (const sym of symbols) {
+    const m = OCC.exec(sym || '');
+    if (m) { const e = `20${m[2]}-${m[3]}-${m[4]}`; want.set(`${m[1]}|${e}`, [m[1], e]); }
+  }
+  await Promise.all([...want.values()].map(async ([root, expiry]) => {
     try {
-      const v = await get(stream(svc, 'chain', { underlying: o.root, from: o.expiry, to: o.expiry }), { fresh: 1500 });
+      const v = await get(stream(svc, 'chain', { underlying: root, from: expiry, to: expiry }), { fresh: 1500 });
       for (const c of v.contracts || []) if (c.symbol) out.set(c.symbol, c);
     } catch (_) { /* priced as unknown */ }
   }));

@@ -1,9 +1,11 @@
 # tinytrader
 
-A platform for running trading and research operations: services,
-deployment modules and an operator console. Services run under NixOS, under
-systemd on any Linux with Nix, or as Docker containers on any operating
-system.
+A platform for running trading and research operations: services and an
+operator console. The services are an ordinary Rust (Cargo) workspace and
+plain HTTP, JSON and files; they build with Cargo and run anywhere. Nix is
+one supported way to package them, for reproducible builds, container images
+and NixOS and nix-darwin service modules, not a requirement (see
+[Building and testing](#building-and-testing)).
 
 tinytrader is the platform, not anyone's deployment. Your hosts, data, secrets,
 strategies and research live in your own repository, which uses tinytrader as a
@@ -59,7 +61,7 @@ console the same way.
 | `services/queue` | The job queue: work that runs later or when the machine can spare it, from templates the deployment defines ([decision 0012](docs/decisions/0012-job-queue.md)) |
 | `nix/watch.nix` | `watch`: a host's own monitor (Docker, containers, health, native services, disks), pushed to an ntfy-style URL, with a heartbeat ping after each run ([decision 0015](docs/decisions/0015-host-watch.md)) |
 | `nix/ai-proxy.nix` | `ai-proxy`: a local OpenAI-compatible AI endpoint on loopback |
-| `infra/modules` | `tinytrader.services.<name>`: NixOS modules (systemd units) and the same definitions as nix-darwin launchd agents |
+| `infra/modules` | `tinytrader.services.<name>`: NixOS modules (systemd units) and the same definitions as nix-darwin launchd agents or boot-time daemons |
 | `nix/` | Flake modules: Rust builds, images, checks |
 | `examples/` | Complete deployments you can run or copy |
 | `docs/` | Platform decisions and contracts |
@@ -74,11 +76,19 @@ operating system ([decision 0004](docs/decisions/0004-nix-not-nixos.md)):
 | Any OS with Docker | Docker Compose (see `examples/`) | `tinytrader.observe` container labels |
 | Any Linux with Nix | systemd unit files generated from `tinytrader.services` | `observe` addresses in the topology file |
 | NixOS | the `tinytrader.services` NixOS module | the topology file the module generates |
-| macOS with nix-darwin | the same `tinytrader.services` definitions as launchd agents (`darwinModules.services`) | `observe` addresses in the topology file |
+| macOS with nix-darwin | the same `tinytrader.services` definitions as launchd agents or boot-time daemons (`darwinModules.services`) | `observe` addresses in the topology file |
 
 With `tinytrader.services`, giving a service `observe.port` is enough: it
 listens there, and the module writes `/etc/tinytrader/topology.json` listing it,
 on NixOS directly and in the `systemdUnits` output for other distributions.
+On macOS a service runs as the host's primary user, as a launchd agent by
+default: it starts when that user logs in. Give it `launchd = "daemon"` to run
+it as a launchd daemon instead (still as that user, with `HOME` and `USER`
+set), which starts at boot with no one logged in, so it comes back after a
+reboot or power cut. With FileVault on, boot waits for the disk to be
+unlocked at the login window either way. Switching a service to a daemon,
+activation stops the agent it was. `watch` finds a service either way.
+
 A service started any other way joins a deployment by being listed by address:
 
 ```json
@@ -124,15 +134,38 @@ directly, with no console needed.
 
 ## Building and testing
 
+### With Cargo (no Nix)
+
+The services build and test with Rust alone. `rustup` installs the pinned
+toolchain from `rust-toolchain.toml` on first use:
+
 ```sh
-nix develop                          # shell with the repo's tools (the toolchain in rust-toolchain.toml)
-cargo build -p console               # one service
-cargo test                           # the Rust workspace
-cargo fmt --all && cargo clippy --all-targets -- --deny warnings
+cargo build --release -p console     # one service; binaries in target/release/
+cargo build --release                # every service
+cargo test --workspace
+cargo fmt --all && cargo clippy --workspace --all-targets -- --deny warnings
+```
+
+A service runs from its binary, taking its settings from the environment
+(documented at the top of its `main.rs`), and the console serves its page
+from `services/console/web/`. CI's `cargo` job builds and tests this way, with
+no Nix installed, so the Cargo path stays first-class.
+
+### With Nix (optional)
+
+Nix adds reproducible builds (every dependency pinned in `flake.lock`),
+container images without Dockerfiles, and the `tinytrader.services` modules for
+NixOS, other Linux distributions and nix-darwin:
+
+```sh
+nix develop                          # shell with the repo's tools
 nix build .#store                    # a service as a Nix package
 nix/build-images.sh console relay    # container images, loaded into Docker as tinytrader/<name>:nix
 nix flake check                      # everything below
 ```
+
+`nix/build-images.sh` runs Nix inside a container when Nix isn't installed,
+so building the images needs only Docker.
 
 `nix flake check` runs:
 
