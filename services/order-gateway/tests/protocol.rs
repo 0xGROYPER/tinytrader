@@ -265,7 +265,7 @@ fn listen_any_is_the_only_way_to_bind_outside_loopback() {
 
 #[test]
 fn loopback_only_and_state_root_refusals() {
-    let tmp = std::path::Path::new("/Users/nobody/state");
+    let tmp = std::path::Path::new("/var/lib/gateway-test/state");
     assert!(
         check_paths("0.0.0.0:7601".parse().unwrap(), tmp)
             .unwrap_err()
