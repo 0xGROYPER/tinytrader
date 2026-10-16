@@ -64,14 +64,16 @@
 //!   account's gateway state, its `unresolved` count and the console's open orders), `POST
 //!   /api/orders/{account}` (`{order, confirm: account}`) and `POST
 //!   /api/orders/{account}/{client_order_id}/cancel`.
-//!   Every write route also needs `CONSOLE_ORDER_LOGINS` (the Tailscale logins
-//!   allowed to write, comma-separated) and `CONSOLE_ORDER_TOKEN` (or `_FILE`),
-//!   which the page sends as `X-Order-Token`. Either unset refuses them
-//!   (`WriteGate`). The write routes are the order routes (those, and an
-//!   account's flatten and resume), the jobs service's and the queue's POST
-//!   (and the queue's PATCH) routes, drive approval, POST `/api/reminders`
-//!   and `/api/profiles`, and PUT `/api/prefs/{key}`. Their GET routes stay
-//!   open.
+//!   Every write route needs `CONSOLE_ORDER_LOGINS` (the Tailscale logins
+//!   allowed to write, comma-separated); an empty list refuses all writes
+//!   (`WriteGate`). A live account's order, cancel, flatten or resume also
+//!   needs `CONSOLE_ORDER_TOKEN` (or `_FILE`, one line of 64 hex characters)
+//!   in the page's `X-Order-Token`. Without that token, live orders are
+//!   refused and everything else still works. Paper orders need only the login.
+//!   The write routes are the order routes (those, and an account's flatten
+//!   and resume), the jobs service's and the queue's POST (and the queue's
+//!   PATCH) routes, drive approval, POST `/api/reminders` and `/api/profiles`,
+//!   and PUT `/api/prefs/{key}`. Their GET routes stay open.
 //! - `CONSOLE_PAGE`: serve the page from this file, and its modules and
 //!   libraries from beside it, read on each request, instead of the copies
 //!   built in (optional; lets the page change without a rebuild).
@@ -129,6 +131,8 @@ struct App {
     profiles: Option<profiles::Profiles>,
     /// Order gateways by account, for Flatten and Resume.
     gateways: gateways::Gateways,
+    /// Who may write, and the token a live account's order needs.
+    gate: WriteGate,
     polls: AtomicU64,
     /// Changes-only snapshots for pages that poll.
     delta: delta::Delta,
@@ -145,16 +149,13 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let write_gate = match WriteGate::from_env() {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("console: {e}");
-            std::process::exit(2);
-        }
-    };
-    if !write_gate.open() {
+    let write_gate = WriteGate::from_env();
+    if write_gate.logins.is_empty() {
+        eprintln!("console: writes are refused until CONSOLE_ORDER_LOGINS is set");
+    }
+    if write_gate.token.is_none() {
         eprintln!(
-            "console: writes are refused until CONSOLE_ORDER_LOGINS and CONSOLE_ORDER_TOKEN (or _FILE) are set"
+            "console: live orders are disabled: the console has no order token configured (CONSOLE_ORDER_TOKEN or _FILE)"
         );
     }
     let config = PollerConfig {
@@ -197,6 +198,7 @@ async fn main() {
             .filter(|s| !s.is_empty())
             .map(|u| (u.trim_end_matches('/').to_owned(), reqwest::Client::new())),
         gateways: gateways::Gateways::from_env(),
+        gate: write_gate.clone(),
         // Beside the reminders unless named.
         profiles: std::env::var("CONSOLE_PROFILES")
             .ok()
@@ -791,62 +793,89 @@ async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
     ))
 }
 
-/// Who may write. Every write route (see [`write_routes`]: orders, flatten and
-/// resume, the jobs service, the queue, drive approval, reminders, profiles,
-/// settings) needs both checks, before anything is forwarded or sent to a gateway:
+/// Who may write. Every write route (see [`write_routes`]) needs the Tailscale
+/// login, checked before anything is forwarded or sent to a gateway:
 ///
 /// - the Tailscale login: `tailscale serve` sets `Tailscale-User-Login` on
 ///   what it forwards, and it must be one of `CONSOLE_ORDER_LOGINS`
 ///   (comma-separated, exact match). Empty or unset refuses every write.
-/// - the order token: `X-Order-Token` must equal `CONSOLE_ORDER_TOKEN` (or the
-///   file `CONSOLE_ORDER_TOKEN_FILE` names). Unset refuses every write. The
-///   login header alone isn't enough: anything on this Mac can send it to
-///   127.0.0.1:8080, so the token is what stops a local process.
 ///
-/// GET routes stay open. Refusals say nothing about which check failed.
+/// A live account's order, cancel, flatten or resume also needs the order
+/// token: `X-Order-Token` must equal `CONSOLE_ORDER_TOKEN` (or the file
+/// `CONSOLE_ORDER_TOKEN_FILE` names). The login header alone isn't enough
+/// for a live account: anything on this Mac can send it to 127.0.0.1:8080.
+/// Unset, live orders are refused with a message saying so. Whether an account
+/// is live is decided by its handler from the gateway, never from the request.
+///
+/// GET routes stay open. Refusals say nothing about which check failed, except
+/// that live orders are disabled when no token is configured.
 #[derive(Clone)]
 struct WriteGate {
     logins: Vec<String>,
     token: Option<String>,
 }
 
+/// A refusal: a status and the message to send.
+type Refusal = (StatusCode, &'static str);
+
 impl WriteGate {
-    fn from_env() -> Result<Self, String> {
+    fn from_env() -> Self {
         let logins = env("CONSOLE_ORDER_LOGINS", "")
             .split(',')
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .map(str::to_owned)
             .collect();
-        let token = tinytrader_observe::optional_secret("CONSOLE_ORDER_TOKEN")?;
-        Ok(Self { logins, token })
+        // An unreadable token file leaves live orders disabled; the console still starts.
+        let token = match tinytrader_observe::optional_secret("CONSOLE_ORDER_TOKEN") {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("console: {e}");
+                None
+            }
+        };
+        Self { logins, token }
     }
 
-    /// Whether any write can be made at all.
-    fn open(&self) -> bool {
-        !self.logins.is_empty() && self.token.is_some()
-    }
-
-    /// Why a write request is refused, as (status, reason), if it is.
-    fn refuse(&self, headers: &axum::http::HeaderMap) -> Option<(StatusCode, &'static str)> {
-        let login = headers.get("tailscale-user-login").and_then(|v| v.to_str().ok());
+    /// Whether a write from `login`, carrying `token`, may go ahead. `live` is
+    /// whether the account it acts on is live; a paper write needs only the login.
+    fn decide(&self, login: Option<&str>, token: Option<&str>, live: bool) -> Option<Refusal> {
         if !login.is_some_and(|l| self.logins.iter().any(|a| a == l)) {
             return Some((StatusCode::FORBIDDEN, "not allowed"));
         }
-        // No token configured: refused (fail closed), not allowed.
+        if !live {
+            return None;
+        }
         let Some(want) = self.token.as_deref() else {
-            return Some((StatusCode::UNAUTHORIZED, "not allowed"));
+            return Some((
+                StatusCode::FORBIDDEN,
+                "live orders are disabled: the console has no order token configured",
+            ));
         };
-        let got = headers
-            .get("x-order-token")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if constant_time_eq(got.as_bytes(), want.as_bytes()) {
+        if constant_time_eq(token.unwrap_or("").as_bytes(), want.as_bytes()) {
             None
         } else {
             Some((StatusCode::UNAUTHORIZED, "not allowed"))
         }
     }
+}
+
+/// The request's Tailscale login and order token, if sent.
+fn login_and_token(headers: &axum::http::HeaderMap) -> (Option<&str>, Option<&str>) {
+    (
+        headers
+            .get("tailscale-user-login")
+            .and_then(|v| v.to_str().ok()),
+        headers.get("x-order-token").and_then(|v| v.to_str().ok()),
+    )
+}
+
+/// The refusal response for a trade on an account (`live` as its handler decided), if any.
+fn refused_for(app: &App, headers: &axum::http::HeaderMap, live: bool) -> Option<Response> {
+    let (login, token) = login_and_token(headers);
+    app.gate
+        .decide(login, token, live)
+        .map(|(status, why)| (status, axum::Json(json!({ "error": why }))).into_response())
 }
 
 /// Compare without stopping at the first difference (the time taken says
@@ -855,13 +884,15 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
 }
 
-/// Middleware: refuse a write the [`WriteGate`] doesn't allow.
+/// Middleware: refuse a write from a login that isn't allowed. The order token
+/// for a live account is checked by its handler, which knows whether it is live.
 async fn write_gate(
     AxumState(gate): AxumState<WriteGate>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    match gate.refuse(req.headers()) {
+    let (login, _) = login_and_token(req.headers());
+    match gate.decide(login, None, false) {
         Some((status, why)) => (status, axum::Json(json!({ "error": why }))).into_response(),
         None => next.run(req).await,
     }
@@ -913,6 +944,7 @@ fn write_routes(gate: WriteGate) -> Router<Arc<App>> {
 async fn order_submit(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path(account): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
@@ -922,6 +954,10 @@ async fn order_submit(
             axum::Json(json!({ "error": "confirm the account" })),
         )
             .into_response();
+    }
+    let live = is_live(&app, &account).await;
+    if let Some(refusal) = refused_for(&app, &headers, live) {
+        return refusal;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -933,7 +969,7 @@ async fn order_submit(
         now.subsec_nanos() % 100_000
     );
     // A live account's order also says so, from the ticket's typed confirmation.
-    if ask["live"] != true && is_live(&app, &account).await {
+    if ask["live"] != true && live {
         return (
             StatusCode::BAD_REQUEST,
             axum::Json(json!({ "error": "a live account's order must be confirmed as live" })),
@@ -959,6 +995,7 @@ async fn order_submit(
 async fn order_cancel(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path((account, id)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     if !id.starts_with(gateways::PREFIX) {
         return (
@@ -966,6 +1003,9 @@ async fn order_cancel(
             axum::Json(json!({ "error": "not one of the console's orders" })),
         )
             .into_response();
+    }
+    if let Some(refusal) = refused_for(&app, &headers, is_live(&app, &account).await) {
+        return refusal;
     }
     trade_request(
         &app,
@@ -1015,6 +1055,7 @@ async fn trade_request(
 async fn account_flatten(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path(account): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
@@ -1025,7 +1066,11 @@ async fn account_flatten(
         )
             .into_response();
     }
-    if is_live(&app, &account).await {
+    let live = is_live(&app, &account).await;
+    if let Some(refusal) = refused_for(&app, &headers, live) {
+        return refusal;
+    }
+    if live {
         return live_refused();
     }
     let reason = ask["reason"]
@@ -1045,10 +1090,15 @@ async fn account_flatten(
 async fn account_resume(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path(account): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-    if is_live(&app, &account).await {
+    let live = is_live(&app, &account).await;
+    if let Some(refusal) = refused_for(&app, &headers, live) {
+        return refusal;
+    }
+    if live {
         return live_refused();
     }
     let reason = ask["reason"]
@@ -1064,8 +1114,9 @@ async fn account_resume(
     .await
 }
 
-/// Whether an account's gateway trades live (from its welcome); unreachable counts as live,
-/// so Flatten and Resume fail closed.
+/// Whether an account trades live, from its gateway's welcome. An account with no
+/// gateway, or one that can't be reached, counts as live, so every trade on it
+/// needs the order token (fail closed).
 async fn is_live(app: &App, account: &str) -> bool {
     match app
         .gateways
@@ -1129,50 +1180,83 @@ mod tests {
 
     const ME: &str = "me@example.net";
 
-    fn headers(login: Option<&'static str>, token: Option<&'static str>) -> axum::http::HeaderMap {
-        let mut h = axum::http::HeaderMap::new();
-        if let Some(l) = login {
-            h.insert("tailscale-user-login", axum::http::HeaderValue::from_static(l));
+    fn gate(token: Option<&str>) -> WriteGate {
+        WriteGate {
+            logins: vec![ME.to_owned()],
+            token: token.map(str::to_owned),
         }
-        if let Some(t) = token {
-            h.insert("x-order-token", axum::http::HeaderValue::from_static(t));
-        }
-        h
-    }
-
-    /// The status a request with these headers is refused with, if it is.
-    fn refused(
-        gate: &WriteGate,
-        login: Option<&'static str>,
-        token: Option<&'static str>,
-    ) -> Option<StatusCode> {
-        gate.refuse(&headers(login, token)).map(|r| r.0)
     }
 
     #[test]
-    fn write_gate_needs_the_login_and_the_token() {
-        let gate = WriteGate {
-            logins: vec![ME.to_owned()],
+    fn a_paper_write_needs_only_the_login() {
+        let g = gate(Some("secret"));
+        assert_eq!(g.decide(Some(ME), None, false), None);
+        // A settings or reminder write is a paper-style write: the login is enough.
+        let no_token = gate(None);
+        assert_eq!(no_token.decide(Some(ME), None, false), None);
+    }
+
+    #[test]
+    fn a_live_order_without_the_token_is_refused() {
+        let g = gate(Some("secret"));
+        assert_eq!(
+            g.decide(Some(ME), None, true),
+            Some((StatusCode::UNAUTHORIZED, "not allowed"))
+        );
+        assert_eq!(
+            g.decide(Some(ME), Some("guess"), true),
+            Some((StatusCode::UNAUTHORIZED, "not allowed"))
+        );
+    }
+
+    #[test]
+    fn a_live_order_with_the_token_passes() {
+        let g = gate(Some("secret"));
+        assert_eq!(g.decide(Some(ME), Some("secret"), true), None);
+    }
+
+    #[test]
+    fn a_live_order_with_no_token_configured_says_so() {
+        let g = gate(None);
+        assert_eq!(
+            g.decide(Some(ME), Some("anything"), true),
+            Some((
+                StatusCode::FORBIDDEN,
+                "live orders are disabled: the console has no order token configured",
+            ))
+        );
+    }
+
+    #[test]
+    fn an_empty_allowlist_refuses_all_writes() {
+        let g = WriteGate {
+            logins: Vec::new(),
             token: Some("secret".to_owned()),
         };
-        assert!(gate.open());
-        // A wrong or missing login is forbidden, whatever the token.
-        assert_eq!(refused(&gate, None, Some("secret")), Some(StatusCode::FORBIDDEN));
-        assert_eq!(refused(&gate, Some("other"), Some("secret")), Some(StatusCode::FORBIDDEN));
-        // The right login with a wrong or missing token is unauthorized.
-        assert_eq!(refused(&gate, Some(ME), None), Some(StatusCode::UNAUTHORIZED));
-        assert_eq!(refused(&gate, Some(ME), Some("guess")), Some(StatusCode::UNAUTHORIZED));
-        // Both right: let through.
-        assert_eq!(refused(&gate, Some(ME), Some("secret")), None);
+        assert_eq!(
+            g.decide(Some(ME), None, false),
+            Some((StatusCode::FORBIDDEN, "not allowed"))
+        );
+        assert_eq!(
+            g.decide(Some(ME), Some("secret"), true),
+            Some((StatusCode::FORBIDDEN, "not allowed"))
+        );
     }
 
     #[test]
-    fn write_gate_without_a_token_refuses_everything() {
-        let gate = WriteGate {
-            logins: vec![ME.to_owned()],
-            token: None,
-        };
-        assert!(!gate.open());
-        assert_eq!(refused(&gate, Some(ME), Some("anything")), Some(StatusCode::UNAUTHORIZED));
+    fn a_wrong_or_missing_login_is_refused() {
+        let g = gate(Some("secret"));
+        assert_eq!(
+            g.decide(None, Some("secret"), true),
+            Some((StatusCode::FORBIDDEN, "not allowed"))
+        );
+        assert_eq!(
+            g.decide(Some("other@example.net"), None, false),
+            Some((StatusCode::FORBIDDEN, "not allowed"))
+        );
+        assert_eq!(
+            g.decide(Some("other@example.net"), Some("secret"), true),
+            Some((StatusCode::FORBIDDEN, "not allowed"))
+        );
     }
 }
