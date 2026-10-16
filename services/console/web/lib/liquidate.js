@@ -13,6 +13,7 @@
 import { fleet } from './fleet.js';
 import { get, stream } from './cache.js';
 import { notSentText } from './orders.js';
+import { ourPrefix } from './ticket.js';
 
 const OCC = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/;
 const r2 = x => Math.round(x * 100) / 100;
@@ -149,7 +150,7 @@ export async function send(account, live, o, p) {
 
 /** Cancel the console's own open orders on an account (ids tt-): how many were asked to cancel. */
 export async function cancelOurs(account, orders) {
-  const ours = (orders || []).filter(o => (o.client_order_id || '').startsWith('tt-'));
+  const ours = (orders || []).filter(o => (o.client_order_id || '').startsWith(ourPrefix()));
   await Promise.all(ours.map(o => fetch(`/api/orders/${encodeURIComponent(account)}/${encodeURIComponent(o.client_order_id)}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => null)));
   return ours.length;
 }

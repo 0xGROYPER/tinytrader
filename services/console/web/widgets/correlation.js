@@ -43,7 +43,7 @@ function draw(my) {
   const t = theme();
   const bar = `<div class="chips">${WINDOWS.map(w => `<button type="button" class="chip-btn" data-cor-w="${w}" aria-pressed="${my.window === w}">${w}d</button>`).join('')}</div>`;
   if (!t || t.symbols.length < 2) return '<p class="muted">Needs a workspace theme with at least two symbols (right-click the workspace number, Theme…).</p>';
-  if (!source()) return '<p class="muted">No service serves daily bars for any symbol (alpaca-data).</p>';
+  if (!source()) return '<p class="muted">No service serves daily bars for any symbol (a <code>daily</code> stream).</p>';
   if (my.err) return bar + `<p class="muted">${esc(my.err)}</p>`;
   if (!my.m) return bar + '<p class="muted">Loading daily bars…</p>';
   const { syms, m, vol, n } = my.m;

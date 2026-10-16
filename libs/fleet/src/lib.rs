@@ -28,6 +28,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tinytrader_observe::unix_seconds;
 
+/// Schema name of the console API documents (`/api/topology`, `/api/state`).
+pub const SCHEMA: &str = "tinytrader.fleet/1";
+
 /// Where a poller finds the deployment.
 #[derive(Clone, Debug, Default)]
 pub struct PollerConfig {
@@ -193,7 +196,7 @@ impl Poller {
             .filter(|_| ON_DEMAND.contains(&stream))
             .and_then(|s| s[stream].as_str())
             .map(str::to_owned)
-            .ok_or_else(|| EventsError::NotDeclared(service.to_owned()))?;
+            .ok_or_else(|| EventsError::NotServed(service.to_owned(), stream.to_owned()))?;
         let r = self
             .http
             .get(format!("{url}?{query}"))
@@ -236,6 +239,8 @@ pub const ON_DEMAND: &[&str] = &[
 pub enum EventsError {
     /// The service declares no event stream.
     NotDeclared(String),
+    /// The service declares no such on-demand stream: (service, stream).
+    NotServed(String, String),
     /// The service did not answer.
     Unreachable(String),
 }
@@ -244,6 +249,7 @@ impl std::fmt::Display for EventsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotDeclared(s) => write!(f, "service {s} declares no events"),
+            Self::NotServed(s, what) => write!(f, "service {s} serves no `{what}`"),
             Self::Unreachable(e) => write!(f, "service unreachable: {e}"),
         }
     }
@@ -696,7 +702,7 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
         Ok(o) => o,
         Err(e) => {
             return (
-                json!({ "generated_at": unix_seconds(), "error": e, "services": {} }),
+                json!({ "schema": SCHEMA, "generated_at": unix_seconds(), "error": e, "services": {} }),
                 Some(e),
             );
         }
@@ -730,7 +736,8 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
     } else {
         json!({ "name": "deployment", "services": [] })
     };
-    let topo = apply_overrides(discovered, &overrides);
+    let mut topo = apply_overrides(discovered, &overrides);
+    topo["schema"] = json!(SCHEMA);
     *app.topology
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = topo.clone();
@@ -835,6 +842,7 @@ async fn poll_once(app: &Poller) -> (Value, Option<String>) {
     }
 
     let snapshot = json!({
+        "schema": SCHEMA,
         "generated_at": unix_seconds(),
         "hosts": hosts,
         "docker": { "configured": app.config.docker.is_some(), "error": docker_error, "stale_seconds": docker_stale },

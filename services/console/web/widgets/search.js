@@ -15,17 +15,21 @@ import { esc, ago, unentity } from '../lib/format.js';
 import { watchlists, addSymbols } from '../lib/watchlists.js';
 import { alertsFor, alertForm } from '../lib/alerts.js';
 import { mark } from './docs.js';
-import { get } from '../lib/cache.js';
+import { get, stream } from '../lib/cache.js';
 
 const MAX = 8;
 
 /** Every ticker EDGAR lists, with its company's name: symbol to name. Fetched once
- * per page, from econ-calendar; empty until it arrives (or if it can't be had). */
+ * per page, from the service that declares `tickers`; empty until it arrives (or if
+ * none does). */
 let directory = null;
 /** @type {Promise<void> | null} */
 let loading = null;
 function loadDirectory() {
-  loading ||= get('/api/stream/econ-calendar/tickers', { fresh: 3600e3 })
+  if (loading) return loading;
+  const svc = serviceFor('tickers');
+  if (!svc) return Promise.resolve(); // asked again once the topology names one
+  loading = get(stream(svc, 'tickers'), { fresh: 3600e3 })
     .then(j => { if (j?.names) directory = j.names; else loading = null; })
     .catch(() => { loading = null; });
   return loading;

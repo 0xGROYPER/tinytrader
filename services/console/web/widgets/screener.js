@@ -94,7 +94,7 @@ defineWidget('screener', {
 
     async function load() {
       const svc = service();
-      if (!svc) { my.err = 'No service serves the screener (alpaca-data).'; render(); return; }
+      if (!svc) { my.err = 'No service serves the screener (a `screener` stream).'; render(); return; }
       if (my.busy) return;
       my.busy = true;
       try {

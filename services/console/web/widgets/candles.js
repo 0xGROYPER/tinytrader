@@ -15,7 +15,7 @@
 // Times are New York time. Drawn with TradingView's Lightweight Charts
 // (Apache-2.0), loaded the first time a chart opens.
 import { defineWidget } from '../lib/widgets.js';
-import { fleet, serviceFor, servicesFor } from '../lib/fleet.js';
+import { fleet, serviceFor, servicesFor, optionRoots } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused } from '../lib/theme.js';
 import { onChange } from '../lib/channels.js';
@@ -168,7 +168,7 @@ const pct = m => `±${(m * 100).toFixed(m < 0.01 ? 2 : 1)}%`;
 
 // GEX levels: gamma exposure by strike from the chain's own gamma (worked out
 // from quotes) and OPRA's open interest (as of the morning, from the OPRA
-// relay; SPY and XSP), over expiries out to the scope. Each contract adds
+// relay, for the roots the OPRA relays carry), over expiries out to the scope. Each contract adds
 // gamma x open interest x 100 x price^2 x 1%: dollars of delta per 1% move,
 // counted positive for calls and negative for puts (the usual assumption
 // that dealers are long calls and short puts; their real positions aren't
@@ -187,7 +187,7 @@ function gexLevels(v, /** @type {Indicator} */ ind) {
   const S = v?.spot; if (!S) return { none: 'no price' };
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }), last = isoIn(GEX_SCOPES[ind.scope || '0dte'][1]);
   const cs = (v.contracts || []).filter(c => c.open_interest > 0 && c.expiry >= today && c.expiry <= last);
-  if (!cs.length) return { none: v.contracts?.some(c => c.open_interest != null) ? 'no open interest in that range' : 'no open interest (SPY and XSP only, from the OPRA relays)' };
+  if (!cs.length) return { none: v.contracts?.some(c => c.open_interest != null) ? 'no open interest in that range' : `no open interest (${optionRoots().join(', ') || 'no option relays'}: open interest comes from the OPRA relays)` };
   const by = new Map(); let calls = new Map(), puts = new Map(), total = 0;
   const one = (c, gamma, price) => (c.type === 'call' ? 1 : -1) * gamma * c.open_interest * 100 * price * price * 0.01;
   for (const c of cs) {
@@ -406,7 +406,7 @@ defineWidget('candles', {
       const { symbol } = my.pick, size = my.size, { service, ask } = source();
       const same = () => my.alive && my.pick?.symbol === symbol && my.size === size;
       try {
-        if (ask === 60 && size >= 86400) throw new Error('Daily and weekly bars need a service with history for any symbol (alpaca-data).');
+        if (ask === 60 && size >= 86400) throw new Error('Daily and weekly bars need a service with history for any symbol (a `bars` stream).');
         const L = await library();
         if (!same()) return;
         if (!my.chart) makeChart(L); else my.chart.applyOptions(colours());
@@ -622,7 +622,7 @@ defineWidget('candles', {
       const any = anyService();
       if (!/^[A-Z][A-Z0-9.]{0,9}$/.test(symbol) && !OCC.test(symbol)) return;
       if (OCC.test(symbol) && !optionRelay(symbol)) { my.err = `No OPRA relay carries ${OCC.exec(symbol)[1]} options, so there's nothing to chart for ${symbol}.`; head(); return; }
-      if (!any && !OCC.test(symbol)) { my.err = 'Typing a ticker needs a service with bars for any symbol (alpaca-data).'; head(); return; }
+      if (!any && !OCC.test(symbol)) { my.err = 'Typing a ticker needs a service with bars for any symbol (a `bars` stream).'; head(); return; }
       if (!my.typed.includes(symbol)) my.typed.push(symbol);
       my.pick = offered().find(c => c.symbol === symbol) || { service: optionRelay(symbol) || any, symbol };
       my.linked = false; input.value = ''; input.blur();

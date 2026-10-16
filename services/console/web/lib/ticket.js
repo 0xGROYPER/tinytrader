@@ -25,6 +25,8 @@ const band = n => Math.max(0.05, r2(Math.abs(n) * 0.05));
 /** Order routing as the console has it: {trading, accounts: [{account, environment, error, state}]}, or {unavailable}. */
 let routing = /** @type {any} */ (null), routingAt = 0, asking = /** @type {Promise<void> | null} */ (null);
 /** Whether an account can be traded from the console. @param {string} name */
+/** The console's order id prefix, as `/api/orders` says (`CONSOLE_TRADE_PREFIX`). */
+export const ourPrefix = () => routing?.prefix || 'tt-';
 export const tradable = name => !!name && !!routing?.trading && (routing.accounts || []).some(x => x.account === name && !x.error);
 /** Routing, read if it's 15 seconds old; then `done` (every caller waiting on the read). */
 export function routed(done) {
@@ -72,7 +74,7 @@ export function createTicket(box, hooks = {}) {
   async function readQuotes() {
     const me = t; if (!me) return;
     const svc = serviceFor('chain');
-    if (!svc) { me.qErr = 'No service serves option chains (alpaca-data), so there are no quotes.'; draw(); return; }
+    if (!svc) { me.qErr = 'No service serves option chains (a `chain` stream), so there are no quotes.'; draw(); return; }
     const want = new Map();
     for (const l of me.legs) { const m = OCC.exec(l.symbol); if (m) { const e = `20${m[2]}-${m[3]}-${m[4]}`; want.set(`${m[1]}|${e}`, [m[1], e]); } }
     const errs = [];

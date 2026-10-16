@@ -13,7 +13,7 @@
 // quantity, market or a limit, and Send to that account's order gateway as
 // the console's trade client (POST /api/orders/{account}).
 import { defineWidget, paint } from '../lib/widgets.js';
-import { svcState, serviceFor, servicesFor } from '../lib/fleet.js';
+import { svcState, serviceFor, servicesFor, optionRoots } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { focused, theme } from '../lib/theme.js';
 import { onChange, publish as publishChannel } from '../lib/channels.js';
@@ -50,7 +50,7 @@ defineWidget('spreads', {
   title: 'Spread builder',
   mount(el) {
     // index: what the chain lists; chain: the shown expiry's prices; spot: the underlying's last.
-    const my = { sym: focused() || theme()?.symbols?.[0] || 'SPY', index: /** @type {any} */ (null), full: /** @type {any} */ (null), chain: /** @type {any} */ (null), spot: /** @type {number | null} */ (null), expiry: /** @type {string | null} */ (null), structure: 'Custom', width: 2, err: '', alive: true, at: 0,
+    const my = { sym: focused() || theme()?.symbols?.[0] || optionRoots()[0] || '', index: /** @type {any} */ (null), full: /** @type {any} */ (null), chain: /** @type {any} */ (null), spot: /** @type {number | null} */ (null), expiry: /** @type {string | null} */ (null), structure: 'Custom', width: 2, err: '', alive: true, at: 0,
       // A suggestion waiting for its chain, and the one shown.
       ask: /** @type {any} */ (null), why: '',
       // The order ticket's account.
@@ -86,13 +86,17 @@ defineWidget('spreads', {
     // Waiting for a topology that names a chain service (the page can mount the builder before it has read one).
     let waitingChain = false;
     async function loadIndex() {
+      // With nothing picked, the first option root the relays carry.
+      if (!my.sym) my.sym = optionRoots()[0] || '';
       const svc = chainService(), sym = my.sym;
-      if (!svc) {
-        waitingChain = true; my.err = 'No service serves option chains (alpaca-data).'; render();
+      if (!svc || !sym) {
+        waitingChain = true;
+        my.err = !svc ? 'No service serves option chains (a `chain` stream).' : 'No relay carries options to start from: type a ticker.';
+        render();
         return;
       }
       waitingChain = false;
-      if (my.err.startsWith('No service')) my.err = '';
+      if (my.err.startsWith('No service') || my.err.startsWith('No relay')) my.err = '';
       const url = indexUrl(svc, sym), kept = peek(url)?.v;
       if (kept && !my.index) { my.index = kept; arrived(); }
       try {
@@ -257,7 +261,7 @@ defineWidget('spreads', {
         if (delta != null) dl += delta;
         return `<tr data-i="${i}">
           <td class="sb-asset"><div class="sb-asset-in">${q?.symbol
-              ? `<button type="button" class="sb-occ mono" data-occ="${esc(q.symbol)}" title="Chart today's mid on Candles (SPY and XSP options, from Databento)">${esc(q.symbol)}</button>`
+              ? `<button type="button" class="sb-occ mono" data-occ="${esc(q.symbol)}" title="Chart today's mid on Candles (options on the roots the OPRA relays carry)">${esc(q.symbol)}</button>`
               : `<span class="sb-occ mono">${esc(`${my.sym} ${l.strike}${l.type[0].toUpperCase()}`)}</span>`}<span class="sb-steps"><button type="button" class="sb-mini" data-act="down" aria-label="Lower strike" title="Lower strike">‹</button><button type="button" class="sb-mini sb-cp" data-act="type" title="Switch call / put">${l.type === 'call' ? 'C' : 'P'}</button><button type="button" class="sb-mini" data-act="up" aria-label="Higher strike" title="Higher strike">›</button></span></div></td>
           <td class="num sb-c-price"${q?.bid != null ? ` title="${q.bid.toFixed(2)} × ${q.ask?.toFixed(2) ?? '—'}"` : ''}>${m == null ? '<span class="muted">—</span>' : m.toFixed(2)}<small class="muted">${q?.bid != null ? `${q.bid.toFixed(2)}×${q.ask?.toFixed(2) ?? '—'}` : ''}</small></td>
           <td class="num sb-c-qty"><span class="sb-qty-cell"><button type="button" class="sb-mini" data-act="less" aria-label="One fewer" title="One fewer (shift: the whole position one unit smaller)">−</button><b class="mono ${n < 0 ? 'sb-sell' : 'sb-buy'}">${n > 0 ? '+' : ''}${n}</b><button type="button" class="sb-mini" data-act="more" aria-label="One more" title="One more (shift: the whole position one unit bigger)">+</button></span></td>

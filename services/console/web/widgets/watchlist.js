@@ -44,7 +44,7 @@ function draw(my) {
         <button type="button" class="tile-btn" data-wl-act="new" title="New list" aria-label="New list">+</button>
         ${mine ? '<button type="button" class="tile-btn" data-wl-act="rename" title="Rename this list" aria-label="Rename this list">✎</button><button type="button" class="tile-btn" data-wl-act="delete" title="Delete this list" aria-label="Delete this list">×</button>' : ''}
         ${mine ? '<form class="wl-add" data-wl-form="add"><input class="wl-in" name="v" placeholder="Add: CCJ, VST" autocomplete="off" spellcheck="false" aria-label="Add symbols"></form>' : ''}</div>`;
-  if (!source()) return [bar, '<p class="muted">No service serves stock snapshots (alpaca-data).</p>'];
+  if (!source()) return [bar, '<p class="muted">No service serves stock snapshots (a <code>snapshots</code> stream).</p>'];
   if (!syms.length) return [bar, `<p class="muted">${mine ? 'This list is empty: add symbols above.' : 'The theme has no symbols.'}</p>`];
   const by = new Map((my.rows || []).map(r => [r.symbol, r]));
   const f = focused();

@@ -3,7 +3,7 @@
 use order_gateway::broker::Broker;
 use order_gateway::{
     AlpacaPaper, ClientSpec, Config, Profile, Role, SimBroker, Timing, check_paths, check_state,
-    load_credentials, start, trading::Credentials,
+    check_state_under, load_credentials, start, trading::Credentials,
 };
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -18,11 +18,11 @@ use std::time::Duration;
 const HELP: &str = "order-gateway --account NAME --broker sim|alpaca-paper|alpaca-live --listen 127.0.0.1:PORT --state DIR
     --client NAME,ROLE,PREFIX,TOKEN [--client ...]      (ROLE: trade|observe|admin)
     [--environment paper] [--credentials-file FILE | --credentials env] [--listen-any] [--allow-live]
-    [--sim-script FILE] [--sim-quotes DBN_FILE|tcp:HOST:PORT]
-    [--underlyings SPY,..] [--any-underlying-client NAME ...] [--equities AAPL,..] [--allow-short]
+    [--sim-script FILE] [--sim-quotes DBN_FILE|tcp:HOST:PORT|relay:HOST:PORT]
+    [--underlyings ROOT,..] [--any-underlying-client NAME ...] [--equities AAPL,..] [--allow-short]
     [--max-open N] [--max-legs N] [--max-notional DOLLARS]
     [--submits-per-min N] [--submits-per-day N] [--closes-per-min N] [--max-rejects N] [--budget N] [--min-options-level N]
-    [--resolve-ms 1000,2000,4000] [--test-stall-after-admitted]
+    [--resolve-ms 1000,2000,4000] [--forbid-state-under DIR ...] [--test-stall-after-admitted]
 Serves one broker account on a loopback port (tinytrader.gateway/1, NDJSON). The sim broker runs
 scripted (--sim-script) or against DBN quotes (--sim-quotes; client-clocked with `advance`).
 alpaca-paper needs --credentials-file (mode 600, APCA_* or ALPACA_* key names) or --credentials env
@@ -31,6 +31,8 @@ secret); values are never printed. It uses the compiled paper endpoints. alpaca-
 live account (real money) and is refused without --allow-live; it takes the same credentials. TOKEN is a file (mode 600,
 not a symlink) or env:VAR (VAR or VAR_FILE); either way >= 64 hex chars. --listen-any allows a
 non-loopback --listen, only for a container whose port is published on loopback.
+Option orders need their roots in --underlyings (none by default). --state is never under /tmp,
+nor under any --forbid-state-under DIR (repeatable), such as a scratch or bulk-data volume.
 ";
 
 /// `NAME` from the environment, or the file named by `NAME_FILE` (a Docker secret).
@@ -84,6 +86,7 @@ fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
     let (mut clients, mut stall, mut allow_short, mut listen_any, mut allow_live) =
         (Vec::new(), false, false, false, false);
     let mut any_underlying: Vec<String> = Vec::new();
+    let mut forbid_state: Vec<PathBuf> = Vec::new();
     // `--name=value` is the same as `--name value`.
     let args: Vec<&str> = args
         .iter()
@@ -100,6 +103,9 @@ fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
             "--listen-any" => listen_any = true,
             "--allow-live" => allow_live = true,
             "--client" => clients.push(it.next().ok_or("--client needs a value")?),
+            "--forbid-state-under" => forbid_state.push(PathBuf::from(
+                it.next().ok_or("--forbid-state-under needs a directory")?,
+            )),
             "--any-underlying-client" => any_underlying.push(
                 it.next()
                     .ok_or("--any-underlying-client needs a client name")?
@@ -255,12 +261,14 @@ fn parse(args: &[String]) -> Result<(Config, [Option<String>; 3]), String> {
     } else {
         check_paths(listen, &state)?;
     }
+    check_state_under(&state, &forbid_state)?;
     let cfg = Config {
         account,
         environment,
         listen,
         listen_any,
         state,
+        forbid_state,
         clients: specs,
         profile,
         timing,
@@ -325,6 +333,9 @@ fn serve<B: Broker + Send + 'static>(cfg: &Config, broker: Result<B, String>) ->
         cfg.account,
         gw.addr()
     );
+    if cfg.profile.underlyings.is_empty() && cfg.profile.any_underlying_clients.is_empty() {
+        eprintln!("order-gateway: no --underlyings: every option order is refused");
+    }
     let (tx, rx) = channel();
     match Signals::new([SIGINT, SIGTERM]) {
         Ok(mut signals) => {
