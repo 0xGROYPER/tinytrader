@@ -83,3 +83,11 @@ catalog; per-file placement across approved drives (0007) is built.
 Reading data back, live recording and the store supervising other
 processes are not built. On macOS the store runs under launchd from a plist
 in the deployment's repository.
+
+## Status, 2026-10-15
+
+The store serves files back over HTTP ([store API](../store-api.md)):
+`GET /files` lists the finished DBN files on its volumes by logical name
+(`<volume>/<path>`), and `GET /files/{volume}/{path}` sends one whole. This
+is the first read path, enough for notebooks; ranges of records, bulk reads
+and running work beside the data come later.
