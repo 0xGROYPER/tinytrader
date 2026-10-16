@@ -1,9 +1,11 @@
 # tinytrader
 
-A platform for running trading and research operations: services,
-deployment modules and an operator console. Services run under NixOS, under
-systemd on any Linux with Nix, or as Docker containers on any operating
-system.
+A platform for running trading and research operations: services and an
+operator console. The services are an ordinary Rust (Cargo) workspace and
+plain HTTP, JSON and files; they build with Cargo and run anywhere. Nix is
+one supported way to package them, for reproducible builds, container images
+and NixOS and nix-darwin service modules, not a requirement (see
+[Building and testing](#building-and-testing)).
 
 tinytrader is the platform, not anyone's deployment. Your hosts, data, secrets,
 strategies and research live in your own repository, which uses tinytrader as a
@@ -132,15 +134,38 @@ directly, with no console needed.
 
 ## Building and testing
 
+### With Cargo (no Nix)
+
+The services build and test with Rust alone. `rustup` installs the pinned
+toolchain from `rust-toolchain.toml` on first use:
+
 ```sh
-nix develop                          # shell with the repo's tools (the toolchain in rust-toolchain.toml)
-cargo build -p console               # one service
-cargo test                           # the Rust workspace
-cargo fmt --all && cargo clippy --all-targets -- --deny warnings
+cargo build --release -p console     # one service; binaries in target/release/
+cargo build --release                # every service
+cargo test --workspace
+cargo fmt --all && cargo clippy --workspace --all-targets -- --deny warnings
+```
+
+A service runs from its binary, taking its settings from the environment
+(documented at the top of its `main.rs`), and the console serves its page
+from `services/console/web/`. CI's `cargo` job builds and tests this way, with
+no Nix installed, so the Cargo path stays first-class.
+
+### With Nix (optional)
+
+Nix adds reproducible builds (every dependency pinned in `flake.lock`),
+container images without Dockerfiles, and the `tinytrader.services` modules for
+NixOS, other Linux distributions and nix-darwin:
+
+```sh
+nix develop                          # shell with the repo's tools
 nix build .#store                    # a service as a Nix package
 nix/build-images.sh console relay    # container images, loaded into Docker as tinytrader/<name>:nix
 nix flake check                      # everything below
 ```
+
+`nix/build-images.sh` runs Nix inside a container when Nix isn't installed,
+so building the images needs only Docker.
 
 `nix flake check` runs:
 
