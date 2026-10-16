@@ -33,15 +33,24 @@ const HISTORY_URL: &str = "https://data.alpaca.markets/v2/stocks";
 /// History is sent to clients in chunks of about this many bytes.
 const CHUNK: usize = 64 * 1024;
 
-/// Transport liveness of the stream: a ping every `every`, and the connection
-/// is dead when no frame (a pong counts) arrives within `deadline` of a ping.
-/// They bound how long a dead TCP connection can look alive, at most `every`
-/// plus `deadline`. They decide nothing about data: a quiet market still
-/// answers pings.
+/// Transport liveness of the stream: a ping every `every`. A ping that no frame
+/// (a pong counts) answers within `deadline` is a missed pong, and the
+/// connection is dropped after `Liveness::MISSED_PONGS` in a row. Any frame
+/// resets the run. They bound how long a dead TCP connection can look alive,
+/// at most `MISSED_PONGS * every + deadline` after its last frame. They decide
+/// nothing about data: a quiet market still answers pings.
 #[derive(Clone, Copy)]
 struct Liveness {
     every: Duration,
     deadline: Duration,
+}
+
+impl Liveness {
+    /// Missed pongs in a row before the connection is dropped. It bounds how
+    /// many missed pongs are tolerated, so one late pong never reconnects. It
+    /// is not a timeout on data: a busy stream never misses, since any frame
+    /// resets the count.
+    const MISSED_PONGS: u32 = 3;
 }
 
 const LIVENESS: Liveness = Liveness {
@@ -143,6 +152,8 @@ impl Alpaca {
         // The next ping, and the pong we wait for once one is sent.
         let mut next_ping = Instant::now() + liveness.every;
         let mut pong_due: Option<Instant> = None;
+        // Pongs missed in a row.
+        let mut missed = 0u32;
         loop {
             let wake = pong_due.unwrap_or(next_ping);
             let msg = tokio::select! {
@@ -156,11 +167,17 @@ impl Alpaca {
                     continue;
                 }
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {
-                    if pong_due.is_some() {
-                        return Err(format!(
-                            "no pong from Alpaca within {}s",
-                            liveness.deadline.as_secs()
-                        ));
+                    if pong_due.take().is_some() {
+                        missed += 1;
+                        if missed >= Liveness::MISSED_PONGS {
+                            return Err(format!(
+                                "no pong from Alpaca: {missed} pings in a row unanswered within {}s",
+                                liveness.deadline.as_secs()
+                            ));
+                        }
+                        // The next ping still waits for its own time, so the
+                        // cadence holds while pongs are missing.
+                        continue;
                     }
                     ws.send(Message::Ping(Vec::new().into()))
                         .await
@@ -171,8 +188,10 @@ impl Alpaca {
                     continue;
                 }
             };
-            // Any frame from Alpaca, a pong included, shows the connection is alive.
+            // Any frame from Alpaca, a pong included, shows the connection is alive
+            // and ends a run of missed pongs.
             pong_due = None;
+            missed = 0;
             let text = match msg.map_err(|e| format!("Alpaca stream failed: {e}"))? {
                 Message::Text(t) => t,
                 Message::Ping(p) => {
@@ -796,6 +815,9 @@ mod tests {
         Healthy,
         /// Stops reading and writing: the socket stays open, as a dead one does.
         Silent,
+        /// Never reads, so never answers a ping. Sends an empty frame at each
+        /// offset (ms after subscribing), then stays silent.
+        Frames(&'static [u64]),
     }
 
     fn alpaca() -> Alpaca {
@@ -853,9 +875,18 @@ mod tests {
                 r#"[{"T":"subscription","trades":[],"quotes":[]}]"#,
             ))
             .await;
-        if peer == Peer::Silent {
+        match peer {
+            Peer::Healthy => {}
             // Keeps the socket open but never reads (so never answers a ping).
-            std::future::pending::<()>().await;
+            Peer::Silent => std::future::pending::<()>().await,
+            Peer::Frames(at) => {
+                let start = tokio::time::Instant::now();
+                for ms in at {
+                    tokio::time::sleep_until(start + Duration::from_millis(*ms)).await;
+                    let _ = ws.send(Message::text("[]")).await;
+                }
+                std::future::pending::<()>().await;
+            }
         }
         while let Some(Ok(msg)) = ws.next().await {
             if let Message::Ping(p) = msg {
@@ -866,7 +897,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_silent_connection_is_dropped_within_the_pong_deadline() {
+    async fn a_silent_connection_is_dropped_after_three_missed_pongs() {
         let (url, _) = fake_alpaca(vec![Peer::Silent]).await;
         let liveness = Liveness {
             every: Duration::from_millis(100),
@@ -883,7 +914,58 @@ mod tests {
         .expect("a silent stream was not dropped");
         let err = r.unwrap_err();
         assert!(err.contains("no pong"), "{err}");
+        assert!(err.contains("3 pings in a row"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn a_single_missed_pong_does_not_drop_the_connection() {
+        // Every ping is missed, but a frame lands between each miss and the
+        // next, so the run of misses never gets past one.
+        let (url, _) = fake_alpaca(vec![Peer::Frames(&[350, 550, 750, 950, 1150])]).await;
+        let liveness = Liveness {
+            every: Duration::from_millis(200),
+            deadline: Duration::from_millis(100),
+        };
+        let (hub, observer) = (hub(), Observer::new("relay", "test"));
+        let mut encoders = HashMap::new();
+        let r = tokio::time::timeout(
+            Duration::from_millis(1300),
+            alpaca().stream(&url, liveness, &hub, &observer, &mut encoders),
+        )
+        .await;
+        assert!(
+            r.is_err(),
+            "one missed pong at a time dropped the stream: {r:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_frame_between_missed_pongs_resets_the_count() {
+        // Misses at 300 and 500 ms are two in a row. The frame at 550 ms ends
+        // that run, so the next three misses (700, 900, 1100) are what drop it.
+        // Without the reset the third miss would come at 700 ms.
+        let (url, _) = fake_alpaca(vec![Peer::Frames(&[550])]).await;
+        let liveness = Liveness {
+            every: Duration::from_millis(200),
+            deadline: Duration::from_millis(100),
+        };
+        let (hub, observer) = (hub(), Observer::new("relay", "test"));
+        let mut encoders = HashMap::new();
+        let started = Instant::now();
+        let r = tokio::time::timeout(
+            Duration::from_secs(5),
+            alpaca().stream(&url, liveness, &hub, &observer, &mut encoders),
+        )
+        .await
+        .expect("the stream was not dropped");
+        let err = r.unwrap_err();
+        assert!(err.contains("3 pings in a row"), "{err}");
+        assert!(
+            started.elapsed() > Duration::from_millis(900),
+            "dropped before the count restarted: {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]
