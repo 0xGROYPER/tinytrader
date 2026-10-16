@@ -14,12 +14,16 @@
 //!   says which batches the volumes hold, and how. `POST /adopt/{provider}`
 //!   with `{ "path": … }` files a provider download folder already on a
 //!   writable volume where it is, on the same terms.
+//! - **Reading** (see the read module): `GET /files?pattern=&limit=` lists
+//!   the DBN files the volumes hold by logical name, `<volume>/<path>`;
+//!   `GET /files/{volume}/{path}` sends one. Read-only, finished files only.
 //!
 //! It runs natively (under launchd on a Mac), not in a container, so it sees
 //! the real disks, and binds to loopback by default.
 
 mod catalog;
 mod ingest;
+mod read;
 mod volumes;
 
 use std::path::{Path, PathBuf};
@@ -202,6 +206,8 @@ async fn main() {
         .route("/batches/{provider}", get(batches))
         .route("/adopt/{provider}", post(adopt))
         .route("/volumes/approve", post(approve))
+        .route("/files", get(list_files))
+        .route("/files/{volume}/{*path}", get(send_file))
         // Filing and drive approval can't be triggered by a web page.
         .layer(axum::middleware::from_fn(
             tinytrader_observe::guard::same_origin_writes,
@@ -661,7 +667,76 @@ async fn adopt(
     }
 }
 
-/// Today's UTC date, `YYYY-MM-DD`.
+#[derive(Deserialize)]
+struct ListFiles {
+    pattern: Option<String>,
+    limit: Option<usize>,
+}
+
+/// The DBN files the volumes hold whose logical name matches `pattern`
+/// (by default all), at most `limit` of them.
+async fn list_files(AxState(store): AxState<Shared>, Query(q): Query<ListFiles>) -> Reply {
+    let volumes = store.volumes();
+    let pattern = q.pattern.unwrap_or_else(|| "*".to_owned());
+    let limit = q.limit.unwrap_or(read::MAX_LISTED).min(read::MAX_LISTED);
+    match tokio::task::spawn_blocking(move || read::list(&volumes, &pattern, limit)).await {
+        Ok(v) => reply(StatusCode::OK, v),
+        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// One DBN file, as it is on the volume.
+async fn send_file(
+    AxState(store): AxState<Shared>,
+    UrlPath((volume, path)): UrlPath<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    use tokio::io::AsyncReadExt as _;
+
+    let volumes = store.volumes();
+    let found = tokio::task::spawn_blocking(move || read::locate(&volumes, &volume, &path)).await;
+    let file = match found {
+        Ok(Ok(f)) => f,
+        Ok(Err((code, why))) => {
+            let code = StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST);
+            return refused(code, why).into_response();
+        }
+        Err(e) => return refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let opened = tokio::fs::File::open(&file).await;
+    let (f, len) = match opened {
+        Ok(f) => match f.metadata().await {
+            Ok(m) => (f, m.len()),
+            Err(e) => {
+                return refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+        },
+        Err(e) => return refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let chunks = futures_util::stream::unfold(f, |mut f| async move {
+        let mut buf = vec![0u8; 256 * 1024];
+        match f.read(&mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(buf)), f))
+            }
+            Err(e) => Some((Err(e), f)),
+        }
+    });
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/octet-stream".to_owned(),
+            ),
+            (axum::http::header::CONTENT_LENGTH, len.to_string()),
+        ],
+        Body::from_stream(chunks),
+    )
+        .into_response()
+}
+
 #[derive(Deserialize)]
 struct ApproveRequest {
     path: PathBuf,
@@ -700,6 +775,7 @@ async fn approve(AxState(store): AxState<Shared>, Json(req): Json<ApproveRequest
     }
 }
 
+/// Today's UTC date, `YYYY-MM-DD`.
 fn today() -> String {
     let days = (unix_seconds() / 86_400.0) as i64;
     let z = days + 719_468;
