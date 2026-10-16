@@ -153,12 +153,16 @@ A known `client_order_id` with a *different* intent is `not_sent{duplicate_confl
 ### Unknown outcome: never resend
 
 1. The gateway **never resends** a submit. The `send` phase is journaled before any bytes leave, so this rule also holds across a crash or restart.
-2. It looks up the `client_order_id` at +1, +2 and +4 s, using the critical budget.
+2. It looks up the `client_order_id` at +1, +2 and +4 s, using the critical budget. A lookup that the budget refuses is made on a later tick, and does not use up an offset.
 3. If the order is found, it emits `resolution{outcome:"found"}` followed by the order's state as `order` events with `source: rest_reconcile`.
-4. If the order is not found by the end of the window, it emits `resolution{outcome:"absent_after", window_ms}`.
+4. Only a 404 from the broker says the order is not there. If the last lookup is a 404, the gateway emits `resolution{outcome:"absent_after", window_ms}`.
    - This is **not** a statement that the order was never submitted.
    - The id stays reserved, and a late `trade_updates` event or a later reconciliation still correlates to it.
-   - What to do next is the client's decision. Reactor today treats an order absent for 5 s as not submitted.
+   - What to do next is the client's decision.
+5. If the last lookup fails (a timeout, a 5xx, a connection error or a 429), the gateway emits `resolution{outcome:"unresolved", window_ms}`. Nothing is known about the order, so it is **unknown**, not absent:
+   - It still counts as open, so it uses a `max_open` slot and blocks opens that would exceed the cap.
+   - A stream event for it, a reconciliation after the stream reconnects, or a restart settles it. Until then clients should treat it as `unknown`.
+   - After a restart an unknown order is looked up again. A journaled `absent_after` does not restore the absent state.
 
 Cancel follows the same rule. An `unknown` cancel is not repeated by the gateway. The client may send another `cancel`, which is idempotent at the broker.
 
@@ -235,7 +239,7 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 | `submit` | `client`, `request_id`, `client_order_id`, `phase: admitted \| sent \| outcome`, `intent` and `intent_sha256` (admitted only), `outcome` (outcome only, the same object as the response) |
 | `cancel` | `client`, `request_id`, `target`, `phase`, `outcome` |
 | `order` | `client_order_id`, `broker_order_id`, `event`, `status`, `ts_broker`, `fill?{execution_id, qty, price}`, `filled_qty`, `avg_price`, `legs?[{symbol, filled_qty, avg_price, fill?{qty, price}}]`, `position_qty?`, `reason?{code, message}`, `source: stream \| rest_reconcile \| sim`, `broker_event`, `broker_raw` |
-| `resolution` | `client_order_id`, `outcome: found \| absent_after`, `window_ms` |
+| `resolution` | `client_order_id`, `outcome: found \| absent_after \| unresolved`, `window_ms`. `absent_after` is a 404 on the last lookup; `unresolved` is a failed last lookup, and the order stays unknown ([section 5](#unknown-outcome-never-resend)). |
 | `account` | `snapshot: account \| positions`, `broker_raw`. Derived from polling and emitted on change; Alpaca has no account stream. |
 | `activity` | `activity_type`, `broker_raw`, for example `OPEXP`, `OPASN`, `OPEXC`, `FILL` or `FEE` |
 | `status` | `state`, `broker_stream: up \| down{since}`, `resync?{from_ts, to_ts, orders_checked}`, `kill?{level, reason}`, `cap?{name}` |
@@ -268,6 +272,7 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
   - `critical`: submit, cancel and unknown resolution.
   - `poll`: reconciliation, the account and position pollers, and client queries.
   - Polls are shed first.
+  - A close (a submit with no opening leg) is critical and is not held up by a 429 backoff, so it still goes when tokens are available. It still spends a token from this bucket, so the bucket bounds closes too.
 - **When accounts may share a limit:** if several accounts share one user-level limit (**UNVERIFIED**), the operator sets `--budget` on each process so that the total stays at or below 150.
 - **On a 429:**
   - The gateway sets `blocked_until = max(Retry-After, x-ratelimit-reset, backoff)`.
@@ -275,16 +280,19 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
   - A throttle that happens on the client side, before any send, is `not_sent{throttled}`.
   - GETs may retry with bounded backoff. POSTs and DELETEs never retry.
 
-**Per-account caps.** These are defaults from the operator profile. They are mechanical access limits, not portfolio risk. A violation is `not_sent{cap}` with the cap's name in `detail`. The notional and open-order caps apply to intents with an opening leg; an intent whose legs all close is held only to the legs, submit and reject limits, so a position can always be closed.
+**Per-account caps.** These are defaults from the operator profile. They are mechanical access limits, not portfolio risk. A violation is `not_sent{cap}` with the cap's name in `detail`. The notional, open-order, submits-per-minute and submits-per-day caps apply to intents with an opening leg. An intent whose legs all close is held only to the legs and reject limits and to the closes-per-minute cap, so a position can always be closed: closes are not counted toward the opening caps, and the opening caps never refuse a close.
 
-| Cap | Default |
-|---|---|
-| submits per minute | 60 |
-| submits per day | 500 |
-| open orders | 4 |
-| legs | 4 |
-| notional per order: \|limit_price\| (a market order's \|ref_price\|) × qty × multiplier (100 an option, 1 a share) | $2,500 |
-| consecutive broker rejects | 5, which trips `halt_opens` |
+| Cap | Flag | Default |
+|---|---|---|
+| opening submits per minute | `--submits-per-min` | 60 |
+| opening submits per day (UTC) | `--submits-per-day` | 500 |
+| closes per minute (counted apart from the opens; `not_sent{cap}`, `closes_per_minute`) | `--closes-per-min` | 30 |
+| open orders | `--max-open` | 4 |
+| legs | `--max-legs` | 4 |
+| notional per order: \|limit_price\| (a market order's \|ref_price\|) × qty × multiplier (100 an option, 1 a share) | `--max-notional` | $2,500 |
+| consecutive broker rejects | `--max-rejects` | 5, which trips `halt_opens` |
+
+The day count is rebuilt from the journal on restart, and only a journaled submit with an opening leg counts toward it. A journaled intent that cannot be read counts as opening, so the count fails closed.
 
 ## 9. Safety rules
 
@@ -559,7 +567,7 @@ order-gateway --account sim-1 --broker sim --listen 127.0.0.1:7601 --state ~/.lo
   --client watch,observe,,~/.config/tinytrader/gateway-clients/watch.token \
   [--sim-script FILE] [--sim-quotes DBN_FILE|tcp:HOST:PORT] \
   [--underlyings SPY] [--any-underlying-client NAME ...] [--equities AAPL,..] [--allow-short] [--max-open 4] [--max-legs 4] [--max-notional 2500] \
-  [--submits-per-min 60] [--submits-per-day 500] [--max-rejects 5] [--budget 150] [--min-options-level 3] \
+  [--submits-per-min 60] [--submits-per-day 500] [--closes-per-min 30] [--max-rejects 5] [--budget 150] [--min-options-level 3] \
   [--resolve-ms 1000,2000,4000]
 ```
 

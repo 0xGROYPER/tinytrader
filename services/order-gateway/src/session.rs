@@ -82,6 +82,17 @@ fn utc_day(ts: u64) -> i64 {
     i64::try_from(ts / 86_400_000_000_000).unwrap_or(0)
 }
 
+/// Whether a journaled `admitted` intent has an opening leg. Anything not clearly
+/// all-close counts as opening, so the restored day count fails closed.
+fn journal_opens(v: &Value) -> bool {
+    let intent = &v["intent"];
+    let legs: Vec<&Value> = match intent["legs"].as_array() {
+        Some(legs) if !legs.is_empty() => legs.iter().collect(),
+        _ => vec![intent],
+    };
+    legs.iter().any(|l| l["effect"].as_str() != Some("close"))
+}
+
 impl OrderState {
     fn admitted(client: String, request_id: String, sha: Option<String>) -> Self {
         let (status, phase) = (String::new(), Phase::Admitted);
@@ -157,6 +168,14 @@ struct Pending {
     next: usize,
 }
 
+/// One unknown-outcome lookup. Only `NotFound` (a 404 answer) says the broker
+/// does not have the order; `Failed` says nothing about it.
+enum Lookup {
+    Found(BrokerOrder),
+    NotFound,
+    Failed,
+}
+
 fn outcome(kind: &str) -> Obj {
     Obj::new().s("outcome", kind)
 }
@@ -214,6 +233,7 @@ pub(crate) struct Session<B: Broker> {
     last_state: &'static str,
     budget: Budget,
     minute: VecDeque<Instant>,
+    closes: VecDeque<Instant>,
     day: (i64, usize),
     rejects: u32,
     pending: Vec<Pending>,
@@ -246,6 +266,7 @@ impl<B: Broker> Session<B> {
             degraded: false,
             last_state: "",
             minute: VecDeque::new(),
+            closes: VecDeque::new(),
             day: (0, 0),
             rejects: 0,
             pending: Vec::new(),
@@ -266,7 +287,8 @@ impl<B: Broker> Session<B> {
         match v["kind"].as_str().unwrap_or("") {
             "submit" => match v["phase"].as_str().unwrap_or("") {
                 "admitted" => {
-                    if utc_day(v["ts_gateway"].as_u64().unwrap_or(0)) == today {
+                    let day = utc_day(v["ts_gateway"].as_u64().unwrap_or(0));
+                    if journal_opens(v) && day == today {
                         self.day = (today, self.day.1 + 1);
                     }
                     let (c, r) = (text("client").unwrap_or_default(), text("request_id"));
@@ -316,11 +338,10 @@ impl<B: Broker> Session<B> {
                     self.by_broker.insert(b, cid);
                 }
             }
-            "resolution" if v["outcome"] == "absent_after" => {
-                if let Some(st) = self.orders.get_mut(&cid) {
-                    st.phase = Phase::Absent;
-                }
-            }
+            // `resolution` is not restored. An unknown order stays Unknown across a
+            // restart and is looked up again, so an old `absent_after` (written
+            // before a lookup error was told apart from a 404) cannot make an
+            // order absent.
             "status" => {
                 if let Some(k) = v.get("kill") {
                     self.killed = KillLevel::parse(k["level"].as_str().unwrap_or(""))
@@ -882,26 +903,44 @@ impl<B: Broker> Session<B> {
         let opening = intent.has_open();
         let minute_ago = Instant::now().checked_sub(Duration::from_mins(1));
         self.minute.retain(|t| minute_ago.is_none_or(|m| *t > m));
+        self.closes.retain(|t| minute_ago.is_none_or(|m| *t > m));
         let today = utc_day(self.ts());
         if self.day.0 != today {
             self.day = (today, 0);
         }
+        // What an order may risk, how many may work at once, and how many opens
+        // may be submitted bound what opens: an order that only closes is never
+        // kept from closing by them. Closes have their own rate limit, counted
+        // apart from the opens.
         let hit = [
             (intent.legs.len() > p.max_legs, "legs"),
-            // What an order may risk, and how many may work at once, bound what
-            // opens: an order that only closes is never kept from closing.
             (
                 opening && notional > p.max_notional_cents.unsigned_abs(),
                 "notional",
             ),
             (opening && open >= p.max_open, "open_orders"),
-            (self.minute.len() >= p.submits_per_min, "submits_per_minute"),
-            (self.day.1 >= p.submits_per_day, "submits_per_day"),
+            (
+                opening && self.minute.len() >= p.submits_per_min,
+                "submits_per_minute",
+            ),
+            (
+                opening && self.day.1 >= p.submits_per_day,
+                "submits_per_day",
+            ),
+            (
+                !opening && self.closes.len() >= p.closes_per_min,
+                "closes_per_minute",
+            ),
         ];
         if let Some((_, name)) = hit.iter().find(|(h, _)| *h) {
             return Some(cap(name));
         }
-        if !self.budget.take(true) {
+        let admitted = if opening {
+            self.budget.take(true)
+        } else {
+            self.budget.take_close()
+        };
+        if !admitted {
             return Some(not_sent("throttled", "null"));
         }
         None
@@ -913,8 +952,12 @@ impl<B: Broker> Session<B> {
         let sha = intent.sha256();
         let st = OrderState::admitted(client.into(), rid.into(), Some(sha.clone()));
         self.orders.insert(cid.clone(), st);
-        self.minute.push_back(Instant::now());
-        self.day.1 += 1;
+        if intent.has_open() {
+            self.minute.push_back(Instant::now());
+            self.day.1 += 1;
+        } else {
+            self.closes.push_back(Instant::now());
+        }
         let extra = Obj::new()
             .raw("intent", &intent.canonical())
             .s("intent_sha256", &sha)
@@ -1442,33 +1485,46 @@ impl<B: Broker> Session<B> {
                 i += 1;
                 continue;
             }
-            let cid = self.pending[i].cid.clone();
-            let found = if self.budget.take(true) {
-                match self.b.order(&OrderRef::Client(cid.clone())) {
-                    Ok(r) => r.value,
-                    Err(e) => {
-                        if e.http_status == 429 {
-                            self.budget.block(e.retry_after_ms);
-                        }
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            if let Some(bo) = found {
-                self.pending.remove(i);
-                self.resolution(&cid, "found", offsets[k])?;
-                self.reconcile_order(bo)?;
-            } else if k + 1 >= offsets.len() {
-                self.pending.remove(i);
-                if let Some(st) = self.orders.get_mut(&cid) {
-                    st.phase = Phase::Absent;
-                }
-                self.resolution(&cid, "absent_after", offsets[k])?;
-            } else {
-                self.pending[i].next += 1;
+            // Refused by our own budget: no lookup was made, so the schedule does
+            // not move and the order is looked up on a later tick.
+            if !self.budget.take(true) {
                 i += 1;
+                continue;
+            }
+            let cid = self.pending[i].cid.clone();
+            let lookup = match self.b.order(&OrderRef::Client(cid.clone())) {
+                Ok(r) => r.value.map_or(Lookup::NotFound, Lookup::Found),
+                Err(e) => {
+                    if e.http_status == 429 {
+                        self.budget.block(e.retry_after_ms);
+                    }
+                    Lookup::Failed
+                }
+            };
+            let last = k + 1 >= offsets.len();
+            match lookup {
+                Lookup::Found(bo) => {
+                    self.pending.remove(i);
+                    self.resolution(&cid, "found", offsets[k])?;
+                    self.reconcile_order(bo)?;
+                }
+                Lookup::NotFound if last => {
+                    self.pending.remove(i);
+                    if let Some(st) = self.orders.get_mut(&cid) {
+                        st.phase = Phase::Absent;
+                    }
+                    self.resolution(&cid, "absent_after", offsets[k])?;
+                }
+                Lookup::Failed if last => {
+                    // Stays Unknown: still open and blocking. A stream event, a
+                    // reconcile or a restart can still settle it.
+                    self.pending.remove(i);
+                    self.resolution(&cid, "unresolved", offsets[k])?;
+                }
+                Lookup::NotFound | Lookup::Failed => {
+                    self.pending[i].next += 1;
+                    i += 1;
+                }
             }
         }
         Ok(())

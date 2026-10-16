@@ -225,6 +225,38 @@ fn lost_response_resolves_by_lookup_without_resend() {
 }
 
 #[test]
+fn a_failed_lookup_leaves_the_order_unknown_not_absent() {
+    let r = rig("alpaca-lookup-error");
+    let mut c = ready(&r.gw, "reactor");
+    r.fake.next("POST", "/v2/orders", Act::Lost);
+    let v = c.submit("r1", &buy("wse-err"));
+    assert_eq!(
+        (v["outcome"].as_str(), v["reason"].as_str()),
+        (Some("unknown"), Some("connection"))
+    );
+    // The broker is failing, which is not the same as saying the order is missing:
+    // every lookup gets a 500, so the order is unresolved, not absent.
+    for _ in 0..3 {
+        r.fake.next(
+            "GET",
+            "/v2/orders:by_client_order_id",
+            Act::Respond(500, Vec::new(), "{}".into()),
+        );
+    }
+    let res = c.event("resolution", |v| v["client_order_id"] == "wse-err");
+    assert_eq!(
+        (res["outcome"].as_str(), res["window_ms"].as_u64()),
+        (Some("unresolved"), Some(80))
+    );
+    assert!(r.fake.count("GET", "/v2/orders:by_client_order_id") >= 3);
+    // Still unknown and open: a stream event for the order settles it.
+    r.fake.event("wse-err", "new", "new");
+    let o = c.order_event("wse-err", "new");
+    assert_eq!(o["source"], "stream");
+    assert_eq!(posts(&r.fake).len(), 1, "never resent");
+}
+
+#[test]
 fn rate_limits_back_off_and_never_resend() {
     let r = rig("alpaca-429");
     let mut c = ready(&r.gw, "reactor");
