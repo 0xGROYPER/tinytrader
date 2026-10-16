@@ -36,7 +36,9 @@ import urllib.request
 BASE = os.environ.get("CONSOLE_URL", "http://127.0.0.1:8080").rstrip("/")
 
 # The views, their folders and the markers that say which ready-made ones
-# are installed, and the Cross-asset board.
+# are installed, the Cross-asset board, the watchlists and the theme: what's
+# chosen on purpose and rarely changes. Alerts stay runtime (they fire and are
+# cleared, often within a day).
 VIEWS = [
     "tinytrader-workspaces",
     "tinytrader-ready",
@@ -45,6 +47,9 @@ VIEWS = [
     "tinytrader-folders",
     "tinytrader-watch-views",
     "tinytrader-board",
+    "tinytrader-watchlists",
+    "tinytrader-theme",
+    "tinytrader-palette",
 ]
 
 
