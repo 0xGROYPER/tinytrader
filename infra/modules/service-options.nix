@@ -76,6 +76,21 @@ in
                 description = "Maximum open files and sockets (LimitNOFILE).";
               };
             };
+            launchd = mkOption {
+              type = types.enum [
+                "agent"
+                "daemon"
+              ];
+              default = "agent";
+              description = ''
+                macOS only: how launchd runs the service, always as the primary
+                user. "agent" (launchd.user.agents) starts it when the user logs
+                in; "daemon" (launchd.daemons, with UserName set) starts it at
+                boot without a login, so it comes back after a reboot or power
+                cut. With FileVault on, boot waits for the disk to be unlocked
+                at the login window either way. Ignored on Linux.
+              '';
+            };
             observe = {
               port = mkOption {
                 type = types.nullOr types.port;

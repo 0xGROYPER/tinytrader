@@ -23,7 +23,9 @@
 #   WATCH_STORE           the store's /health, judged the same way
 #   WATCH_NATIVE          native tinytrader services (tinytrader.services
 #                         names): launchd com.tinytrader.<name> must be
-#                         running (macOS), systemd tinytrader-<name> active
+#                         running (macOS; found as a daemon, in the system
+#                         domain, or as an agent, in gui/<uid>), systemd
+#                         tinytrader-<name> active (elsewhere)
 #   WATCH_DISKS           mount points: WATCH_DISK_WARN % used (default 90)
 #                         is a warning, WATCH_DISK_CRIT % (95) or under
 #                         WATCH_DISK_MIN_FREE_GIB free (10) high priority; a
@@ -55,7 +57,8 @@
 # Run it as a service like any other: tinytrader.services.watch = { enable =
 # true; package = tinytrader.packages.<system>.watch; environment = { ... };
 # secrets.WATCH_NOTIFY = ...; } (secrets on NixOS; on macOS, put them in the
-# environment from a wrapper, as darwin-services has no secrets).
+# environment from a wrapper, as darwin-services has no secrets; and give it
+# launchd = "daemon" there so it starts at boot, without a login).
 { ... }:
 {
   perSystem =
