@@ -391,6 +391,11 @@ fn single_loss(leg: &Leg, limit: i128) -> Result<i128, &'static str> {
     }
 }
 
+/// Index roots whose options are European: they exercise only at expiry, so their value before
+/// expiry is discounted and can sit below the intrinsic payoff. SPXW is the weekly SPX root.
+/// Only the payoff-floor bound of [`combo_loss`] depends on this.
+const EUROPEAN_ROOTS: [&str; 3] = ["SPX", "SPXW", "XSP"];
+
 /// The loss per parent unit of a combo, in cents of price (signed). The payoff at expiry is
 /// piecewise linear with breakpoints at the strikes and at zero, so its least value is at
 /// one of those points, provided it does not keep falling above the highest strike. The
@@ -405,6 +410,13 @@ fn single_loss(leg: &Leg, limit: i128) -> Result<i128, &'static str> {
 /// and no price per leg, so the closing legs' share of it cannot be read. Nothing is
 /// assumed about that split, so the opening legs are not sized alone. Legs with different
 /// expiries are a calendar or diagonal (see [`calendar_loss`]).
+///
+/// The bound at the least payoff is sound only if the position is worth at least that payoff
+/// before expiry. An American option always is (it can be exercised). A European one is not:
+/// its value is discounted, so a long position with a payoff floor above zero can be worth less
+/// than the floor before expiry. For a European root such a floor is not used, and the combo is
+/// `max_loss_unknown`. A floor at zero is the debit, which holds for any option, and a negative
+/// least payoff (a short-side bound) is no less than its discounted value, so both stay.
 fn combo_loss(intent: &Intent) -> Result<i128, &'static str> {
     if intent.legs.iter().any(|l| !l.open) {
         return Err("max_loss_unknown");
@@ -448,6 +460,9 @@ fn combo_loss(intent: &Intent) -> Result<i128, &'static str> {
         .map(payoff)
         .min()
         .unwrap_or(0);
+    if least > 0 && EUROPEAN_ROOTS.contains(&cs[0].root) {
+        return Err("max_loss_unknown");
+    }
     Ok(i128::from(intent.limit_cents) - least)
 }
 
@@ -724,6 +739,20 @@ mod tests {
         // constant $10, so the least payoff is $10 and the loss is $1: $100 a contract.
         let o = order(vec![leg(P580, true, true), leg(C570, true, true)], 1100, 1);
         assert_eq!(max_loss_cents(&o), Ok(100 * 100));
+    }
+
+    #[test]
+    fn a_long_combo_with_a_floor_is_unknown_on_a_european_root() {
+        // The same shape as the SPY test above, on the European SPX, SPXW and XSP roots: the
+        // floor is not used, so no bound is claimed. SPY keeps its bound of $1.
+        for root in ["SPX", "SPXW", "XSP"] {
+            let put = format!("{root}261005P00580000");
+            let call = format!("{root}261005C00570000");
+            let o = order(vec![leg(&put, true, true), leg(&call, true, true)], 1100, 1);
+            assert_eq!(max_loss_cents(&o), Err("max_loss_unknown"), "{root}");
+        }
+        let spy = order(vec![leg(P580, true, true), leg(C570, true, true)], 1100, 1);
+        assert_eq!(max_loss_cents(&spy), Ok(100 * 100));
     }
 
     #[test]
