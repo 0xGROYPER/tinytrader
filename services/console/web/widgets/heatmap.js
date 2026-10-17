@@ -9,7 +9,7 @@
 // read when the map is shown (and again once it's ten minutes old); it covers
 // the companies the screener scans, not every listed stock.
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { serviceFor } from '../lib/fleet.js';
 import { esc, etTime } from '../lib/format.js';
 import { theme, setFocus } from '../lib/theme.js';
 import { get, stream } from '../lib/cache.js';
@@ -19,7 +19,7 @@ const PERIODS = { '1D': ['change_pct', 0.03], '1W': ['change_5d', 0.06], '1M': [
 const STALE = 10 * 60e3;
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (_) { /* private mode */ } return null; };
 const HEAD = 18; // a sector's header strip, in pixels
-const service = () => (fleet.topo?.services || []).find(s => s.screener)?.id || null;
+const service = () => serviceFor('screener') || null;
 const cap = v => !v ? '' : v >= 1e12 ? `$${(v / 1e12).toFixed(2)}T` : v >= 1e9 ? `$${Math.round(v / 1e9)}B` : `$${Math.round(v / 1e6)}M`;
 const pct = v => v == null ? '—' : `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v * 100).toFixed(2)}%`;
 

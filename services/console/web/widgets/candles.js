@@ -15,7 +15,7 @@
 // Times are New York time. Drawn with TradingView's Lightweight Charts
 // (Apache-2.0), loaded the first time a chart opens.
 import { defineWidget } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { fleet, serviceFor, servicesFor } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused } from '../lib/theme.js';
 import { onChange } from '../lib/channels.js';
@@ -45,7 +45,7 @@ function optionRelay(symbol) {
 }
 
 function relayed() {
-  return (fleet.topo?.services || []).filter(s => s.bars).flatMap(s => {
+  return servicesFor('bars').flatMap(s => {
     const symbols = [...new Set((s.schedule || []).flatMap(x => x.symbols || []))];
     return symbols.map(symbol => ({ service: s.id, symbol }));
   });
@@ -56,7 +56,7 @@ function relayed() {
  * every relayed symbol. */
 function choices() {
   const t = theme(), live = relayed(), f = focused();
-  const any = (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id;
+  const any = serviceFor('bars', 'snapshots');
   // Without a theme, the relays' symbols, and the one picked elsewhere (an earnings report).
   if (!t?.symbols.length) return f && any && !live.some(c => c.symbol === f) ? [...live, { service: any, symbol: f }] : live;
   return t.symbols.map(symbol => live.find(c => c.symbol === symbol) || (any ? { service: any, symbol } : null)).filter(Boolean);
@@ -130,7 +130,7 @@ function loadIndicators() {
 const saveIndicators = (/** @type {Indicator[]} */ list) => { try { localStorage.setItem(IND_KEY, JSON.stringify(list)); } catch (_) {} };
 const colourOf = (/** @type {number} */ i) => { const c = COLOURS[i % COLOURS.length]; return c.startsWith('--') ? css(c) || '#888' : c; };
 
-const chainService = () => (fleet.topo?.services || []).find(s => s.chain)?.id || null;
+const chainService = () => serviceFor('chain') || null;
 const nextReport = sym => {
   const e = Object.values(fleet.snap?.services || {}).map(s => s?.earnings).find(x => Array.isArray(x?.reports));
   const today = new Date().toISOString().slice(0, 10);
@@ -277,7 +277,7 @@ defineWidget('candles', {
     el.innerHTML = '<div class="cd"><div class="cd-top"><form class="cd-search"><input class="cd-ticker mono" name="ticker" placeholder="Ticker or option" maxlength="21" autocomplete="off" spellcheck="false" aria-label="Show a ticker"></form><div class="cd-bar"></div></div><div class="cd-chart"><div class="cd-legend"></div></div><p class="cd-msg muted"></p></div>';
     const bar = el.querySelector('.cd-bar'), box = /** @type {HTMLElement} */ (el.querySelector('.cd-chart')), msg = el.querySelector('.cd-msg');
     const leg = /** @type {HTMLElement} */ (el.querySelector('.cd-legend'));
-    const anyService = () => (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id;
+    const anyService = () => serviceFor('bars', 'snapshots');
     const offered = () => {
       const list = choices(), any = anyService();
       for (const symbol of my.typed) {
@@ -381,7 +381,7 @@ defineWidget('candles', {
     }
     async function liveEdge() {
       if (!my.pick || !my.alive || !my.candles || document.hidden || el.offsetParent === null) return;
-      const { symbol } = my.pick, size = my.size, svc = (fleet.topo?.services || []).find(x => x.snapshots)?.id;
+      const { symbol } = my.pick, size = my.size, svc = serviceFor('snapshots');
       if (!svc || OCC.test(symbol) || size > 86400 || !my.drawn.len) return;
       let snap;
       try {

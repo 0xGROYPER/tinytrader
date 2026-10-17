@@ -8,7 +8,7 @@
 // changed. Each leg's bid and ask come from the chain service every few
 // seconds. A live account is never picked for you, and its Send asks once
 // more before it sends.
-import { fleet, svcState } from './fleet.js';
+import { svcState, serviceFor, servicesFor } from './fleet.js';
 import { onChange } from './channels.js';
 import { get, stream } from './cache.js';
 import { esc } from './format.js';
@@ -42,7 +42,7 @@ export function routed(done) {
 
 /** An account's open orders, as its account service has them (null if unknown, undefined if not read). */
 function openOrdersOf(name) {
-  for (const s of (fleet.topo?.services || []).filter(x => x.accounts)) for (const a of svcState(s.id).accounts?.accounts || []) if (a.name === name) return a.orders;
+  for (const s of servicesFor('accounts')) for (const a of svcState(s.id).accounts?.accounts || []) if (a.name === name) return a.orders;
   return undefined;
 }
 
@@ -71,7 +71,7 @@ export function createTicket(box, hooks = {}) {
   // Bid and ask for every leg, one chain read per underlying and expiry.
   async function readQuotes() {
     const me = t; if (!me) return;
-    const svc = (fleet.topo?.services || []).find(s => s.chain)?.id;
+    const svc = serviceFor('chain');
     if (!svc) { me.qErr = 'No service serves option chains (alpaca-data), so there are no quotes.'; draw(); return; }
     const want = new Map();
     for (const l of me.legs) { const m = OCC.exec(l.symbol); if (m) { const e = `20${m[2]}-${m[3]}-${m[4]}`; want.set(`${m[1]}|${e}`, [m[1], e]); } }

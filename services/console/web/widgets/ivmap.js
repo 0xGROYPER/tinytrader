@@ -6,7 +6,7 @@
 // underlying is the one picked in a watchlist, else the workspace theme's
 // first symbol, else one typed in; refreshed every 30 seconds.
 import { defineWidget } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { serviceFor } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused } from '../lib/theme.js';
 import { get, stream } from '../lib/cache.js';
@@ -16,7 +16,7 @@ const EVERY = 30_000;
 /** Strikes shown either side of spot. */
 const SIDE = 14;
 
-const source = () => (fleet.topo?.services || []).find(s => s.chain)?.id || null;
+const source = () => serviceFor('chain') || null;
 const pct = x => x == null ? '' : `${(x * 100).toFixed(1)}`;
 // The heatmap scale: blue, cyan, green, yellow, orange, red.
 const STOPS = [[49, 92, 196], [41, 166, 214], [72, 183, 116], [240, 210, 70], [242, 140, 48], [212, 52, 44]];

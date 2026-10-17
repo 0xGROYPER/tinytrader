@@ -17,12 +17,12 @@
 // econ-calendar (whose Alpha Vantage histories are limited to 20 a day, so
 // they load for theme companies and for a row when it's opened).
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { fleet, serviceFor } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, setFocus } from '../lib/theme.js';
 import { get } from '../lib/cache.js';
 
-const svcWith = k => (fleet.topo?.services || []).find(s => s[k])?.id || null;
+const svcWith = k => serviceFor(k);
 const DAY = 86_400_000;
 const pct = (x, d = 1) => x == null || !isFinite(x) ? '—' : `${(x * 100).toFixed(d)}%`;
 const cap = n => n == null ? '' : n >= 1e12 ? `$${(n / 1e12).toFixed(1)}T` : `$${Math.round(n / 1e9)}B`;
