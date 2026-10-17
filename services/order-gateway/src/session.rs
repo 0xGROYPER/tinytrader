@@ -240,6 +240,22 @@ fn backoff(map: &mut HashMap<String, Recheck>, cid: &str, now: Instant, poll: Du
     );
 }
 
+/// The open-listing check of an automatic clear, kept for its by-id check on a later poll.
+struct ClearHalf {
+    cid: String,
+    open: Seen,
+    listed: usize,
+}
+
+/// The broker results a clear is decided on.
+struct Checks {
+    open: Seen,
+    listed: usize,
+    by_id: Seen,
+    raw: String,
+    found: Option<BrokerOrder>,
+}
+
 /// One unknown-outcome lookup. Only `NotFound` (a 404 answer) says the broker
 /// does not have the order; `Failed` says nothing about it.
 enum Lookup {
@@ -441,6 +457,11 @@ pub(crate) struct Session<B: Broker> {
     /// The same backoff for automatic clears, which a refused clear feeds. Kept apart so a
     /// lookup's backoff never delays a clear of an order past its session.
     clear_retry: HashMap<String, Recheck>,
+    /// The open-listing half of an automatic clear, kept until its by-id half runs on a later
+    /// clear turn.
+    clear_half: Option<ClearHalf>,
+    /// Whose turn it is to go first on a poll: the recheck or the automatic clear.
+    clear_turn: bool,
     /// The client order id of the last poll lookup or automatic clear, for round-robin.
     cursor: Option<String>,
     cod_timers: Vec<(String, Instant)>,
@@ -478,6 +499,8 @@ impl<B: Broker> Session<B> {
             pending: Vec::new(),
             rechecks: HashMap::new(),
             clear_retry: HashMap::new(),
+            clear_half: None,
+            clear_turn: false,
             cursor: None,
             cod_timers: Vec::new(),
             last_poll: Instant::now(),
@@ -1840,44 +1863,42 @@ impl<B: Broker> Session<B> {
         self.status(&Obj::new().raw("resync", &resync).done())
     }
 
-    /// The two broker checks of a clear. Both always run, so a shown order is reported as
-    /// shown even when the other check fails. Returns each check, the number of orders
-    /// the listing returned, the raw by-id answer when it is a 404, and the order the
-    /// lookup found.
-    fn clear_checks(
+    /// The open-orders check of a clear: the order's seen state and the listing's size.
+    /// `None` when the budget refused the call, which sends nothing.
+    fn open_check(&mut self, cid: &str, critical: bool) -> Option<(Seen, usize)> {
+        if !self.budget.take(critical) {
+            return None;
+        }
+        Some(match self.b.open_orders() {
+            Ok(r) => {
+                let seen = match r.value.iter().find(|o| o.client_order_id == cid) {
+                    Some(o) => Seen::Shows(o.status.clone()),
+                    None if listing_full(r.value.len()) => Seen::Unreliable("listing_full".into()),
+                    None => Seen::Absent,
+                };
+                (seen, r.value.len())
+            }
+            Err(e) => (self.failed(&e), 0),
+        })
+    }
+
+    /// The by-id check of a clear: the seen state, the raw answer when it is a 404, and the
+    /// order the lookup found. `None` when the budget refused the call, which sends nothing.
+    fn by_id_check(
         &mut self,
         cid: &str,
         critical: bool,
-    ) -> (Seen, Seen, usize, String, Option<BrokerOrder>) {
-        let (open, listed) = if self.budget.take(critical) {
-            match self.b.open_orders() {
-                Ok(r) => {
-                    let seen = match r.value.iter().find(|o| o.client_order_id == cid) {
-                        Some(o) => Seen::Shows(o.status.clone()),
-                        None if listing_full(r.value.len()) => {
-                            Seen::Unreliable("listing_full".into())
-                        }
-                        None => Seen::Absent,
-                    };
-                    (seen, r.value.len())
-                }
-                Err(e) => (self.failed(&e), 0),
-            }
-        } else {
-            (Seen::Failed("throttled".into()), 0)
-        };
-        let (by_id, raw, found) = if self.budget.take(critical) {
-            match self.b.order(&OrderRef::Client(cid.to_owned())) {
-                Ok(r) => match r.value {
-                    Some(o) => (Seen::Shows(o.status.clone()), String::from("null"), Some(o)),
-                    None => (Seen::Absent, r.raw, None),
-                },
-                Err(e) => (self.failed(&e), String::from("null"), None),
-            }
-        } else {
-            (Seen::Failed("throttled".into()), String::from("null"), None)
-        };
-        (open, by_id, listed, raw, found)
+    ) -> Option<(Seen, String, Option<BrokerOrder>)> {
+        if !self.budget.take(critical) {
+            return None;
+        }
+        Some(match self.b.order(&OrderRef::Client(cid.to_owned())) {
+            Ok(r) => match r.value {
+                Some(o) => (Seen::Shows(o.status.clone()), String::from("null"), Some(o)),
+                None => (Seen::Absent, r.raw, None),
+            },
+            Err(e) => (self.failed(&e), String::from("null"), None),
+        })
     }
 
     /// A failed broker check; a 429 holds the budget back as it does for any query.
@@ -1896,7 +1917,7 @@ impl<B: Broker> Session<B> {
         cid: &str,
         reason: &str,
     ) -> Result<String, String> {
-        match self.clear(requester, cid, reason, true)? {
+        match self.clear(requester, cid, reason)? {
             Ok(()) => Ok(outcome("ok").s("client_order_id", cid).done()),
             Err(r) => {
                 self.refuse(requester, cid, reason, &r)?;
@@ -1931,16 +1952,14 @@ impl<B: Broker> Session<B> {
         self.emit(self.ts(), "clear_refused", &body.done(), aud)
     }
 
-    /// Clears an unresolved order that the broker does not show (section 5). Emits
-    /// `cleared` and returns `Ok(Ok(()))`, or returns why the clear was refused. `critical`
-    /// is the budget class of the broker checks: an operator's clear is critical, the
-    /// automatic clear is poll traffic.
+    /// Clears an unresolved order that the broker does not show (section 5), for an
+    /// operator's `clear_order`, critical traffic: both checks run now. Emits `cleared` and
+    /// returns `Ok(Ok(()))`, or returns why the clear was refused.
     fn clear(
         &mut self,
         requester: &str,
         cid: &str,
         reason: &str,
-        critical: bool,
     ) -> Result<Result<(), Refused>, String> {
         let Some(st) = self.orders.get(cid) else {
             return Ok(Err(Refused::plain("unknown_order")));
@@ -1948,18 +1967,50 @@ impl<B: Broker> Session<B> {
         if !st.open() {
             return Ok(Err(Refused::plain("not_unresolved")));
         }
-        let (open, by_id, listed, raw, found) = self.clear_checks(cid, critical);
+        // Both checks always run, so a shown order is reported as shown even when the other
+        // check fails.
+        let (open, listed) = self
+            .open_check(cid, true)
+            .unwrap_or((Seen::Failed("throttled".into()), 0));
+        let (by_id, raw, found) = self.by_id_check(cid, true).unwrap_or((
+            Seen::Failed("throttled".into()),
+            String::from("null"),
+            None,
+        ));
+        self.settle(
+            requester,
+            cid,
+            reason,
+            Checks {
+                open,
+                listed,
+                by_id,
+                raw,
+                found,
+            },
+        )
+    }
+
+    /// Decides a clear on its checks, and clears the order when neither shows it. Emits
+    /// `cleared`, or returns the refusal.
+    fn settle(
+        &mut self,
+        requester: &str,
+        cid: &str,
+        reason: &str,
+        c: Checks,
+    ) -> Result<Result<(), Refused>, String> {
         // An order the lookup found settles from its state, as a found lookup settles it,
         // whatever the verdict: a terminal state stops it counting, a working one stays open.
-        if let Some(bo) = found {
+        if let Some(bo) = c.found {
             self.reconcile_order(bo)?;
         }
-        if let Err(refusal) = clear_verdict(&open, &by_id) {
+        if let Err(refusal) = clear_verdict(&c.open, &c.by_id) {
             let (why, detail) = refusal_parts(&refusal);
             return Ok(Err(Refused {
                 reason: why,
                 detail,
-                broker: Some(broker_checks(&open, listed, &by_id, &raw)),
+                broker: Some(broker_checks(&c.open, c.listed, &c.by_id, &c.raw)),
             }));
         }
         if let Some(st) = self.orders.get_mut(cid) {
@@ -1969,13 +2020,16 @@ impl<B: Broker> Session<B> {
         let broker = Obj::new()
             .raw(
                 "open_orders",
-                &Obj::new().s("result", "absent").n("listed", listed).done(),
+                &Obj::new()
+                    .s("result", "absent")
+                    .n("listed", c.listed)
+                    .done(),
             )
             .raw(
                 "by_id",
                 &Obj::new()
                     .s("result", "absent")
-                    .raw("broker_raw", &raw)
+                    .raw("broker_raw", &c.raw)
                     .done(),
             )
             .done();
@@ -1990,10 +2044,12 @@ impl<B: Broker> Session<B> {
     }
 
     /// Clears one unresolved day or cls order whose session has passed, when the broker
-    /// shows nothing: one order per poll, round-robin, on the order's poll backoff. Returns
-    /// whether it made broker calls. Its checks are non-critical (`clear_checks`), so each
-    /// takes a token that keeps the close reserve. A refused automatic clear leaves the
-    /// order alone, is not journaled, and backs off like a failed lookup.
+    /// shows nothing: one order per clear turn, round-robin, on the order's clear backoff.
+    /// Its two checks run on separate polls: the open listing first, kept as `clear_half`,
+    /// then the by-id lookup on a later clear turn. Each check takes a non-critical token;
+    /// a refused token sends nothing, returns `false` and leaves the backoff alone. A
+    /// refused automatic clear leaves the order alone and is not journaled, and backs off
+    /// like a failed lookup. Returns whether it made a broker call.
     fn clear_day_orders(&mut self, at: Instant) -> Result<bool, String> {
         let now = self.ts();
         let mut cids: Vec<String> = self
@@ -2008,13 +2064,47 @@ impl<B: Broker> Session<B> {
         cids.sort();
         self.clear_retry
             .retain(|c, _| cids.binary_search(c).is_ok());
+        if let Some(half) = self.clear_half.take()
+            && cids.binary_search(&half.cid).is_ok()
+        {
+            return self.clear_by_id(half, at);
+        }
         let retry = &self.clear_retry;
         let Some(cid) = self.round_robin(&cids, |c| retry.get(c).is_none_or(|r| r.due <= at))
         else {
             return Ok(false);
         };
+        let Some((open, listed)) = self.open_check(&cid, false) else {
+            return Ok(false);
+        };
         self.cursor = Some(cid.clone());
-        match self.clear(GATEWAY, &cid, "day_order_after_session", false)? {
+        // A listing that already refuses the clear refuses it whatever the by-id lookup
+        // says, so the lookup is not sent.
+        if clear_verdict(&open, &Seen::Absent).is_err() {
+            backoff(&mut self.clear_retry, &cid, at, self.cfg.timing.poll);
+        } else {
+            self.clear_half = Some(ClearHalf { cid, open, listed });
+        }
+        Ok(true)
+    }
+
+    /// The by-id half of an automatic clear, decided with the listing kept from an earlier
+    /// poll. A refused token keeps the half for the next clear turn.
+    fn clear_by_id(&mut self, half: ClearHalf, at: Instant) -> Result<bool, String> {
+        let Some((by_id, raw, found)) = self.by_id_check(&half.cid, false) else {
+            self.clear_half = Some(half);
+            return Ok(false);
+        };
+        let cid = half.cid.clone();
+        self.cursor = Some(cid.clone());
+        let checks = Checks {
+            open: half.open,
+            listed: half.listed,
+            by_id,
+            raw,
+            found,
+        };
+        match self.settle(GATEWAY, &cid, "day_order_after_session", checks)? {
             Ok(()) => {
                 self.clear_retry.remove(&cid);
             }
@@ -2152,8 +2242,8 @@ impl<B: Broker> Session<B> {
             self.degraded = true;
             self.sync_state()?;
         }
-        // At most one broker lookup per tick (a blocking call stalls kills, cancels and
-        // submits), so a poll's lookup or clear makes the tick's resolve wait.
+        // At most one broker call per tick (a blocking call stalls kills, cancels and
+        // submits): a poll's lookup, clear or degraded listing makes the tick's resolve wait.
         let mut looked = false;
         if now.duration_since(self.last_poll) >= self.cfg.timing.poll {
             self.last_poll = now;
@@ -2165,17 +2255,38 @@ impl<B: Broker> Session<B> {
             if !self.gate_ok {
                 self.reconcile(false)?;
             } else {
-                if self.degraded {
-                    self.budget.charge();
-                    if let Ok(r) = self.b.open_orders() {
-                        for bo in r.value {
-                            self.reconcile_order(bo)?;
+                // The recheck and the automatic clear take turns to go first, so neither
+                // starves the other; the other runs when the first has nothing to do.
+                let clear_first = self.clear_turn;
+                self.clear_turn = !self.clear_turn;
+                looked = if clear_first {
+                    self.clear_day_orders(now)?
+                } else {
+                    self.recheck_unresolved(now)?
+                };
+                if !looked {
+                    looked = if clear_first {
+                        self.recheck_unresolved(now)?
+                    } else {
+                        self.clear_day_orders(now)?
+                    };
+                }
+                // Degraded: the listing reconciles what the stream missed. It runs only when no
+                // lookup ran this tick, and a refused token or a 429 is handled as any query.
+                if !looked && self.degraded && self.budget.take(false) {
+                    looked = true;
+                    match self.b.open_orders() {
+                        Ok(r) => {
+                            for bo in r.value {
+                                self.reconcile_order(bo)?;
+                            }
+                        }
+                        Err(e) => {
+                            if e.http_status == 429 {
+                                self.budget.block(e.retry_after_ms);
+                            }
                         }
                     }
-                }
-                looked = self.recheck_unresolved(now)?;
-                if !looked {
-                    looked = self.clear_day_orders(now)?;
                 }
             }
         }
@@ -2226,8 +2337,250 @@ fn line_aud(v: &Value) -> Aud {
 
 #[cfg(test)]
 mod tests {
-    use super::{Refusal, Seen, clear_verdict, close_check, listing_full, session_order_expired};
-    use crate::safety::{days_from_civil, et_ns};
+    use super::{
+        ClearHalf, OrderState, Phase, Refusal, Seen, Session, clear_verdict, close_check,
+        listing_full, session_order_expired, wall_ns,
+    };
+    use crate::broker::{
+        AccountInfo, Broker, BrokerError, BrokerOrder, CancelResult, Capabilities, FlattenResult,
+        MarketClock, OrderRef, Position, Query, Reply, SessionDay, SubmitResult, Update,
+    };
+    use crate::intent::Intent;
+    use crate::journal::Journal;
+    use crate::safety::{Profile, days_from_civil, et_ns};
+    use crate::server::{Config, Timing};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+    use std::time::{Duration, Instant};
+
+    /// A broker that answers from a script and records each call by name. Its open listing
+    /// is `open`; with `open_429` set, the listing fails with a 429 and that retry-after.
+    struct Stub {
+        calls: Rc<RefCell<Vec<&'static str>>>,
+        open_429: Option<u64>,
+    }
+
+    fn unsupported() -> BrokerError {
+        BrokerError::local("unsupported", "stub")
+    }
+
+    impl Broker for Stub {
+        fn kind(&self) -> &'static str {
+            "sim"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                combo: true,
+                max_legs: 4,
+                client_order_id_max: 128,
+                idempotency: "client_order_id",
+            }
+        }
+        fn pins(&self) -> String {
+            "{}".into()
+        }
+        fn now(&self) -> Option<u64> {
+            None
+        }
+        fn submit(&mut self, _: &Intent) -> SubmitResult {
+            SubmitResult::Unknown {
+                reason: "timeout",
+                retry_after_ms: None,
+            }
+        }
+        fn cancel(&mut self, _: &str) -> CancelResult {
+            CancelResult::Unknown {
+                reason: "timeout",
+                retry_after_ms: None,
+            }
+        }
+        fn cancel_all(&mut self) -> CancelResult {
+            CancelResult::Unknown {
+                reason: "timeout",
+                retry_after_ms: None,
+            }
+        }
+        fn flatten(&mut self) -> FlattenResult {
+            FlattenResult::Unknown { reason: "timeout" }
+        }
+        fn order(&mut self, _: &OrderRef) -> Query<Option<BrokerOrder>> {
+            self.calls.borrow_mut().push("order");
+            Ok(Reply {
+                value: None,
+                raw: "{}".into(),
+            })
+        }
+        fn open_orders(&mut self) -> Query<Vec<BrokerOrder>> {
+            self.calls.borrow_mut().push("open_orders");
+            if let Some(ms) = self.open_429 {
+                return Err(BrokerError {
+                    http_status: 429,
+                    code: "http_429".into(),
+                    message: String::new(),
+                    raw: String::new(),
+                    retry_after_ms: Some(ms),
+                });
+            }
+            Ok(Reply {
+                value: Vec::new(),
+                raw: "[]".into(),
+            })
+        }
+        fn orders_since(&mut self, _: u64) -> Query<Vec<BrokerOrder>> {
+            Err(unsupported())
+        }
+        fn account(&mut self) -> Query<AccountInfo> {
+            Err(unsupported())
+        }
+        fn positions(&mut self) -> Query<Vec<Position>> {
+            Err(unsupported())
+        }
+        fn activities(
+            &mut self,
+            _: &[String],
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Query<(Vec<String>, Option<String>)> {
+            Err(unsupported())
+        }
+        fn clock(&mut self) -> Query<MarketClock> {
+            Err(unsupported())
+        }
+        fn calendar(&mut self, _: &str, _: &str) -> Query<Vec<SessionDay>> {
+            Err(unsupported())
+        }
+        fn poll_updates(&mut self, _: &mut Vec<Update>) {}
+    }
+
+    /// A session on a fresh state root, with its calls recorded in the returned log.
+    fn session(
+        name: &str,
+        open_429: Option<u64>,
+    ) -> (Session<Stub>, Rc<RefCell<Vec<&'static str>>>) {
+        let root = std::env::temp_dir().join(format!("og-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let (journal, _) = Journal::open(&root, "acct").unwrap();
+        let cfg = Config {
+            account: "acct".into(),
+            environment: "paper".into(),
+            listen: "127.0.0.1:0".parse().unwrap(),
+            listen_any: false,
+            state: root,
+            clients: Vec::new(),
+            profile: Profile::default(),
+            timing: Timing::default(),
+            stall_after_admitted: false,
+        };
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let stub = Stub {
+            calls: Rc::clone(&calls),
+            open_429,
+        };
+        let mut s = Session::new(cfg, stub, journal, &[], Arc::new(AtomicU64::new(0)));
+        s.gate_ok = true;
+        (s, calls)
+    }
+
+    /// Makes the next poll due and runs one tick.
+    fn poll(s: &mut Session<Stub>) {
+        s.last_poll = Instant::now() - Duration::from_secs(60);
+        s.tick().unwrap();
+    }
+
+    /// An unresolved order, not scheduled for a resolve lookup, with its time in force.
+    fn unresolved(s: &mut Session<Stub>, cid: &str, tif: &str, submitted: Option<u64>) {
+        let mut o = OrderState::admitted(
+            "acct".into(),
+            "req".into(),
+            None,
+            Vec::new(),
+            Some(tif.into()),
+            submitted,
+        );
+        o.phase = Phase::Unknown;
+        s.orders.insert(cid.into(), o);
+    }
+
+    /// Submitted two New York trading days ago: a day order past its session.
+    fn two_days_ago() -> Option<u64> {
+        Some(wall_ns() - 2 * 86_400_000_000_000)
+    }
+
+    #[test]
+    fn a_day_order_past_its_session_is_cleared_while_many_orders_are_due() {
+        // Thirty unresolved good-til-canceled orders are due for a lookup on every poll. The
+        // day order must still be cleared: the recheck and the clear take turns.
+        let (mut s, _) = session("clear-turns", None);
+        for i in 0..30 {
+            unresolved(&mut s, &format!("wse-gtc-{i:02}"), "gtc", None);
+        }
+        unresolved(&mut s, "wse-day", "day", two_days_ago());
+        for _ in 0..4 {
+            poll(&mut s);
+        }
+        assert_eq!(s.orders["wse-day"].phase, Phase::Cleared);
+    }
+
+    #[test]
+    fn a_clear_checks_its_listing_and_its_lookup_on_separate_polls() {
+        // Each clear turn makes one call: the listing first, the by-id lookup on the next.
+        let (mut s, calls) = session("clear-split", None);
+        unresolved(&mut s, "wse-day", "day", two_days_ago());
+        assert_eq!(s.clear_day_orders(Instant::now()), Ok(true));
+        assert_eq!(*calls.borrow(), vec!["open_orders"]);
+        assert_eq!(s.orders["wse-day"].phase, Phase::Unknown);
+        assert_eq!(s.clear_day_orders(Instant::now()), Ok(true));
+        assert_eq!(*calls.borrow(), vec!["open_orders", "order"]);
+        assert_eq!(s.orders["wse-day"].phase, Phase::Cleared);
+    }
+
+    #[test]
+    fn a_429_on_the_degraded_listing_blocks_further_polls() {
+        let (mut s, calls) = session("degraded-429", Some(60_000));
+        s.degraded = true;
+        poll(&mut s);
+        assert_eq!(*calls.borrow(), vec!["open_orders"]);
+        assert!(s.budget.blocked());
+        // Within the retry-after time no poll sends anything, whatever is due.
+        poll(&mut s);
+        poll(&mut s);
+        assert_eq!(*calls.borrow(), vec!["open_orders"]);
+    }
+
+    #[test]
+    fn a_tick_makes_at_most_one_broker_call() {
+        // Degraded, with three unresolved orders due: one lookup, and no listing or resolve.
+        let (mut s, calls) = session("one-call", None);
+        s.degraded = true;
+        for i in 0..3 {
+            unresolved(&mut s, &format!("wse-gtc-{i}"), "gtc", None);
+        }
+        poll(&mut s);
+        assert_eq!(calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_throttled_clear_sends_nothing_and_does_not_back_off() {
+        let (mut s, calls) = session("throttled-clear", None);
+        unresolved(&mut s, "wse-day", "day", two_days_ago());
+        s.budget.block(Some(60_000));
+        assert_eq!(s.clear_day_orders(Instant::now()), Ok(false));
+        assert!(calls.borrow().is_empty());
+        assert!(s.clear_retry.is_empty());
+        // A kept listing whose by-id lookup is refused waits for the next turn, unbacked.
+        s.clear_half = Some(ClearHalf {
+            cid: "wse-day".into(),
+            open: Seen::Absent,
+            listed: 0,
+        });
+        assert_eq!(s.clear_day_orders(Instant::now()), Ok(false));
+        assert!(s.clear_half.is_some());
+        assert!(s.clear_retry.is_empty());
+        assert!(calls.borrow().is_empty());
+    }
 
     fn shows(s: &str) -> Seen {
         Seen::Shows(s.into())
