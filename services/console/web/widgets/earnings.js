@@ -183,7 +183,7 @@ defineWidget('earnings', {
       const row = e.target.closest('[data-er]'); if (!row) return;
       const sym = row.dataset.er; my.open = my.open === sym ? null : sym; update();
       // Its underlying goes to the IV heatmap and the chart.
-      if (my.open) { history(sym); setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym })); }
+      if (my.open) { history(sym); setFocus(sym); }
     };
     el.addEventListener('click', click);
     const themed = () => { my.open = null; update(); fill(); };

@@ -121,7 +121,7 @@ defineWidget('heatmap', {
       const p = /** @type {HTMLElement | null} */ (e.target.closest?.('[data-hm-period]'))?.dataset.hmPeriod;
       if (p && PERIODS[p]) { my.period = p; store('tt-hm-period', p); update(); return; }
       const s = /** @type {HTMLElement | null} */ (e.target.closest?.('[data-sym]'))?.dataset.sym;
-      if (s) { setFocus(s); document.dispatchEvent(new CustomEvent('tt-focus', { detail: s })); }
+      if (s) setFocus(s);
     };
     el.addEventListener('mouseover', over); el.addEventListener('click', click);
     const resized = new ResizeObserver(() => update()); resized.observe(el);

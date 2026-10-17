@@ -18,6 +18,7 @@ import { defineWidget } from '../lib/widgets.js';
 import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused } from '../lib/theme.js';
+import { onChange } from '../lib/channels.js';
 import { position } from '../lib/position.js';
 import { held, latest, older, exhausted } from '../lib/bars.js';
 import { get, stream } from '../lib/cache.js';
@@ -633,15 +634,16 @@ defineWidget('candles', {
       if (e.target.closest('[data-cd-link]')) { my.linked = !my.linked; if (my.linked) { const f = focused(), c = f && offered().find(x => x.symbol === f); if (c) { my.pick = c; fresh(); return; } } head(); keep(); }
     };
     el.addEventListener('click', click);
-    // The symbol picked in a watchlist, or a new theme.
-    const follow = (/** @type {Event} */ e) => {
+    // The symbol picked in a watchlist (the focus channel), and a new theme.
+    const followFocus = sym => {
       if (!my.linked) return;
-      const sym = /** @type {CustomEvent} */ (e).detail, any = anyService();
+      const any = anyService();
       if (typeof sym === 'string' && any && !offered().some(x => x.symbol === sym)) my.typed.push(sym);
       const c = typeof sym === 'string' && offered().find(x => x.symbol === sym);
-      if (c) { my.pick = c; fresh(); } else if (e.type === 'tt-theme') { my.pick = null; fresh(); }
+      if (c) { my.pick = c; fresh(); }
     };
-    document.addEventListener('tt-focus', follow);
+    const themed = () => { if (!my.linked) return; my.pick = null; fresh(); };
+    onChange('focus', followFocus);
     // A contract to chart (the Spread builder's legs): today's mid from its relay.
     const chart = (/** @type {Event} */ e) => {
       const symbol = /** @type {CustomEvent} */ (e).detail, relay = typeof symbol === 'string' ? optionRelay(symbol) : null;
@@ -650,7 +652,7 @@ defineWidget('candles', {
       my.pick = { service: relay, symbol }; fresh();
     };
     document.addEventListener('tt-chart', chart);
-    document.addEventListener('tt-theme', follow);
+    document.addEventListener('tt-theme', themed);
     head(); legend(); load();
     // Minute bars change once a minute: refresh them every 5 s, longer ones every minute.
     let ticks = 0;
@@ -659,7 +661,7 @@ defineWidget('candles', {
     return {
       // The fleet's polls only matter for which symbols are offered.
       update() { if (!my.pick) { head(); load(); } },
-      dispose() { my.alive = false; clearInterval(my.timer); clearInterval(my.edgeTimer); cancelAnimationFrame(my.raf); document.removeEventListener('tt-position', changed); my.chart?.remove(); el.removeEventListener('click', click); document.removeEventListener('tt-focus', follow); document.removeEventListener('tt-chart', chart); document.removeEventListener('tt-theme', follow); },
+      dispose() { my.alive = false; clearInterval(my.timer); clearInterval(my.edgeTimer); cancelAnimationFrame(my.raf); document.removeEventListener('tt-position', changed); my.chart?.remove(); el.removeEventListener('click', click); document.removeEventListener('tt-chart', chart); document.removeEventListener('tt-theme', themed); },
     };
   },
 });

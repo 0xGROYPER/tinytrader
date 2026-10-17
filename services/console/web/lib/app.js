@@ -45,7 +45,7 @@ import '../widgets/crossasset.js';
 import '../widgets/observations.js';
 import '../widgets/relations.js';
 import { watchlists, addList, addSymbols } from './watchlists.js';
-import { setTheme, PRESETS, parseSymbols, parseKeywords, LAYERS, DEFAULT_LAYERS } from './theme.js';
+import { setTheme, setFocus, PRESETS, parseSymbols, parseKeywords, LAYERS, DEFAULT_LAYERS } from './theme.js';
 const state = { openGroups: new Set(), navKey: '', tab: 'workspace', lastOk: 0, collections: [], doc: null };
 /** An element by ID, typed loosely enough for forms and buttons alike. @type {(id: string) => HTMLInputElement} */
 const $ = id => /** @type {HTMLInputElement} */ (document.getElementById(id));
@@ -445,7 +445,7 @@ document.addEventListener('tt-show-ticker', e => {
   laySave();
   // Once mounted, both pointed at it.
   requestAnimationFrame(() => {
-    document.dispatchEvent(new CustomEvent('tt-focus', { detail: symbol }));
+    setFocus(symbol);
     document.dispatchEvent(new CustomEvent('tt-news-symbol', { detail: { symbol } }));
   });
 });

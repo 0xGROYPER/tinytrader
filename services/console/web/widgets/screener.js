@@ -149,7 +149,7 @@ defineWidget('screener', {
       const r = (my.data?.rows || []).find(x => x.symbol === sym);
       askRecommendation({ sym, view: my.sort != null ? '' : my.view, row: r || null, earnings: reports().get(sym)?.date || null });
       document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'spreads' }));
-      setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym }));
+      setFocus(sym);
       document.dispatchEvent(new CustomEvent('tt-show-ticker', { detail: { symbol: sym, from: el } }));
     }
     function select(row) {
