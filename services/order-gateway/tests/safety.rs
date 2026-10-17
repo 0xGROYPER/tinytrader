@@ -272,8 +272,12 @@ fn stream_drop_degrades_then_resyncs_to_ready() {
         "cancels are allowed while degraded"
     );
     // The cancel happened while the stream was down; the 1 Hz poll or resync reports it.
+    // The stream can also deliver it first once it is back, so either source is correct.
     let o = c.order_event("wse-1", "canceled");
-    assert_eq!(o["source"], "rest_reconcile");
+    assert!(
+        matches!(o["source"].as_str(), Some("rest_reconcile" | "sim")),
+        "{o}"
+    );
     let st = c.event("status", |v| v.get("resync").is_some());
     assert_eq!(st["state"], "ready");
     assert_eq!(c.submit("r4", &buy("wse-4"))["outcome"], "accepted");
