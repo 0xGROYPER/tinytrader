@@ -1188,6 +1188,11 @@ impl<B: Broker> Session<B> {
         }
         let p = &self.cfg.profile;
         let opening = intent.has_open();
+        // A market order's reference price does not bound its fill, so no cap can hold a
+        // market opening. Refused for every client; a market close is not.
+        if opening && intent.market {
+            return Some(not_sent("market_opening_refused", "null"));
+        }
         // An opening intent is capped at what it can lose; a close is never checked.
         let loss = if opening {
             max_loss(intent).map(|m| m.cents)

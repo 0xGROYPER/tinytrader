@@ -228,7 +228,7 @@ The broker's `capabilities` declare its tick rules, and the gateway refuses an i
 
 **Canonical form:** the gateway re-serializes the parsed intent with a fixed field order, no whitespace, and prices normalized to the shortest form with 2 decimal places. Its SHA-256 is `intent_sha256`, which is used for duplicate detection.
 
-**Market orders** (`type: "market"`) are sent with no price and fill at whatever the market gives, across the spread. The gateway has no quotes of its own, so a market intent carries `ref_price`, the client's estimate of its price when sent (the console sends the natural: the ask on buys, the bid on sells), and the notional cap is checked against it. It doesn't bound the fill. Day only; no `cls`.
+**Market orders** (`type: "market"`) are sent with no price and fill at whatever the market gives, across the spread. The gateway has no quotes of its own, so a market intent carries `ref_price`, the client's estimate of its price when sent (the console sends the natural: the ask on buys, the bid on sells). The `ref_price` doesn't bound the fill, so **a market opening is refused for every client**: a market buy-to-open or sell-to-open, option or stock, is `not_sent{market_opening_refused}` before any cap is checked, and nothing is sent. A market close is allowed and is not checked against the notional cap. Day only; no `cls`.
 
 **Reserved for later versions, as allowlist additions rather than protocol changes:**
 - stop and stop-limit types
@@ -241,7 +241,7 @@ The broker's `capabilities` declare its tick rules, and the gateway refuses an i
 | Intent | Alpaca `POST /v2/orders` body |
 |---|---|
 | single | `{symbol, qty, side, type:"limit", limit_price, time_in_force:"day", client_order_id, position_intent}` |
-| market (single or combo) | as above with `type:"market"` and no `limit_price` |
+| market close (single or combo) | as above with `type:"market"` and no `limit_price`. A market opening is refused ([section 6](#6-order-intent)). |
 | combo | `{order_class:"mleg", qty, type:"limit", limit_price, time_in_force:"day", client_order_id, legs:[{symbol, ratio_qty, side, position_intent}]}` |
 | stock single | `{symbol, qty, side, type:"limit", limit_price, time_in_force:"day"\|"cls", client_order_id}`, with no `position_intent`: Alpaca infers opening or closing from the position |
 | `side` + `effect` | `position_intent` is `buy_to_open`, `buy_to_close`, `sell_to_open` or `sell_to_close` (options) |
@@ -313,7 +313,7 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 | closes per minute (counted apart from the opens; `not_sent{cap}`, `closes_per_minute`) | `--closes-per-min` | 30 |
 | open orders | `--max-open` | 4 |
 | legs | `--max-legs` | 4 |
-| maximum loss per opening intent (see above; a market order's \|ref_price\| is used for its price): the cap is named `notional` | `--max-notional` | $2,500 |
+| maximum loss per opening intent (see above). A market opening is refused before this cap (`market_opening_refused`), so it is checked for limit openings only: the cap is named `notional` | `--max-notional` | $2,500 |
 | consecutive broker rejects | `--max-rejects` | 5, which trips `halt_opens` |
 
 **Maximum loss.** `--max-notional` caps what an opening intent can lose, not what it costs to open. The loss is per parent unit, times qty and the multiplier (100 an option, 1 a share):
@@ -505,6 +505,7 @@ The same resync runs after every `trade_updates` reconnect. An order in phase `s
 - `cap` (with `detail.cap`)
 - `max_loss_unbounded` (with `detail.symbols`): an opening naked short call or short share
 - `max_loss_unknown` (with `detail.symbols`): an opening intent whose maximum loss the gateway cannot bound
+- `market_opening_refused`: a market buy-to-open or sell-to-open, option or stock, for any client. Its reference price does not bound the fill, so no cap can hold it. Use a limit. A market close is not refused.
 - `killed`
 - `not_ready`
 - `leg_pending` (with `detail.symbols`: a close on a leg that has an open or unresolved order)
