@@ -1800,8 +1800,13 @@ impl<B: Broker> Session<B> {
 
     /// The two broker checks of a clear. Both always run, so a shown order is reported as
     /// shown even when the other check fails. Returns each check, the number of orders
-    /// the listing returned, and the raw by-id answer when it is a 404.
-    fn clear_checks(&mut self, cid: &str, critical: bool) -> (Seen, Seen, usize, String) {
+    /// the listing returned, the raw by-id answer when it is a 404, and the order the
+    /// lookup found.
+    fn clear_checks(
+        &mut self,
+        cid: &str,
+        critical: bool,
+    ) -> (Seen, Seen, usize, String, Option<BrokerOrder>) {
         let (open, listed) = if self.budget.take(critical) {
             match self.b.open_orders() {
                 Ok(r) => {
@@ -1819,18 +1824,18 @@ impl<B: Broker> Session<B> {
         } else {
             (Seen::Failed("throttled".into()), 0)
         };
-        let (by_id, raw) = if self.budget.take(critical) {
+        let (by_id, raw, found) = if self.budget.take(critical) {
             match self.b.order(&OrderRef::Client(cid.to_owned())) {
                 Ok(r) => match r.value {
-                    Some(o) => (Seen::Shows(o.status), String::from("null")),
-                    None => (Seen::Absent, r.raw),
+                    Some(o) => (Seen::Shows(o.status.clone()), String::from("null"), Some(o)),
+                    None => (Seen::Absent, r.raw, None),
                 },
-                Err(e) => (self.failed(&e), String::from("null")),
+                Err(e) => (self.failed(&e), String::from("null"), None),
             }
         } else {
-            (Seen::Failed("throttled".into()), String::from("null"))
+            (Seen::Failed("throttled".into()), String::from("null"), None)
         };
-        (open, by_id, listed, raw)
+        (open, by_id, listed, raw, found)
     }
 
     /// A failed broker check; a 429 holds the budget back as it does for any query.
@@ -1901,7 +1906,12 @@ impl<B: Broker> Session<B> {
         if !st.open() {
             return Ok(Err(Refused::plain("not_unresolved")));
         }
-        let (open, by_id, listed, raw) = self.clear_checks(cid, critical);
+        let (open, by_id, listed, raw, found) = self.clear_checks(cid, critical);
+        // An order the lookup found settles from its state, as a found lookup settles it,
+        // whatever the verdict: a terminal state stops it counting, a working one stays open.
+        if let Some(bo) = found {
+            self.reconcile_order(bo)?;
+        }
         if let Err(refusal) = clear_verdict(&open, &by_id) {
             let (why, detail) = refusal_parts(&refusal);
             return Ok(Err(Refused {
@@ -1938,7 +1948,7 @@ impl<B: Broker> Session<B> {
     }
 
     /// Clears each unresolved day or cls order whose session has passed, when the broker
-    /// shows nothing. Runs on the poll, after `recheck_absent`, so it needs no timer of its
+    /// shows nothing. Runs on the poll, after `recheck_unresolved`, so it needs no timer of its
     /// own. A refused automatic clear leaves the order alone and is not journaled.
     fn clear_day_orders(&mut self) -> Result<(), String> {
         let now = self.ts();
@@ -1998,8 +2008,9 @@ impl<B: Broker> Session<B> {
                     self.resolution(&cid, "absent_after", offsets[k])?;
                 }
                 Lookup::Failed if last => {
-                    // Stays Unknown: still open and blocking. A stream event, a
-                    // reconcile or a restart can still settle it.
+                    // Stays Unknown: still open and blocking. The poll looks it up
+                    // again (`recheck_unresolved`), and a stream event, a reconcile or
+                    // a restart can settle it too.
                     self.pending.remove(i);
                     self.resolution(&cid, "unresolved", offsets[k])?;
                 }
@@ -2012,16 +2023,21 @@ impl<B: Broker> Session<B> {
         Ok(())
     }
 
-    /// Looks up each absent order by client ID on the poll interval, so an
-    /// absent order settles without waiting for a stream reconnect. Found: it
-    /// is reconciled from its state and settles. A 404 or any other error never
-    /// clears it: it stays absent and counted until a stream event or a later
-    /// lookup finds it.
-    fn recheck_absent(&mut self) -> Result<(), String> {
+    /// Looks up each unresolved order by client ID on the poll interval: each absent
+    /// order, and each unknown order whose last lookup failed (it is no longer
+    /// scheduled), so it settles without waiting for a stream reconnect. Found, in any
+    /// state: it is reconciled from its state and settles, or stays open when the state
+    /// is not terminal. A 404 or any other error never clears it: it stays open and
+    /// counted until a stream event or a later lookup finds it.
+    fn recheck_unresolved(&mut self) -> Result<(), String> {
         let mut cids: Vec<String> = self
             .orders
             .iter()
-            .filter(|(_, s)| matches!(s.phase, Phase::Absent))
+            .filter(|(c, s)| match s.phase {
+                Phase::Absent => true,
+                Phase::Unknown => !self.pending.iter().any(|p| p.cid == **c),
+                _ => false,
+            })
             .map(|(c, _)| c.clone())
             .collect();
         cids.sort();
@@ -2057,7 +2073,7 @@ impl<B: Broker> Session<B> {
                         }
                     }
                 }
-                self.recheck_absent()?;
+                self.recheck_unresolved()?;
                 self.clear_day_orders()?;
             }
             let halted = matches!(self.killed, Some((KillLevel::HaltAll, _)));
