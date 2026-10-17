@@ -716,7 +716,7 @@ fn a_closing_auction_order_left_unresolved_is_cleared_once_its_session_has_passe
 }
 
 #[test]
-fn a_day_and_a_closing_auction_order_from_a_prior_session_clear_on_the_same_poll() {
+fn a_day_and_a_closing_auction_order_from_a_prior_session_are_each_cleared() {
     let state = root("cls-and-day");
     // Two submits never reach the broker: a day option and a closing-auction stock.
     let script = format!(
@@ -738,10 +738,11 @@ fn a_day_and_a_closing_auction_order_from_a_prior_session_clear_on_the_same_poll
         v["client_order_id"] == "wse-cls" && v["outcome"] == "absent_after"
     });
     c.req("advance", "a1", &format!(r#""to_ts":{}"#, T0 + DAY));
-    // Both are past their session, and both are cleared on the same poll. Waiting on the
-    // unresolved count, not on each event, since an event read by one wait is not seen by the next.
+    // Both are past their session. One automatic clear runs per poll, so they clear on
+    // successive polls. Waiting on the unresolved count, not on each event, since an event
+    // read by one wait is not seen by the next.
     let mut q = c.req("open_orders", "q1", "").0;
-    for n in 0..40 {
+    for n in 0..100 {
         if q["unresolved"] == 0 {
             break;
         }

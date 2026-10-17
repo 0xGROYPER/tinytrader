@@ -214,6 +214,32 @@ struct Pending {
     next: usize,
 }
 
+/// The longest wait between two by-id lookups of one unresolved order. It bounds the
+/// broker call rate per order and decides nothing about the order.
+const RECHECK_CAP: Duration = Duration::from_secs(30);
+
+/// The backoff of one unresolved order's poll lookups: due at `due`, after `interval`.
+struct Recheck {
+    due: Instant,
+    interval: Duration,
+}
+
+/// Schedules the next try of a failed order: one poll after the first failure, then twice
+/// the last interval, up to `RECHECK_CAP` (or the poll, if that is longer).
+fn backoff(map: &mut HashMap<String, Recheck>, cid: &str, now: Instant, poll: Duration) {
+    let interval = match map.get(cid) {
+        Some(r) => (r.interval * 2).min(RECHECK_CAP.max(poll)),
+        None => poll,
+    };
+    map.insert(
+        cid.to_owned(),
+        Recheck {
+            due: now + interval,
+            interval,
+        },
+    );
+}
+
 /// One unknown-outcome lookup. Only `NotFound` (a 404 answer) says the broker
 /// does not have the order; `Failed` says nothing about it.
 enum Lookup {
@@ -409,6 +435,14 @@ pub(crate) struct Session<B: Broker> {
     day: (i64, usize),
     rejects: u32,
     pending: Vec<Pending>,
+    /// Poll lookups of unresolved orders, by client order id. An order without an entry
+    /// has not failed a poll lookup yet, so it is due.
+    rechecks: HashMap<String, Recheck>,
+    /// The same backoff for automatic clears, which a refused clear feeds. Kept apart so a
+    /// lookup's backoff never delays a clear of an order past its session.
+    clear_retry: HashMap<String, Recheck>,
+    /// The client order id of the last poll lookup or automatic clear, for round-robin.
+    cursor: Option<String>,
     cod_timers: Vec<(String, Instant)>,
     last_poll: Instant,
     last_seq: Arc<AtomicU64>,
@@ -442,6 +476,9 @@ impl<B: Broker> Session<B> {
             day: (0, 0),
             rejects: 0,
             pending: Vec::new(),
+            rechecks: HashMap::new(),
+            clear_retry: HashMap::new(),
+            cursor: None,
             cod_timers: Vec::new(),
             last_poll: Instant::now(),
             last_seq,
@@ -1952,10 +1989,12 @@ impl<B: Broker> Session<B> {
         Ok(Ok(()))
     }
 
-    /// Clears each unresolved day or cls order whose session has passed, when the broker
-    /// shows nothing. Runs on the poll, after `recheck_unresolved`, so it needs no timer of its
-    /// own. A refused automatic clear leaves the order alone and is not journaled.
-    fn clear_day_orders(&mut self) -> Result<(), String> {
+    /// Clears one unresolved day or cls order whose session has passed, when the broker
+    /// shows nothing: one order per poll, round-robin, on the order's poll backoff. Returns
+    /// whether it made broker calls. Its checks are non-critical (`clear_checks`), so each
+    /// takes a token that keeps the close reserve. A refused automatic clear leaves the
+    /// order alone, is not journaled, and backs off like a failed lookup.
+    fn clear_day_orders(&mut self, at: Instant) -> Result<bool, String> {
         let now = self.ts();
         let mut cids: Vec<String> = self
             .orders
@@ -1967,10 +2006,34 @@ impl<B: Broker> Session<B> {
             .map(|(c, _)| c.clone())
             .collect();
         cids.sort();
-        for cid in cids {
-            let _refused = self.clear(GATEWAY, &cid, "day_order_after_session", false)?;
+        self.clear_retry
+            .retain(|c, _| cids.binary_search(c).is_ok());
+        let retry = &self.clear_retry;
+        let Some(cid) = self.round_robin(&cids, |c| retry.get(c).is_none_or(|r| r.due <= at))
+        else {
+            return Ok(false);
+        };
+        self.cursor = Some(cid.clone());
+        match self.clear(GATEWAY, &cid, "day_order_after_session", false)? {
+            Ok(()) => {
+                self.clear_retry.remove(&cid);
+            }
+            Err(_) => backoff(&mut self.clear_retry, &cid, at, self.cfg.timing.poll),
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// The first id after the cursor, in sorted order and wrapping, that `due` accepts.
+    fn round_robin(&self, cids: &[String], due: impl Fn(&str) -> bool) -> Option<String> {
+        let start = self
+            .cursor
+            .as_ref()
+            .and_then(|c| cids.iter().position(|x| x > c))
+            .unwrap_or(0);
+        (0..cids.len())
+            .map(|k| &cids[(start + k) % cids.len()])
+            .find(|c| due(c))
+            .cloned()
     }
 
     fn resolve(&mut self, now: Instant) -> Result<(), String> {
@@ -2021,20 +2084,24 @@ impl<B: Broker> Session<B> {
                 }
                 Lookup::NotFound | Lookup::Failed => {
                     self.pending[i].next += 1;
-                    i += 1;
                 }
             }
+            // One blocking lookup per tick: the others are due and run on later ticks.
+            break;
         }
         Ok(())
     }
 
-    /// Looks up each unresolved order by client ID on the poll interval: each absent
-    /// order, and each unknown order whose last lookup failed (it is no longer
-    /// scheduled), so it settles without waiting for a stream reconnect. Found, in any
-    /// state: it is reconciled from its state and settles, or stays open when the state
-    /// is not terminal. A 404 or any other error never clears it: it stays open and
-    /// counted until a stream event or a later lookup finds it.
-    fn recheck_unresolved(&mut self) -> Result<(), String> {
+    /// Looks up one unresolved order by client ID per poll, round-robin: each absent
+    /// order, and each unknown order that is not scheduled (its last lookup failed), so it
+    /// settles without waiting for a stream reconnect. Found, in any state: it is
+    /// reconciled from its state and settles, or stays open when the state is not
+    /// terminal. A 404 or any other error never clears it: it stays open and counted
+    /// until a stream event or a later lookup finds it. A failed lookup is retried on the
+    /// next poll, then after a doubling interval capped at `RECHECK_CAP`. Each lookup
+    /// takes a non-critical token first; a refused token skips the order for this poll.
+    /// Returns whether a lookup was made.
+    fn recheck_unresolved(&mut self, now: Instant) -> Result<bool, String> {
         let mut cids: Vec<String> = self
             .orders
             .iter()
@@ -2046,13 +2113,33 @@ impl<B: Broker> Session<B> {
             .map(|(c, _)| c.clone())
             .collect();
         cids.sort();
-        for cid in cids {
-            self.budget.charge();
-            if let Ok(Some(bo)) = self.b.order(&OrderRef::Client(cid)).map(|r| r.value) {
-                self.reconcile_order(bo)?;
+        // An order that settled has no backoff left: its next failure starts over.
+        self.rechecks.retain(|c, _| cids.binary_search(c).is_ok());
+        let rechecks = &self.rechecks;
+        let Some(cid) = self.round_robin(&cids, |c| rechecks.get(c).is_none_or(|r| r.due <= now))
+        else {
+            return Ok(false);
+        };
+        if !self.budget.take(false) {
+            return Ok(false);
+        }
+        self.cursor = Some(cid.clone());
+        match self.b.order(&OrderRef::Client(cid.clone())) {
+            Ok(r) => match r.value {
+                Some(bo) => {
+                    self.rechecks.remove(&cid);
+                    self.reconcile_order(bo)?;
+                }
+                None => backoff(&mut self.rechecks, &cid, now, self.cfg.timing.poll),
+            },
+            Err(e) => {
+                if e.http_status == 429 {
+                    self.budget.block(e.retry_after_ms);
+                }
+                backoff(&mut self.rechecks, &cid, now, self.cfg.timing.poll);
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn tick(&mut self) -> Result<(), String> {
@@ -2065,8 +2152,16 @@ impl<B: Broker> Session<B> {
             self.degraded = true;
             self.sync_state()?;
         }
+        // At most one broker lookup per tick (a blocking call stalls kills, cancels and
+        // submits), so a poll's lookup or clear makes the tick's resolve wait.
+        let mut looked = false;
         if now.duration_since(self.last_poll) >= self.cfg.timing.poll {
             self.last_poll = now;
+            // The kill sentinel is checked before any lookup, so a lookup never delays it.
+            let halted = matches!(self.killed, Some((KillLevel::HaltAll, _)));
+            if !halted && self.cfg.state.join("KILL").exists() {
+                self.kill(KillLevel::HaltAll, "sentinel", "operator", "sentinel")?;
+            }
             if !self.gate_ok {
                 self.reconcile(false)?;
             } else {
@@ -2078,15 +2173,15 @@ impl<B: Broker> Session<B> {
                         }
                     }
                 }
-                self.recheck_unresolved()?;
-                self.clear_day_orders()?;
-            }
-            let halted = matches!(self.killed, Some((KillLevel::HaltAll, _)));
-            if !halted && self.cfg.state.join("KILL").exists() {
-                self.kill(KillLevel::HaltAll, "sentinel", "operator", "sentinel")?;
+                looked = self.recheck_unresolved(now)?;
+                if !looked {
+                    looked = self.clear_day_orders(now)?;
+                }
             }
         }
-        self.resolve(now)?;
+        if !looked {
+            self.resolve(now)?;
+        }
         let due: Vec<String> = self
             .cod_timers
             .iter()
