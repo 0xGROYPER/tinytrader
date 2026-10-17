@@ -234,7 +234,7 @@ defineWidget('search', {
       if (a === 'back') { my.sym = null; my.res = null; draw(); el.dispatchEvent(new CustomEvent('tt-tab-args', { bubbles: true, detail: { args: {}, title: 'Search' } })); return; }
       const sym = my.sym; if (!sym) return;
       if (a === 'chart' || a === 'options') {
-        setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym }));
+        setFocus(sym);
         document.dispatchEvent(new CustomEvent('tt-show-view', { detail: a === 'chart' ? 'candles' : 'spreads' }));
       }
       if (a === 'alert') { my.alert = !my.alert; draw(); /** @type {HTMLInputElement | null} */ (main.querySelector('.al-form input'))?.focus(); }

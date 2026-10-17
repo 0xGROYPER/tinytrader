@@ -93,7 +93,6 @@ defineWidget('watchlist', {
     // A symbol picked: the charts follow it and the news narrows to it (toggle: a click on it again widens).
     const pick = (s, toggle) => {
       setFocus(s);
-      document.dispatchEvent(new CustomEvent('tt-focus', { detail: s }));
       document.dispatchEvent(new CustomEvent('tt-news-symbol', { detail: toggle ? s : { symbol: s } }));
       update();
       /** @type {HTMLElement | null} */ (main.querySelector(`[data-wl="${CSS.escape(s)}"]`))?.scrollIntoView({ block: 'nearest' });
@@ -131,7 +130,7 @@ defineWidget('watchlist', {
       shown = n;
       const f = focused();
       if (f && syms.includes(f)) return;
-      setFocus(syms[0]); document.dispatchEvent(new CustomEvent('tt-focus', { detail: syms[0] }));
+      setFocus(syms[0]);
     };
     const changed = () => { point(); update(); if (current().join(',') !== my.asked) load(); };
     const click = e => {
