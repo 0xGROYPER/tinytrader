@@ -392,9 +392,13 @@ fn single_loss(leg: &Leg, limit: i128) -> Result<i128, &'static str> {
 }
 
 /// Index roots whose options are European: they exercise only at expiry, so their value before
-/// expiry is discounted and can sit below the intrinsic payoff. SPXW is the weekly SPX root.
-/// Only the payoff-floor bound of [`combo_loss`] depends on this.
-const EUROPEAN_ROOTS: [&str; 3] = ["SPX", "SPXW", "XSP"];
+/// expiry is discounted and can sit below the intrinsic payoff. SPXW is the weekly SPX root,
+/// and VIXW the weekly VIX root. The list must match the contract specs: an unlisted root is
+/// treated as American. The payoff-floor bound of [`combo_loss`] and the put-calendar bound of
+/// [`calendar_loss`] depend on this.
+const EUROPEAN_ROOTS: [&str; 9] = [
+    "SPX", "SPXW", "XSP", "NDX", "XND", "RUT", "MRUT", "VIX", "VIXW",
+];
 
 /// The loss per parent unit of a combo, in cents of price (signed). The payoff at expiry is
 /// piecewise linear with breakpoints at the strikes and at zero, so its least value is at
@@ -472,6 +476,11 @@ fn combo_loss(intent: &Intent) -> Result<i128, &'static str> {
 /// A less favourable long (a call above the short strike, a put below it) leaves the gap
 /// between the strikes open, so the loss is the debit plus that gap. A short expiring after
 /// its long is unknown, as is anything with more legs or ratios other than one.
+///
+/// A European put calendar is unknown whatever its strikes. Before expiry the long put is worth
+/// its strike discounted, not its intrinsic value, so the position can lose more than the debit
+/// plus the gap even when the long strike is at or above the short. European calls are bounded
+/// this way: a call is worth at least its discounted forward intrinsic value.
 fn calendar_loss(intent: &Intent, cs: &[Contract]) -> Result<i128, &'static str> {
     let (a, b) = match (intent.legs.as_slice(), cs) {
         ([a, b], [_, _]) => (a, b),
@@ -483,6 +492,9 @@ fn calendar_loss(intent: &Intent, cs: &[Contract]) -> Result<i128, &'static str>
     let (si, li) = if a.buy { (1, 0) } else { (0, 1) };
     let (short, long) = (&cs[si], &cs[li]);
     if short.put != long.put || short.expiry > long.expiry {
+        return Err("max_loss_unknown");
+    }
+    if short.put && EUROPEAN_ROOTS.contains(&short.root) {
         return Err("max_loss_unknown");
     }
     let (ks, kl) = (strike_of(short)?, strike_of(long)?);
@@ -780,6 +792,73 @@ mod tests {
             1,
         );
         assert_eq!(max_loss_cents(&diag), Ok((150 + 500) * 100));
+    }
+
+    #[test]
+    fn a_european_put_calendar_with_a_lower_long_strike_is_unknown() {
+        // Sell the 580 put expiring 16 Oct and buy the 570 put expiring 23 Oct, for a $1.00
+        // debit. On SPXW the long put is worth its discounted strike at a zero underlying, so
+        // the loss exceeds the $11.00 debit-plus-gap bound: no bound is claimed.
+        let cal = order(
+            vec![
+                leg("SPXW261016P00580000", false, true),
+                leg("SPXW261023P00570000", true, true),
+            ],
+            100,
+            1,
+        );
+        assert_eq!(max_loss_cents(&cal), Err("max_loss_unknown"));
+        // The same on the other European roots, and with the long strike at or above the short.
+        for root in ["SPX", "XSP", "NDX", "RUT", "VIX", "VIXW"] {
+            let cal = order(
+                vec![
+                    leg(&format!("{root}261016P00580000"), false, true),
+                    leg(&format!("{root}261023P00570000"), true, true),
+                ],
+                100,
+                1,
+            );
+            assert_eq!(max_loss_cents(&cal), Err("max_loss_unknown"), "{root}");
+        }
+        let covered = order(
+            vec![
+                leg("SPXW261016P00570000", false, true),
+                leg("SPXW261023P00580000", true, true),
+            ],
+            100,
+            1,
+        );
+        assert_eq!(max_loss_cents(&covered), Err("max_loss_unknown"));
+    }
+
+    #[test]
+    fn a_put_calendar_with_a_lower_long_strike_keeps_its_bound_on_spy() {
+        // The same put calendar on SPY is American, so the bound stands: $1.00 debit plus the
+        // $10 gap, $11.00 a contract.
+        let cal = order(
+            vec![
+                leg("SPY261016P00580000", false, true),
+                leg("SPY261023P00570000", true, true),
+            ],
+            100,
+            1,
+        );
+        assert_eq!(max_loss_cents(&cal), Ok(1100 * 100));
+    }
+
+    #[test]
+    fn a_european_call_calendar_keeps_its_bound() {
+        // Sell the 580 call and buy the 585 call a week later, on SPXW, for a $1.00 debit: the
+        // $5 gap is open, so the loss is $6.00 a contract.
+        let cal = order(
+            vec![
+                leg("SPXW261016C00580000", false, true),
+                leg("SPXW261023C00585000", true, true),
+            ],
+            100,
+            1,
+        );
+        assert_eq!(max_loss_cents(&cal), Ok((100 + 500) * 100));
     }
 
     #[test]
