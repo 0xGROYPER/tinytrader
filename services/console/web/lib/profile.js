@@ -69,6 +69,8 @@ export function painted(changed) {
 
 /** The state poll's size and parse time. */
 export function statePoll(bytes, parseMs) { log({ k: 'st', bytes, ms: +parseMs.toFixed(2) }); }
+/** A channel's value changed (lib/channels.js). */
+export function channelPublished(name) { log({ k: 'ev', type: `ch:${name}`, by: caller() }); }
 
 // The widget that called, from the stack (async code has left `current`).
 function caller() {

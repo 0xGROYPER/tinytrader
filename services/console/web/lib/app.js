@@ -4,7 +4,7 @@
 // Settings shared between devices: read before anything here runs.
 import './prefs.js';
 import { esc, bytes, duration, fmt, ago, etStamp } from './format.js';
-import { fleet, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf, newsItems } from './fleet.js';
+import { fleet, setTopology, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf, newsItems } from './fleet.js';
 import { widget, widgetNames } from './widgets.js';
 import { drawCharts } from './charts.js';
 import { prof, timed, statePoll, profileWanted, startProfile, stopProfile } from './profile.js';
@@ -1375,7 +1375,7 @@ function status() {
   $('banner').textContent = problems.join(' ');
 }
 async function loadTopology() {
-  try { const r = await fetch('/api/topology', { cache: 'no-store' }); if (r.ok) { fleet.topo = await r.json(); document.title = fleet.topo.name ? `tinytrader · ${fleet.topo.name}` : 'tinytrader'; } } catch (_) {}
+  try { const r = await fetch('/api/topology', { cache: 'no-store' }); if (r.ok) { setTopology(await r.json()); document.title = fleet.topo.name ? `tinytrader · ${fleet.topo.name}` : 'tinytrader'; } } catch (_) {}
 }
 // The snapshot, as changes since the last answer: each service's unchanged
 // fields keep their previous value (and object), so most polls carry only

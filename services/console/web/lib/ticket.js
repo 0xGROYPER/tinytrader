@@ -9,6 +9,7 @@
 // seconds. A live account is never picked for you, and its Send asks once
 // more before it sends.
 import { fleet, svcState } from './fleet.js';
+import { onChange } from './channels.js';
 import { get, stream } from './cache.js';
 import { esc } from './format.js';
 import { notSentText } from './orders.js';
@@ -64,6 +65,8 @@ function outcome(v, ok) {
 export function createTicket(box, hooks = {}) {
   /** @type {null | { title: string, acct: string, from: string, legs: { symbol: string, side: 'buy' | 'sell', ratio: number }[], qty: number, effect: 'open' | 'close', market: boolean, limit: number | null, quotes: Map<string, any>, qErr: string, confirm: number, sending: boolean, result: string, done: boolean, risk?: (net: number, qty: number) => string }} */
   let t = null, timer = 0;
+  // A ticket opened before the topology named a chain service reads its quotes once it does.
+  const offTopology = onChange('topology', () => { if (t?.qErr?.startsWith('No service')) readQuotes(); });
 
   // Bid and ask for every leg, one chain read per underlying and expiry.
   async function readQuotes() {
@@ -221,6 +224,6 @@ export function createTicket(box, hooks = {}) {
     close,
     get isOpen() { return !!t; },
     update() { routed(() => draw()); draw(); },
-    dispose() { clearTimeout(timer); box.removeEventListener('click', click); box.removeEventListener('input', input); box.removeEventListener('change', change); box.removeEventListener('keydown', key); },
+    dispose() { clearTimeout(timer); offTopology(); box.removeEventListener('click', click); box.removeEventListener('input', input); box.removeEventListener('change', change); box.removeEventListener('keydown', key); },
   };
 }

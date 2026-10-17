@@ -10,6 +10,7 @@ import { fleet } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused } from '../lib/theme.js';
 import { get, stream } from '../lib/cache.js';
+import { onChange } from '../lib/channels.js';
 
 const EVERY = 30_000;
 /** Strikes shown either side of spot. */
@@ -103,15 +104,16 @@ defineWidget('ivmap', {
       const v = String(new FormData(e.target).get('sym') || '').trim().toUpperCase();
       if (/^[A-Z0-9.]{1,10}$/.test(v)) { e.target.querySelector('input')?.blur(); pick(v); }
     };
-    const follow = (/** @type {Event} */ e) => { const s = /** @type {CustomEvent} */ (e).detail; if (typeof s === 'string') pick(s); };
     el.addEventListener('click', click);
     el.addEventListener('submit', submit);
-    document.addEventListener('tt-focus', follow);
+    onChange('focus', s => { if (typeof s === 'string') pick(s); });
+    // The chain service comes with the topology: a chain that wasn't there is read once it is.
+    onChange('topology', () => { if (!my.chain) load(); });
     const timer = setInterval(load, EVERY);
     update(); load();
     return {
       update() {},
-      dispose() { my.alive = false; clearInterval(timer); el.removeEventListener('click', click); el.removeEventListener('submit', submit); document.removeEventListener('tt-focus', follow); },
+      dispose() { my.alive = false; clearInterval(timer); el.removeEventListener('click', click); el.removeEventListener('submit', submit); },
     };
   },
 });

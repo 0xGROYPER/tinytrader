@@ -256,3 +256,13 @@ interface WidgetDef {
   title: string;
   mount(el: HTMLElement): WidgetInstance;
 }
+
+/** The state channels (lib/channels.js): each holds its latest value. */
+interface Channels {
+  /** The deployment, as /api/topology last served it (lib/fleet.js sets it); null until read. */
+  topology: Topology | null;
+  /** The symbol picked last, which charts and the builders follow (lib/theme.js). */
+  focus: string | null;
+  /** The account picked for trading, kept in this browser. */
+  account: string;
+}

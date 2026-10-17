@@ -16,6 +16,7 @@ import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { focused, theme } from '../lib/theme.js';
+import { onChange, publish as publishChannel } from '../lib/channels.js';
 import { position, publish, wanted } from '../lib/position.js';
 import { recommend } from '../lib/recommend.js';
 import { GROUPS, STRUCTURES, identify, whatIs } from '../lib/structures.js';
@@ -70,7 +71,7 @@ defineWidget('spreads', {
     const $ = s => el.querySelector(s);
     // The order ticket, in its own box; the account picked there is kept.
     const tkBox = /** @type {HTMLElement} */ ($('.sb-ticket'));
-    const tk = createTicket(tkBox, { onAccount: n => { my.acct = n; store('tt-sb-account', n); } });
+    const tk = createTicket(tkBox, { onAccount: n => { my.acct = n; store('tt-sb-account', n); publishChannel('account', n); } });
 
     const day0 = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // By day, so yesterday's kept listing isn't taken for today's.
@@ -82,14 +83,15 @@ defineWidget('spreads', {
     const took = v => { if (v?.spot) my.spot = v.spot; };
 
     // What the chain lists: kept from before at once (today's), then read.
+    // Waiting for a topology that names a chain service (the page can mount the builder before it has read one).
+    let waitingChain = false;
     async function loadIndex() {
       const svc = chainService(), sym = my.sym;
       if (!svc) {
-        // The page can mount the builder before it has read the topology: look again shortly.
-        my.err = 'No service serves option chains (alpaca-data).'; render();
-        setTimeout(() => { if (my.alive && sym === my.sym && !my.index) loadIndex(); }, 1000);
+        waitingChain = true; my.err = 'No service serves option chains (alpaca-data).'; render();
         return;
       }
+      waitingChain = false;
       if (my.err.startsWith('No service')) my.err = '';
       const url = indexUrl(svc, sym), kept = peek(url)?.v;
       if (kept && !my.index) { my.index = kept; arrived(); }
@@ -481,17 +483,15 @@ defineWidget('spreads', {
       if (ask.sym === my.sym && my.index) { my.ask = ask; loadFull(); }
       else { my.ask = ask; switchTo(ask.sym); }
     };
-    const follow = (/** @type {Event} */ e) => {
-      const s = /** @type {CustomEvent} */ (e).detail;
+    onChange('focus', s => {
       // A suggestion for it is on its way (the screener sends both).
       if (typeof s === 'string' && s !== my.sym && wanted.ask?.sym !== s && my.ask?.sym !== s) switchTo(s);
-    };
+    });
+    onChange('topology', () => { if (waitingChain) loadIndex(); });
     document.addEventListener('tt-recommend', asked);
     document.addEventListener('tt-held', heldAsked);
-    document.addEventListener('tt-focus', follow);
-    // Opened from an account's card: that account for the Trade review.
-    const acctAsked = e => { const n = /** @type {CustomEvent} */ (e).detail; if (typeof n === 'string' && n) { my.acct = n; render(); } };
-    document.addEventListener('tt-sb-account', acctAsked);
+    // Opened from an account's card (or picked in the ticket): that account for the Trade review.
+    onChange('account', n => { if (n && n !== my.acct) { my.acct = n; render(); } });
     if (wanted.held) heldAsked(); else if (wanted.ask) asked(); else { render(); loadIndex(); }
     resized.observe(el);
     // The shown expiry's prices, every 5 seconds while the page is in view.
@@ -502,7 +502,7 @@ defineWidget('spreads', {
       update() {},
       dispose() {
         my.alive = false; clearInterval(timer); resized.disconnect(); tk.dispose();
-        document.removeEventListener('tt-recommend', asked); document.removeEventListener('tt-held', heldAsked); document.removeEventListener('tt-focus', follow); document.removeEventListener('tt-sb-account', acctAsked);
+        document.removeEventListener('tt-recommend', asked); document.removeEventListener('tt-held', heldAsked);
         publish({ shown: false });
       },
     };

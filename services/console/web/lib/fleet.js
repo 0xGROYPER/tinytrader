@@ -2,9 +2,19 @@
 // the latest snapshot of every service (health, metrics, streams). The page
 // fills these in; widgets read them (decision 0010).
 import { fmt } from './format.js';
+import { publish } from './channels.js';
 
 /** @type {{ topo: Topology | null, snap: Snapshot | null }} */
 export const fleet = { topo: null, snap: null };
+
+let topoText = '';
+/** Sets the topology, and publishes it when its text changed: it's read every few seconds, and mostly is the same.
+ * @param {Topology} t */
+export function setTopology(t) {
+  const text = JSON.stringify(t);
+  if (text === topoText) return;
+  topoText = text; fleet.topo = t; publish('topology', t);
+}
 
 /** @type {(id: string) => ServiceState} */
 export const svcState = id => fleet.snap?.services?.[id] || {};
