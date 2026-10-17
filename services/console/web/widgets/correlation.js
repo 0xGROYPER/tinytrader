@@ -4,13 +4,13 @@
 // shown as a matrix coloured blue (-1) through white (0) to red (+1). Each
 // row also gives the symbol's annualised realised volatility over the window.
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { serviceFor } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme } from '../lib/theme.js';
 import { get } from '../lib/cache.js';
 
 const WINDOWS = [20, 60, 120, 250];
-const source = () => (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id || null;
+const source = () => serviceFor('bars', 'snapshots') || null;
 
 /** Daily closes by date for one symbol. @returns {Promise<Map<number, number>>} */
 async function closes(svc, symbol, days) {

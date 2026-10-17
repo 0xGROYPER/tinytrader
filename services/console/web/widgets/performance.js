@@ -11,12 +11,12 @@
 // (Alpaca's portfolio history) less deposits and withdrawals, so it includes
 // fees and positions still open.
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet, svcState } from '../lib/fleet.js';
+import { svcState, serviceFor, servicesFor } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { occLabel } from '../lib/ticket.js';
 import { get } from '../lib/cache.js';
 
-const service = () => (fleet.topo?.services || []).find(s => s.performance)?.id || null;
+const service = () => serviceFor('performance') || null;
 const nyToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 const money = v => v == null ? '—' : `${v < 0 ? '−' : v > 0 ? '+' : ''}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: Math.abs(v) >= 1000 ? 0 : 2 })}`;
 const short = d => new Date(d + 'T12:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short', day: 'numeric' });
@@ -26,7 +26,7 @@ const tone = v => v > 0 ? 'up' : v < 0 ? 'down' : 'flat';
 const level = (v, max) => !v || !max ? 0 : 1 + Math.min(3, Math.floor(Math.abs(v) / max * 4 - 1e-9));
 
 function accounts() {
-  for (const s of (fleet.topo?.services || []).filter(x => x.accounts)) {
+  for (const s of servicesFor('accounts')) {
     const list = svcState(s.id).accounts?.accounts || [];
     if (list.length) return list.map(a => ({ name: a.name, label: a.label || a.name, live: a.environment === 'live' }));
   }
@@ -37,7 +37,7 @@ function accounts() {
 function dayList(my) {
   const list = my.perf?.days || [], today = nyToday();
   if (list.some(d => d.date === today)) return list;
-  for (const s of (fleet.topo?.services || []).filter(x => x.accounts)) {
+  for (const s of servicesFor('accounts')) {
     const a = (svcState(s.id).accounts?.accounts || []).find(x => x.name === my.acct)?.account;
     if (a?.equity && a?.last_equity) return [...list, { date: today, equity: a.equity, pnl: a.equity - a.last_equity, pnl_pct: (a.equity / a.last_equity - 1) * 100 }];
   }

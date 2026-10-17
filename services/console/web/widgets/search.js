@@ -9,7 +9,7 @@
 // price alerts on it (lib/alerts.js) or open it as a view of its own. A search in the header opens a view on the
 // ticker instead, in the Tickers folder (lib/app.js).
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet, newsItems } from '../lib/fleet.js';
+import { fleet, newsItems, serviceFor } from '../lib/fleet.js';
 import { parseSymbols, setFocus } from '../lib/theme.js';
 import { esc, ago, unentity } from '../lib/format.js';
 import { watchlists, addSymbols } from '../lib/watchlists.js';
@@ -148,7 +148,7 @@ export function bindSearch(root, onPick) {
 
 const cap = v => !v ? '' : v >= 1e12 ? `$${(v / 1e12).toFixed(2)}T` : v >= 1e9 ? `$${Math.round(v / 1e9)}B` : `$${Math.round(v / 1e6)}M`;
 const pct = v => v == null ? '—' : `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v * 100).toFixed(2)}%`;
-const svcWith = k => (fleet.topo?.services || []).find(s => s[k])?.id || null;
+const svcWith = k => serviceFor(k);
 const getJson = url => get(url, { fresh: 5000 }).catch(() => null);
 
 /** A ticker's results: quote, the screener's row, next earnings and recent news. */

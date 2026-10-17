@@ -10,13 +10,13 @@
 // chart and its news (opened beside the screener if need be), and a suggested
 // position in the Spread builder. ↑ and ↓ step through the rows the same way.
 import { defineWidget } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { fleet, serviceFor } from '../lib/fleet.js';
 import { esc, etTime } from '../lib/format.js';
 import { setFocus } from '../lib/theme.js';
 import { askRecommendation } from '../lib/position.js';
 import { get, stream } from '../lib/cache.js';
 
-const service = () => (fleet.topo?.services || []).find(s => s.screener)?.id || null;
+const service = () => serviceFor('screener') || null;
 const SHOW = 50;
 
 // The implied move to the expiry, scaled to a week (five sessions), so names

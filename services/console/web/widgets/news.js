@@ -8,7 +8,7 @@
 // chosen first in a view without a theme that has a Watchlist panel; other
 // views start on All.
 import { defineWidget, paint } from '../lib/widgets.js';
-import { newsItems, fleet } from '../lib/fleet.js';
+import { newsItems, serviceFor } from '../lib/fleet.js';
 import { esc, ago, unentity } from '../lib/format.js';
 import { theme, onTheme } from '../lib/theme.js';
 import { picked, symbolsOf, THEME_LIST } from '../lib/watchlists.js';
@@ -66,7 +66,7 @@ defineWidget('news', {
     const topEl = /** @type {HTMLElement} */ (el.querySelector('.nw-top')), listEl = /** @type {HTMLElement} */ (el.querySelector('.nw-list'));
     // Recent stories on the theme's symbols, from a service that searches news.
     async function find() {
-      const t = theme(), svc = (fleet.topo?.services || []).find(s => s.news_search)?.id;
+      const t = theme(), svc = serviceFor('news_search');
       if (!my.alive || !t?.symbols.length || !svc) return;
       try {
         my.found = (await get(stream(svc, 'news_search', { symbols: t.symbols.join(','), limit: 50 }), { fresh: 30e3 })).items || []; if (my.alive) update();
@@ -74,7 +74,7 @@ defineWidget('news', {
     }
     // And on the picked watchlist's.
     async function findWatched() {
-      const w = watch(), svc = (fleet.topo?.services || []).find(s => s.news_search)?.id;
+      const w = watch(), svc = serviceFor('news_search');
       if (!my.alive || !w?.[1].length || !svc) { my.watched = []; return; }
       try {
         my.watched = (await get(stream(svc, 'news_search', { symbols: w[1].join(','), limit: 50 }), { fresh: 30e3 })).items || []; if (my.alive) update();
@@ -92,7 +92,7 @@ defineWidget('news', {
     };
     // A ticker entered: recent stories on it too, from a service that searches news.
     async function lookUp(sym) {
-      const svc = (fleet.topo?.services || []).find(s => s.news_search)?.id; if (!svc) return;
+      const svc = serviceFor('news_search'); if (!svc) return;
       my.looking = true; update();
       try {
         my.searched = (await get(stream(svc, 'news_search', { symbols: sym, limit: 50 }), { fresh: 30e3 })).items || [];

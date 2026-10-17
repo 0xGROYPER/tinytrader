@@ -4,7 +4,7 @@
 // Settings shared between devices: read before anything here runs.
 import './prefs.js';
 import { esc, bytes, duration, fmt, ago, etStamp } from './format.js';
-import { fleet, setTopology, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf, newsItems } from './fleet.js';
+import { fleet, setTopology, statusOf, subOf, serviceFor } from './fleet.js';
 import { widget, widgetNames } from './widgets.js';
 import { drawCharts } from './charts.js';
 import { prof, timed, statePoll, profileWanted, startProfile, stopProfile } from './profile.js';
@@ -1350,7 +1350,7 @@ function bellToggle(open) {
   // Looked at: the count goes, the list stays (until removed or re-armed).
   else markSeen();
 }
-watchAlerts(() => (fleet.topo?.services || []).find(s => s.snapshots)?.id || null);
+watchAlerts(() => serviceFor('snapshots') || null);
 document.addEventListener('tt-alerts', () => { updateHeaderStatus(); if (!$('bell-pop').hidden) bellDraw(); });
 $('bell').addEventListener('click', e => { e.stopPropagation(); bellToggle($('bell-pop').hidden); });
 document.addEventListener('click', e => {

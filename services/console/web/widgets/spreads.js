@@ -13,7 +13,7 @@
 // quantity, market or a limit, and Send to that account's order gateway as
 // the console's trade client (POST /api/orders/{account}).
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet, svcState } from '../lib/fleet.js';
+import { svcState, serviceFor, servicesFor } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { focused, theme } from '../lib/theme.js';
 import { onChange, publish as publishChannel } from '../lib/channels.js';
@@ -27,12 +27,12 @@ const store = (k, v) => { try { if (v === undefined) return localStorage.getItem
 // Each account's open orders as the broker has them (alpaca-account), however placed: null if unknown.
 const openOrders = () => {
   const out = new Map();
-  for (const s of (fleet.topo?.services || []).filter(x => x.accounts)) {
+  for (const s of servicesFor('accounts')) {
     for (const a of svcState(s.id).accounts?.accounts || []) if (a.name && a.orders !== undefined) out.set(a.name, a.orders);
   }
   return out;
 };
-const chainService = () => (fleet.topo?.services || []).find(s => s.chain)?.id || null;
+const chainService = () => serviceFor('chain') || null;
 const N = x => 0.5 * (1 + erf(x / Math.SQRT2));
 function erf(x) {
   const s = x < 0 ? -1 : 1, t = 1 / (1 + 0.3275911 * Math.abs(x));

@@ -15,7 +15,7 @@
 // sets price alerts for it (lib/alerts.js); the % heading sorts by the day's
 // change.
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { fleet, serviceFor } from '../lib/fleet.js';
 import { esc, etTime } from '../lib/format.js';
 import { theme, focused, setFocus, parseSymbols } from '../lib/theme.js';
 import { alertsFor, alertForm, describe } from '../lib/alerts.js';
@@ -26,7 +26,7 @@ import { get, stream } from '../lib/cache.js';
 const EVERY = 5000;
 
 /** The first service serving stock snapshots. */
-const source = () => (fleet.topo?.services || []).find(s => s.snapshots)?.id || null;
+const source = () => serviceFor('snapshots') || null;
 
 const pct = x => x == null ? '' : `${x >= 0 ? '+' : '−'}${Math.abs(x * 100).toFixed(2)}%`;
 const num = x => x == null ? '' : x.toFixed(x >= 1 ? 2 : 4);

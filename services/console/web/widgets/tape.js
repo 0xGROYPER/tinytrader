@@ -18,7 +18,7 @@
 // by separate counts (4000 trades held, 1500 kept in the browser), as quotes
 // outnumber trades many times over at the open.
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { serviceFor } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { focused } from '../lib/theme.js';
 
@@ -41,7 +41,7 @@ function trim(ticks, trades, quotes) {
 const TRADES = 4000, QUOTES = 1000;
 const EVERY = 500, HOLD = 1500, SHOW = 300, BIG = 1000, FLASH = 1200;
 const SIZES = [0, 100, 500, 1000, 5000];
-const relay = () => (fleet.topo?.services || []).find(s => s.tape)?.id || null;
+const relay = () => serviceFor('tape') || null;
 const hms = t => new Date(t * 1000).toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour12: false });
 const ms = t => String(Math.floor((t % 1) * 1000)).padStart(3, '0');
 const side = x => x.p == null ? '' : x.a != null && x.p >= x.a ? 'buy' : x.b != null && x.p <= x.b ? 'sell' : 'mid';
