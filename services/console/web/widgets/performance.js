@@ -96,12 +96,12 @@ defineWidget('performance', {
     try { my.acct = JSON.parse(el.dataset.args || '{}').account || ''; } catch (_) {}
     el.innerHTML = '<div class="pf"><div class="pf-top"></div><section class="pf-sec pf-trades"></section><section class="pf-sec pf-cal"></section></div>';
     const $ = s => /** @type {HTMLElement} */ (el.querySelector(s));
-    const ask = (what, q) => get(`/api/stream/${encodeURIComponent(service() || 'accounts')}/${what}?${q}`, { fresh: 5000 });
+    const ask = (what, q) => { const svc = service(); return svc ? get(`/api/stream/${encodeURIComponent(svc)}/${what}?${q}`, { fresh: 5000 }) : Promise.reject(new Error('No service serves account performance (a `performance` stream).')); };
     const draw = () => {
       const list = accounts();
       if (!list.some(a => a.name === my.acct)) my.acct = (list.find(a => a.live) || list[0])?.name || '';
       paint($('.pf-top'), list.length ? `<select class="acct-pick pf-acct" aria-label="Account">${list.map(a => `<option value="${esc(a.name)}"${a.name === my.acct ? ' selected' : ''}>${esc(a.label)}</option>`).join('')}</select>` : '<p class="muted">No account service is running.</p>');
-      if (!service()) { paint($('.pf-trades'), '<p class="muted">The account service needs redeploying for performance.</p>'); return; }
+      if (!service()) { paint($('.pf-trades'), '<p class="muted">No service serves account performance (a <code>performance</code> stream).</p>'); return; }
       paint($('.pf-trades'), tradesView(my)); paint($('.pf-cal'), monthView(my));
     };
     async function loadPerf() {

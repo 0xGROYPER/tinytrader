@@ -26,6 +26,18 @@ export const servicesFor = (...caps) => (read('topology')?.services || []).filte
 /** @type {(id: string) => ServiceState} */
 export const svcState = id => fleet.snap?.services?.[id] || {};
 
+/** The option roots the deployment's relays carry (`SPY` for a relay of
+ * `SPY.OPT`), from their `/describe`: what the option views offer first. */
+export function optionRoots() {
+  const roots = new Set();
+  for (const s of read('topology')?.services || []) {
+    for (const x of [...(s.relay?.symbols || []), ...(s.schedule || []).flatMap(e => e.symbols || [])]) {
+      if (typeof x === 'string' && x.endsWith('.OPT')) roots.add(x.slice(0, -4));
+    }
+  }
+  return [...roots];
+}
+
 export function metric(id, name, labels) {
   const list = svcState(id).metrics?.[name] || [];
   const hit = list.find(m => !labels || Object.entries(labels).every(([k, v]) => m.labels[k] === v));

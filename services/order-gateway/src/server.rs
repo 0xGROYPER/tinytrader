@@ -104,6 +104,9 @@ pub struct Config {
     pub listen_any: bool,
     /// Durable state root (journal, lock, `KILL`).
     pub state: PathBuf,
+    /// Directories the state root must not be under, besides `/tmp`
+    /// (`--forbid-state-under`): a deployment's scratch or bulk-data volumes.
+    pub forbid_state: Vec<PathBuf>,
     /// Clients bound to this account.
     pub clients: Vec<ClientSpec>,
     /// Allowlist and caps.
@@ -114,8 +117,7 @@ pub struct Config {
     pub stall_after_admitted: bool,
 }
 
-/// Refuses a non-loopback listen address and a state root under `/tmp` or
-/// `/Volumes/Data`.
+/// Refuses a non-loopback listen address and a state root under `/tmp`.
 ///
 /// # Errors
 /// The refusal reason.
@@ -126,11 +128,20 @@ pub fn check_paths(listen: SocketAddr, state: &Path) -> Result<(), String> {
     check_state(state)
 }
 
-/// The state root must not be under `/tmp` or `/Volumes/Data`.
+/// The state root must not be under `/tmp`.
 ///
 /// # Errors
 /// Names the forbidden root.
 pub fn check_state(state: &Path) -> Result<(), String> {
+    check_state_under(state, &[])
+}
+
+/// The state root must not be under `/tmp`, nor under any of `forbidden`
+/// (the deployment's own, from `--forbid-state-under`).
+///
+/// # Errors
+/// Names the forbidden root.
+pub fn check_state_under(state: &Path, forbidden: &[PathBuf]) -> Result<(), String> {
     let mut probe = state.to_path_buf();
     while !probe.exists() {
         if !probe.pop() {
@@ -139,9 +150,13 @@ pub fn check_state(state: &Path) -> Result<(), String> {
     }
     let real = probe.canonicalize().unwrap_or(probe);
     let full = real.join(state.strip_prefix(&real).unwrap_or(Path::new("")));
-    for bad in ["/tmp", "/private/tmp", "/Volumes/Data"] {
+    let fixed = [Path::new("/tmp"), Path::new("/private/tmp")];
+    for bad in fixed
+        .into_iter()
+        .chain(forbidden.iter().map(PathBuf::as_path))
+    {
         if full.starts_with(bad) || state.starts_with(bad) {
-            return Err(format!("--state must not be under {bad}"));
+            return Err(format!("--state must not be under {}", bad.display()));
         }
     }
     Ok(())
@@ -427,6 +442,7 @@ pub fn start<B: Broker + Send + 'static>(cfg: Config, broker: B) -> Result<Gatew
     } else {
         check_paths(cfg.listen, &cfg.state)?;
     }
+    check_state_under(&cfg.state, &cfg.forbid_state)?;
     let (journal, recovered) = Journal::open(&cfg.state, &cfg.account)?;
     let listener =
         TcpListener::bind(cfg.listen).map_err(|e| format!("bind {}: {e}", cfg.listen))?;

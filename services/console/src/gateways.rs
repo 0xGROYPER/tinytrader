@@ -1,8 +1,9 @@
 //! The order gateways the console may act through: the Accounts widget's
-//! Flatten and Resume buttons as the operator's admin client `ops`
-//! (`CONSOLE_GATEWAYS`, `CONSOLE_GATEWAY_TOKEN`), and the Spread builder's
-//! orders as the trade client `console`, whose order ids start `tt-`
-//! (`CONSOLE_TRADE_TOKEN`).
+//! Flatten and Resume buttons as an admin client (`CONSOLE_GATEWAY_CLIENT`,
+//! default `ops`, with `CONSOLE_GATEWAY_TOKEN`), and the Spread builder's
+//! orders as a trade client (`CONSOLE_TRADE_CLIENT`, default `console`, with
+//! `CONSOLE_TRADE_TOKEN`), whose order ids start with `CONSOLE_TRADE_PREFIX`
+//! (default `tt-`). The names and prefix must match the gateway's `--client`.
 //!
 //! Each request opens one connection to the account's gateway
 //! (tinytrader.gateway/1: NDJSON over TCP), sends `hello`, then the one
@@ -18,8 +19,9 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::TcpStream;
 
 const SCHEMA: &str = "tinytrader.gateway/1";
-/// The console's trade client and its order id prefix.
+/// The console's default trade client, admin client and order id prefix.
 pub const TRADER: &str = "console";
+pub const ADMIN: &str = "ops";
 pub const PREFIX: &str = "tt-";
 
 /// Which client a request goes as.
@@ -36,10 +38,15 @@ pub struct Gateways {
     pub addrs: BTreeMap<String, String>,
     token: Option<String>,
     trade_token: Option<String>,
+    /// The client names the console says `hello` as.
+    admin_client: String,
+    trade_client: String,
+    /// The trade client's `client_order_id` prefix.
+    pub prefix: String,
 }
 
 impl Gateways {
-    /// `paper-1=host.docker.internal:7701;paper-3=...`, and the admin token
+    /// `paper=gateway-paper:7701;live=gateway-live:7710`, and the admin token
     /// from `CONSOLE_GATEWAY_TOKEN` or `CONSOLE_GATEWAY_TOKEN_FILE`.
     #[must_use]
     pub fn from_env() -> Self {
@@ -50,10 +57,20 @@ impl Gateways {
         let trade_token = tinytrader_observe::secret("CONSOLE_TRADE_TOKEN")
             .ok()
             .filter(|t| !t.is_empty());
+        let name = |var: &str, default: &str| {
+            std::env::var(var)
+                .ok()
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| default.to_owned())
+        };
         Self {
             addrs,
             token,
             trade_token,
+            admin_client: name("CONSOLE_GATEWAY_CLIENT", ADMIN),
+            trade_client: name("CONSOLE_TRADE_CLIENT", TRADER),
+            prefix: name("CONSOLE_TRADE_PREFIX", PREFIX),
         }
     }
 
@@ -88,13 +105,13 @@ impl Gateways {
             .ok_or("no gateway for this account")?;
         let (client, token) = match who {
             As::Ops => (
-                "ops",
+                self.admin_client.as_str(),
                 self.token
                     .as_deref()
                     .ok_or("no gateway token configured (CONSOLE_GATEWAY_TOKEN)")?,
             ),
             As::Trade => (
-                TRADER,
+                self.trade_client.as_str(),
                 self.trade_token
                     .as_deref()
                     .ok_or("no trade token configured (CONSOLE_TRADE_TOKEN)")?,

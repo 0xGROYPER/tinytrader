@@ -75,7 +75,7 @@ const service = fleet => serviceFor('daily') || null;
 export async function closes(fleet, symbols) {
   const svc = service(fleet);
   // Before the topology has loaded there's no telling yet: asked again in a second.
-  if (!svc) return fleet.topo ? { series: new Map(), error: 'No service serves daily closes (alpaca-data).', wait: STALE } : { series: new Map(), error: '', wait: 1000 };
+  if (!svc) return fleet.topo ? { series: new Map(), error: 'No service serves daily closes (a `daily` stream).', wait: STALE } : { series: new Map(), error: '', wait: 1000 };
   const want = [...new Set(symbols)].filter(s => !kept.has(s) || old(kept.get(s)));
   let error = '';
   for (let i = 0; i < want.length; i += 200) {

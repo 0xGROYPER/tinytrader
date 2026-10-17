@@ -61,7 +61,7 @@ function readout(my) {
 
 function draw(my, W, H) {
   const head = '<div><h1>Sector heatmap</h1><p class="muted" style="margin:0">Large companies by sector, sized by market value and coloured by the day\'s change.</p></div>';
-  if (!service()) return head + '<p class="muted">No service serves the options screener (alpaca-data).</p>';
+  if (!service()) return head + '<p class="muted">No service serves the options screener (a <code>screener</code> stream).</p>';
   if (my.err) return head + `<p class="msg-err">${esc(my.err)}</p>`;
   if (!my.rows) return head + '<p class="muted">Loading…</p>';
   const [field, SAT] = PERIODS[my.period], chg = r => r[field] ?? null;

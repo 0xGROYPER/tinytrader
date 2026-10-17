@@ -1727,7 +1727,7 @@ async fn main() {
         .route("/screener", get(screen))
         .with_state(app)
         .merge(observer.router());
-    let listen = listen_address("ALPACA_DATA_LISTEN", "127.0.0.1:9123");
+    let listen = listen_address("ALPACA_DATA_LISTEN", "127.0.0.1:9125");
     let listener = match tokio::net::TcpListener::bind(&listen).await {
         Ok(l) => l,
         Err(e) => {

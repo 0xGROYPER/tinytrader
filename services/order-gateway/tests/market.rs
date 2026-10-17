@@ -334,3 +334,26 @@ fn rule5_fill_beats_simultaneous_cancel() {
         );
     });
 }
+
+/// `relay:HOST:PORT` joins a market data relay before reading its records.
+#[test]
+fn relay_sources_send_a_join_request() {
+    use std::io::BufRead as _;
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    let bytes = stream(&main_quotes());
+    let joined = std::thread::spawn(move || {
+        let (s, _) = l.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(s.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let mut s = s;
+        let _ = s.write_all(&bytes);
+        line
+    });
+    let sim = SimBroker::market("{}", &format!("relay:{addr}")).unwrap();
+    let join: Value = serde_json::from_str(&joined.join().unwrap()).unwrap();
+    assert_eq!(join["protocol"], "tinytrader.relay/1");
+    drop(sim);
+}

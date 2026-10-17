@@ -1,7 +1,7 @@
 //! Protocol conformance: a golden NDJSON transcript, framing and handshake errors,
 //! strict request validation, roles and event visibility, loopback-only binding.
 mod support;
-use order_gateway::{SimBroker, check_paths, start};
+use order_gateway::{SimBroker, check_paths, check_state_under, start};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -280,13 +280,13 @@ fn loopback_only_and_state_root_refusals() {
         .unwrap_err()
         .contains("/tmp")
     );
+    let bulk = std::path::PathBuf::from("/srv/bulk");
     assert!(
-        check_paths(
-            "127.0.0.1:7601".parse().unwrap(),
-            std::path::Path::new("/Volumes/Data/gw")
-        )
-        .is_err()
+        check_state_under(std::path::Path::new("/srv/bulk/gw"), std::slice::from_ref(&bulk))
+            .unwrap_err()
+            .contains("/srv/bulk")
     );
+    assert!(check_state_under(std::path::Path::new("/srv/state/gw"), &[bulk]).is_ok());
     assert!(check_paths("[::1]:7601".parse().unwrap(), tmp).is_ok());
     let r = root("bind");
     let tok = r.join("t.token");

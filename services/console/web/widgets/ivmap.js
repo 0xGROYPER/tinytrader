@@ -67,7 +67,7 @@ function draw(my) {
   const t = theme(), picks = [...new Set([...(t?.symbols || []), my.symbol].filter(Boolean))].slice(0, 16);
   const bar = `<form class="iv-bar"><input class="input iv-input" name="sym" value="${esc(my.symbol || '')}" placeholder="Symbol" aria-label="Underlying" autocomplete="off" spellcheck="false">
     <span class="chips">${picks.map(s => `<button type="button" class="chip-btn" data-iv-pick="${esc(s)}" aria-pressed="${s === my.symbol}">${esc(s)}</button>`).join('')}</span></form>`;
-  if (!svc) return bar + '<p class="muted">No service serves option chains (alpaca-data).</p>';
+  if (!svc) return bar + '<p class="muted">No service serves option chains (a <code>chain</code> stream).</p>';
   if (!my.symbol) return bar + '<p class="muted">Pick or type an underlying.</p>';
   if (my.err) return bar + `<p class="muted">${esc(my.err)}</p>`;
   if (!my.chain) return bar + '<p class="muted">Loading the chain…</p>';

@@ -9,7 +9,8 @@ const NS: i64 = 1_000_000_000;
 /// Operator profile: allowlist and per-account caps (section 8).
 #[derive(Clone, Debug)]
 pub struct Profile {
-    /// Allowed option roots.
+    /// Allowed option roots; none by default, so a deployment names its own
+    /// (`--underlyings`).
     pub underlyings: Vec<String>,
     /// Clients whose option orders may be on any underlying (a manual
     /// trading client); every other check and cap still applies to them.
@@ -42,7 +43,7 @@ pub struct Profile {
 impl Default for Profile {
     fn default() -> Self {
         Self {
-            underlyings: vec!["SPY".into()],
+            underlyings: Vec::new(),
             any_underlying_clients: Vec::new(),
             equities: Vec::new(),
             allow_short: false,
