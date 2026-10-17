@@ -74,10 +74,9 @@ pub struct Profile {
 /// What the file says about one `(account, client)` pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Applied {
-    /// No binding: the client has only the account-wide limits.
+    /// No rules: the client has only the account-wide limits. A binding switched off in the
+    /// file is this too.
     None,
-    /// A binding that is switched off: the client may close, but not open, on this account.
-    Disabled,
     /// A binding in force.
     Enabled(Profile),
 }
@@ -158,12 +157,12 @@ impl Rules {
         })
     }
 
-    /// The rules that apply to `client` on `account`.
+    /// The rules that apply to `client` on `account`. A binding that is switched off means
+    /// the rules are off for that client, as if it were not in the file.
     pub fn binding(&self, account: &str, client: &str) -> Applied {
         match self.bindings.get(&(account.to_owned(), client.to_owned())) {
-            None => Applied::None,
-            Some((_, false)) => Applied::Disabled,
             Some((profile, true)) => Applied::Enabled(self.profiles[profile]),
+            None | Some((_, false)) => Applied::None,
         }
     }
 
@@ -271,10 +270,6 @@ pub fn check_order(applied: Applied, opening: bool, o: &Opening<'_>) -> Result<(
     }
     match applied {
         Applied::None => Ok(()),
-        Applied::Disabled => Err(refuse(
-            "binding_disabled",
-            "this client's rules are switched off on this account, so it may not open here".into(),
-        )),
         Applied::Enabled(profile) => check_opening(&profile, o),
     }
 }
@@ -388,7 +383,7 @@ underlyings = ["SPY", "XSP", "SPX"]
             Applied::Enabled(Profile::default())
         );
         assert_eq!(r.binding("paper-1", "other"), Applied::None);
-        assert_eq!(r.binding("live-1", "console"), Applied::Disabled);
+        assert_eq!(r.binding("live-1", "console"), Applied::None);
         assert_eq!(r.group_of("XSP"), "SPY");
         assert_eq!(r.group_of("AAPL"), "AAPL");
     }
@@ -531,20 +526,16 @@ underlyings = ["SPY", "XSP", "SPX"]
     }
 
     #[test]
-    fn a_disabled_binding_is_not_a_profile() {
-        assert_eq!(rules().binding("live-1", "console"), Applied::Disabled);
-    }
-
-    #[test]
-    fn a_disabled_binding_refuses_openings_but_never_closes() {
+    fn a_disabled_binding_applies_no_rules() {
+        // The live binding is in the file switched off: it is the same as no binding.
+        assert_eq!(rules().binding("live-1", "console"), Applied::None);
         let mut o = open(1_00);
         o.market = true;
         o.start_equity = None;
         assert_eq!(
-            check_order(Applied::Disabled, true, &o).unwrap_err().rule,
-            "binding_disabled"
+            check_order(rules().binding("live-1", "console"), true, &o),
+            Ok(())
         );
-        assert_eq!(check_order(Applied::Disabled, false, &o), Ok(()));
     }
 
     #[test]
