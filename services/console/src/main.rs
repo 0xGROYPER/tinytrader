@@ -41,7 +41,7 @@
 //!   and `Tags` headers), or `CONSOLE_NOTIFY_FILE` naming a file holding it.
 //!   Optional. Down: a container exited, dead, restarting or gone, or a
 //!   service reporting `failed` (`notify.rs`).
-//! - `CONSOLE_STORE`: the store, e.g. `http://host.docker.internal:9120`, so
+//! - `CONSOLE_STORE`: the store, e.g. `http://store:9120`, so
 //!   the Storage widget can approve a new drive (decision 0007). Only that
 //!   one call is passed through. `CONSOLE_STORE_TOKEN` (or `_FILE`): the
 //!   store's write token, when the store requires one, sent with it.
@@ -53,12 +53,14 @@
 //!   decision 0012). `/api/queue/...` is passed to it, so the Queue widget
 //!   can add, edit and cancel jobs; the queue runs only its templates.
 //! - `CONSOLE_GATEWAYS`: order gateways by account, e.g.
-//!   `paper-1=host.docker.internal:7701;paper-3=host.docker.internal:7700`, and
+//!   `paper=gateway-paper:7701;live=gateway-live:7710`, and
 //!   `CONSOLE_GATEWAY_TOKEN` (or `_FILE`), the operator's admin token for them
 //!   (optional). `/api/accounts/{account}/flatten` and `.../resume` act through
 //!   the account's gateway; an account without one (live) can't be flattened.
+//!   The console says `hello` as `CONSOLE_GATEWAY_CLIENT` (default `ops`).
 //!   With `CONSOLE_TRADE_TOKEN` (or `_FILE`), the console's trade client
-//!   `console` sends the Spread builder's orders: `GET /api/orders` (each
+//!   (`CONSOLE_TRADE_CLIENT`, default `console`; order ids start with
+//!   `CONSOLE_TRADE_PREFIX`, default `tt-`) sends the Spread builder's orders: `GET /api/orders` (each
 //!   account's gateway state and the console's open orders), `POST
 //!   /api/orders/{account}` (`{order, confirm: account}`) and `POST
 //!   /api/orders/{account}/{client_order_id}/cancel`.
@@ -77,10 +79,14 @@
 //!   console edits (`/api/reminders`); it may be a file in a git checkout,
 //!   and is read again when it changes on disk. `CONSOLE_REMINDERS_SEED`: a
 //!   Markdown roadmap to start it from when there is no file (optional).
+//! - `CONSOLE_JOURNAL`: the trading journal's JSON file (`/api/journal`), by
+//!   default `journal.json` beside `CONSOLE_REMINDERS`. Writes are refused
+//!   while the file can't be read (it is left as it is).
 
 mod collections;
 mod delta;
 mod gateways;
+mod journal;
 mod notify;
 mod prefs;
 mod profiles;
@@ -119,6 +125,8 @@ struct App {
     /// Settings that follow the user between devices (`/api/prefs`).
     prefs: Option<prefs::Prefs>,
     reminders: Option<reminders::Reminders>,
+    /// The trading journal (`/api/journal`), if its file can be read.
+    journal: Option<journal::Journal>,
     /// Profile-mode recordings uploaded by pages, if a directory is configured.
     profiles: Option<profiles::Profiles>,
     /// Order gateways by account, for Flatten and Resume.
@@ -216,6 +224,24 @@ async fn main() {
                     .filter(|s| !s.is_empty());
                 prefs::Prefs::open(p, defaults.as_deref().map(std::path::Path::new))
             }),
+        journal: std::env::var("CONSOLE_JOURNAL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                journal::default_path(
+                    std::env::var("CONSOLE_REMINDERS")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .map(std::path::PathBuf::from)
+                        .as_deref(),
+                )
+            })
+            .and_then(|p| {
+                journal::Journal::open(p)
+                    .map_err(|e| eprintln!("console: journal off: {e}"))
+                    .ok()
+            }),
         reminders: std::env::var("CONSOLE_REMINDERS")
             .ok()
             .filter(|s| !s.is_empty())
@@ -279,6 +305,11 @@ async fn main() {
         )
         .route("/api/reminders", get(reminders_get).post(reminders_post))
         .route("/api/prefs", get(prefs_get))
+        .route("/api/journal", get(journal_get).post(journal_post))
+        .route(
+            "/api/journal/{id}",
+            axum::routing::put(journal_put).delete(journal_delete),
+        )
         .route("/api/prefs/{key}", axum::routing::put(prefs_put))
         .route(
             "/api/profiles",
@@ -455,6 +486,16 @@ async fn state(
     )))
 }
 
+/// A fleet lookup's failure as the API's error document: `404` for a stream
+/// the service doesn't declare, `502` for one that doesn't answer.
+fn fleet_error(e: &EventsError) -> Response {
+    let code = match e {
+        EventsError::Unreachable(_) => StatusCode::BAD_GATEWAY,
+        EventsError::NotDeclared(_) | EventsError::NotServed(..) => StatusCode::NOT_FOUND,
+    };
+    (code, axum::Json(json!({ "error": e.to_string() }))).into_response()
+}
+
 /// Live tail of a service's events, forwarded from the service.
 async fn events(
     AxumState(app): AxumState<Arc<App>>,
@@ -465,12 +506,7 @@ async fn events(
     let limit = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100);
     match app.poller.events_json(&service, after, limit).await {
         Ok(v) => no_store(axum::Json(v)),
-        Err(e @ EventsError::NotDeclared(_)) => {
-            (StatusCode::NOT_FOUND, e.to_string()).into_response()
-        }
-        Err(e @ EventsError::Unreachable(_)) => {
-            (StatusCode::BAD_GATEWAY, e.to_string()).into_response()
-        }
+        Err(e) => fleet_error(&e),
     }
 }
 
@@ -489,12 +525,7 @@ async fn bars(
             StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY),
             axum::Json(v),
         )),
-        Err(e @ EventsError::NotDeclared(_)) => {
-            (StatusCode::NOT_FOUND, e.to_string()).into_response()
-        }
-        Err(e @ EventsError::Unreachable(_)) => {
-            (StatusCode::BAD_GATEWAY, e.to_string()).into_response()
-        }
+        Err(e) => fleet_error(&e),
     }
 }
 
@@ -513,12 +544,7 @@ async fn stream(
             StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY),
             axum::Json(v),
         )),
-        Err(e @ EventsError::NotDeclared(_)) => {
-            (StatusCode::NOT_FOUND, e.to_string()).into_response()
-        }
-        Err(e @ EventsError::Unreachable(_)) => {
-            (StatusCode::BAD_GATEWAY, e.to_string()).into_response()
-        }
+        Err(e) => fleet_error(&e),
     }
 }
 
@@ -540,7 +566,7 @@ async fn collection_doc(
         .find(|c| c.id == id)
         .and_then(|c| c.render(index))
         .map_or_else(
-            || (StatusCode::NOT_FOUND, "no such document").into_response(),
+            || (StatusCode::NOT_FOUND, axum::Json(json!({ "error": "no such document" }))).into_response(),
             |d| no_store(axum::Json(d)),
         )
 }
@@ -585,6 +611,70 @@ async fn prefs_put(
         Err(prefs::Refused::Bad(e)) => {
             (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": e }))).into_response()
         }
+    }
+}
+
+/// The entries whose day is in `from..=to`, newest first.
+async fn journal_get(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    let Some(j) = &app.journal else {
+        return (StatusCode::NOT_FOUND, "no journal configured").into_response();
+    };
+    let entries = j.list(
+        q.get("from").map(String::as_str),
+        q.get("to").map(String::as_str),
+    );
+    no_store(axum::Json(json!({ "entries": entries })))
+}
+
+/// Journal writes answer with the entry, or the error.
+fn journal_answer(r: Result<journal::Entry, journal::Refused>) -> Response {
+    match r {
+        Ok(e) => no_store(axum::Json(e)),
+        Err(journal::Refused::NotFound) => (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({ "error": "no such entry" })),
+        )
+            .into_response(),
+        Err(journal::Refused::Bad(e)) => {
+            (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": e }))).into_response()
+        }
+    }
+}
+
+async fn journal_post(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    match &app.journal {
+        Some(j) => journal_answer(j.create(&body)),
+        None => (StatusCode::NOT_FOUND, "no journal configured").into_response(),
+    }
+}
+
+async fn journal_put(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    match &app.journal {
+        Some(j) => journal_answer(j.update(&id, &body)),
+        None => (StatusCode::NOT_FOUND, "no journal configured").into_response(),
+    }
+}
+
+async fn journal_delete(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match &app.journal {
+        Some(j) => match j.delete(&id) {
+            Ok(()) => no_store(axum::Json(json!({ "ok": true }))),
+            Err(e) => journal_answer(Err(e)),
+        },
+        None => (StatusCode::NOT_FOUND, "no journal configured").into_response(),
     }
 }
 
@@ -674,7 +764,11 @@ async fn pass(
     body: axum::body::Bytes,
 ) -> Response {
     let Some((base, http)) = to else {
-        return (StatusCode::NOT_FOUND, format!("no {what} configured")).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({ "error": format!("no {what} configured") })),
+        )
+            .into_response();
     };
     let url = match query {
         Some(q) => format!("{base}/{rest}?{q}"),
@@ -693,7 +787,11 @@ async fn pass(
             let bytes = r.bytes().await.unwrap_or_default();
             no_store((code, [(header::CONTENT_TYPE, "application/json")], bytes))
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("{what}: {e}")).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            axum::Json(json!({ "error": format!("{what}: {e}") })),
+        )
+            .into_response(),
     }
 }
 
@@ -768,16 +866,16 @@ async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
                     .and_then(|r| r["orders"].as_array())
                     .into_iter()
                     .flatten()
-                    .filter(|o| o["client_order_id"].as_str().is_some_and(|i| i.starts_with(gateways::PREFIX)))
+                    .filter(|o| o["client_order_id"].as_str().is_some_and(|i| i.starts_with(app.gateways.prefix.as_str())))
                     .map(|o| json!({ "client_order_id": o["client_order_id"], "status": o["status"], "filled_qty": o["filled_qty"], "avg_price": o["avg_price"], "legs": o["legs"], "limit_price": o["broker_raw"]["limit_price"], "qty": o["broker_raw"]["qty"], "submitted_at": o["broker_raw"]["submitted_at"] }))
                     .collect();
-                json!({ "account": account, "state": w["state"], "environment": w["environment"], "orders": mine })
+                json!({ "account": account, "state": w["state"], "environment": w["environment"], "broker": w["broker"], "orders": mine })
             }
             Err(e) => json!({ "account": account, "error": e }),
         });
     }
     no_store(axum::Json(
-        json!({ "trading": can, "prefix": gateways::PREFIX, "accounts": out }),
+        json!({ "trading": can, "prefix": app.gateways.prefix, "accounts": out }),
     ))
 }
 
@@ -803,10 +901,13 @@ async fn order_submit(
         .unwrap_or_default();
     let id = format!(
         "{}{}-{:05}",
-        gateways::PREFIX,
+        app.gateways.prefix,
         now.as_secs(),
         now.subsec_nanos() % 100_000
     );
+    if !app.gateways.addrs.contains_key(&account) {
+        return no_gateway();
+    }
     // A live account's order also says so, from the ticket's typed confirmation.
     if ask["live"] != true && is_live(&app, &account).await {
         return (
@@ -835,7 +936,7 @@ async fn order_cancel(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path((account, id)): axum::extract::Path<(String, String)>,
 ) -> Response {
-    if !id.starts_with(gateways::PREFIX) {
+    if !id.starts_with(app.gateways.prefix.as_str()) {
         return (
             StatusCode::BAD_REQUEST,
             axum::Json(json!({ "error": "not one of the console's orders" })),
@@ -858,11 +959,7 @@ async fn trade_request(
     wait: u64,
 ) -> Response {
     if !app.gateways.addrs.contains_key(account) {
-        return (
-            StatusCode::NOT_FOUND,
-            axum::Json(json!({ "error": "this account has no order gateway" })),
-        )
-            .into_response();
+        return no_gateway();
     }
     match app
         .gateways
@@ -900,6 +997,9 @@ async fn account_flatten(
         )
             .into_response();
     }
+    if !app.gateways.addrs.contains_key(&account) {
+        return no_gateway();
+    }
     if is_live(&app, &account).await {
         return live_refused();
     }
@@ -923,6 +1023,9 @@ async fn account_resume(
     body: axum::body::Bytes,
 ) -> Response {
     let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    if !app.gateways.addrs.contains_key(&account) {
+        return no_gateway();
+    }
     if is_live(&app, &account).await {
         return live_refused();
     }
@@ -937,6 +1040,14 @@ async fn account_resume(
         15,
     )
     .await
+}
+
+fn no_gateway() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        axum::Json(json!({ "error": "this account has no order gateway" })),
+    )
+        .into_response()
 }
 
 /// Whether an account's gateway trades live (from its welcome); unreachable counts as live,
@@ -969,11 +1080,7 @@ async fn gateway_request(
     wait: u64,
 ) -> Response {
     if !app.gateways.addrs.contains_key(account) {
-        return (
-            StatusCode::NOT_FOUND,
-            axum::Json(json!({ "error": "this account has no order gateway" })),
-        )
-            .into_response();
+        return no_gateway();
     }
     match app
         .gateways

@@ -96,7 +96,7 @@ defineWidget('observations', {
       const k = /** @type {HTMLElement | null} */ (t.closest('[data-ob-kind]'))?.dataset.obKind;
       if (k) { my.kind = k; update(); return; }
       const s = /** @type {HTMLElement | null} */ (t.closest('[data-sym]'))?.dataset.sym;
-      if (s && !s.includes('/') && !/^(VIX|IRX|FVX|TNX|TYX)/.test(s)) { setFocus(s); document.dispatchEvent(new CustomEvent('tt-focus', { detail: s })); }
+      if (s && !s.includes('/') && !/^(VIX|IRX|FVX|TNX|TYX)/.test(s)) { setFocus(s); }
     };
     const changed = () => { my.at = 0; load(); };
     el.addEventListener('click', click);

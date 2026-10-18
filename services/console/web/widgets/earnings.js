@@ -17,12 +17,12 @@
 // econ-calendar (whose Alpha Vantage histories are limited to 20 a day, so
 // they load for theme companies and for a row when it's opened).
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { fleet, serviceFor } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, setFocus } from '../lib/theme.js';
 import { get } from '../lib/cache.js';
 
-const svcWith = k => (fleet.topo?.services || []).find(s => s[k])?.id || null;
+const svcWith = k => serviceFor(k);
 const DAY = 86_400_000;
 const pct = (x, d = 1) => x == null || !isFinite(x) ? '—' : `${(x * 100).toFixed(d)}%`;
 const cap = n => n == null ? '' : n >= 1e12 ? `$${(n / 1e12).toFixed(1)}T` : `$${Math.round(n / 1e9)}B`;
@@ -183,7 +183,7 @@ defineWidget('earnings', {
       const row = e.target.closest('[data-er]'); if (!row) return;
       const sym = row.dataset.er; my.open = my.open === sym ? null : sym; update();
       // Its underlying goes to the IV heatmap and the chart.
-      if (my.open) { history(sym); setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym })); }
+      if (my.open) { history(sym); setFocus(sym); }
     };
     el.addEventListener('click', click);
     const themed = () => { my.open = null; update(); fill(); };

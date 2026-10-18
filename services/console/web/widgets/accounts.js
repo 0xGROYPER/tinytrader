@@ -24,7 +24,7 @@ import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { askHeld } from '../lib/position.js';
-import { createTicket, tradable, routed, occLabel } from '../lib/ticket.js';
+import { createTicket, tradable, routed, occLabel, ourPrefix } from '../lib/ticket.js';
 import { closable, plan, uncovered, quotes, priced, send, cancelOurs } from '../lib/liquidate.js';
 import { get } from '../lib/cache.js';
 
@@ -132,7 +132,7 @@ function liquidatePanel(a) {
     const picks = held.map(h => `<tr><td style="text-align:left"><label class="liq-pick"><input type="checkbox" data-liq-pick="${esc(name)}|${esc(h.symbol)}"${L.pick.has(h.symbol) ? ' checked' : ''}> <span class="${h.qty > 0 ? 'pos' : 'neg'}">${h.qty > 0 ? '+' : '−'}${Math.abs(h.qty)}</span> ${esc(occLabel(h.symbol))}</label></td><td>${quoteOf(h.symbol)}</td></tr>`).join('');
     body = `<div class="scroll"><table class="pos-tbl"><thead><tr><th style="text-align:left">Position <button type="button" class="chip-btn" data-liq-all="${esc(name)}">All</button> <button type="button" class="chip-btn" data-liq-none="${esc(name)}">None</button></th><th>Bid × ask</th></tr></thead><tbody>${picks}</tbody></table></div>${ordersTable(orders)}`;
   } else body = ordersTable(L.sent);
-  const ours = (a.orders || []).filter(o => (o.client_order_id || '').startsWith('tt-')).length, theirs = (a.orders || []).length - ours;
+  const ours = (a.orders || []).filter(o => (o.client_order_id || '').startsWith(ourPrefix())).length, theirs = (a.orders || []).length - ours;
   const notes = [
     ours ? `Cancels the console's ${ours} open order${ours > 1 ? 's' : ''} first.` : '',
     theirs ? `<span class="neg">${theirs} open order${theirs > 1 ? 's' : ''} placed elsewhere stay${theirs > 1 ? '' : 's'}, and can keep a contract from closing: cancel ${theirs > 1 ? 'them' : 'it'} where ${theirs > 1 ? 'they were' : 'it was'} placed.</span>` : '',
@@ -166,7 +166,7 @@ function ordersPanel(a) {
     ? o.legs.map(l => `${l.side === 'sell' ? '−' : '+'}${(l.ratio_qty || 1) * (o.qty || 1)} ${esc(l.symbol)}`).join('<br>')
     : `${o.side === 'sell' ? '−' : '+'}${o.qty ?? '?'} ${esc(o.symbol)}`;
   const rows = orders.map(o => {
-    const id = o.client_order_id || '', ours = id.startsWith('tt-'), c = cancelling[`${name}|${id}`];
+    const id = o.client_order_id || '', ours = id.startsWith(ourPrefix()), c = cancelling[`${name}|${id}`];
     return `<tr><td style="color:var(--fg);text-align:left">${legsOf(o)}</td>
       <td>${o.limit_price != null ? (o.limit_price < 0 ? `cr ${(-o.limit_price).toFixed(2)}` : o.limit_price.toFixed(2)) : esc(o.type || '')}</td>
       <td>${o.filled_qty || 0}/${o.qty ?? '?'}</td><td>${esc(o.status || '')}</td><td>${esc(age(o.created_at))}</td>
@@ -402,7 +402,7 @@ function mount(el, single = false, book = false) {
     L.stage = 'sending'; L.sent = orders; L.results = orders.map(() => null); update();
     // Our own working orders hold contracts: cancelled, then gone from the account (at most 5 s).
     if (await cancelOurs(name, a?.orders)) {
-      for (let i = 0; i < 25 && (accountOf(name)?.orders || []).some(o => (o.client_order_id || '').startsWith('tt-')); i++) await new Promise(r => setTimeout(r, 200));
+      for (let i = 0; i < 25 && (accountOf(name)?.orders || []).some(o => (o.client_order_id || '').startsWith(ourPrefix())); i++) await new Promise(r => setTimeout(r, 200));
     }
     // Fresh quotes, then every order at once.
     L.q = await quotes(orders.flatMap(o => o.legs.map(l => l.symbol)));

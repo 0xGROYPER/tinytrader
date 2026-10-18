@@ -15,9 +15,10 @@
 // Times are New York time. Drawn with TradingView's Lightweight Charts
 // (Apache-2.0), loaded the first time a chart opens.
 import { defineWidget } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { fleet, serviceFor, servicesFor, optionRoots } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused } from '../lib/theme.js';
+import { onChange } from '../lib/channels.js';
 import { position } from '../lib/position.js';
 import { held, latest, older, exhausted } from '../lib/bars.js';
 import { get, stream } from '../lib/cache.js';
@@ -44,7 +45,7 @@ function optionRelay(symbol) {
 }
 
 function relayed() {
-  return (fleet.topo?.services || []).filter(s => s.bars).flatMap(s => {
+  return servicesFor('bars').flatMap(s => {
     const symbols = [...new Set((s.schedule || []).flatMap(x => x.symbols || []))];
     return symbols.map(symbol => ({ service: s.id, symbol }));
   });
@@ -55,7 +56,7 @@ function relayed() {
  * every relayed symbol. */
 function choices() {
   const t = theme(), live = relayed(), f = focused();
-  const any = (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id;
+  const any = serviceFor('bars', 'snapshots');
   // Without a theme, the relays' symbols, and the one picked elsewhere (an earnings report).
   if (!t?.symbols.length) return f && any && !live.some(c => c.symbol === f) ? [...live, { service: any, symbol: f }] : live;
   return t.symbols.map(symbol => live.find(c => c.symbol === symbol) || (any ? { service: any, symbol } : null)).filter(Boolean);
@@ -129,7 +130,7 @@ function loadIndicators() {
 const saveIndicators = (/** @type {Indicator[]} */ list) => { try { localStorage.setItem(IND_KEY, JSON.stringify(list)); } catch (_) {} };
 const colourOf = (/** @type {number} */ i) => { const c = COLOURS[i % COLOURS.length]; return c.startsWith('--') ? css(c) || '#888' : c; };
 
-const chainService = () => (fleet.topo?.services || []).find(s => s.chain)?.id || null;
+const chainService = () => serviceFor('chain') || null;
 const nextReport = sym => {
   const e = Object.values(fleet.snap?.services || {}).map(s => s?.earnings).find(x => Array.isArray(x?.reports));
   const today = new Date().toISOString().slice(0, 10);
@@ -167,7 +168,7 @@ const pct = m => `±${(m * 100).toFixed(m < 0.01 ? 2 : 1)}%`;
 
 // GEX levels: gamma exposure by strike from the chain's own gamma (worked out
 // from quotes) and OPRA's open interest (as of the morning, from the OPRA
-// relay; SPY and XSP), over expiries out to the scope. Each contract adds
+// relay, for the roots the OPRA relays carry), over expiries out to the scope. Each contract adds
 // gamma x open interest x 100 x price^2 x 1%: dollars of delta per 1% move,
 // counted positive for calls and negative for puts (the usual assumption
 // that dealers are long calls and short puts; their real positions aren't
@@ -186,7 +187,7 @@ function gexLevels(v, /** @type {Indicator} */ ind) {
   const S = v?.spot; if (!S) return { none: 'no price' };
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }), last = isoIn(GEX_SCOPES[ind.scope || '0dte'][1]);
   const cs = (v.contracts || []).filter(c => c.open_interest > 0 && c.expiry >= today && c.expiry <= last);
-  if (!cs.length) return { none: v.contracts?.some(c => c.open_interest != null) ? 'no open interest in that range' : 'no open interest (SPY and XSP only, from the OPRA relays)' };
+  if (!cs.length) return { none: v.contracts?.some(c => c.open_interest != null) ? 'no open interest in that range' : `no open interest (${optionRoots().join(', ') || 'no option relays'}: open interest comes from the OPRA relays)` };
   const by = new Map(); let calls = new Map(), puts = new Map(), total = 0;
   const one = (c, gamma, price) => (c.type === 'call' ? 1 : -1) * gamma * c.open_interest * 100 * price * price * 0.01;
   for (const c of cs) {
@@ -276,7 +277,7 @@ defineWidget('candles', {
     el.innerHTML = '<div class="cd"><div class="cd-top"><form class="cd-search"><input class="cd-ticker mono" name="ticker" placeholder="Ticker or option" maxlength="21" autocomplete="off" spellcheck="false" aria-label="Show a ticker"></form><div class="cd-bar"></div></div><div class="cd-chart"><div class="cd-legend"></div></div><p class="cd-msg muted"></p></div>';
     const bar = el.querySelector('.cd-bar'), box = /** @type {HTMLElement} */ (el.querySelector('.cd-chart')), msg = el.querySelector('.cd-msg');
     const leg = /** @type {HTMLElement} */ (el.querySelector('.cd-legend'));
-    const anyService = () => (fleet.topo?.services || []).find(s => s.bars && s.snapshots)?.id;
+    const anyService = () => serviceFor('bars', 'snapshots');
     const offered = () => {
       const list = choices(), any = anyService();
       for (const symbol of my.typed) {
@@ -380,7 +381,7 @@ defineWidget('candles', {
     }
     async function liveEdge() {
       if (!my.pick || !my.alive || !my.candles || document.hidden || el.offsetParent === null) return;
-      const { symbol } = my.pick, size = my.size, svc = (fleet.topo?.services || []).find(x => x.snapshots)?.id;
+      const { symbol } = my.pick, size = my.size, svc = serviceFor('snapshots');
       if (!svc || OCC.test(symbol) || size > 86400 || !my.drawn.len) return;
       let snap;
       try {
@@ -405,7 +406,7 @@ defineWidget('candles', {
       const { symbol } = my.pick, size = my.size, { service, ask } = source();
       const same = () => my.alive && my.pick?.symbol === symbol && my.size === size;
       try {
-        if (ask === 60 && size >= 86400) throw new Error('Daily and weekly bars need a service with history for any symbol (alpaca-data).');
+        if (ask === 60 && size >= 86400) throw new Error('Daily and weekly bars need a service with history for any symbol (a `bars` stream).');
         const L = await library();
         if (!same()) return;
         if (!my.chart) makeChart(L); else my.chart.applyOptions(colours());
@@ -621,7 +622,7 @@ defineWidget('candles', {
       const any = anyService();
       if (!/^[A-Z][A-Z0-9.]{0,9}$/.test(symbol) && !OCC.test(symbol)) return;
       if (OCC.test(symbol) && !optionRelay(symbol)) { my.err = `No OPRA relay carries ${OCC.exec(symbol)[1]} options, so there's nothing to chart for ${symbol}.`; head(); return; }
-      if (!any && !OCC.test(symbol)) { my.err = 'Typing a ticker needs a service with bars for any symbol (alpaca-data).'; head(); return; }
+      if (!any && !OCC.test(symbol)) { my.err = 'Typing a ticker needs a service with bars for any symbol (a `bars` stream).'; head(); return; }
       if (!my.typed.includes(symbol)) my.typed.push(symbol);
       my.pick = offered().find(c => c.symbol === symbol) || { service: optionRelay(symbol) || any, symbol };
       my.linked = false; input.value = ''; input.blur();
@@ -633,15 +634,16 @@ defineWidget('candles', {
       if (e.target.closest('[data-cd-link]')) { my.linked = !my.linked; if (my.linked) { const f = focused(), c = f && offered().find(x => x.symbol === f); if (c) { my.pick = c; fresh(); return; } } head(); keep(); }
     };
     el.addEventListener('click', click);
-    // The symbol picked in a watchlist, or a new theme.
-    const follow = (/** @type {Event} */ e) => {
+    // The symbol picked in a watchlist (the focus channel), and a new theme.
+    const followFocus = sym => {
       if (!my.linked) return;
-      const sym = /** @type {CustomEvent} */ (e).detail, any = anyService();
+      const any = anyService();
       if (typeof sym === 'string' && any && !offered().some(x => x.symbol === sym)) my.typed.push(sym);
       const c = typeof sym === 'string' && offered().find(x => x.symbol === sym);
-      if (c) { my.pick = c; fresh(); } else if (e.type === 'tt-theme') { my.pick = null; fresh(); }
+      if (c) { my.pick = c; fresh(); }
     };
-    document.addEventListener('tt-focus', follow);
+    const themed = () => { if (!my.linked) return; my.pick = null; fresh(); };
+    onChange('focus', followFocus);
     // A contract to chart (the Spread builder's legs): today's mid from its relay.
     const chart = (/** @type {Event} */ e) => {
       const symbol = /** @type {CustomEvent} */ (e).detail, relay = typeof symbol === 'string' ? optionRelay(symbol) : null;
@@ -650,7 +652,7 @@ defineWidget('candles', {
       my.pick = { service: relay, symbol }; fresh();
     };
     document.addEventListener('tt-chart', chart);
-    document.addEventListener('tt-theme', follow);
+    document.addEventListener('tt-theme', themed);
     head(); legend(); load();
     // Minute bars change once a minute: refresh them every 5 s, longer ones every minute.
     let ticks = 0;
@@ -659,7 +661,7 @@ defineWidget('candles', {
     return {
       // The fleet's polls only matter for which symbols are offered.
       update() { if (!my.pick) { head(); load(); } },
-      dispose() { my.alive = false; clearInterval(my.timer); clearInterval(my.edgeTimer); cancelAnimationFrame(my.raf); document.removeEventListener('tt-position', changed); my.chart?.remove(); el.removeEventListener('click', click); document.removeEventListener('tt-focus', follow); document.removeEventListener('tt-chart', chart); document.removeEventListener('tt-theme', follow); },
+      dispose() { my.alive = false; clearInterval(my.timer); clearInterval(my.edgeTimer); cancelAnimationFrame(my.raf); document.removeEventListener('tt-position', changed); my.chart?.remove(); el.removeEventListener('click', click); document.removeEventListener('tt-chart', chart); document.removeEventListener('tt-theme', themed); },
     };
   },
 });

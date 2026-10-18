@@ -2729,6 +2729,7 @@ mod tests {
             listen: "127.0.0.1:0".parse().unwrap(),
             listen_any: false,
             state: root,
+            forbid_state: Vec::new(),
             clients: Vec::new(),
             profile: Profile::default(),
             timing: Timing::default(),

@@ -68,8 +68,5 @@ export function collect(mount) {
   try { return { value: mount(), end: () => mine.forEach(off => off()) }; } finally { mounting = outer; }
 }
 
-// TEMPORARY, until step 3 moves their publishers to channels: the events that
-// still carry these values. tt-focus comes from widgets that don't call
-// setFocus; tt-sb-account from accounts.js.
-document.addEventListener('tt-focus', e => { const s = /** @type {CustomEvent} */ (e).detail; if (typeof s === 'string') publish('focus', s); });
+// TEMPORARY, until accounts.js publishes it itself: the tt-sb-account event.
 document.addEventListener('tt-sb-account', e => { const n = /** @type {CustomEvent} */ (e).detail; if (typeof n === 'string' && n) publish('account', n); });

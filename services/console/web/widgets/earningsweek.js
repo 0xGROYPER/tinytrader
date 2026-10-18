@@ -93,7 +93,6 @@ defineWidget('earningsweek', {
       if (!t) return;
       if (t.dataset.sym) {
         setFocus(t.dataset.sym);
-        document.dispatchEvent(new CustomEvent('tt-focus', { detail: t.dataset.sym }));
         return;
       }
       if (t.dataset.key) { my.open.add(t.dataset.key); render(); return; }

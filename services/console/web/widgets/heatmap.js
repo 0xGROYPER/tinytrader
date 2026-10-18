@@ -9,7 +9,7 @@
 // read when the map is shown (and again once it's ten minutes old); it covers
 // the companies the screener scans, not every listed stock.
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { serviceFor } from '../lib/fleet.js';
 import { esc, etTime } from '../lib/format.js';
 import { theme, setFocus } from '../lib/theme.js';
 import { get, stream } from '../lib/cache.js';
@@ -19,7 +19,7 @@ const PERIODS = { '1D': ['change_pct', 0.03], '1W': ['change_5d', 0.06], '1M': [
 const STALE = 10 * 60e3;
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (_) { /* private mode */ } return null; };
 const HEAD = 18; // a sector's header strip, in pixels
-const service = () => (fleet.topo?.services || []).find(s => s.screener)?.id || null;
+const service = () => serviceFor('screener') || null;
 const cap = v => !v ? '' : v >= 1e12 ? `$${(v / 1e12).toFixed(2)}T` : v >= 1e9 ? `$${Math.round(v / 1e9)}B` : `$${Math.round(v / 1e6)}M`;
 const pct = v => v == null ? '—' : `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v * 100).toFixed(2)}%`;
 
@@ -61,7 +61,7 @@ function readout(my) {
 
 function draw(my, W, H) {
   const head = '<div><h1>Sector heatmap</h1><p class="muted" style="margin:0">Large companies by sector, sized by market value and coloured by the day\'s change.</p></div>';
-  if (!service()) return head + '<p class="muted">No service serves the options screener (alpaca-data).</p>';
+  if (!service()) return head + '<p class="muted">No service serves the options screener (a <code>screener</code> stream).</p>';
   if (my.err) return head + `<p class="msg-err">${esc(my.err)}</p>`;
   if (!my.rows) return head + '<p class="muted">Loading…</p>';
   const [field, SAT] = PERIODS[my.period], chg = r => r[field] ?? null;
@@ -121,7 +121,7 @@ defineWidget('heatmap', {
       const p = /** @type {HTMLElement | null} */ (e.target.closest?.('[data-hm-period]'))?.dataset.hmPeriod;
       if (p && PERIODS[p]) { my.period = p; store('tt-hm-period', p); update(); return; }
       const s = /** @type {HTMLElement | null} */ (e.target.closest?.('[data-sym]'))?.dataset.sym;
-      if (s) { setFocus(s); document.dispatchEvent(new CustomEvent('tt-focus', { detail: s })); }
+      if (s) setFocus(s);
     };
     el.addEventListener('mouseover', over); el.addEventListener('click', click);
     const resized = new ResizeObserver(() => update()); resized.observe(el);

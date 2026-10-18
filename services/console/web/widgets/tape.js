@@ -18,7 +18,7 @@
 // by separate counts (4000 trades held, 1500 kept in the browser), as quotes
 // outnumber trades many times over at the open.
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { serviceFor, servicesFor } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { focused } from '../lib/theme.js';
 
@@ -41,7 +41,9 @@ function trim(ticks, trades, quotes) {
 const TRADES = 4000, QUOTES = 1000;
 const EVERY = 500, HOLD = 1500, SHOW = 300, BIG = 1000, FLASH = 1200;
 const SIZES = [0, 100, 500, 1000, 5000];
-const relay = () => (fleet.topo?.services || []).find(s => s.tape)?.id || null;
+const relay = () => serviceFor('tape') || null;
+/** The stock symbols the tape relay says it carries (`/describe`'s `relay.symbols`). */
+const carried = () => servicesFor('tape')[0]?.relay?.symbols || [];
 const hms = t => new Date(t * 1000).toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour12: false });
 const ms = t => String(Math.floor((t % 1) * 1000)).padStart(3, '0');
 const side = x => x.p == null ? '' : x.a != null && x.p >= x.a ? 'buy' : x.b != null && x.p <= x.b ? 'sell' : 'mid';
@@ -74,8 +76,9 @@ function list(my) {
   // Only the newest few: a burst of quotes shouldn't light up the whole list.
   let lit = 0;
   const fl = x => { const age = now - (x.rt || 0); return age < FLASH && lit++ < 40 ? ` tp-new" style="animation-delay:-${Math.round(age)}ms` : ''; };
-  if (!relay()) return '<p class="muted">No relay serves a tape: relay-iex needs redeploying with it.</p>';
+  if (!relay()) return '<p class="muted">No relay serves a tape (a <code>tape</code> stream).</p>';
   if (my.err) return `<p class="msg-err">${esc(my.err)}</p>`;
+  if (!my.sym) return '<p class="muted">Type a ticker: the tape relay names none it carries.</p>';
   if (my.missing) return `<p class="muted">${esc(my.sym)} can't be shown: ${esc(my.missing)}.</p>`;
   const rows = [];
   for (let i = my.ticks.length - 1; i >= 0 && rows.length < SHOW; i--) {
@@ -127,7 +130,8 @@ defineWidget('tape', {
       my.busy = true;
       try {
         // The symbol picked elsewhere when the relay carries it, until one is picked here.
-        if (!my.sym) { const f = focused(); my.sym = f && my.symbols.includes(f) ? f : my.symbols[0] || 'SPY'; }
+        if (!my.sym) { const f = focused(); my.sym = f && my.symbols.includes(f) ? f : my.symbols[0] || carried()[0] || f || ''; }
+        if (!my.sym) { draw(); return; }
         const q = my.last ? `after=${my.last}` : `limit=${TRADES}`;
         const r = await fetch(`/api/stream/${encodeURIComponent(svc)}/tape?symbol=${encodeURIComponent(my.sym)}&watch=1&${q}`, { cache: 'no-store' });
         const v = await r.json().catch(() => ({}));

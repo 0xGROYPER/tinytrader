@@ -86,7 +86,7 @@ defineWidget('crossasset', {
       if (act === 'cancel') { my.edit = false; update(); return; }
       if (act === 'reset') { my.edit = false; setBoard(null); return; }
       const s = /** @type {HTMLElement | null} */ (t.closest('[data-sym]'))?.dataset.sym;
-      if (s && !s.includes('/') && !/^(VIX|IRX|FVX|TNX|TYX)/.test(s)) { setFocus(s); document.dispatchEvent(new CustomEvent('tt-focus', { detail: s })); }
+      if (s && !s.includes('/') && !/^(VIX|IRX|FVX|TNX|TYX)/.test(s)) { setFocus(s); }
     };
     const submit = e => {
       const f = /** @type {HTMLFormElement} */ (e.target); if (!f.matches('[data-ca-form]')) return;

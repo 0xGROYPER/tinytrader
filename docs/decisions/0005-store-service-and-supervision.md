@@ -86,7 +86,7 @@ in the deployment's repository.
 
 ## Status, 2026-10-15
 
-The store serves files back over HTTP ([store API](../store-api.md)):
+The store serves files back over HTTP ([store API](../api/store.md)):
 `GET /files` lists the finished DBN files on its volumes by logical name
 (`<volume>/<path>`), and `GET /files/{volume}/{path}` sends one whole. This
 is the first read path, enough for notebooks; ranges of records, bulk reads
