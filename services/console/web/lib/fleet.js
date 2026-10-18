@@ -2,7 +2,7 @@
 // the latest snapshot of every service (health, metrics, streams). The page
 // fills these in; widgets read them (decision 0010).
 import { fmt } from './format.js';
-import { publish } from './channels.js';
+import { publish, read } from './channels.js';
 
 /** @type {{ topo: Topology | null, snap: Snapshot | null }} */
 export const fleet = { topo: null, snap: null };
@@ -16,8 +16,27 @@ export function setTopology(t) {
   topoText = text; fleet.topo = t; publish('topology', t);
 }
 
+/** The first service the topology gives every one of these capabilities (its key, such as `chain`), or null.
+ * @param {...string} caps */
+export const serviceFor = (...caps) => servicesFor(...caps)[0]?.id || null;
+/** Every service the topology gives all these capabilities.
+ * @param {...string} caps */
+export const servicesFor = (...caps) => (read('topology')?.services || []).filter(s => caps.every(c => s[c]));
+
 /** @type {(id: string) => ServiceState} */
 export const svcState = id => fleet.snap?.services?.[id] || {};
+
+/** The option roots the deployment's relays carry (`SPY` for a relay of
+ * `SPY.OPT`), from their `/describe`: what the option views offer first. */
+export function optionRoots() {
+  const roots = new Set();
+  for (const s of read('topology')?.services || []) {
+    for (const x of [...(s.relay?.symbols || []), ...(s.schedule || []).flatMap(e => e.symbols || [])]) {
+      if (typeof x === 'string' && x.endsWith('.OPT')) roots.add(x.slice(0, -4));
+    }
+  }
+  return [...roots];
+}
 
 export function metric(id, name, labels) {
   const list = svcState(id).metrics?.[name] || [];

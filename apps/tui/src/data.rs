@@ -388,14 +388,13 @@ pub fn book_choices(t: &Topology) -> Vec<BookChoice> {
             })
         })
         .collect();
-    // The most traded first.
-    let rank = |r: &str| {
-        ["SPY", "QQQ", "XSP", "SPX"]
-            .iter()
-            .position(|x| r.starts_with(x))
-            .unwrap_or(9)
-    };
-    out.sort_by(|a, b| rank(&a.root).cmp(&rank(&b.root)).then(a.root.cmp(&b.root)));
+    // The topology's focus first (a relay's id), then by root.
+    let focus = t.focus.as_deref();
+    out.sort_by(|a, b| {
+        (Some(a.key.as_str()) != focus)
+            .cmp(&(Some(b.key.as_str()) != focus))
+            .then(a.root.cmp(&b.root))
+    });
     out
 }
 

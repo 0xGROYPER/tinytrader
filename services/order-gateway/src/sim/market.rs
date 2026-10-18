@@ -30,10 +30,25 @@ pub(crate) struct QuoteSource {
 }
 
 impl QuoteSource {
-    /// `tcp:HOST:PORT` connects to a stream; anything else is a DBN file path.
+    /// `tcp:HOST:PORT` connects to a DBN stream; `relay:HOST:PORT` joins a
+    /// market data relay (`tinytrader.relay/1`, live from now); anything else
+    /// is a DBN file path.
     pub(crate) fn open(spec: &str) -> Result<Self, String> {
-        let (r, pin): (Box<dyn Read + Send>, String) = if let Some(addr) = spec.strip_prefix("tcp:")
+        let (r, pin): (Box<dyn Read + Send>, String) = if let Some(addr) =
+            spec.strip_prefix("relay:")
         {
+            let mut s =
+                TcpStream::connect(addr).map_err(|e| format!("--sim-quotes {spec}: {e}"))?;
+            std::io::Write::write_all(
+                &mut s,
+                b"{\"protocol\":\"tinytrader.relay/1\",\"client\":\"sim-broker\"}\n",
+            )
+            .map_err(|e| format!("--sim-quotes {spec}: {e}"))?;
+            (
+                Box::new(BufReader::new(s)),
+                crate::protocol::Obj::new().s("source", "relay").done(),
+            )
+        } else if let Some(addr) = spec.strip_prefix("tcp:") {
             let s = TcpStream::connect(addr).map_err(|e| format!("--sim-quotes {spec}: {e}"))?;
             (
                 Box::new(BufReader::new(s)),

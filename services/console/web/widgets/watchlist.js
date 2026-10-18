@@ -15,7 +15,7 @@
 // sets price alerts for it (lib/alerts.js); the % heading sorts by the day's
 // change.
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { fleet, serviceFor } from '../lib/fleet.js';
 import { esc, etTime } from '../lib/format.js';
 import { theme, focused, setFocus, parseSymbols } from '../lib/theme.js';
 import { alertsFor, alertForm, describe } from '../lib/alerts.js';
@@ -26,7 +26,7 @@ import { get, stream } from '../lib/cache.js';
 const EVERY = 5000;
 
 /** The first service serving stock snapshots. */
-const source = () => (fleet.topo?.services || []).find(s => s.snapshots)?.id || null;
+const source = () => serviceFor('snapshots') || null;
 
 const pct = x => x == null ? '' : `${x >= 0 ? '+' : '−'}${Math.abs(x * 100).toFixed(2)}%`;
 const num = x => x == null ? '' : x.toFixed(x >= 1 ? 2 : 4);
@@ -44,7 +44,7 @@ function draw(my) {
         <button type="button" class="tile-btn" data-wl-act="new" title="New list" aria-label="New list">+</button>
         ${mine ? '<button type="button" class="tile-btn" data-wl-act="rename" title="Rename this list" aria-label="Rename this list">✎</button><button type="button" class="tile-btn" data-wl-act="delete" title="Delete this list" aria-label="Delete this list">×</button>' : ''}
         ${mine ? '<form class="wl-add" data-wl-form="add"><input class="wl-in" name="v" placeholder="Add: CCJ, VST" autocomplete="off" spellcheck="false" aria-label="Add symbols"></form>' : ''}</div>`;
-  if (!source()) return [bar, '<p class="muted">No service serves stock snapshots (alpaca-data).</p>'];
+  if (!source()) return [bar, '<p class="muted">No service serves stock snapshots (a <code>snapshots</code> stream).</p>'];
   if (!syms.length) return [bar, `<p class="muted">${mine ? 'This list is empty: add symbols above.' : 'The theme has no symbols.'}</p>`];
   const by = new Map((my.rows || []).map(r => [r.symbol, r]));
   const f = focused();
@@ -93,7 +93,6 @@ defineWidget('watchlist', {
     // A symbol picked: the charts follow it and the news narrows to it (toggle: a click on it again widens).
     const pick = (s, toggle) => {
       setFocus(s);
-      document.dispatchEvent(new CustomEvent('tt-focus', { detail: s }));
       document.dispatchEvent(new CustomEvent('tt-news-symbol', { detail: toggle ? s : { symbol: s } }));
       update();
       /** @type {HTMLElement | null} */ (main.querySelector(`[data-wl="${CSS.escape(s)}"]`))?.scrollIntoView({ block: 'nearest' });
@@ -131,7 +130,7 @@ defineWidget('watchlist', {
       shown = n;
       const f = focused();
       if (f && syms.includes(f)) return;
-      setFocus(syms[0]); document.dispatchEvent(new CustomEvent('tt-focus', { detail: syms[0] }));
+      setFocus(syms[0]);
     };
     const changed = () => { point(); update(); if (current().join(',') !== my.asked) load(); };
     const click = e => {

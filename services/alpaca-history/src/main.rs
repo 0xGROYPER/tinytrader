@@ -505,6 +505,8 @@ async fn main() {
     let router = Router::new()
         .route("/runs", get(|AxState(a): AxState<Shared>| async move { Json(runs_view(&a)) }).post(post_run))
         .route("/runs/{id}/stop", post(stop_run))
+        // A web page of another origin can't start or stop a run.
+        .layer(axum::middleware::from_fn(tinytrader_observe::guard::same_origin_writes))
         .with_state(app.clone())
         .merge(observer.router())
         .merge(app.events.router());

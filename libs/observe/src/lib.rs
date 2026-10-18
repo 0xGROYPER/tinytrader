@@ -139,6 +139,13 @@ impl Observer {
     ///   `metric` names a metric with the bytes written.
     /// - `panels`: suggested charts over `series`, each `{ heading, note,
     ///   decimals, footer }` (footer entries as in the topology format).
+    /// - `schedule`: what it runs and when, each `{ name, kind, when }` with
+    ///   `kind` one of `always`, `window`, `interval`, `daily`, `event` or
+    ///   `yield`, and optionally `every_seconds`, `hours`, `class`, `yields_to`.
+    /// - `relay`: for a market data relay, `{ protocol, listen, symbols }`.
+    ///
+    /// `streams` may also name request endpoints a client can discover (such
+    /// as `"chain": "/chain"`); see `docs/api/observe.md`.
     pub fn describe(&self, description: serde_json::Value) {
         *lock(&self.inner.description) = description;
     }

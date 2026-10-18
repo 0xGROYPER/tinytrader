@@ -38,7 +38,7 @@ function addClients(byId, edges) {
       if (c.account) {
         const a = accounts.find(x => x.name === c.account || x.label?.toLowerCase() === c.account.toLowerCase());
         const aid = 'account:' + c.account;
-        byId[aid] ||= { id: aid, kind: 'acct', label: a ? `Alpaca ${a.label}` : c.account, host: 'clients', account: a || null, sub: a ? `${a.environment} account` : 'not an account this deployment reads' };
+        byId[aid] ||= { id: aid, kind: 'acct', label: a ? a.label || a.name : c.account, host: 'clients', account: a || null, sub: a ? `${a.environment} account` : 'not an account this deployment reads' };
         link(id, aid, 'trades');
       }
     }

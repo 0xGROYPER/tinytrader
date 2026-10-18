@@ -9,23 +9,27 @@
 // price alerts on it (lib/alerts.js) or open it as a view of its own. A search in the header opens a view on the
 // ticker instead, in the Tickers folder (lib/app.js).
 import { defineWidget, paint } from '../lib/widgets.js';
-import { fleet, newsItems } from '../lib/fleet.js';
+import { fleet, newsItems, serviceFor } from '../lib/fleet.js';
 import { parseSymbols, setFocus } from '../lib/theme.js';
 import { esc, ago, unentity } from '../lib/format.js';
 import { watchlists, addSymbols } from '../lib/watchlists.js';
 import { alertsFor, alertForm } from '../lib/alerts.js';
 import { mark } from './docs.js';
-import { get } from '../lib/cache.js';
+import { get, stream } from '../lib/cache.js';
 
 const MAX = 8;
 
 /** Every ticker EDGAR lists, with its company's name: symbol to name. Fetched once
- * per page, from econ-calendar; empty until it arrives (or if it can't be had). */
+ * per page, from the service that declares `tickers`; empty until it arrives (or if
+ * none does). */
 let directory = null;
 /** @type {Promise<void> | null} */
 let loading = null;
 function loadDirectory() {
-  loading ||= get('/api/stream/econ-calendar/tickers', { fresh: 3600e3 })
+  if (loading) return loading;
+  const svc = serviceFor('tickers');
+  if (!svc) return Promise.resolve(); // asked again once the topology names one
+  loading = get(stream(svc, 'tickers'), { fresh: 3600e3 })
     .then(j => { if (j?.names) directory = j.names; else loading = null; })
     .catch(() => { loading = null; });
   return loading;
@@ -148,7 +152,7 @@ export function bindSearch(root, onPick) {
 
 const cap = v => !v ? '' : v >= 1e12 ? `$${(v / 1e12).toFixed(2)}T` : v >= 1e9 ? `$${Math.round(v / 1e9)}B` : `$${Math.round(v / 1e6)}M`;
 const pct = v => v == null ? '—' : `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v * 100).toFixed(2)}%`;
-const svcWith = k => (fleet.topo?.services || []).find(s => s[k])?.id || null;
+const svcWith = k => serviceFor(k);
 const getJson = url => get(url, { fresh: 5000 }).catch(() => null);
 
 /** A ticker's results: quote, the screener's row, next earnings and recent news. */
@@ -234,7 +238,7 @@ defineWidget('search', {
       if (a === 'back') { my.sym = null; my.res = null; draw(); el.dispatchEvent(new CustomEvent('tt-tab-args', { bubbles: true, detail: { args: {}, title: 'Search' } })); return; }
       const sym = my.sym; if (!sym) return;
       if (a === 'chart' || a === 'options') {
-        setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym }));
+        setFocus(sym);
         document.dispatchEvent(new CustomEvent('tt-show-view', { detail: a === 'chart' ? 'candles' : 'spreads' }));
       }
       if (a === 'alert') { my.alert = !my.alert; draw(); /** @type {HTMLInputElement | null} */ (main.querySelector('.al-form input'))?.focus(); }

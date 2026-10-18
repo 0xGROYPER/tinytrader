@@ -6,7 +6,7 @@
 // underlying is the one picked in a watchlist, else the workspace theme's
 // first symbol, else one typed in; refreshed every 30 seconds.
 import { defineWidget } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { serviceFor } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { theme, focused } from '../lib/theme.js';
 import { get, stream } from '../lib/cache.js';
@@ -16,7 +16,7 @@ const EVERY = 30_000;
 /** Strikes shown either side of spot. */
 const SIDE = 14;
 
-const source = () => (fleet.topo?.services || []).find(s => s.chain)?.id || null;
+const source = () => serviceFor('chain') || null;
 const pct = x => x == null ? '' : `${(x * 100).toFixed(1)}`;
 // The heatmap scale: blue, cyan, green, yellow, orange, red.
 const STOPS = [[49, 92, 196], [41, 166, 214], [72, 183, 116], [240, 210, 70], [242, 140, 48], [212, 52, 44]];
@@ -67,7 +67,7 @@ function draw(my) {
   const t = theme(), picks = [...new Set([...(t?.symbols || []), my.symbol].filter(Boolean))].slice(0, 16);
   const bar = `<form class="iv-bar"><input class="input iv-input" name="sym" value="${esc(my.symbol || '')}" placeholder="Symbol" aria-label="Underlying" autocomplete="off" spellcheck="false">
     <span class="chips">${picks.map(s => `<button type="button" class="chip-btn" data-iv-pick="${esc(s)}" aria-pressed="${s === my.symbol}">${esc(s)}</button>`).join('')}</span></form>`;
-  if (!svc) return bar + '<p class="muted">No service serves option chains (alpaca-data).</p>';
+  if (!svc) return bar + '<p class="muted">No service serves option chains (a <code>chain</code> stream).</p>';
   if (!my.symbol) return bar + '<p class="muted">Pick or type an underlying.</p>';
   if (my.err) return bar + `<p class="muted">${esc(my.err)}</p>`;
   if (!my.chain) return bar + '<p class="muted">Loading the chain…</p>';

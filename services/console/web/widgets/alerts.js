@@ -37,7 +37,7 @@ defineWidget('alerts', {
       const t = /** @type {HTMLElement} */ (e.target);
       if (t.closest('[data-al-cancel]')) { my.sym = ''; update(); return; }
       const s = /** @type {HTMLElement | null} */ (t.closest('[data-al-sym]'))?.dataset.alSym;
-      if (s) { setFocus(s); document.dispatchEvent(new CustomEvent('tt-focus', { detail: s })); }
+      if (s) setFocus(s);
     };
     el.addEventListener('submit', submit); el.addEventListener('click', click);
     document.addEventListener('tt-alerts', update);

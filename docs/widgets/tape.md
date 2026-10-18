@@ -2,7 +2,7 @@
 
 Time and sales from the IEX relay, a tick at a time: every trade with its price and size, newest at the top, marked by where it printed against the quote before it.
 
-**Data:** the IEX relay's `/tape` ([relay API](../relay-api.md#get-tape)): the last 4,000 trades and 4,000 quote changes of each of its symbols (SPY and QQQ), held in memory, read twice a second while the panel is in sight. IEX is a few percent of US volume, so it's a sample of the flow, not all of it, and it's empty after the relay restarts until the feed runs again.
+**Data:** the IEX relay's `/tape` ([relay API](../api/relay.md#get-tape)): the last 4,000 trades and 4,000 quote changes of each of its symbols (SPY and QQQ), held in memory, read twice a second while the panel is in sight. IEX is a few percent of US volume, so it's a sample of the flow, not all of it, and it's empty after the relay restarts until the feed runs again.
 
 **Using it:**
 

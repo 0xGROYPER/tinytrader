@@ -42,6 +42,8 @@ format or a module option instead.
 
 ## Contracts
 
+Every client-facing interface is documented in [docs/api/](docs/api/README.md), with its stability. Keep that reference in step with the code.
+
 - **`tinytrader.observe/1`** (`libs/observe`): the `/health` document and metric
   names. Change additively; never rename or remove. Labels stay low
   cardinality (service, venue, product), never per-order ids.

@@ -47,8 +47,12 @@ pub fn config(state: PathBuf) -> Config {
         listen: "127.0.0.1:0".parse().unwrap(),
         listen_any: false,
         state,
+        forbid_state: Vec::new(),
         clients: clients(),
-        profile: Profile::default(),
+        profile: Profile {
+            underlyings: vec!["SPY".into()],
+            ..Profile::default()
+        },
         timing: Timing {
             resolve: vec![ms(20), ms(40), ms(80)],
             stream_grace: ms(100),

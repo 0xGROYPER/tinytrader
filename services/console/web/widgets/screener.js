@@ -10,13 +10,13 @@
 // chart and its news (opened beside the screener if need be), and a suggested
 // position in the Spread builder. ↑ and ↓ step through the rows the same way.
 import { defineWidget } from '../lib/widgets.js';
-import { fleet } from '../lib/fleet.js';
+import { fleet, serviceFor } from '../lib/fleet.js';
 import { esc, etTime } from '../lib/format.js';
 import { setFocus } from '../lib/theme.js';
 import { askRecommendation } from '../lib/position.js';
 import { get, stream } from '../lib/cache.js';
 
-const service = () => (fleet.topo?.services || []).find(s => s.screener)?.id || null;
+const service = () => serviceFor('screener') || null;
 const SHOW = 50;
 
 // The implied move to the expiry, scaled to a week (five sessions), so names
@@ -94,7 +94,7 @@ defineWidget('screener', {
 
     async function load() {
       const svc = service();
-      if (!svc) { my.err = 'No service serves the screener (alpaca-data).'; render(); return; }
+      if (!svc) { my.err = 'No service serves the screener (a `screener` stream).'; render(); return; }
       if (my.busy) return;
       my.busy = true;
       try {
@@ -149,7 +149,7 @@ defineWidget('screener', {
       const r = (my.data?.rows || []).find(x => x.symbol === sym);
       askRecommendation({ sym, view: my.sort != null ? '' : my.view, row: r || null, earnings: reports().get(sym)?.date || null });
       document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'spreads' }));
-      setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym }));
+      setFocus(sym);
       document.dispatchEvent(new CustomEvent('tt-show-ticker', { detail: { symbol: sym, from: el } }));
     }
     function select(row) {

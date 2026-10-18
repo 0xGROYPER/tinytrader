@@ -26,6 +26,7 @@ fn spawn(root: &Path, script: &str, stall: bool) -> (Child, std::net::SocketAddr
     .arg(root.join("state"))
     .arg("--client")
     .arg(format!("reactor,trade,wse-,{}", tok.display()))
+    .args(["--underlyings", "SPY"])
     .arg("--sim-script")
     .arg(root.join("script.json"))
     .stderr(Stdio::piped());

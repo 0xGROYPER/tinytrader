@@ -324,6 +324,10 @@ async fn main() {
         .route("/price", post(price))
         .route("/submit", post(submit))
         .route("/download/{job}", post(download))
+        // A web page of another origin can't submit (or pay for) anything.
+        .layer(axum::middleware::from_fn(
+            tinytrader_observe::guard::same_origin_writes,
+        ))
         .with_state(jobs.clone())
         .merge(observer.router())
         .merge(jobs.events.router());

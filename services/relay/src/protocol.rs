@@ -22,10 +22,11 @@ pub struct Join {
     #[serde(default)]
     pub conditions: bool,
     /// Who is connecting, such as `xsp-strategy`: shown on the console.
-    #[serde(default)]
+    /// `name` is accepted as another spelling (earlier documentation used it).
+    #[serde(default, alias = "name")]
     pub client: Option<String>,
-    /// The Alpaca account the client trades, by its name in the deployment
-    /// (such as `paper-1`): shown on the console beside the client.
+    /// The account the client trades, by its name in the deployment (such
+    /// as `paper`): shown on the console beside the client.
     #[serde(default)]
     pub account: Option<String>,
 }
@@ -114,7 +115,9 @@ mod tests {
         .unwrap();
         assert_eq!(j.start.unwrap().unix_timestamp(), 1_791_207_000);
         assert!(j.conditions);
-        assert!(parse_join(r#"{"protocol":"hyphae"}"#).is_err());
+        let j = parse_join(r#"{"protocol":"tinytrader.relay/1","name":"my-strategy"}"#).unwrap();
+        assert_eq!(j.client.as_deref(), Some("my-strategy"));
+        assert!(parse_join(r#"{"protocol":"other/1"}"#).is_err());
         assert!(parse_join(r#"{"protocol":"tinytrader.relay/1","extra":1}"#).is_err());
         assert!(parse_join("not json").is_err());
     }

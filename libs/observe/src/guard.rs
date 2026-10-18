@@ -139,7 +139,7 @@ impl WriteToken {
                 scheme.eq_ignore_ascii_case("bearer").then(|| rest.trim())
             });
         match got {
-            None => Some("this write needs the store's bearer token (Authorization: Bearer …)"),
+            None => Some("this write needs the service's bearer token (Authorization: Bearer …)"),
             Some(t) if constant_time_eq(t.as_bytes(), want.as_bytes()) => None,
             Some(_) => Some("wrong bearer token"),
         }

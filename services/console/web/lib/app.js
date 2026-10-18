@@ -4,7 +4,7 @@
 // Settings shared between devices: read before anything here runs.
 import './prefs.js';
 import { esc, bytes, duration, fmt, ago, etStamp } from './format.js';
-import { fleet, setTopology, svcState, metric, statusOf, statusText, writerOf, nodesById, uptimeOf, subOf, newsItems } from './fleet.js';
+import { fleet, setTopology, statusOf, subOf, serviceFor } from './fleet.js';
 import { widget, widgetNames } from './widgets.js';
 import { drawCharts } from './charts.js';
 import { prof, timed, statePoll, profileWanted, startProfile, stopProfile } from './profile.js';
@@ -45,7 +45,7 @@ import '../widgets/crossasset.js';
 import '../widgets/observations.js';
 import '../widgets/relations.js';
 import { watchlists, addList, addSymbols } from './watchlists.js';
-import { setTheme, PRESETS, parseSymbols, parseKeywords, LAYERS, DEFAULT_LAYERS } from './theme.js';
+import { setTheme, setFocus, PRESETS, parseSymbols, parseKeywords, LAYERS, DEFAULT_LAYERS } from './theme.js';
 const state = { openGroups: new Set(), navKey: '', tab: 'workspace', lastOk: 0, collections: [], doc: null };
 /** An element by ID, typed loosely enough for forms and buttons alike. @type {(id: string) => HTMLInputElement} */
 const $ = id => /** @type {HTMLInputElement} */ (document.getElementById(id));
@@ -445,7 +445,7 @@ document.addEventListener('tt-show-ticker', e => {
   laySave();
   // Once mounted, both pointed at it.
   requestAnimationFrame(() => {
-    document.dispatchEvent(new CustomEvent('tt-focus', { detail: symbol }));
+    setFocus(symbol);
     document.dispatchEvent(new CustomEvent('tt-news-symbol', { detail: { symbol } }));
   });
 });
@@ -1350,7 +1350,7 @@ function bellToggle(open) {
   // Looked at: the count goes, the list stays (until removed or re-armed).
   else markSeen();
 }
-watchAlerts(() => (fleet.topo?.services || []).find(s => s.snapshots)?.id || null);
+watchAlerts(() => serviceFor('snapshots') || null);
 document.addEventListener('tt-alerts', () => { updateHeaderStatus(); if (!$('bell-pop').hidden) bellDraw(); });
 $('bell').addEventListener('click', e => { e.stopPropagation(); bellToggle($('bell-pop').hidden); });
 document.addEventListener('click', e => {

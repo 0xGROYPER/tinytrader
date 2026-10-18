@@ -8,7 +8,7 @@
 // changed. Each leg's bid and ask come from the chain service every few
 // seconds. A live account is never picked for you, and its Send asks once
 // more before it sends.
-import { fleet, svcState } from './fleet.js';
+import { svcState, serviceFor, servicesFor } from './fleet.js';
 import { onChange } from './channels.js';
 import { get, stream } from './cache.js';
 import { esc } from './format.js';
@@ -25,6 +25,8 @@ const band = n => Math.max(0.05, r2(Math.abs(n) * 0.05));
 /** Order routing as the console has it: {trading, accounts: [{account, environment, error, state}]}, or {unavailable}. */
 let routing = /** @type {any} */ (null), routingAt = 0, asking = /** @type {Promise<void> | null} */ (null);
 /** Whether an account can be traded from the console. @param {string} name */
+/** The console's order id prefix, as `/api/orders` says (`CONSOLE_TRADE_PREFIX`). */
+export const ourPrefix = () => routing?.prefix || 'tt-';
 export const tradable = name => !!name && !!routing?.trading && (routing.accounts || []).some(x => x.account === name && !x.error);
 /** Routing, read if it's 15 seconds old; then `done` (every caller waiting on the read). */
 export function routed(done) {
@@ -42,7 +44,7 @@ export function routed(done) {
 
 /** An account's open orders, as its account service has them (null if unknown, undefined if not read). */
 function openOrdersOf(name) {
-  for (const s of (fleet.topo?.services || []).filter(x => x.accounts)) for (const a of svcState(s.id).accounts?.accounts || []) if (a.name === name) return a.orders;
+  for (const s of servicesFor('accounts')) for (const a of svcState(s.id).accounts?.accounts || []) if (a.name === name) return a.orders;
   return undefined;
 }
 
@@ -71,8 +73,8 @@ export function createTicket(box, hooks = {}) {
   // Bid and ask for every leg, one chain read per underlying and expiry.
   async function readQuotes() {
     const me = t; if (!me) return;
-    const svc = (fleet.topo?.services || []).find(s => s.chain)?.id;
-    if (!svc) { me.qErr = 'No service serves option chains (alpaca-data), so there are no quotes.'; draw(); return; }
+    const svc = serviceFor('chain');
+    if (!svc) { me.qErr = 'No service serves option chains (a `chain` stream), so there are no quotes.'; draw(); return; }
     const want = new Map();
     for (const l of me.legs) { const m = OCC.exec(l.symbol); if (m) { const e = `20${m[2]}-${m[3]}-${m[4]}`; want.set(`${m[1]}|${e}`, [m[1], e]); } }
     const errs = [];

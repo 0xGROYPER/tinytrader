@@ -100,7 +100,7 @@ defineWidget('day', {
       const st = t.closest('[data-dy-step]'); if (st) { go(step(my.day, +(/** @type {HTMLElement} */ (st)).dataset.dyStep)); return; }
       if (t.closest('[data-dy-today]')) { go(nyToday()); return; }
       const sym = /** @type {HTMLElement | null} */ (t.closest('[data-sym]'))?.dataset.sym;
-      if (sym) { setFocus(sym); document.dispatchEvent(new CustomEvent('tt-focus', { detail: sym })); }
+      if (sym) setFocus(sym);
     };
     el.addEventListener('click', click);
     update();
