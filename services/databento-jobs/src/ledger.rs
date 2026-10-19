@@ -125,6 +125,15 @@ impl Ledger {
             .collect()
     }
 
+    /// Every submission here that Databento accepted (a job, so a purchase).
+    #[must_use]
+    pub fn purchases(&self) -> Vec<&Entry> {
+        self.entries
+            .iter()
+            .filter(|e| e.state == "submitted" && e.job.is_some())
+            .collect()
+    }
+
     /// Every job ID submitted here.
     #[must_use]
     pub fn submitted(&self) -> HashSet<String> {

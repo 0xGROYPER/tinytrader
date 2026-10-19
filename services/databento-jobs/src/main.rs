@@ -5,11 +5,18 @@
 //!   already holds of it and any download in progress.
 //! - `GET /datasets`, `GET /schemas?dataset=`: for the request form.
 //! - `POST /price` with `{ dataset, schema, symbols, stype_in, start, end }`
-//!   (dates, `end` inclusive): the cost and billable size, and a quote ID.
-//! - `POST /submit` with `{ quote, confirm_usd }`: prices the quoted request
-//!   again and submits it only if the price is unchanged and, when it costs
-//!   anything, `confirm_usd` is exactly that price. A submission is never
-//!   retried; if its outcome is uncertain the jobs list says what happened.
+//!   (dates, `end` inclusive): the cost and billable size, and a quote ID,
+//!   with the requested days the store already holds (`held_days`) and the
+//!   earlier purchases it overlaps (`bought`).
+//! - `POST /submit` with `{ quote, confirm_usd, again? }`: prices the quoted
+//!   request again and submits it only if the price is unchanged and, when it
+//!   costs anything, `confirm_usd` is exactly that price. Never what's had
+//!   already: it's refused if the store holds any of its days (or can't say),
+//!   or if it overlaps a job on Databento's list (queued, processing, or done
+//!   and waiting to download, wherever it was bought), always; or a purchase
+//!   in the ledger no longer on that list, unless `again` is true (an expired
+//!   job never filed, say). A submission is never retried; if its outcome is uncertain the
+//!   jobs list says what happened.
 //! - `POST /download/{job}`: streams the job's files into the store, each
 //!   checked against Databento's size and SHA-256, then has the store file
 //!   the batch. Jobs submitted here download by themselves once done.
@@ -739,15 +746,193 @@ async fn availability(jobs: &Jobs, c: &Checked) -> Result<Vec<String>, String> {
     Ok(warnings)
 }
 
+/// The request's days, first to last, as `YYYY-MM-DD`.
+fn days(c: &Checked) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut d = c.start;
+    while d < c.end {
+        out.push(d.to_string());
+        let Some(n) = d.next_day() else { break };
+        d = n;
+    }
+    out
+}
+
+/// The requested days the store's catalog holds for this dataset, symbol and
+/// schema, on any volume.
+fn held_days(catalog: &Value, c: &Checked) -> Vec<String> {
+    let want: HashSet<String> = days(c).into_iter().collect();
+    let symbol = c.symbols.first().map_or("", String::as_str);
+    let mut held: Vec<String> = catalog["roots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|r| r["datasets"].as_array().into_iter().flatten())
+        .filter(|d| d["id"] == c.dataset.as_str() && d["symbol"] == symbol)
+        .filter_map(|d| d["schemas"][c.schema.as_str()]["days"].as_object())
+        .flat_map(|days| days.keys().filter(|k| want.contains(*k)).cloned())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    held.sort();
+    held
+}
+
+/// Earlier purchases this request overlaps, each as a line saying which:
+/// jobs on Databento's list that aren't expired (queued, processing, or done
+/// and waiting to be downloaded, wherever they were bought), and purchases in
+/// the ledger that aren't on that list any more (`.1`: only these may be
+/// bought `again`, as they can no longer be downloaded).
+fn bought(purchases: &[ledger::Entry], listed: &Value, c: &Checked) -> (Vec<String>, Vec<String>) {
+    let (from, to) = (c.start.to_string(), c.end.to_string());
+    let symbol = c.symbols.first().map_or("", String::as_str);
+    let on_list: HashSet<&str> = listed["jobs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|j| j["state"] != "expired")
+        .filter_map(|j| j["id"].as_str())
+        .collect();
+    let mut gone = Vec::new();
+    for e in purchases {
+        if e.job.as_deref().is_some_and(|j| on_list.contains(j)) {
+            continue; // judged below, from the list
+        }
+        // dataset|schema|symbols|start|end (end exclusive), as `ledger::fingerprint`.
+        let f: Vec<&str> = e.request.split('|').collect();
+        if let [d, s, sym, a, b] = f[..]
+            && d == c.dataset
+            && s == c.schema.as_str()
+            && sym == symbol
+            && a < to.as_str()
+            && from.as_str() < b
+        {
+            gone.push(format!(
+                "{} (bought here, {a} to before {b}; no longer on Databento's list)",
+                e.job.as_deref().unwrap_or("a job")
+            ));
+        }
+    }
+    let (lo, hi) = (
+        c.start.midnight().assume_utc().unix_timestamp(),
+        c.end.midnight().assume_utc().unix_timestamp(),
+    );
+    let mut live = Vec::new();
+    for j in listed["jobs"].as_array().into_iter().flatten() {
+        if j["state"] == "expired" {
+            continue;
+        }
+        if j["dataset"] == c.dataset.as_str()
+            && j["schema"] == c.schema.as_str()
+            && j["symbols"] == symbol
+            && j["start"].as_i64().is_some_and(|s| s < hi)
+            && j["end"].as_i64().is_some_and(|e| lo < e)
+        {
+            live.push(format!(
+                "{} ({} on Databento; download it rather than buy it again)",
+                j["id"].as_str().unwrap_or_default(),
+                j["state"].as_str().unwrap_or("listed")
+            ));
+        }
+    }
+    (live, gone)
+}
+
+/// The store's catalog: which days each volume holds.
+async fn catalog(jobs: &Jobs) -> Result<Value, String> {
+    let r = jobs
+        .http
+        .get(format!("{}/catalog", jobs.store))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| format!("the store's catalog: {e}"))?;
+    if !r.status().is_success() {
+        return Err(format!("the store's catalog: HTTP {}", r.status()));
+    }
+    r.json::<Value>()
+        .await
+        .map_err(|e| format!("the store's catalog: {e}"))
+}
+
+/// What's had already of a request: the days the store holds, and earlier
+/// purchases it overlaps (see `bought`), from the store's catalog and
+/// Databento's job list as they are now.
+async fn had(
+    jobs: &Jobs,
+    c: &Checked,
+) -> Result<(Vec<String>, (Vec<String>, Vec<String>)), String> {
+    let held = held_days(&catalog(jobs).await?, c);
+    let short = {
+        let mut db = jobs.db.lock().await;
+        db.batch()
+            .list_jobs(&ListJobsParams::default())
+            .await
+            .map_err(|e| format!("Databento's job list: {e}"))?
+    };
+    // Each job's request (dataset, schema, symbols, days) never changes:
+    // from the details already read, else read now. A job whose request
+    // can't be read fails the check, so nothing is bought blind.
+    let mut rows = Vec::new();
+    for sj in short.iter().filter(|sj| sj.state != JobState::Expired) {
+        let known = lock(&jobs.details).get(&sj.id).cloned();
+        let job = match known {
+            Some(j) => j,
+            None => {
+                let mut db = jobs.db.lock().await;
+                db.batch()
+                    .get_job_details(&sj.id)
+                    .await
+                    .map_err(|e| format!("Databento's job {}: {e}", sj.id))?
+            }
+        };
+        // Its state as listed now (the details may be from earlier).
+        rows.push(row(
+            &BatchJob {
+                state: sj.state,
+                ..job
+            },
+            &Value::Null,
+            None,
+        ));
+    }
+    let listed = json!({ "jobs": rows });
+    let purchases: Vec<ledger::Entry> = lock(&jobs.ledger)
+        .as_ref()
+        .map(|l| l.purchases().into_iter().cloned().collect())
+        .unwrap_or_default();
+    Ok((held, bought(&purchases, &listed, c)))
+}
+
 async fn price(AxState(jobs): AxState<Shared>, Json(request): Json<Request>) -> Reply {
     let checked = match request.check() {
         Ok(c) => c,
         Err(e) => return refused(StatusCode::BAD_REQUEST, e),
     };
-    let warnings = match availability(&jobs, &checked).await {
+    let mut warnings = match availability(&jobs, &checked).await {
         Ok(w) => w,
         Err(e) => return refused(StatusCode::BAD_REQUEST, e),
     };
+    // What's had already; submitting refuses it, so say so now.
+    let (held, prior) = match had(&jobs, &checked).await {
+        Ok((h, (live, gone))) => (h, [live, gone].concat()),
+        Err(e) => {
+            warnings.push(format!(
+                "couldn't check what's held already ({e}); submitting will refuse until it can"
+            ));
+            (Vec::new(), Vec::new())
+        }
+    };
+    if !held.is_empty() {
+        warnings.push(format!(
+            "the store already holds {} of these days ({}); request only the others",
+            held.len(),
+            held.join(", ")
+        ));
+    }
+    if !prior.is_empty() {
+        warnings.push(format!("overlaps earlier purchases: {}", prior.join("; ")));
+    }
     let (usd, bytes) = match cost(&jobs, &checked).await {
         Ok(c) => c,
         Err(e) => return refused(StatusCode::BAD_GATEWAY, e),
@@ -766,7 +951,7 @@ async fn price(AxState(jobs): AxState<Shared>, Json(request): Json<Request>) -> 
     (
         StatusCode::OK,
         Json(
-            json!({ "quote": id, "warnings": warnings, "cost_usd": usd, "billable_bytes": bytes, "valid_seconds": QUOTE_TTL.as_secs() }),
+            json!({ "quote": id, "warnings": warnings, "cost_usd": usd, "billable_bytes": bytes, "valid_seconds": QUOTE_TTL.as_secs(), "held_days": held, "bought": prior }),
         ),
     )
 }
@@ -775,6 +960,10 @@ async fn price(AxState(jobs): AxState<Shared>, Json(request): Json<Request>) -> 
 struct Submit {
     quote: String,
     confirm_usd: Option<f64>,
+    /// Buy again what overlaps an earlier purchase (one never filed, such as
+    /// an expired job). Days the store holds are never bought again.
+    #[serde(default)]
+    again: bool,
 }
 
 async fn submit(AxState(jobs): AxState<Shared>, Json(s): Json<Submit>) -> Reply {
@@ -794,6 +983,44 @@ async fn submit(AxState(jobs): AxState<Shared>, Json(s): Json<Submit>) -> Reply 
     let Ok(checked) = quote.request.check() else {
         return refused(StatusCode::BAD_REQUEST, "the request is no longer valid");
     };
+    // Never buy what's had already, and never when that can't be checked.
+    match had(&jobs, &checked).await {
+        Err(e) => {
+            return refused(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("couldn't check what's held already, so nothing is submitted: {e}"),
+            );
+        }
+        Ok((held, _)) if !held.is_empty() => {
+            return refused(
+                StatusCode::CONFLICT,
+                format!(
+                    "the store already holds {} of these days ({}); request only the others",
+                    held.len(),
+                    held.join(", ")
+                ),
+            );
+        }
+        Ok((_, (live, _))) if !live.is_empty() => {
+            return refused(
+                StatusCode::CONFLICT,
+                format!(
+                    "already bought and on Databento's servers: {}",
+                    live.join("; ")
+                ),
+            );
+        }
+        Ok((_, (_, gone))) if !gone.is_empty() && !s.again => {
+            return refused(
+                StatusCode::CONFLICT,
+                format!(
+                    "this overlaps earlier purchases that are no longer on Databento's list: {}. If they were never filed, submit with \"again\": true to buy them again",
+                    gone.join("; ")
+                ),
+            );
+        }
+        Ok(_) => {}
+    }
     let (now, _) = match cost(&jobs, &checked).await {
         Ok(c) => c,
         Err(e) => {
@@ -1265,6 +1492,76 @@ async fn copy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_days_the_store_holds_for_the_same_dataset_symbol_and_schema() {
+        let catalog = json!({ "roots": [
+            { "datasets": [
+                { "id": "OPRA.PILLAR", "symbol": "SPY.OPT", "schemas": { "cmbp-1": { "days": { "2025-10-01": 1, "2025-10-03": 1 } } } },
+                { "id": "OPRA.PILLAR", "symbol": "QQQ.OPT", "schemas": { "cmbp-1": { "days": { "2025-10-02": 1 } } } },
+            ] },
+            { "datasets": [
+                { "id": "OPRA.PILLAR", "symbol": "SPY.OPT", "schemas": { "definition": { "days": { "2025-10-02": 1 } }, "cmbp-1": { "days": { "2025-10-03": 1, "2025-10-09": 1 } } } },
+            ] },
+        ] });
+        let c = req("SPY.OPT", "2025-10-01", "2025-10-05").check().unwrap();
+        assert_eq!(held_days(&catalog, &c), vec!["2025-10-01", "2025-10-03"]);
+        let none = req("SPY.OPT", "2025-10-04", "2025-10-05").check().unwrap();
+        assert!(held_days(&catalog, &none).is_empty());
+    }
+
+    #[test]
+    fn finds_overlapping_purchases_in_the_ledger_and_on_databentos_list() {
+        let entry = |start: &str, end: &str| ledger::Entry {
+            at: 1.0,
+            request: ledger::fingerprint("OPRA.PILLAR", "cmbp-1", &["SPY.OPT".into()], start, end),
+            state: "submitted".into(),
+            job: Some(format!("OPRA-{start}")),
+            cost_usd: Some(1.0),
+            note: None,
+        };
+        // End exclusive, as submitted: Oct 1-2 and Oct 10.
+        let purchases = vec![
+            entry("2025-10-01", "2025-10-03"),
+            entry("2025-10-10", "2025-10-11"),
+        ];
+        let at = |d: &str| {
+            time::Date::parse(d, time::macros::format_description!("[year]-[month]-[day]"))
+                .unwrap()
+                .midnight()
+                .assume_utc()
+                .unix_timestamp()
+        };
+        let listed = json!({ "jobs": [
+            { "id": "OPRA-X", "state": "done", "dataset": "OPRA.PILLAR", "schema": "cmbp-1", "symbols": "SPY.OPT", "start": at("2025-10-05"), "end": at("2025-10-06") },
+            { "id": "OPRA-OLD", "state": "expired", "dataset": "OPRA.PILLAR", "schema": "cmbp-1", "symbols": "SPY.OPT", "start": at("2025-10-04"), "end": at("2025-10-05") },
+            { "id": "OPRA-Q", "state": "done", "dataset": "OPRA.PILLAR", "schema": "cmbp-1", "symbols": "QQQ.OPT", "start": at("2025-10-04"), "end": at("2025-10-05") },
+        ] });
+        let ids = |c: &Checked| {
+            let (live, gone) = bought(&purchases, &listed, c);
+            [live, gone]
+                .concat()
+                .iter()
+                .map(|l| l.split(' ').next().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        // On Databento's servers (here done, waiting to download): always
+        // refused. In the ledger only (its job gone from the list): may be
+        // bought again.
+        let (live, gone) = bought(
+            &purchases,
+            &listed,
+            &req("SPY.OPT", "2025-10-02", "2025-10-05").check().unwrap(),
+        );
+        assert_eq!((live.len(), gone.len()), (1, 1));
+        assert!(live[0].starts_with("OPRA-X") && gone[0].starts_with("OPRA-2025-10-01"));
+        // The day after a purchase ends doesn't overlap it; nor do expired jobs or other symbols.
+        assert!(ids(&req("SPY.OPT", "2025-10-03", "2025-10-04").check().unwrap()).is_empty());
+        assert_eq!(
+            ids(&req("SPY.OPT", "2025-10-10", "2025-10-10").check().unwrap()),
+            vec!["OPRA-2025-10-10"]
+        );
+    }
 
     fn req(symbols: &str, start: &str, end: &str) -> Request {
         Request {
