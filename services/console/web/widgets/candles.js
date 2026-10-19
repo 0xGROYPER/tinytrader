@@ -8,10 +8,10 @@
 // zoom back for more history, loaded a chunk at a time and kept in the page
 // (lib/bars.js). Indicators (the expected move to a chosen horizon) are
 // listed over the chart's top left, each with its settings.
-// With the Spread builder's "Show on chart", the position is drawn too: its
-// strikes and breakevens as lines, where it profits or loses at expiry shaded
-// across the chart, and its payoff sideways at the right edge on the same
-// prices. Legs are changed in the builder.
+// With the Spread builder's "Chart" on, the position is drawn too, from the
+// latest candle to its expiry: each strike a line (red sold, green bought),
+// and every price shaded by whether it profits or loses at expiry. Legs are
+// changed in the builder.
 // Times are New York time. Drawn with TradingView's Lightweight Charts
 // (Apache-2.0), loaded the first time a chart opens.
 import { defineWidget } from '../lib/widgets.js';
@@ -263,7 +263,7 @@ defineWidget('candles', {
       pick: null, size: 86400, err: null, note: null, last: '', timer: 0, chart: null, candles: null, volume: null, alive: true,
       drawn: { key: '', first: 0, len: 0, lastT: 0 }, backing: false, edgeTimer: 0,
       ind: loadIndicators(), open: '', expiries: /** @type {string[]} */ ([]), em: /** @type {Record<string, any>} */ ({}), emLines: [], spot: 0, emAt: 0, emFor: '',
-      L: null, posLines: [], over: null, raf: 0, sig: '', hoverY: null,
+      L: null, posLines: [], over: null, raf: 0, sig: '', hoverY: null, perDay: 0, room: 0,
       // Linked: follows the symbol picked elsewhere (a watchlist, Search, the
       // builder). A ticker typed into this chart's box pins it to that ticker.
       // Kept in the panel's layout, with the symbol and bar size, so several
@@ -315,9 +315,9 @@ defineWidget('candles', {
       my.candles = my.chart.addSeries(L.CandlestickSeries, { upColor: css('--ok'), downColor: css('--crit'), wickUpColor: css('--ok'), wickDownColor: css('--crit'), borderVisible: false });
       my.volume = my.chart.addSeries(L.HistogramSeries, { priceScaleId: 'volume', priceFormat: { type: 'volume' }, color: css('--line') });
       my.chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
-      // Keep a shown position's strikes and breakevens in view.
+      // Keep a shown position's strikes in view.
       my.candles.applyOptions({ autoscaleInfoProvider: (/** @type {() => any} */ orig) => {
-        const r = orig(), ks = shownHere() ? [...position.legs.map(l => l.strike), ...position.be] : [];
+        const r = orig(), ks = shownHere() ? position.legs.map(l => l.strike) : [];
         return r && ks.length ? { ...r, priceRange: { minValue: Math.min(r.priceRange.minValue, ...ks), maxValue: Math.max(r.priceRange.maxValue, ...ks) } } : r;
       } });
       my.chart.subscribeCrosshairMove((/** @type {any} */ p) => { my.hoverY = p?.point ? p.point.y : null; });
@@ -356,6 +356,12 @@ defineWidget('candles', {
         else if (n) ts.setVisibleLogicalRange({ from: Math.max(0, n - OPEN_BARS), to: n + 3 });
       }
       my.drawn = { key, first, len: n, lastT: bars[n - 1]?.[0] ?? 0 };
+      // Bars a trading day, from the last few whole days drawn (for the position's span to expiry).
+      if (size < 86400 && n) {
+        const per = new Map(); for (const b of bars) { const d = nyDate(b[0]); per.set(d, (per.get(d) || 0) + 1); }
+        const whole = [...per.values()].slice(1, -1).slice(-5);
+        my.perDay = whole.length ? whole.reduce((x, y) => x + y, 0) / whole.length : 390 * 60 / size;
+      }
       const lastBar = bars[n - 1];
       my.last = !lastBar ? 'no trades yet' : size >= 86400
         ? `${lastBar[4].toFixed(2)} · ${new Date((lastBar[0] + 43200) * 1000).toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short', day: 'numeric' })}`
@@ -546,7 +552,7 @@ defineWidget('candles', {
     // Clicks on the legend aren't chart drags.
     leg.addEventListener('pointerdown', e => e.stopPropagation());
 
-    const fresh = () => { my.chart?.remove(); my.over?.remove(); my.chart = my.candles = my.volume = my.over = null; my.emLines = []; my.posLines = []; my.sig = ''; my.emFor = ''; my.last = ''; my.drawn = { key: '', first: 0, len: 0, lastT: 0 }; head(); legend(); load(); keep(); };
+    const fresh = () => { my.chart?.remove(); my.over?.remove(); my.chart = my.candles = my.volume = my.over = null; my.emLines = []; my.posLines = []; my.sig = ''; my.room = 0; my.emFor = ''; my.last = ''; my.drawn = { key: '', first: 0, len: 0, lastT: 0 }; head(); legend(); load(); keep(); };
     // The builder's position, when shown and on this chart's symbol.
     const shownHere = () => !!(position.shown && position.pay && position.legs.length && position.sym === my.pick?.symbol);
     const money = (/** @type {number} */ v) => `${v < 0 ? '−' : '+'}$${Math.abs(v * 100).toFixed(0)}`;
@@ -556,48 +562,58 @@ defineWidget('candles', {
       my.posLines = []; my.sig = '';
       cancelAnimationFrame(my.raf);
       if (!my.candles || !my.L) return;
-      if (!shownHere()) { paint(); return; }
-      const pay = /** @type {(s: number) => number} */ (position.pay);
-      for (const l of position.legs) my.posLines.push(my.candles.createPriceLine({
-        price: l.strike, color: sideCol(l.side), lineWidth: 2, lineStyle: l.side < 0 ? my.L.LineStyle.Solid : my.L.LineStyle.Dashed, axisLabelVisible: true,
-        title: `${l.side < 0 ? 'Sell' : 'Buy'}${l.qty > 1 ? ' ' + l.qty : ''} ${l.strike}${l.type === 'call' ? 'C' : 'P'}  ${money(pay(l.strike))}`,
-      }));
-      for (const b of position.be) my.posLines.push(my.candles.createPriceLine({
-        price: b, color: css('--warn-mark') || css('--warn'), lineWidth: 1, lineStyle: my.L.LineStyle.Dotted, axisLabelVisible: true, title: 'breakeven',
-      }));
+      if (!shownHere()) { if (my.room) { my.room = 0; my.chart?.timeScale().applyOptions({ rightOffset: 0 }); } paint(); return; }
       my.chart.priceScale('right').applyOptions({ autoScale: true });
+      // Room right of the latest candle for the span to expiry: all of it, up
+      // to half the bars in view (a 1-minute chart can't show days ahead).
+      const ts = my.chart.timeScale(), r = ts.getVisibleLogicalRange(), room = Math.ceil(Math.min(barsToExpiry() + 1, r ? (r.to - r.from) / 2 : 40));
+      if (room !== my.room) { my.room = room; ts.applyOptions({ rightOffset: room }); ts.scrollToRealTime(); }
       const loop = () => { paint(); my.raf = requestAnimationFrame(loop); };
       loop();
     }
-    // The overlay: profit and loss shading, the sideways payoff and the P&L
-    // at the pointer's price; repainted only when the scale or pointer moves.
+    // Bars from the latest to the expiry's close (16:00 New York): whole
+    // trading days at this chart's bars a day (weekdays; holidays aren't
+    // known here), plus what's left of today's session.
+    function barsToExpiry() {
+      const exp = position.expiry; if (!exp || !my.drawn.len) return 0;
+      const nowNY = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+      const today = nowNY.toLocaleDateString('en-CA');
+      let days = 0;
+      for (let d = new Date(today + 'T12:00:00Z'); ;) { d.setUTCDate(d.getUTCDate() + 1); const iso = d.toISOString().slice(0, 10); if (iso > exp) break; if (d.getUTCDay() % 6) days++; }
+      if (my.size >= 86400) return days;
+      const left = nowNY.getDay() % 6 ? Math.max(0, 960 - (nowNY.getHours() * 60 + nowNY.getMinutes())) * 60 / my.size : 0;
+      return days * my.perDay + left;
+    }
+    // The overlay, from the latest candle to the expiry: profit and loss
+    // shading, the strikes, and the P&L at the pointer's price; repainted
+    // only when the scale or pointer moves.
     function paint() {
       const c = my.over; if (!c || !my.candles || !my.chart) return;
-      const on = shownHere(), plotW = my.chart.timeScale().width(), plotH = box.clientHeight - my.chart.timeScale().height();
-      const sig = on ? [plotW, plotH, my.candles.priceToCoordinate(100), my.candles.priceToCoordinate(200), my.hoverY, position.net, position.legs.map(l => l.side * l.qty + l.type + l.strike).join()].join('|') : 'off';
+      const on = shownHere(), ts = my.chart.timeScale(), plotW = ts.width(), plotH = box.clientHeight - ts.height();
+      const last = my.drawn.len - 1, x0 = on ? ts.logicalToCoordinate(last) : null, x1 = on ? ts.logicalToCoordinate(last + Math.max(1, barsToExpiry())) : null;
+      const sig = on ? [plotW, plotH, x0, x1, my.candles.priceToCoordinate(100), my.candles.priceToCoordinate(200), my.hoverY, position.net, position.legs.map(l => l.side * l.qty + l.type + l.strike).join()].join('|') : 'off';
       if (sig === my.sig) return;
       my.sig = sig;
       const dpr = window.devicePixelRatio || 1, W = box.clientWidth, H = box.clientHeight;
       if (c.width !== Math.round(W * dpr) || c.height !== Math.round(H * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
       const g = /** @type {CanvasRenderingContext2D} */ (c.getContext('2d'));
       g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
-      if (!on || plotW <= 0 || plotH <= 0) return;
+      if (!on || plotW <= 0 || plotH <= 0 || x0 == null || x1 == null) return;
+      const a = Math.max(0, x0), b = Math.min(plotW, x1);
       const pay = /** @type {(s: number) => number} */ (position.pay), ok = css('--ok'), bad = css('--crit');
-      const at = (/** @type {number} */ y) => { const p = my.candles.coordinateToPrice(y); return p == null ? null : pay(p); };
-      // Shading: green where it profits at expiry, red where it loses.
-      const vals = [];
-      for (let y = 0; y < plotH; y += 2) { const v = at(y); vals.push([y, v]); if (v == null) continue; g.fillStyle = v >= 0 ? ok : bad; g.globalAlpha = 0.07; g.fillRect(0, y, plotW, 2); }
-      g.globalAlpha = 1;
-      // The payoff sideways, in the right-hand 96 px.
-      const fin = vals.filter(([, v]) => v != null && isFinite(v)), lo = Math.min(0, ...fin.map(([, v]) => v)), hi = Math.max(0, ...fin.map(([, v]) => v));
-      if (fin.length && hi > lo) {
-        const x0 = plotW - 100, x1 = plotW - 6, X = (/** @type {number} */ v) => x0 + (v - lo) / (hi - lo) * (x1 - x0);
-        g.fillStyle = css('--bg') || '#fff'; g.globalAlpha = 0.75; g.fillRect(x0 - 4, 0, x1 - x0 + 10, plotH); g.globalAlpha = 1;
-        g.strokeStyle = css('--line'); g.lineWidth = 1; g.beginPath(); g.moveTo(X(0), 0); g.lineTo(X(0), plotH); g.stroke();
-        g.strokeStyle = css('--fg') || '#111'; g.lineWidth = 2; g.beginPath();
-        fin.forEach(([y, v], i) => i ? g.lineTo(X(v), y) : g.moveTo(X(v), y)); g.stroke();
-        g.font = `10px ${css('--mono') || 'monospace'}`; g.fillStyle = css('--muted');
-        g.textAlign = 'center'; g.fillText('P&L at expiry', (x0 + x1) / 2, 12);
+      if (b > a) {
+        g.save(); g.beginPath(); g.rect(a, 0, b - a, plotH); g.clip();
+        // Shading: green where it profits at expiry, red where it loses.
+        g.globalAlpha = 0.12;
+        for (let y = 0; y < plotH; y += 2) { const p = my.candles.coordinateToPrice(y), v = p == null ? null : pay(p); if (v == null) continue; g.fillStyle = v >= 0 ? ok : bad; g.fillRect(a, y, b - a, 2); }
+        g.globalAlpha = 1;
+        // The strikes: red sold, green bought.
+        g.lineWidth = 2;
+        for (const l of position.legs) {
+          const y = my.candles.priceToCoordinate(l.strike); if (y == null) continue;
+          g.strokeStyle = sideCol(l.side); g.beginPath(); g.moveTo(a, Math.round(y) + 0.5); g.lineTo(b, Math.round(y) + 0.5); g.stroke();
+        }
+        g.restore();
       }
       // The P&L at the pointer's price.
       if (my.hoverY != null && my.hoverY < plotH) {

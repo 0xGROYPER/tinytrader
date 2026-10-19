@@ -54,7 +54,7 @@ defineWidget('spreads', {
       // A suggestion waiting for its chain, and the one shown.
       ask: /** @type {any} */ (null), why: '',
       // The order ticket's account.
-      acct: store('tt-sb-account') || '', payoff: store('tt-sb-payoff') === '1',
+      acct: store('tt-sb-account') || '', payoff: store('tt-sb-payoff') === '1', onChart: store('tt-sb-chart') === '1',
       // Positions held, loaded from Accounts: their legs carry `cost`, the entry price.
       held: /** @type {any} */ (null), heldAsk: /** @type {any} */ (null), wantExpiry: /** @type {string | null} */ (null) };
     el.innerHTML = `<div class="sb">
@@ -263,7 +263,7 @@ defineWidget('spreads', {
     function render() {
       const a = analyse();
       // Publish first: Candles draws from it.
-      publish({ sym: my.sym, expiry: my.expiry, strikes: { call: strikesOf('call'), put: strikesOf('put') }, net: a?.net ?? 0, be: a?.be ?? [], pay: a?.pay ?? null });
+      publish({ sym: my.sym, expiry: my.expiry, strikes: { call: strikesOf('call'), put: strikesOf('put') }, net: a?.net ?? 0, be: a?.be ?? [], pay: a?.pay ?? null, shown: my.onChart });
       // The box shows the underlying; typing replaces it.
       const tickerBox = /** @type {HTMLInputElement} */ ($('.sb-ticker'));
       if (document.activeElement !== tickerBox) tickerBox.placeholder = my.sym || 'Ticker';
@@ -311,7 +311,7 @@ defineWidget('spreads', {
       }).join('');
       // The header (ticker, expiry) stays put: only the rows are redrawn.
       $('.sb-legs tbody').innerHTML = rows;
-      $('.sb-legs tfoot').innerHTML = `<tr><td colspan="3"><span class="sb-adds"><button type="button" class="sb-add" data-act="add" title="Add a leg">+ Leg</button><select class="sb-addsp" aria-label="Add a spread" title="Add a vertical spread to these legs (a credit spread goes one width out of the money, a debit spread at the money)"><option value="">+ Spread…</option>${Object.keys(GROUPS[0].items).map(n => `<option>${esc(n)}</option>`).join('')}</select><button type="button" class="sb-add sb-paybtn" aria-pressed="${my.payoff}">Payoff</button></span></td>
+      $('.sb-legs tfoot').innerHTML = `<tr><td colspan="3"><span class="sb-adds"><button type="button" class="sb-add" data-act="add" title="Add a leg">+ Leg</button><select class="sb-addsp" aria-label="Add a spread" title="Add a vertical spread to these legs (a credit spread goes one width out of the money, a debit spread at the money)"><option value="">+ Spread…</option>${Object.keys(GROUPS[0].items).map(n => `<option>${esc(n)}</option>`).join('')}</select><button type="button" class="sb-add sb-paybtn" aria-pressed="${my.payoff}">Payoff</button><button type="button" class="sb-add sb-chartbtn" aria-pressed="${my.onChart}" title="Draw the position on Candles (same symbol), from now to its expiry">Chart</button></span></td>
           <td class="num sb-c-value"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr>`;
       payoff(a);
       // The summary: what it costs, what it can lose and make, and the chance; the rest on hover.
@@ -500,6 +500,7 @@ defineWidget('spreads', {
       // A contract's symbol: its chart on Candles, opened if need be.
       if (b.dataset.occ) { document.dispatchEvent(new CustomEvent('tt-show-view', { detail: 'candles' })); setTimeout(() => document.dispatchEvent(new CustomEvent('tt-chart', { detail: b.dataset.occ }))); return; }
       if (b.classList.contains('sb-trade')) { if (tk.isOpen) tk.close(); else trade(); render(); return; }
+      if (b.classList.contains('sb-chartbtn')) { my.onChart = !my.onChart; store('tt-sb-chart', my.onChart ? '1' : '0'); render(); return; }
       if (b.classList.contains('sb-paybtn')) { my.payoff = !my.payoff; store('tt-sb-payoff', my.payoff ? '1' : '0'); render(); return; }
       const act = b.dataset.act;
       if (!act) return;
