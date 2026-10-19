@@ -67,11 +67,14 @@
 //!   /api/orders/{account}` (`{order, confirm: account}`) and `POST
 //!   /api/orders/{account}/{client_order_id}/cancel`.
 //!   Every write route needs `CONSOLE_ORDER_LOGINS` (the Tailscale logins
-//!   allowed to write, comma-separated); an empty list refuses all writes
-//!   (`WriteGate`). A live account's order, cancel, flatten or resume also
-//!   needs the order token in the page's `X-Order-Token`: the file
-//!   `CONSOLE_ORDER_TOKEN_FILE` names (one line, e.g. 64 hex characters), or
-//!   else `CONSOLE_ORDER_TOKEN`. Without a token, live orders are refused and
+//!   allowed to write, comma-separated) and `CONSOLE_HOSTS` (the host names
+//!   the console is reached by, comma-separated, ports optional); an empty
+//!   list refuses all writes (`WriteGate`). A live account's order, cancel,
+//!   flatten or resume also needs the order token in the page's
+//!   `X-Order-Token`: the file `CONSOLE_ORDER_TOKEN_FILE` names (one line,
+//!   e.g. 64 hex characters), or else `CONSOLE_ORDER_TOKEN`. So does a paper
+//!   account's flatten or resume unless `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` is
+//!   `false` (default `true`). Without a token, those are refused and
 //!   everything else still works. Paper orders need only the login. A live
 //!   account's flatten or resume also needs `confirm` naming the account. An
 //!   account is paper only when both the accounts service's `environment` for
@@ -170,6 +173,9 @@ async fn main() {
     let write_gate = WriteGate::from_env();
     if write_gate.logins.is_empty() {
         eprintln!("console: writes are refused until CONSOLE_ORDER_LOGINS is set");
+    }
+    if write_gate.hosts.is_empty() {
+        eprintln!("console: writes are refused until CONSOLE_HOSTS is set");
     }
     if write_gate.token.is_none() {
         eprintln!(
@@ -415,10 +421,23 @@ async fn file(uri: axum::http::Uri) -> Response {
     };
     (
         [(header::CONTENT_TYPE, kind), (header::CACHE_CONTROL, cache)],
+        NO_FRAMING,
         body,
     )
         .into_response()
 }
+
+/// The page's Content-Security-Policy: scripts only from the console itself
+/// (the page has no inline scripts or inline event handlers), and no other
+/// site may frame it.
+const CSP: &str = "script-src 'self'; frame-ancestors 'none'";
+
+/// Headers on the page and its files: the CSP above, and `X-Frame-Options`
+/// for browsers that don't read `frame-ancestors`.
+const NO_FRAMING: [(header::HeaderName, &str); 2] = [
+    (header::CONTENT_SECURITY_POLICY, CSP),
+    (header::X_FRAME_OPTIONS, "DENY"),
+];
 
 async fn page() -> Response {
     match web_file("index.html") {
@@ -427,6 +446,7 @@ async fn page() -> Response {
                 (header::CONTENT_TYPE, "text/html; charset=utf-8"),
                 (header::CACHE_CONTROL, "no-cache"),
             ],
+            NO_FRAMING,
             body,
         )
             .into_response(),
@@ -917,31 +937,47 @@ fn routes(write_gate: WriteGate) -> Router<Arc<App>> {
         ))
 }
 
-/// Who may write. Every write route (see [`write_routes`]) needs the Tailscale
-/// login, checked before anything is forwarded or sent to a gateway:
+/// Who may write. Every write route (see [`write_routes`]) is checked here
+/// before anything is forwarded or sent to a gateway:
 ///
-/// - the Tailscale login: `tailscale serve` sets `Tailscale-User-Login` on
-///   what it forwards, and it must be one of `CONSOLE_ORDER_LOGINS`
-///   (comma-separated, exact match). Empty or unset refuses every write.
+/// - the Host: the request's `Host` must be one of `CONSOLE_HOSTS`
+///   (comma-separated host names, each with or without a port; without one,
+///   any port matches). This stops a page that rebinds its own DNS name to
+///   the console's address from writing. Empty or unset refuses every write.
+/// - the Tailscale login: `Tailscale-User-Login` must be one of
+///   `CONSOLE_ORDER_LOGINS` (comma-separated, exact match). Empty or unset
+///   refuses every write.
+///
+/// The login header is trusted only because `tailscale serve` removes any
+/// copy a client sends and sets its own. Anything that reaches the console's
+/// port without going through `tailscale serve` can send any login it likes:
+/// a process on the host, or another container on the same Docker network.
+/// So the port must stay on loopback and off any shared network.
 ///
 /// A live account's order, cancel, flatten or resume also needs the order
 /// token: `X-Order-Token` must equal `CONSOLE_ORDER_TOKEN` (or the file
-/// `CONSOLE_ORDER_TOKEN_FILE` names). The login header alone isn't enough
-/// for a live account: anything on the console's host can reach its port directly
-/// and send it.
-/// Unset, live orders are refused with a message saying so. Whether an account
+/// `CONSOLE_ORDER_TOKEN_FILE` names). So does a paper account's flatten or
+/// resume, unless `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` is `false` (the default
+/// is `true`). Paper orders and cancels need only the login.
+/// Unset, those writes are refused with a message saying so. Whether an account
 /// is live is decided by its handler (see [`account_live`]) from the accounts
 /// service's environment and the gateway's own welcome, never from the request:
 /// either one not saying `paper` makes it live.
 ///
 /// GET routes stay open. A refusal says which check failed in plain words
-/// (403 for the login, 401 for the token), never what was expected.
+/// (403 for the host or the login, 401 for the token), never what was
+/// expected, and carries `X-Write-Gate: refused` and `"gate": true`, so the
+/// page can tell it from a refusal by a service behind the console.
 /// `GET /api/write-gate` tells the page whether writes are on, whether this
-/// viewer's login may make them, and whether live orders are on.
+/// viewer's request may make them, and whether live orders are on.
 #[derive(Clone)]
 struct WriteGate {
     logins: Vec<String>,
+    /// The allowed Host names, lowercased, each with its port if one was given.
+    hosts: Vec<String>,
     token: Option<String>,
+    /// Whether a paper account's flatten or resume needs the order token.
+    paper_flatten_token: bool,
 }
 
 /// A refusal: a status and the message to send.
@@ -950,20 +986,35 @@ type Refusal = (StatusCode, &'static str);
 /// The refusal for every write while `CONSOLE_ORDER_LOGINS` is empty.
 const NO_LOGINS: &str =
     "writes are disabled: the console has no allowed logins configured (CONSOLE_ORDER_LOGINS)";
+/// The refusal for every write while `CONSOLE_HOSTS` is empty.
+const NO_HOSTS: &str =
+    "writes are disabled: the console has no allowed host names configured (CONSOLE_HOSTS)";
+/// The refusal for a request whose Host isn't on the list (or has none).
+const BAD_HOST: &str = "writes are not allowed through this host name";
 /// The refusal for a login that isn't on the list (or no login at all).
 const NOT_ALLOWED: &str = "writes are not allowed for this login";
-/// The refusal for a live write whose order token is missing or wrong.
-const BAD_TOKEN: &str = "a live account's write needs the console's order token";
-/// The refusal for a live write while no order token is configured.
-const NO_TOKEN: &str = "live orders are disabled: the console has no order token configured";
+/// The refusal for a write whose order token is missing or wrong.
+const BAD_TOKEN: &str = "this write needs the console's order token";
+/// The refusal for a write that needs the token while none is configured.
+const NO_TOKEN: &str = "this write needs the order token, and the console has none configured";
+
+/// The response header that marks the gate's own refusals.
+const GATE_HEADER: &str = "x-write-gate";
 
 impl WriteGate {
     fn from_env() -> Self {
-        let logins = env("CONSOLE_ORDER_LOGINS", "")
-            .split(',')
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(str::to_owned)
+        let list = |var: &str| -> Vec<String> {
+            env(var, "")
+                .split(',')
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let logins = list("CONSOLE_ORDER_LOGINS");
+        let hosts = list("CONSOLE_HOSTS")
+            .iter()
+            .filter_map(|h| normal_host(h))
             .collect();
         // An unreadable token file leaves live orders disabled; the console still starts.
         let token = match tinytrader_observe::optional_secret("CONSOLE_ORDER_TOKEN") {
@@ -973,7 +1024,19 @@ impl WriteGate {
                 None
             }
         };
-        Self { logins, token }
+        let paper_flatten_token = !matches!(
+            env("CONSOLE_TOKEN_FOR_PAPER_FLATTEN", "true")
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "false" | "0" | "no" | "off"
+        );
+        Self {
+            logins,
+            hosts,
+            token,
+            paper_flatten_token,
+        }
     }
 
     /// Whether `login` is one of the allowed Tailscale logins.
@@ -981,8 +1044,35 @@ impl WriteGate {
         login.is_some_and(|l| self.logins.iter().any(|a| a == l))
     }
 
-    /// Why a write from `login` is refused, if it is, before the token is
-    /// looked at. No logins configured refuses every write, and says so.
+    /// Whether the request's `host` (its `Host` header) is one of the
+    /// allowed names: an entry with a port must match it exactly, one
+    /// without matches the name on any port.
+    fn host_allowed(&self, host: Option<&str>) -> bool {
+        let Some(host) = host.and_then(normal_host) else {
+            return false;
+        };
+        let name = host_name(&host);
+        self.hosts
+            .iter()
+            .any(|a| *a == host || (host_name(a) == a.as_str() && a == name))
+    }
+
+    /// Why a write is refused, if it is, from its Host and login, before the
+    /// token is looked at. No logins or no hosts configured refuses every
+    /// write, and says so.
+    fn refuse_request(&self, host: Option<&str>, login: Option<&str>) -> Option<Refusal> {
+        if self.logins.is_empty() {
+            Some((StatusCode::FORBIDDEN, NO_LOGINS))
+        } else if self.hosts.is_empty() {
+            Some((StatusCode::FORBIDDEN, NO_HOSTS))
+        } else if !self.host_allowed(host) {
+            Some((StatusCode::FORBIDDEN, BAD_HOST))
+        } else {
+            self.refuse_login(login)
+        }
+    }
+
+    /// Why a write from `login` is refused, if it is.
     fn refuse_login(&self, login: Option<&str>) -> Option<Refusal> {
         if self.logins.is_empty() {
             Some((StatusCode::FORBIDDEN, NO_LOGINS))
@@ -993,13 +1083,19 @@ impl WriteGate {
         }
     }
 
-    /// Whether a write from `login`, carrying `token`, may go ahead, on an
-    /// account that is `live` or not. A paper write needs only the login.
-    fn decide(&self, login: Option<&str>, token: Option<&str>, live: bool) -> Option<Refusal> {
+    /// Whether a write from `login`, carrying `token`, may go ahead, when it
+    /// needs the order token (`needs_token`: a live account's write, or a
+    /// flatten or resume) or not. Any other write needs only the login.
+    fn decide(
+        &self,
+        login: Option<&str>,
+        token: Option<&str>,
+        needs_token: bool,
+    ) -> Option<Refusal> {
         if let Some(refusal) = self.refuse_login(login) {
             return Some(refusal);
         }
-        if !live {
+        if !needs_token {
             return None;
         }
         let Some(want) = self.token.as_deref() else {
@@ -1011,6 +1107,44 @@ impl WriteGate {
             Some((StatusCode::UNAUTHORIZED, BAD_TOKEN))
         }
     }
+
+    /// Whether a flatten or resume on an account that is `live` or not needs
+    /// the order token.
+    fn flatten_needs_token(&self, live: bool) -> bool {
+        live || self.paper_flatten_token
+    }
+}
+
+/// A Host as compared: trimmed, lowercased, without a trailing dot on the
+/// name; `None` when empty.
+fn normal_host(host: &str) -> Option<String> {
+    let h = host.trim().to_ascii_lowercase();
+    let name = host_name(&h);
+    let port = &h[name.len()..];
+    let name = name.strip_suffix('.').unwrap_or(name);
+    (!name.is_empty()).then(|| format!("{name}{port}"))
+}
+
+/// The name part of a Host, without its port (`[::1]:8080` gives `[::1]`).
+fn host_name(host: &str) -> &str {
+    if host.starts_with('[') {
+        return host.find(']').map_or(host, |i| &host[..=i]);
+    }
+    match host.rsplit_once(':') {
+        Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host,
+    }
+}
+
+/// The request's Host: its `Host` header, else the URI's authority (HTTP/2).
+fn request_host<'a>(
+    headers: &'a axum::http::HeaderMap,
+    uri: &'a axum::http::Uri,
+) -> Option<&'a str> {
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| uri.authority().map(axum::http::uri::Authority::as_str))
 }
 
 /// The request's Tailscale login and order token, if sent.
@@ -1023,28 +1157,39 @@ fn login_and_token(headers: &axum::http::HeaderMap) -> (Option<&str>, Option<&st
     )
 }
 
-/// The refusal response for a write on an account that is `live` or not (as
+/// The refusal response for a write that needs the order token or not (as
 /// its handler found it), if any.
-fn refused_for(app: &App, headers: &axum::http::HeaderMap, live: bool) -> Option<Response> {
+fn refused_for(app: &App, headers: &axum::http::HeaderMap, needs_token: bool) -> Option<Response> {
     let (login, token) = login_and_token(headers);
-    app.gate.decide(login, token, live).map(refusal)
+    app.gate.decide(login, token, needs_token).map(refusal)
 }
 
+/// The gate's refusal, marked as the gate's (header and body) so the page
+/// can tell it from a service's own 401 or 403.
 fn refusal((status, why): Refusal) -> Response {
-    (status, axum::Json(json!({ "error": why }))).into_response()
+    (
+        status,
+        [(GATE_HEADER, "refused")],
+        axum::Json(json!({ "error": why, "gate": true })),
+    )
+        .into_response()
 }
 
 /// The write gate as this viewer meets it: `writes` (any logins configured),
-/// `allowed` (this request's login is one of them), `live_orders` (an order
-/// token is configured). Never the logins or the token themselves.
+/// `hosts` (any host names configured), `allowed` (this request's Host and
+/// login may write), `live_orders` (an order token is configured). Never the
+/// logins, the host names or the token themselves.
 async fn write_gate_get(
     AxumState(app): AxumState<Arc<App>>,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> Response {
     let (login, _) = login_and_token(&headers);
+    let host = request_host(&headers, &uri);
     no_store(axum::Json(json!({
         "writes": !app.gate.logins.is_empty(),
-        "allowed": app.gate.refuse_login(login).is_none(),
+        "hosts": !app.gate.hosts.is_empty(),
+        "allowed": app.gate.refuse_request(host, login).is_none(),
         "live_orders": app.gate.token.is_some(),
     })))
 }
@@ -1058,7 +1203,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b.iter()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
 }
 
-/// Middleware: refuse a write from a login that isn't allowed. The order token
+/// Middleware: refuse a write through a Host or from a login that isn't
+/// allowed. The order token
 /// for a live account is checked by its handler, which knows the account.
 async fn write_gate(
     AxumState(gate): AxumState<WriteGate>,
@@ -1066,7 +1212,7 @@ async fn write_gate(
     next: axum::middleware::Next,
 ) -> Response {
     let (login, _) = login_and_token(req.headers());
-    match gate.refuse_login(login) {
+    match gate.refuse_request(request_host(req.headers(), req.uri()), login) {
         Some(r) => refusal(r),
         None => next.run(req).await,
     }
@@ -1239,7 +1385,8 @@ async fn trade_request(
 
 /// Close every position of an account at market through its gateway: halts
 /// opens, cancels open orders, liquidates. The body must name the account in
-/// `confirm`; a live account's flatten also needs the order token.
+/// `confirm`. It needs the order token on a live account, and on a paper one
+/// unless `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` is `false`.
 async fn account_flatten(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path(account): axum::extract::Path<String>,
@@ -1261,7 +1408,7 @@ async fn account_flatten(
         Ok(live) => live,
         Err(e) => return gateway_failed(e),
     };
-    if let Some(refusal) = refused_for(&app, &headers, live) {
+    if let Some(refusal) = refused_for(&app, &headers, app.gate.flatten_needs_token(live)) {
         return refusal;
     }
     let reason = ask["reason"]
@@ -1278,7 +1425,8 @@ async fn account_flatten(
 }
 
 /// Allow opening orders again on an account (the gateway's `unkill`). A live
-/// account's resume also needs the order token and `confirm` naming the account.
+/// account's resume also needs `confirm` naming the account. The order token
+/// is needed as for a flatten.
 async fn account_resume(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path(account): axum::extract::Path<String>,
@@ -1293,7 +1441,7 @@ async fn account_resume(
         Ok(live) => live,
         Err(e) => return gateway_failed(e),
     };
-    if let Some(refusal) = refused_for(&app, &headers, live) {
+    if let Some(refusal) = refused_for(&app, &headers, app.gate.flatten_needs_token(live)) {
         return refusal;
     }
     if live && !confirmed(&ask, &account) {
@@ -1423,7 +1571,9 @@ mod tests {
     fn gate(token: Option<&str>) -> WriteGate {
         WriteGate {
             logins: vec![ME.to_owned()],
+            hosts: vec!["127.0.0.1".to_owned()],
             token: token.map(str::to_owned),
+            paper_flatten_token: true,
         }
     }
 
@@ -1496,7 +1646,9 @@ mod tests {
     fn an_empty_allowlist_refuses_all_writes() {
         let g = WriteGate {
             logins: Vec::new(),
+            hosts: vec!["127.0.0.1".to_owned()],
             token: Some("secret".to_owned()),
+            paper_flatten_token: true,
         };
         assert_eq!(
             g.decide(Some(ME), None, false),
@@ -1531,21 +1683,32 @@ mod tests {
 
     /// The console's routes on a free port, with no services configured.
     async fn serve(gate: WriteGate) -> String {
+        serve_with(gate, None, gateways::Gateways::for_test(Default::default())).await
+    }
+
+    /// The console's routes on a free port, with `upstream` as both the jobs
+    /// service and the queue (if given), and these gateways.
+    async fn serve_with(
+        gate: WriteGate,
+        upstream: Option<String>,
+        gateways: gateways::Gateways,
+    ) -> String {
+        let to = |u: &Option<String>| u.clone().map(|u| (u, reqwest::Client::new()));
         let app = Arc::new(App {
             poller: Poller::new(PollerConfig {
                 topology: "/nonexistent/topology.json".to_owned(),
                 docker: None,
                 project: None,
             }),
-            jobs: None,
-            queue: None,
+            jobs: to(&upstream),
+            queue: to(&upstream),
             store: None,
             store_token: None,
             prefs: None,
             reminders: None,
             journal: None,
             profiles: None,
-            gateways: gateways::Gateways::from_env(),
+            gateways,
             gate: gate.clone(),
             polls: AtomicU64::new(0),
             delta: delta::Delta::new(0),
@@ -1563,17 +1726,35 @@ mod tests {
 
     /// A request's status and its `error`, if any.
     async fn ask(method: reqwest::Method, url: &str, login: Option<&str>) -> (u16, Option<String>) {
+        let (status, error, _) = ask_full(method, url, login, &[], "{}").await;
+        (status, error)
+    }
+
+    /// A request's status, its `error`, and whether the write gate marked
+    /// it as its own refusal (header and body agree).
+    async fn ask_full(
+        method: reqwest::Method,
+        url: &str,
+        login: Option<&str>,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> (u16, Option<String>, bool) {
         let mut req = reqwest::Client::new()
             .request(method, url)
             .header("content-type", "application/json")
-            .body("{}");
+            .body(body.to_owned());
         if let Some(l) = login {
             req = req.header("tailscale-user-login", l);
         }
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
         let r = req.send().await.unwrap();
         let status = r.status().as_u16();
+        let marked = r.headers().get(GATE_HEADER).is_some_and(|v| v == "refused");
         let v: serde_json::Value = r.json().await.unwrap_or_default();
-        (status, v["error"].as_str().map(str::to_owned))
+        assert_eq!(marked, v["gate"] == true, "header and body disagree");
+        (status, v["error"].as_str().map(str::to_owned), marked)
     }
 
     /// Every write route (path, methods), as the page sends them.
@@ -1596,7 +1777,9 @@ mod tests {
     async fn with_no_allowlist_every_write_is_refused_and_reads_stay_open() {
         let base = serve(WriteGate {
             logins: Vec::new(),
+            hosts: vec!["127.0.0.1".to_owned()],
             token: Some("made-up-token".to_owned()),
+            paper_flatten_token: true,
         })
         .await;
         for (path, methods) in WRITES {
@@ -1625,7 +1808,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             r,
-            json!({ "writes": false, "allowed": false, "live_orders": true })
+            json!({ "writes": false, "hosts": true, "allowed": false, "live_orders": true })
         );
     }
 
@@ -1658,7 +1841,271 @@ mod tests {
             .unwrap();
         assert_eq!(
             r,
-            json!({ "writes": true, "allowed": true, "live_orders": false })
+            json!({ "writes": true, "hosts": true, "allowed": true, "live_orders": false })
         );
+    }
+
+    #[test]
+    fn hosts_match_by_name_and_port() {
+        let g = WriteGate {
+            hosts: ["Console.Example.ts.net", "127.0.0.1:8080", "[::1]"]
+                .iter()
+                .filter_map(|h| normal_host(h))
+                .collect(),
+            ..gate(None)
+        };
+        for ok in [
+            "console.example.ts.net",
+            "console.example.ts.net:443",
+            "CONSOLE.example.ts.net.",
+            "127.0.0.1:8080",
+            "[::1]:9000",
+            "[::1]",
+        ] {
+            assert!(g.host_allowed(Some(ok)), "{ok}");
+        }
+        for bad in [
+            "evil.example",
+            "console.example.ts.net.evil.example",
+            "127.0.0.1",
+            "127.0.0.1:8081",
+            "[::2]",
+            "",
+        ] {
+            assert!(!g.host_allowed(Some(bad)), "{bad}");
+        }
+        assert!(!g.host_allowed(None));
+        assert_eq!(
+            g.refuse_request(Some("evil.example"), Some(ME)),
+            Some((StatusCode::FORBIDDEN, BAD_HOST))
+        );
+        assert_eq!(g.refuse_request(Some("127.0.0.1:8080"), Some(ME)), None);
+        assert_eq!(
+            WriteGate {
+                hosts: Vec::new(),
+                ..gate(None)
+            }
+            .refuse_request(Some("127.0.0.1"), Some(ME)),
+            Some((StatusCode::FORBIDDEN, NO_HOSTS))
+        );
+    }
+
+    #[test]
+    fn a_paper_flatten_needs_the_token_unless_turned_off() {
+        let g = gate(Some("secret"));
+        assert!(g.flatten_needs_token(false));
+        assert_eq!(
+            g.decide(Some(ME), None, g.flatten_needs_token(false)),
+            Some((StatusCode::UNAUTHORIZED, BAD_TOKEN))
+        );
+        assert_eq!(
+            g.decide(Some(ME), Some("secret"), g.flatten_needs_token(false)),
+            None
+        );
+        let off = WriteGate {
+            paper_flatten_token: false,
+            ..gate(Some("secret"))
+        };
+        assert!(!off.flatten_needs_token(false));
+        assert!(off.flatten_needs_token(true));
+        assert_eq!(
+            off.decide(Some(ME), None, off.flatten_needs_token(false)),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn writes_need_an_allowed_host() {
+        // Reached as 127.0.0.1:<port>, which is not on this list.
+        let base = serve(WriteGate {
+            hosts: vec![
+                "console.example.ts.net".to_owned(),
+                "127.0.0.1:1".to_owned(),
+            ],
+            ..gate(None)
+        })
+        .await;
+        let url = format!("{base}/api/reminders");
+        let (status, error, marked) =
+            ask_full(reqwest::Method::POST, &url, Some(ME), &[], "{}").await;
+        assert_eq!(
+            (status, error.as_deref(), marked),
+            (403, Some(BAD_HOST), true)
+        );
+        let rebound = [("host", "attacker.example")];
+        let (status, error, marked) =
+            ask_full(reqwest::Method::POST, &url, Some(ME), &rebound, "{}").await;
+        assert_eq!(
+            (status, error.as_deref(), marked),
+            (403, Some(BAD_HOST), true)
+        );
+        // The configured name, on any port, gets past the gate (to the route's own 404).
+        let named = [("host", "console.example.ts.net:443")];
+        let (status, _, marked) =
+            ask_full(reqwest::Method::POST, &url, Some(ME), &named, "{}").await;
+        assert_eq!((status, marked), (404, false));
+
+        // No host names configured: every write is refused, and the page is told.
+        let base = serve(WriteGate {
+            hosts: Vec::new(),
+            ..gate(None)
+        })
+        .await;
+        for (path, methods) in WRITES {
+            for m in *methods {
+                let method = reqwest::Method::from_bytes(m.as_bytes()).unwrap();
+                let (status, error, marked) =
+                    ask_full(method, &format!("{base}{path}"), Some(ME), &[], "{}").await;
+                assert_eq!(
+                    (status, error.as_deref(), marked),
+                    (403, Some(NO_HOSTS), true),
+                    "{m} {path}"
+                );
+            }
+        }
+        let r: serde_json::Value = reqwest::Client::new()
+            .get(format!("{base}/api/write-gate"))
+            .header("tailscale-user-login", ME)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            json!({ "writes": true, "hosts": false, "allowed": false, "live_orders": false })
+        );
+    }
+
+    /// A stand-in for the jobs service and the queue: a GET answers with its
+    /// path; any write is refused with the upstream's own 401.
+    async fn upstream() -> String {
+        let router = Router::new().fallback(
+            |method: axum::http::Method, uri: axum::http::Uri| async move {
+                if method == axum::http::Method::GET {
+                    axum::Json(json!({ "from": "upstream", "path": uri.path() })).into_response()
+                } else {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        axum::Json(json!({ "error": "upstream says no" })),
+                    )
+                        .into_response()
+                }
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn job_and_queue_reads_reach_their_proxies_and_upstream_refusals_are_not_the_gates() {
+        let up = upstream().await;
+        let base = serve_with(
+            gate(None),
+            Some(up),
+            gateways::Gateways::for_test(Default::default()),
+        )
+        .await;
+        for path in ["jobs/list", "queue/jobs"] {
+            // No login: reads are open.
+            let r = reqwest::get(format!("{base}/api/{path}")).await.unwrap();
+            assert_eq!(r.status().as_u16(), 200, "GET /api/{path}");
+            let v: serde_json::Value = r.json().await.unwrap();
+            assert_eq!(v["from"], "upstream", "GET /api/{path}");
+            assert_eq!(v["path"], format!("/{}", path.split_once('/').unwrap().1));
+        }
+        // A write past the gate that the upstream refuses is not marked as the gate's.
+        let (status, error, marked) = ask_full(
+            reqwest::Method::POST,
+            &format!("{base}/api/jobs/submit"),
+            Some(ME),
+            &[],
+            "{}",
+        )
+        .await;
+        assert_eq!(
+            (status, error.as_deref(), marked),
+            (401, Some("upstream says no"), false)
+        );
+        // The gate's own refusal is.
+        let (status, _, marked) = ask_full(
+            reqwest::Method::POST,
+            &format!("{base}/api/jobs/submit"),
+            None,
+            &[],
+            "{}",
+        )
+        .await;
+        assert_eq!((status, marked), (403, true));
+    }
+
+    #[tokio::test]
+    async fn a_live_order_without_the_token_is_refused_and_never_sent() {
+        // A gateway that counts connections and answers nothing.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                drop(conn);
+            }
+        });
+        let gateways =
+            gateways::Gateways::for_test([("live-1".to_owned(), addr.to_string())].into());
+        let base = serve_with(gate(Some("made-up-token")), None, gateways).await;
+        // No accounts service reports live-1, so it counts as live.
+        let order = json!({ "confirm": "live-1", "live": true, "order": {
+            "qty": 1, "limit_price": 2.1, "legs": [{ "symbol": "XSP261016C00780000", "side": "buy" }]
+        } })
+        .to_string();
+        let url = format!("{base}/api/orders/live-1");
+        for token in [None, Some("guess")] {
+            let headers: Vec<(&str, &str)> =
+                token.map(|t| ("x-order-token", t)).into_iter().collect();
+            let (status, error, marked) =
+                ask_full(reqwest::Method::POST, &url, Some(ME), &headers, &order).await;
+            assert_eq!(
+                (status, error.as_deref(), marked),
+                (401, Some(BAD_TOKEN), true),
+                "{token:?}"
+            );
+        }
+        let cancel = format!("{base}/api/orders/live-1/tt-1/cancel");
+        let (status, _, marked) =
+            ask_full(reqwest::Method::POST, &cancel, Some(ME), &[], "{}").await;
+        assert_eq!((status, marked), (401, true));
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            0,
+            "nothing reached the gateway"
+        );
+        // With the token, the same order is sent (the stand-in drops it: 502).
+        let (status, _, marked) = ask_full(
+            reqwest::Method::POST,
+            &url,
+            Some(ME),
+            &[("x-order-token", "made-up-token")],
+            &order,
+        )
+        .await;
+        assert_eq!((status, marked), (502, false));
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn the_page_and_its_files_cannot_be_framed() {
+        let base = serve(gate(None)).await;
+        for path in ["/", "/docs", "/lib/app.js", "/lib/api.js"] {
+            let r = reqwest::get(format!("{base}{path}")).await.unwrap();
+            assert_eq!(r.status().as_u16(), 200, "{path}");
+            let h = r.headers();
+            assert_eq!(h["content-security-policy"], CSP, "{path}");
+            assert_eq!(h["x-frame-options"], "DENY", "{path}");
+        }
     }
 }

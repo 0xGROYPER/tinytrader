@@ -74,6 +74,19 @@ impl Gateways {
         }
     }
 
+    /// Gateways at `addrs`, with both tokens set, for tests.
+    #[cfg(test)]
+    pub fn for_test(addrs: BTreeMap<String, String>) -> Self {
+        Self {
+            addrs,
+            token: Some("made-up-admin".to_owned()),
+            trade_token: Some("made-up-trade".to_owned()),
+            admin_client: ADMIN.to_owned(),
+            trade_client: TRADER.to_owned(),
+            prefix: PREFIX.to_owned(),
+        }
+    }
+
     /// Whether the console can send orders (its trade token is configured).
     #[must_use]
     pub fn can_trade(&self) -> bool {
