@@ -145,9 +145,10 @@ fn close_on(cid: &str, symbol: &str) -> String {
 const FAR: &str = "SPY261005C00590000";
 const CALL_585: &str = "SPY261005C00585000";
 const PUT_C: &str = "SPY261005P00565000";
-/// A 575 call, and the 580 call of a November expiry (a calendar with the 580 call).
+/// A 575 call, and the 580 call of the next week's expiry, 2026-10-12 (a calendar with the 580
+/// call).
 const CALL_575: &str = "SPY261005C00575000";
-const CALL_580_NOV: &str = "SPY261012C00580000";
+const CALL_580_NEXT: &str = "SPY261012C00580000";
 
 #[test]
 fn a_close_is_not_counted_toward_the_daily_cap() {
@@ -587,11 +588,59 @@ fn a_roll_and_a_calendar_are_refused_as_unknown() {
     // A calendar: the 580 calls of two expiries.
     let cal = combo(
         "wse-cal",
-        &[(CALL, 1, "buy", "open"), (CALL_580_NOV, 1, "sell", "open")],
+        &[(CALL, 1, "buy", "open"), (CALL_580_NEXT, 1, "sell", "open")],
         1,
         "1.00",
     );
     let r = c.submit("cal", &cal);
+    assert_eq!(r["reason"], "max_loss_unknown", "{r}");
+    gw.stop().unwrap();
+}
+
+#[test]
+fn a_spy_call_calendar_is_admitted_at_its_debit() {
+    // Sell the 261005 580 call and buy the 261012 580 call for a $1.00 debit: SPY is American,
+    // so the long covers the short and the loss is the debit, $100 a contract. A $100 cap
+    // admits one contract and refuses two.
+    let mut cfg = config(root("max-loss-spy-cal"));
+    cfg.profile.max_notional_cents = 10_000;
+    let gw = scripted(cfg, &clocked_holding());
+    let mut c = Conn::open(&gw, "reactor", None);
+    let cal = |cid: &str, qty: u32| {
+        combo(
+            cid,
+            &[(CALL, 1, "sell", "open"), (CALL_580_NEXT, 1, "buy", "open")],
+            qty,
+            "1.00",
+        )
+    };
+    assert_eq!(
+        cap_name(&c.submit("c2", &cal("wse-c2", 2))),
+        Some("notional".into())
+    );
+    let r = c.submit("c1", &cal("wse-c1", 1));
+    assert_eq!(r["outcome"], "accepted", "{r}");
+    gw.stop().unwrap();
+}
+
+#[test]
+fn a_vix_call_calendar_is_refused_as_unknown() {
+    // Sell the 21 Oct VIX 20 call and buy the 18 Nov VIX 20 call: each expiry settles on its
+    // own VIX futures month, so the long need not cover the short.
+    let mut cfg = config(root("max-loss-vix-cal"));
+    cfg.profile.underlyings.push("VIX".into());
+    let gw = scripted(cfg, &clocked_holding());
+    let mut c = Conn::open(&gw, "reactor", None);
+    let cal = combo(
+        "wse-vix",
+        &[
+            ("VIX261021C00020000", 1, "sell", "open"),
+            ("VIX261118C00020000", 1, "buy", "open"),
+        ],
+        1,
+        "1.00",
+    );
+    let r = c.submit("vix", &cal);
     assert_eq!(r["reason"], "max_loss_unknown", "{r}");
     gw.stop().unwrap();
 }

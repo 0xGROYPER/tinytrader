@@ -393,11 +393,12 @@ fn single_loss(leg: &Leg, limit: i128) -> Result<i128, &'static str> {
 
 /// Index roots whose options are European: they exercise only at expiry, so their value before
 /// expiry is discounted and can sit below the intrinsic payoff. SPXW is the weekly SPX root,
-/// and VIXW the weekly VIX root. The list must match the contract specs: an unlisted root is
-/// treated as American. The payoff-floor bound of [`combo_loss`] and the put-calendar bound of
-/// [`calendar_loss`] depend on this.
-const EUROPEAN_ROOTS: [&str; 9] = [
-    "SPX", "SPXW", "XSP", "NDX", "XND", "RUT", "MRUT", "VIX", "VIXW",
+/// VIXW the weekly VIX root, NDXP the PM-settled NDX root and RUTW the weekly RUT root. The list
+/// must match the contract specs: an unlisted root is treated as American. The payoff-floor
+/// bound of [`combo_loss`] and the calendar bound of [`calendar_loss`] depend on this.
+const EUROPEAN_ROOTS: [&str; 14] = [
+    "SPX", "SPXW", "XSP", "NDX", "NDXP", "XND", "RUT", "RUTW", "MRUT", "DJX", "XEO", "VIX", "VIXW",
+    "SPIKE",
 ];
 
 /// The loss per parent unit of a combo, in cents of price (signed). The payoff at expiry is
@@ -477,10 +478,14 @@ fn combo_loss(intent: &Intent) -> Result<i128, &'static str> {
 /// between the strikes open, so the loss is the debit plus that gap. A short expiring after
 /// its long is unknown, as is anything with more legs or ratios other than one.
 ///
-/// A European put calendar is unknown whatever its strikes. Before expiry the long put is worth
-/// its strike discounted, not its intrinsic value, so the position can lose more than the debit
-/// plus the gap even when the long strike is at or above the short. European calls are bounded
-/// this way: a call is worth at least its discounted forward intrinsic value.
+/// Every calendar or diagonal on a European root, call or put, is unknown whatever its strikes.
+/// The bound assumes that when the short expires the long is worth at least the short's payoff,
+/// which holds for an American long (it can be exercised) but not for a European one, which
+/// can only be held. A European put is worth its strike discounted, not its intrinsic value.
+/// A deep in-the-money European call is worth less than its intrinsic value once the dividends
+/// paid before its expiry outweigh the interest on the strike. And VIX and VIXW expiries each
+/// settle on a different VIX futures month, so the long is not even on the same underlying
+/// value as the short: a later VIX call can be worth far less than an expiring one.
 fn calendar_loss(intent: &Intent, cs: &[Contract]) -> Result<i128, &'static str> {
     let (a, b) = match (intent.legs.as_slice(), cs) {
         ([a, b], [_, _]) => (a, b),
@@ -494,7 +499,7 @@ fn calendar_loss(intent: &Intent, cs: &[Contract]) -> Result<i128, &'static str>
     if short.put != long.put || short.expiry > long.expiry {
         return Err("max_loss_unknown");
     }
-    if short.put && EUROPEAN_ROOTS.contains(&short.root) {
+    if EUROPEAN_ROOTS.contains(&short.root) {
         return Err("max_loss_unknown");
     }
     let (ks, kl) = (strike_of(short)?, strike_of(long)?);
@@ -526,13 +531,13 @@ mod tests {
     const C575: &str = "SPY261005C00575000";
     const C580: &str = "SPY261005C00580000";
     const C585: &str = "SPY261005C00585000";
-    const C580_NOV: &str = "SPY261012C00580000";
+    const C580_NEXT: &str = "SPY261012C00580000";
     const P565: &str = "SPY261005P00565000";
     const P570: &str = "SPY261005P00570000";
     const P570_ODD: &str = "SPY261005P00570005";
     const P580: &str = "SPY261005P00580000";
     const C570: &str = "SPY261005C00570000";
-    const C585_NOV: &str = "SPY261012C00585000";
+    const C585_NEXT: &str = "SPY261012C00585000";
 
     fn leg(symbol: &str, buy: bool, open: bool) -> Leg {
         Leg {
@@ -769,11 +774,11 @@ mod tests {
 
     #[test]
     fn a_covered_calendar_loses_its_debit() {
-        // Sell the near 580 call and buy the November 580 call, for a $1.50 debit, two
+        // Sell the 580 call and buy the 580 call expiring a week later, for a $1.50 debit, two
         // contracts. The long covers the short at the same strike, so the loss is the debit:
         // $1.50 x 100 x 2 = $300.
         let cal = order(
-            vec![leg(C580, false, true), leg(C580_NOV, true, true)],
+            vec![leg(C580, false, true), leg(C580_NEXT, true, true)],
             150,
             2,
         );
@@ -783,11 +788,11 @@ mod tests {
 
     #[test]
     fn a_diagonal_loses_its_debit_plus_the_strike_gap() {
-        // Sell the near 580 call and buy the November 585 call, for a $1.50 debit. The long
+        // Sell the 580 call and buy the 585 call expiring a week later, for a $1.50 debit. The long
         // is the less favourable strike, so the 585 - 580 = $5 gap is open: the loss is
         // $1.50 + $5.00 = $6.50 a share, $650 a contract.
         let diag = order(
-            vec![leg(C580, false, true), leg(C585_NOV, true, true)],
+            vec![leg(C580, false, true), leg(C585_NEXT, true, true)],
             150,
             1,
         );
@@ -809,7 +814,10 @@ mod tests {
         );
         assert_eq!(max_loss_cents(&cal), Err("max_loss_unknown"));
         // The same on the other European roots, and with the long strike at or above the short.
-        for root in ["SPX", "XSP", "NDX", "RUT", "VIX", "VIXW"] {
+        for root in [
+            "SPX", "XSP", "NDX", "NDXP", "XND", "RUT", "RUTW", "MRUT", "DJX", "XEO", "VIX", "VIXW",
+            "SPIKE",
+        ] {
             let cal = order(
                 vec![
                     leg(&format!("{root}261016P00580000"), false, true),
@@ -847,26 +855,61 @@ mod tests {
     }
 
     #[test]
-    fn a_european_call_calendar_keeps_its_bound() {
-        // Sell the 580 call and buy the 585 call a week later, on SPXW, for a $1.00 debit: the
-        // $5 gap is open, so the loss is $6.00 a contract.
-        let cal = order(
+    fn a_european_call_calendar_or_diagonal_is_unknown() {
+        // Sell the VIX 20 call expiring 21 Oct and buy the 20 call expiring 18 Nov, for a $1.00
+        // debit. Each expiry settles on its own VIX futures month, so the long need not be
+        // worth the short's payoff: no bound is claimed.
+        let vix = order(
             vec![
-                leg("SPXW261016C00580000", false, true),
-                leg("SPXW261023C00585000", true, true),
+                leg("VIX261021C00020000", false, true),
+                leg("VIX261118C00020000", true, true),
             ],
             100,
             1,
         );
-        assert_eq!(max_loss_cents(&cal), Ok((100 + 500) * 100));
+        assert_eq!(max_loss_cents(&vix), Err("max_loss_unknown"));
+        // The same for a call calendar and a call diagonal on every other European root: a deep
+        // in-the-money European call can be worth less than its intrinsic value.
+        for root in [
+            "SPX", "SPXW", "XSP", "NDX", "NDXP", "XND", "RUT", "RUTW", "MRUT", "DJX", "XEO",
+            "VIXW", "SPIKE",
+        ] {
+            for long_strike in ["00580000", "00585000"] {
+                let cal = order(
+                    vec![
+                        leg(&format!("{root}261016C00580000"), false, true),
+                        leg(&format!("{root}261023C{long_strike}"), true, true),
+                    ],
+                    100,
+                    1,
+                );
+                assert_eq!(
+                    max_loss_cents(&cal),
+                    Err("max_loss_unknown"),
+                    "{root} {long_strike}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_spy_call_calendar_keeps_its_bound() {
+        // Sell the 580 call expiring 5 Oct and buy the 580 call expiring 12 Oct, for a $1.00
+        // debit. SPY is American, so the long covers the short: $100 a contract.
+        let cal = order(
+            vec![leg(C580, false, true), leg(C580_NEXT, true, true)],
+            100,
+            1,
+        );
+        assert_eq!(max_loss_cents(&cal), Ok(100 * 100));
     }
 
     #[test]
     fn a_short_expiring_after_its_long_is_unknown() {
-        // Buy the near 580 call and sell the November 580 call: the short is not covered
+        // Buy the 580 call and sell the 580 call expiring a week later: the short is not covered
         // by a later long, so no bound is claimed.
         let back = order(
-            vec![leg(C580, true, true), leg(C580_NOV, false, true)],
+            vec![leg(C580, true, true), leg(C580_NEXT, false, true)],
             150,
             1,
         );
@@ -891,7 +934,7 @@ mod tests {
     fn a_shape_that_is_not_classified_is_unknown() {
         // A calendar: the legs expire on different dates.
         let cal = order(
-            vec![leg(C580, true, true), leg(C580_NOV, false, true)],
+            vec![leg(C580, true, true), leg(C580_NEXT, false, true)],
             100,
             1,
         );
