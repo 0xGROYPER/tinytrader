@@ -510,10 +510,21 @@ async fn list_incoming(AxState(store): AxState<Shared>) -> Json<Value> {
     Json(json!({ "batches": out }))
 }
 
+#[derive(Deserialize)]
+struct IncorporateQuery {
+    /// A batch bought as a list of contracts of this parent (`SPY.OPT`) is
+    /// filed as partial days (decision 0018).
+    parent: Option<String>,
+}
+
 async fn incorporate(
     AxState(store): AxState<Shared>,
     UrlPath((provider, batch)): UrlPath<(String, String)>,
+    Query(q): Query<IncorporateQuery>,
 ) -> Reply {
+    if q.parent.as_deref().is_some_and(|p| !ingest::safe(p)) {
+        return refused(StatusCode::BAD_REQUEST, "unsafe parent symbol");
+    }
     let Some(pdir) = ingest::provider_dir(&provider) else {
         return refused(
             StatusCode::NOT_FOUND,
@@ -538,13 +549,18 @@ async fn incorporate(
     let _one_at_a_time = store.filing.lock().await;
     let today = today();
     let b = batch.clone();
-    let result =
-        tokio::task::spawn_blocking(move || ingest::incorporate(&parts, &elsewhere, &b, &today))
-            .await;
+    let result = tokio::task::spawn_blocking(move || match q.parent {
+        Some(parent) => partial::import_batch(&parts, &elsewhere, &b, &parent, &today),
+        None => ingest::incorporate(&parts, &elsewhere, &b, &today),
+    })
+    .await;
     match result {
         Ok(Ok(summary)) => {
             store.batches_in.fetch_add(1, Ordering::Relaxed);
-            let n = summary["files"].as_array().map_or(0, Vec::len);
+            let n = summary["files"]
+                .as_array()
+                .or_else(|| summary["days"].as_array())
+                .map_or(0, Vec::len);
             store.events.push(
                 format!("incorporated {pdir}/{batch}: {n} files"),
                 summary.to_string(),

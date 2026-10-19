@@ -405,7 +405,13 @@ pub fn import(
     let mut problems = Vec::new();
     let mut check = |f: &Value| -> Result<(), String> {
         let name = f["filename"].as_str().unwrap_or_default();
-        let day = import_day(name)
+        // The day: given (a provider batch's file names say it their own way),
+        // or the file's name, YYYY-MM-DD.dbn.zst.
+        let day = f["day"]
+            .as_str()
+            .filter(|d| d.len() == 10 && ingest::day_ns(d).is_some())
+            .map(str::to_owned)
+            .or_else(|| import_day(name))
             .filter(|_| safe(name))
             .ok_or_else(|| format!("{name:?}: files are named YYYY-MM-DD.dbn.zst"))?;
         let want = f["hash"]
@@ -604,6 +610,30 @@ pub fn import(
         }
         ledger.record(json!({ "step": "receipt", "file": to }))?;
     }
+    // Other receipts beside it (a provider batch's manifest and metadata) are
+    // kept too, never over a different one.
+    for part in parts {
+        for e in fs::read_dir(&part.inc).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name == IMPORT || !name.ends_with(".json") || !safe(&name) {
+                continue;
+            }
+            let bytes = fs::read(e.path()).map_err(|e| e.to_string())?;
+            let mut kept = true;
+            for root in &roots {
+                let to = root.join("provenance").join(id).join(&name);
+                if !to.exists() {
+                    write_new(&to, &bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+                    ledger.record(json!({ "step": "receipt", "file": to }))?;
+                } else if fs::read(&to).map_err(|e| e.to_string())? != bytes {
+                    kept = false;
+                }
+            }
+            if kept {
+                fs::remove_file(e.path()).map_err(|e| e.to_string())?;
+            }
+        }
+    }
     let mut left = Vec::new();
     for part in parts {
         let _ = fs::remove_file(part.inc.join(IMPORT));
@@ -636,6 +666,75 @@ pub fn import(
     }
     ledger.record(json!({ "step": "complete" }))?;
     Ok(summary)
+}
+
+/// File a provider batch bought as a list of contracts of `parent` (such as
+/// `SPY.OPT`), waiting in `.incoming/<batch>` with the provider's
+/// `manifest.json` and `metadata.json`: as an import of its day files, each a
+/// partial day, with those receipts kept beside it.
+///
+/// # Errors
+/// If the batch isn't a daily DBN batch requested by contract
+/// (`stype_in = raw_symbol`), or as [`import`].
+pub fn import_batch(
+    parts: &[Part],
+    elsewhere: &[PathBuf],
+    batch: &str,
+    parent: &str,
+    today: &str,
+) -> Result<Value, String> {
+    let read = |name: &str| -> Result<(Value, &Part), String> {
+        let part = parts
+            .iter()
+            .find(|p| p.inc.join(name).exists())
+            .ok_or_else(|| format!("{name}: missing"))?;
+        let text = fs::read_to_string(part.inc.join(name)).map_err(|e| format!("{name}: {e}"))?;
+        Ok((
+            serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))?,
+            part,
+        ))
+    };
+    if parts.iter().any(|p| p.inc.join(IMPORT).exists()) {
+        // Written by an earlier, interrupted run: file it as it says.
+        return import(parts, elsewhere, batch, today);
+    }
+    let (manifest, home) = read("manifest.json")?;
+    let (metadata, _) = read("metadata.json")?;
+    let q = &metadata["query"];
+    let (dataset, schema) = (
+        q["dataset"]
+            .as_str()
+            .ok_or("metadata.json has no dataset")?,
+        q["schema"].as_str().ok_or("metadata.json has no schema")?,
+    );
+    if q["encoding"] != "dbn" || q["compression"] != "zstd" {
+        return Err("only DBN batches compressed with zstd are filed".into());
+    }
+    let c = &metadata["customizations"];
+    if c["split_symbols"] == true || c["split_duration"] != "day" {
+        return Err("only batches split by day, and not by symbol, are filed".into());
+    }
+    if q["stype_in"] != "raw_symbol" {
+        return Err("only batches requested by contract (stype_in raw_symbol) are filed as partial days; file others with /incorporate without a parent".into());
+    }
+    let files: Vec<Value> = manifest["files"]
+        .as_array()
+        .ok_or("manifest.json lists no files")?
+        .iter()
+        .filter_map(|f| {
+            let name = f["filename"].as_str()?;
+            let day = ingest::databento_day(name, schema)?;
+            Some(json!({ "filename": name, "day": day, "size": f["size"], "hash": f["hash"] }))
+        })
+        .collect();
+    let receipt = json!({
+        "dataset": dataset, "schema": schema, "symbol": parent,
+        "source": { "provider_batch": batch, "query": q },
+        "files": files,
+    });
+    let text = serde_json::to_string_pretty(&receipt).map_err(|e| e.to_string())?;
+    write_new(&home.inc.join(IMPORT), text.as_bytes()).map_err(|e| format!("{IMPORT}: {e}"))?;
+    import(parts, elsewhere, batch, today)
 }
 
 /// Each held day of `dataset/symbol/schema` from `start` to `end`
@@ -1038,6 +1137,47 @@ mod tests {
         e["pending"] = json!({ "sha256": "f00d" });
         set_entry(&dir, DAY, Some(e)).unwrap();
         assert!(settle(&dir, DAY).is_err());
+    }
+
+    #[test]
+    fn files_a_contract_list_batch_as_partial_days() {
+        let root = scratch("batch").join("Databento");
+        let inc = root.join(INCOMING).join("OPRA-X");
+        fs::create_dir_all(&inc).unwrap();
+        let name = "opra-pillar-20261002.cbbo-1m.dbn.zst";
+        let bytes = day_bytes(&[(C1, 11), (C2, 12)], &[(11, 0), (12, 1)]);
+        fs::write(inc.join(name), &bytes).unwrap();
+        let sha = hash_file(&inc.join(name)).unwrap();
+        fs::write(inc.join("manifest.json"), json!({ "files": [{ "filename": name, "size": bytes.len(), "hash": format!("sha256:{sha}") }] }).to_string()).unwrap();
+        let metadata = |stype: &str| {
+            json!({ "query": { "dataset": "OPRA.PILLAR", "schema": "cbbo-1m", "stype_in": stype, "symbols": [C1, C2], "encoding": "dbn", "compression": "zstd" }, "customizations": { "split_duration": "day", "split_symbols": false } }).to_string()
+        };
+        let part = Part {
+            inc: inc.clone(),
+            root: root.clone(),
+        };
+        // A whole-symbol batch isn't filed this way.
+        fs::write(inc.join("metadata.json"), metadata("parent")).unwrap();
+        assert!(
+            import_batch(
+                std::slice::from_ref(&part),
+                &[],
+                "OPRA-X",
+                "SPY.OPT",
+                "2026-10-19"
+            )
+            .unwrap_err()
+            .contains("raw_symbol")
+        );
+        fs::remove_file(inc.join("metadata.json")).unwrap();
+        fs::write(inc.join("metadata.json"), metadata("raw_symbol")).unwrap();
+        let s = import_batch(&[part], &[], "OPRA-X", "SPY.OPT", "2026-10-19").unwrap();
+        assert_eq!(s["days"][0]["day"], DAY);
+        assert_eq!(fs::read(file(&root)).unwrap(), bytes);
+        for r in [IMPORT, "manifest.json", "metadata.json"] {
+            assert!(root.join("provenance/OPRA-X").join(r).exists(), "{r} kept");
+        }
+        assert!(!inc.exists());
     }
 
     #[test]

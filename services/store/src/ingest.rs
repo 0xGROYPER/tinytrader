@@ -196,7 +196,7 @@ impl Ledger {
 
 /// `YYYY-MM-DD` of a Databento file name such as
 /// `opra-pillar-20251001.cmbp-1.dbn.zst`, if it is a daily DBN file of `schema`.
-fn databento_day(name: &str, schema: &str) -> Option<String> {
+pub(crate) fn databento_day(name: &str, schema: &str) -> Option<String> {
     let (stem, rest) = name.split_once('.')?;
     let day = stem.rsplit('-').next()?;
     if day.len() != 8 || !day.bytes().all(|b| b.is_ascii_digit()) {
