@@ -1,6 +1,6 @@
 # 0018: Partial days, and buying only what's missing
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-19
 - **Builds on:** [0002](0002-data-store.md) (the layout, filing provider
   batches, coverage and the catalog), [0005](0005-store-service-and-supervision.md)
@@ -8,6 +8,12 @@
   [0007](0007-storage-pool-and-automations.md) (purchased data is kept,
   refetchable data is not), and the `databento-jobs` service
   ([API](../api/databento-jobs.md))
+
+> **Built so far (2026-10-19):** the store's part (sections 1 to 4:
+> coverage in manifests, import, merge, the catalog's `partial` days and
+> `GET /coverage`). **Not yet built:** section 5 (`databento-jobs` buying only
+> what's missing) and promotion of a merged day to `complete`. Until then the
+> jobs service refuses any day the store holds, partial or not.
 
 ## Context
 

@@ -84,7 +84,7 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
 /// Flush a directory's entries (a new or removed name) to disk. A file
 /// system that doesn't support it (some report EINVAL or ENOTSUP) isn't an
 /// error; any other failure is.
-fn sync_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
     match fs::File::open(dir)?.sync_all() {
         Err(e)
             if matches!(e.raw_os_error(), Some(22 | 45 | 102))
@@ -160,12 +160,12 @@ impl Upload {
 
 /// Appends step records to a migration ledger, one copy on each volume
 /// involved, so every volume records what happened to its files.
-struct Ledger {
+pub(crate) struct Ledger {
     files: Vec<fs::File>,
 }
 
 impl Ledger {
-    fn open(paths: &[PathBuf]) -> Result<Self, String> {
+    pub(crate) fn open(paths: &[PathBuf]) -> Result<Self, String> {
         let mut files = Vec::new();
         for path in paths {
             if let Some(dir) = path.parent() {
@@ -183,7 +183,7 @@ impl Ledger {
     }
     /// Append a step to every copy of the ledger, flushed. A filing whose
     /// record can't be written stops: what moved must always be on record.
-    fn record(&mut self, mut event: Value) -> Result<(), String> {
+    pub(crate) fn record(&mut self, mut event: Value) -> Result<(), String> {
         event["at"] = json!(tinytrader_observe::unix_seconds());
         for file in &mut self.files {
             writeln!(file, "{event}").map_err(|e| format!("migration ledger: {e}"))?;
@@ -210,7 +210,12 @@ fn databento_day(name: &str, schema: &str) -> Option<String> {
 /// dataset, its schema, and a time range that includes the day. The manifest
 /// already vouched for its bytes; this catches a file that is intact but
 /// isn't what its name says.
-fn check_header(path: &Path, dataset: &str, schema: &str, day: &str) -> Result<(), String> {
+pub(crate) fn check_header(
+    path: &Path,
+    dataset: &str,
+    schema: &str,
+    day: &str,
+) -> Result<(), String> {
     let decoder = dbn::decode::dbn::Decoder::from_zstd_file(path)
         .map_err(|e| format!("not a readable DBN file: {e}"))?;
     let m = dbn::decode::DbnMetadata::metadata(&decoder);
@@ -250,7 +255,7 @@ fn check_header(path: &Path, dataset: &str, schema: &str, day: &str) -> Result<(
 }
 
 /// Nanoseconds since the epoch at 00:00 UTC of a `YYYY-MM-DD` day.
-fn day_ns(day: &str) -> Option<u64> {
+pub(crate) fn day_ns(day: &str) -> Option<u64> {
     let mut it = day.split('-').map(str::parse::<i64>);
     let (y, m, d) = (it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?);
     let y = if m <= 2 { y - 1 } else { y };
@@ -266,7 +271,7 @@ fn day_ns(day: &str) -> Option<u64> {
 /// Move `from` to `to` without ever replacing an existing `to`: a hard link
 /// (which fails if `to` exists, atomically) then removing `from`. Both are on
 /// the same volume.
-fn place_new(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn place_new(from: &Path, to: &Path) -> std::io::Result<()> {
     let dir = to
         .parent()
         .ok_or_else(|| std::io::Error::other("no parent directory"))?;
@@ -281,7 +286,7 @@ fn place_new(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Write `bytes` to a new file at `to`, never replacing one.
-fn write_new(to: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_new(to: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = to.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -355,12 +360,7 @@ pub fn incorporate(
 ///
 /// # Errors
 /// As [`incorporate`].
-pub fn adopt(
-    dir: &Path,
-    root: &Path,
-    elsewhere: &[PathBuf],
-    today: &str,
-) -> Result<Value, String> {
+pub fn adopt(dir: &Path, root: &Path, elsewhere: &[PathBuf], today: &str) -> Result<Value, String> {
     let batch = dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -885,8 +885,8 @@ mod tests {
         fs::write(b.join(DAY), b"what b had").unwrap();
         stage(&a, "OPRA-T", &["SPX.OPT"], b"other");
         let parts = one(&a, "OPRA-T");
-        let err = incorporate(&parts, std::slice::from_ref(&b), "OPRA-T", "2026-10-06")
-            .unwrap_err();
+        let err =
+            incorporate(&parts, std::slice::from_ref(&b), "OPRA-T", "2026-10-06").unwrap_err();
         assert!(err.contains("already holds a different file"), "{err}");
         assert_eq!(fs::read(b.join(DAY)).unwrap(), b"what b had");
         let _ = fs::remove_dir_all(&d);
@@ -926,8 +926,7 @@ mod tests {
         fs::create_dir_all(root.join(DAY).parent().unwrap()).unwrap();
         fs::write(root.join(DAY), b"what we had").unwrap();
         stage(&root, "OPRA-2", &["SPX.OPT"], b"something else");
-        let err =
-            incorporate(&one(&root, "OPRA-2"), &[], "OPRA-2", "2026-10-06").unwrap_err();
+        let err = incorporate(&one(&root, "OPRA-2"), &[], "OPRA-2", "2026-10-06").unwrap_err();
         assert!(err.contains("already holds a different file"), "{err}");
         assert_eq!(fs::read(root.join(DAY)).unwrap(), b"what we had");
         assert!(
@@ -985,8 +984,7 @@ mod tests {
     fn refuses_batches_of_several_symbols() {
         let root = scratch("symbols").join("Databento");
         stage(&root, "OPRA-5", &["SPY.OPT", "QQQ.OPT"], b"two parents");
-        let err =
-            incorporate(&one(&root, "OPRA-5"), &[], "OPRA-5", "2026-10-06").unwrap_err();
+        let err = incorporate(&one(&root, "OPRA-5"), &[], "OPRA-5", "2026-10-06").unwrap_err();
         assert!(err.contains("one symbol"), "{err}");
         assert!(!root.join("OPRA.PILLAR").exists());
         let _ = fs::remove_dir_all(root.parent().unwrap());
@@ -1026,8 +1024,7 @@ mod tests {
         fs::create_dir_all(root.join("provenance/OPRA-7")).unwrap();
         fs::write(root.join("provenance/OPRA-7/manifest.json"), "{}").unwrap();
         stage(&root, "OPRA-7", &["SPX.OPT"], b"day one");
-        let err =
-            incorporate(&one(&root, "OPRA-7"), &[], "OPRA-7", "2026-10-06").unwrap_err();
+        let err = incorporate(&one(&root, "OPRA-7"), &[], "OPRA-7", "2026-10-06").unwrap_err();
         assert!(err.contains("different manifest.json"), "{err}");
         assert!(!root.join(DAY).exists());
         assert_eq!(
@@ -1091,8 +1088,7 @@ mod tests {
             &["SPX.OPT"],
             &dbn_file("OPRA.PILLAR", dbn::Schema::Trades, "2025-10-01", b""),
         );
-        let err = incorporate(&one(&root, "OPRA-11"), &[], "OPRA-11", "2026-10-06")
-            .unwrap_err();
+        let err = incorporate(&one(&root, "OPRA-11"), &[], "OPRA-11", "2026-10-06").unwrap_err();
         assert!(err.contains("schema"), "{err}");
         stage_bytes(
             &root,
@@ -1100,8 +1096,7 @@ mod tests {
             &["SPX.OPT"],
             &dbn_file("OPRA.PILLAR", dbn::Schema::Cmbp1, "2025-10-02", b""),
         );
-        let err = incorporate(&one(&root, "OPRA-12"), &[], "OPRA-12", "2026-10-06")
-            .unwrap_err();
+        let err = incorporate(&one(&root, "OPRA-12"), &[], "OPRA-12", "2026-10-06").unwrap_err();
         assert!(err.contains("not 2025-10-01"), "{err}");
         stage_bytes(&root, "OPRA-13", &["SPX.OPT"], b"not dbn at all");
         assert!(

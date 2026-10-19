@@ -6,7 +6,10 @@
   ledgers, raw pages from request/response sources, the intraday store,
   incorporating provider batches, and keeping roots clean
 - **See also:** [0005](0005-store-service-and-supervision.md), which makes
-  the store a service reached over the network
+  the store a service reached over the network;
+  [0018](0018-partial-coverage.md), which adds partial days (a list of
+  contracts for part of a day), their coverage in each schema folder's
+  `manifest.json`, imports of DBN not from a batch, and merging
 
 
 > **Built so far (2026-10-07):** provider roots and the standard layout,
