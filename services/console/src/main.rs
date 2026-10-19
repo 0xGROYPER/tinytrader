@@ -8,6 +8,8 @@
 //!   from the Docker Engine API, plus each service's `/health`, `/metrics`
 //!   and optional `/recent` endpoints. With `?since=G&epoch=E` (the last
 //!   answer's), only the service fields changed since (see `delta`).
+//!   Each account in a service's `accounts` carries `age_ms`: the console's
+//!   clock now minus the account's `updated_at`, or null.
 //!
 //! A background task refreshes the snapshot every two seconds, so any number
 //! of viewers cost one round of polling. The console never writes to Docker
@@ -56,14 +58,30 @@
 //!   `paper=gateway-paper:7701;live=gateway-live:7710`, and
 //!   `CONSOLE_GATEWAY_TOKEN` (or `_FILE`), the operator's admin token for them
 //!   (optional). `/api/accounts/{account}/flatten` and `.../resume` act through
-//!   the account's gateway; an account without one (live) can't be flattened.
+//!   the account's gateway; an account without one can't be flattened.
 //!   The console says `hello` as `CONSOLE_GATEWAY_CLIENT` (default `ops`).
 //!   With `CONSOLE_TRADE_TOKEN` (or `_FILE`), the console's trade client
 //!   (`CONSOLE_TRADE_CLIENT`, default `console`; order ids start with
 //!   `CONSOLE_TRADE_PREFIX`, default `tt-`) sends the Spread builder's orders: `GET /api/orders` (each
-//!   account's gateway state and the console's open orders), `POST
+//!   account's gateway state, its `unresolved` count and the console's open orders), `POST
 //!   /api/orders/{account}` (`{order, confirm: account}`) and `POST
 //!   /api/orders/{account}/{client_order_id}/cancel`.
+//!   Every write route needs `CONSOLE_ORDER_LOGINS` (the Tailscale logins
+//!   allowed to write, comma-separated); an empty list refuses all writes
+//!   (`WriteGate`). A live account's order, cancel, flatten or resume also
+//!   needs the order token in the page's `X-Order-Token`: the file
+//!   `CONSOLE_ORDER_TOKEN_FILE` names (one line, e.g. 64 hex characters), or
+//!   else `CONSOLE_ORDER_TOKEN`. Without a token, live orders are refused and
+//!   everything else still works. Paper orders need only the login. A live
+//!   account's flatten or resume also needs `confirm` naming the account. An
+//!   account is paper only when both the accounts service's `environment` for
+//!   it (`alpaca-account`) and its gateway's welcome say `paper`.
+//!   `GET /api/write-gate` says whether writes are on for the viewer.
+//!   The write routes are the order routes (those, and an account's flatten
+//!   and resume), the jobs service's and the queue's POST (and the queue's
+//!   PATCH) routes, drive approval, POST `/api/reminders` and `/api/profiles`,
+//!   PUT `/api/prefs/{key}`, and the journal's POST, PUT and DELETE. Their GET
+//!   routes stay open.
 //! - `CONSOLE_PAGE`: serve the page from this file, and its modules and
 //!   libraries from beside it, read on each request, instead of the copies
 //!   built in (optional; lets the page change without a rebuild).
@@ -131,6 +149,8 @@ struct App {
     profiles: Option<profiles::Profiles>,
     /// Order gateways by account, for Flatten and Resume.
     gateways: gateways::Gateways,
+    /// Who may write, and the token a live account's order needs.
+    gate: WriteGate,
     polls: AtomicU64,
     /// Changes-only snapshots for pages that poll.
     delta: delta::Delta,
@@ -147,6 +167,15 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    let write_gate = WriteGate::from_env();
+    if write_gate.logins.is_empty() {
+        eprintln!("console: writes are refused until CONSOLE_ORDER_LOGINS is set");
+    }
+    if write_gate.token.is_none() {
+        eprintln!(
+            "console: live orders are disabled: the console has no order token configured (CONSOLE_ORDER_TOKEN or _FILE)"
+        );
+    }
     let config = PollerConfig {
         topology: env("CONSOLE_TOPOLOGY", "topology.json"),
         docker: std::env::var("CONSOLE_DOCKER")
@@ -187,6 +216,7 @@ async fn main() {
             .filter(|s| !s.is_empty())
             .map(|u| (u.trim_end_matches('/').to_owned(), reqwest::Client::new())),
         gateways: gateways::Gateways::from_env(),
+        gate: write_gate.clone(),
         // Beside the reminders unless named.
         profiles: std::env::var("CONSOLE_PROFILES")
             .ok()
@@ -280,68 +310,7 @@ async fn main() {
 
     tokio::spawn(poll_forever(app.clone(), observer.clone()));
 
-    let router = Router::new()
-        .route("/", get(page))
-        .route("/docs", get(page))
-        .route("/docs/", get(page))
-        .route("/vendor/{file}", get(file))
-        .route("/lib/{file}", get(file))
-        .route("/widgets/{file}", get(file))
-        .route("/api/topology", get(topology))
-        .route("/api/state", get(state))
-        .route("/api/events/{service}", get(events))
-        .route("/api/bars/{service}", get(bars))
-        .route("/api/stream/{service}/{stream}", get(stream))
-        .route("/api/collections", get(list_collections))
-        .route("/api/collections/{id}/{index}", get(collection_doc))
-        .route("/api/jobs/{*rest}", get(jobs_proxy).post(jobs_proxy))
-        .route(
-            "/api/queue/{*rest}",
-            get(queue_proxy).post(queue_proxy).patch(queue_proxy),
-        )
-        .route(
-            "/api/store/volumes/approve",
-            axum::routing::post(store_approve),
-        )
-        .route("/api/reminders", get(reminders_get).post(reminders_post))
-        .route("/api/prefs", get(prefs_get))
-        .route("/api/journal", get(journal_get).post(journal_post))
-        .route(
-            "/api/journal/{id}",
-            axum::routing::put(journal_put).delete(journal_delete),
-        )
-        .route("/api/prefs/{key}", axum::routing::put(prefs_put))
-        .route(
-            "/api/profiles",
-            get(profiles_list)
-                .post(profiles_post)
-                .layer(axum::extract::DefaultBodyLimit::max(
-                    profiles::MAX_BYTES + 1024,
-                )),
-        )
-        .route("/api/profiles/{id}", get(profiles_get))
-        .route("/api/accounts/gateways", get(gateways_list))
-        .route("/api/orders", get(orders_list))
-        .route("/api/orders/{account}", axum::routing::post(order_submit))
-        .route(
-            "/api/orders/{account}/{id}/cancel",
-            axum::routing::post(order_cancel),
-        )
-        .route(
-            "/api/accounts/{account}/flatten",
-            axum::routing::post(account_flatten),
-        )
-        .route(
-            "/api/accounts/{account}/resume",
-            axum::routing::post(account_resume),
-        )
-        // The console's writes (jobs, the queue, drive approval, reminders, flatten) can't be
-        // forged by another page open in the browser.
-        .layer(axum::middleware::from_fn(
-            tinytrader_observe::guard::json_writes,
-        ))
-        .with_state(app)
-        .merge(observer.router());
+    let router = routes(write_gate).with_state(app).merge(observer.router());
     let listener = match tokio::net::TcpListener::bind(&listen).await {
         Ok(l) => l,
         Err(e) => {
@@ -479,11 +448,36 @@ async fn state(
 ) -> Response {
     let since = q.get("since").and_then(|v| v.parse().ok());
     let epoch = q.get("epoch").and_then(|v| v.parse().ok());
-    no_store(axum::Json(app.delta.answer(
-        app.poller.snapshot_json(),
-        since,
-        epoch,
-    )))
+    let mut state = app.delta.answer(app.poller.snapshot_json(), since, epoch);
+    add_account_ages(&mut state, tinytrader_observe::unix_seconds());
+    no_store(axum::Json(state))
+}
+
+/// Adds `age_ms` to each account a service serves (`services.<id>.accounts.accounts[]`):
+/// this server's clock now minus the account's `updated_at` (its last successful
+/// poll), in whole milliseconds, or null without one. Computed here, so the
+/// age does not depend on the clock of the device reading it.
+fn add_account_ages(state: &mut serde_json::Value, now: f64) {
+    let Some(services) = state.get_mut("services").and_then(|s| s.as_object_mut()) else {
+        return;
+    };
+    for svc in services.values_mut() {
+        let Some(accounts) = svc
+            .pointer_mut("/accounts/accounts")
+            .and_then(|a| a.as_array_mut())
+        else {
+            continue;
+        };
+        for account in accounts {
+            let age = account
+                .get("updated_at")
+                .and_then(|t| t.as_f64())
+                .map(|at| ((now - at) * 1000.0).max(0.0).round() as i64);
+            if let Some(obj) = account.as_object_mut() {
+                obj.insert("age_ms".into(), json!(age));
+            }
+        }
+    }
 }
 
 /// A fleet lookup's failure as the API's error document: `404` for a stream
@@ -566,7 +560,13 @@ async fn collection_doc(
         .find(|c| c.id == id)
         .and_then(|c| c.render(index))
         .map_or_else(
-            || (StatusCode::NOT_FOUND, axum::Json(json!({ "error": "no such document" }))).into_response(),
+            || {
+                (
+                    StatusCode::NOT_FOUND,
+                    axum::Json(json!({ "error": "no such document" })),
+                )
+                    .into_response()
+            },
             |d| no_store(axum::Json(d)),
         )
 }
@@ -869,7 +869,9 @@ async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
                     .filter(|o| o["client_order_id"].as_str().is_some_and(|i| i.starts_with(app.gateways.prefix.as_str())))
                     .map(|o| json!({ "client_order_id": o["client_order_id"], "status": o["status"], "filled_qty": o["filled_qty"], "avg_price": o["avg_price"], "legs": o["legs"], "limit_price": o["broker_raw"]["limit_price"], "qty": o["broker_raw"]["qty"], "submitted_at": o["broker_raw"]["submitted_at"] }))
                     .collect();
-                json!({ "account": account, "state": w["state"], "environment": w["environment"], "broker": w["broker"], "orders": mine })
+                // The gateway's count of orders that have not resolved (new opens are blocked); null when it doesn't say.
+                let unresolved = r.as_ref().map_or(serde_json::Value::Null, |r| r["unresolved"].clone());
+                json!({ "account": account, "state": w["state"], "environment": w["environment"], "broker": w["broker"], "unresolved": unresolved, "orders": mine })
             }
             Err(e) => json!({ "account": account, "error": e }),
         });
@@ -879,6 +881,241 @@ async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
     ))
 }
 
+/// Every route of the console's own: the page, its reads, and the writes
+/// behind the [`WriteGate`].
+fn routes(write_gate: WriteGate) -> Router<Arc<App>> {
+    Router::new()
+        .route("/", get(page))
+        .route("/docs", get(page))
+        .route("/docs/", get(page))
+        .route("/vendor/{file}", get(file))
+        .route("/lib/{file}", get(file))
+        .route("/widgets/{file}", get(file))
+        .route("/api/topology", get(topology))
+        .route("/api/state", get(state))
+        .route("/api/events/{service}", get(events))
+        .route("/api/bars/{service}", get(bars))
+        .route("/api/stream/{service}/{stream}", get(stream))
+        .route("/api/collections", get(list_collections))
+        .route("/api/collections/{id}/{index}", get(collection_doc))
+        .route("/api/jobs/{*rest}", get(jobs_proxy))
+        .route("/api/queue/{*rest}", get(queue_proxy))
+        .route("/api/reminders", get(reminders_get))
+        .route("/api/prefs", get(prefs_get))
+        .route("/api/journal", get(journal_get))
+        .route("/api/profiles", get(profiles_list))
+        .route("/api/profiles/{id}", get(profiles_get))
+        .route("/api/accounts/gateways", get(gateways_list))
+        .route("/api/orders", get(orders_list))
+        .route("/api/write-gate", get(write_gate_get))
+        // Every write, including the orders, behind WriteGate.
+        .merge(write_routes(write_gate))
+        // The console's writes (jobs, the queue, drive approval, reminders, flatten) can't be
+        // forged by another page open in the browser.
+        .layer(axum::middleware::from_fn(
+            tinytrader_observe::guard::json_writes,
+        ))
+}
+
+/// Who may write. Every write route (see [`write_routes`]) needs the Tailscale
+/// login, checked before anything is forwarded or sent to a gateway:
+///
+/// - the Tailscale login: `tailscale serve` sets `Tailscale-User-Login` on
+///   what it forwards, and it must be one of `CONSOLE_ORDER_LOGINS`
+///   (comma-separated, exact match). Empty or unset refuses every write.
+///
+/// A live account's order, cancel, flatten or resume also needs the order
+/// token: `X-Order-Token` must equal `CONSOLE_ORDER_TOKEN` (or the file
+/// `CONSOLE_ORDER_TOKEN_FILE` names). The login header alone isn't enough
+/// for a live account: anything on the console's host can reach its port directly
+/// and send it.
+/// Unset, live orders are refused with a message saying so. Whether an account
+/// is live is decided by its handler (see [`account_live`]) from the accounts
+/// service's environment and the gateway's own welcome, never from the request:
+/// either one not saying `paper` makes it live.
+///
+/// GET routes stay open. A refusal says which check failed in plain words
+/// (403 for the login, 401 for the token), never what was expected.
+/// `GET /api/write-gate` tells the page whether writes are on, whether this
+/// viewer's login may make them, and whether live orders are on.
+#[derive(Clone)]
+struct WriteGate {
+    logins: Vec<String>,
+    token: Option<String>,
+}
+
+/// A refusal: a status and the message to send.
+type Refusal = (StatusCode, &'static str);
+
+/// The refusal for every write while `CONSOLE_ORDER_LOGINS` is empty.
+const NO_LOGINS: &str =
+    "writes are disabled: the console has no allowed logins configured (CONSOLE_ORDER_LOGINS)";
+/// The refusal for a login that isn't on the list (or no login at all).
+const NOT_ALLOWED: &str = "writes are not allowed for this login";
+/// The refusal for a live write whose order token is missing or wrong.
+const BAD_TOKEN: &str = "a live account's write needs the console's order token";
+/// The refusal for a live write while no order token is configured.
+const NO_TOKEN: &str = "live orders are disabled: the console has no order token configured";
+
+impl WriteGate {
+    fn from_env() -> Self {
+        let logins = env("CONSOLE_ORDER_LOGINS", "")
+            .split(',')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect();
+        // An unreadable token file leaves live orders disabled; the console still starts.
+        let token = match tinytrader_observe::optional_secret("CONSOLE_ORDER_TOKEN") {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("console: {e}");
+                None
+            }
+        };
+        Self { logins, token }
+    }
+
+    /// Whether `login` is one of the allowed Tailscale logins.
+    fn login_allowed(&self, login: Option<&str>) -> bool {
+        login.is_some_and(|l| self.logins.iter().any(|a| a == l))
+    }
+
+    /// Why a write from `login` is refused, if it is, before the token is
+    /// looked at. No logins configured refuses every write, and says so.
+    fn refuse_login(&self, login: Option<&str>) -> Option<Refusal> {
+        if self.logins.is_empty() {
+            Some((StatusCode::FORBIDDEN, NO_LOGINS))
+        } else if self.login_allowed(login) {
+            None
+        } else {
+            Some((StatusCode::FORBIDDEN, NOT_ALLOWED))
+        }
+    }
+
+    /// Whether a write from `login`, carrying `token`, may go ahead, on an
+    /// account that is `live` or not. A paper write needs only the login.
+    fn decide(&self, login: Option<&str>, token: Option<&str>, live: bool) -> Option<Refusal> {
+        if let Some(refusal) = self.refuse_login(login) {
+            return Some(refusal);
+        }
+        if !live {
+            return None;
+        }
+        let Some(want) = self.token.as_deref() else {
+            return Some((StatusCode::FORBIDDEN, NO_TOKEN));
+        };
+        if constant_time_eq(token.unwrap_or("").as_bytes(), want.as_bytes()) {
+            None
+        } else {
+            Some((StatusCode::UNAUTHORIZED, BAD_TOKEN))
+        }
+    }
+}
+
+/// The request's Tailscale login and order token, if sent.
+fn login_and_token(headers: &axum::http::HeaderMap) -> (Option<&str>, Option<&str>) {
+    (
+        headers
+            .get("tailscale-user-login")
+            .and_then(|v| v.to_str().ok()),
+        headers.get("x-order-token").and_then(|v| v.to_str().ok()),
+    )
+}
+
+/// The refusal response for a write on an account that is `live` or not (as
+/// its handler found it), if any.
+fn refused_for(app: &App, headers: &axum::http::HeaderMap, live: bool) -> Option<Response> {
+    let (login, token) = login_and_token(headers);
+    app.gate.decide(login, token, live).map(refusal)
+}
+
+fn refusal((status, why): Refusal) -> Response {
+    (status, axum::Json(json!({ "error": why }))).into_response()
+}
+
+/// The write gate as this viewer meets it: `writes` (any logins configured),
+/// `allowed` (this request's login is one of them), `live_orders` (an order
+/// token is configured). Never the logins or the token themselves.
+async fn write_gate_get(
+    AxumState(app): AxumState<Arc<App>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let (login, _) = login_and_token(&headers);
+    no_store(axum::Json(json!({
+        "writes": !app.gate.logins.is_empty(),
+        "allowed": app.gate.refuse_login(login).is_none(),
+        "live_orders": app.gate.token.is_some(),
+    })))
+}
+
+/// Compare without stopping at the first difference (the time taken says
+/// nothing about how much of a guess was right). Both sides are hashed first,
+/// so neither does the length of the guess.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use sha2::{Digest, Sha256};
+    let (a, b) = (Sha256::digest(a), Sha256::digest(b));
+    a.iter().zip(b.iter()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+/// Middleware: refuse a write from a login that isn't allowed. The order token
+/// for a live account is checked by its handler, which knows the account.
+async fn write_gate(
+    AxumState(gate): AxumState<WriteGate>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let (login, _) = login_and_token(req.headers());
+    match gate.refuse_login(login) {
+        Some(r) => refusal(r),
+        None => next.run(req).await,
+    }
+}
+
+/// The write routes, each behind the [`WriteGate`]: orders (submit, cancel,
+/// flatten, resume), the jobs service and the queue (POST, and PATCH for the
+/// queue), drive approval, reminders, profile recordings and settings (PUT).
+/// Their GET routes are merged in separately and stay open.
+fn write_routes(gate: WriteGate) -> Router<Arc<App>> {
+    Router::new()
+        .route("/api/orders/{account}", axum::routing::post(order_submit))
+        .route(
+            "/api/orders/{account}/{id}/cancel",
+            axum::routing::post(order_cancel),
+        )
+        .route(
+            "/api/accounts/{account}/flatten",
+            axum::routing::post(account_flatten),
+        )
+        .route(
+            "/api/accounts/{account}/resume",
+            axum::routing::post(account_resume),
+        )
+        .route("/api/jobs/{*rest}", axum::routing::post(jobs_proxy))
+        .route(
+            "/api/queue/{*rest}",
+            axum::routing::post(queue_proxy).patch(queue_proxy),
+        )
+        .route(
+            "/api/store/volumes/approve",
+            axum::routing::post(store_approve),
+        )
+        .route("/api/reminders", axum::routing::post(reminders_post))
+        .route("/api/prefs/{key}", axum::routing::put(prefs_put))
+        .route("/api/journal", axum::routing::post(journal_post))
+        .route(
+            "/api/journal/{id}",
+            axum::routing::put(journal_put).delete(journal_delete),
+        )
+        .route(
+            "/api/profiles",
+            axum::routing::post(profiles_post).layer(axum::extract::DefaultBodyLimit::max(
+                profiles::MAX_BYTES + 1024,
+            )),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(gate, write_gate))
+}
+
 /// Send one of the Spread builder's orders to a paper account's gateway as
 /// the console's trade client. The body names the account again in
 /// `confirm`; the id is made here. The gateway's answer is returned as is
@@ -886,6 +1123,7 @@ async fn orders_list(AxumState(app): AxumState<Arc<App>>) -> Response {
 async fn order_submit(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path(account): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
@@ -896,6 +1134,16 @@ async fn order_submit(
         )
             .into_response();
     }
+    if !app.gateways.addrs.contains_key(&account) {
+        return no_gateway();
+    }
+    let live = match account_live(&app, &account, gateways::As::Trade).await {
+        Ok(live) => live,
+        Err(e) => return gateway_failed(e),
+    };
+    if let Some(refusal) = refused_for(&app, &headers, live) {
+        return refusal;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -905,11 +1153,8 @@ async fn order_submit(
         now.as_secs(),
         now.subsec_nanos() % 100_000
     );
-    if !app.gateways.addrs.contains_key(&account) {
-        return no_gateway();
-    }
     // A live account's order also says so, from the ticket's typed confirmation.
-    if ask["live"] != true && is_live(&app, &account).await {
+    if ask["live"] != true && live {
         return (
             StatusCode::BAD_REQUEST,
             axum::Json(json!({ "error": "a live account's order must be confirmed as live" })),
@@ -935,6 +1180,7 @@ async fn order_submit(
 async fn order_cancel(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path((account, id)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     if !id.starts_with(app.gateways.prefix.as_str()) {
         return (
@@ -942,6 +1188,16 @@ async fn order_cancel(
             axum::Json(json!({ "error": "not one of the console's orders" })),
         )
             .into_response();
+    }
+    if !app.gateways.addrs.contains_key(&account) {
+        return no_gateway();
+    }
+    let live = match account_live(&app, &account, gateways::As::Trade).await {
+        Ok(live) => live,
+        Err(e) => return gateway_failed(e),
+    };
+    if let Some(refusal) = refused_for(&app, &headers, live) {
+        return refusal;
     }
     trade_request(
         &app,
@@ -981,16 +1237,17 @@ async fn trade_request(
     }
 }
 
-/// Close every position of a paper account at market through its gateway:
-/// halts opens, cancels open orders, liquidates. The body must name the
-/// account in `confirm`.
+/// Close every position of an account at market through its gateway: halts
+/// opens, cancels open orders, liquidates. The body must name the account in
+/// `confirm`; a live account's flatten also needs the order token.
 async fn account_flatten(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path(account): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-    if ask["confirm"].as_str() != Some(account.as_str()) {
+    if !confirmed(&ask, &account) {
         return (
             StatusCode::BAD_REQUEST,
             axum::Json(json!({ "error": "type the account's name to confirm" })),
@@ -1000,8 +1257,12 @@ async fn account_flatten(
     if !app.gateways.addrs.contains_key(&account) {
         return no_gateway();
     }
-    if is_live(&app, &account).await {
-        return live_refused();
+    let live = match account_live(&app, &account, gateways::As::Ops).await {
+        Ok(live) => live,
+        Err(e) => return gateway_failed(e),
+    };
+    if let Some(refusal) = refused_for(&app, &headers, live) {
+        return refusal;
     }
     let reason = ask["reason"]
         .as_str()
@@ -1016,18 +1277,31 @@ async fn account_flatten(
     .await
 }
 
-/// Allow opening orders again on a paper account (the gateway's `unkill`).
+/// Allow opening orders again on an account (the gateway's `unkill`). A live
+/// account's resume also needs the order token and `confirm` naming the account.
 async fn account_resume(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path(account): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
     if !app.gateways.addrs.contains_key(&account) {
         return no_gateway();
     }
-    if is_live(&app, &account).await {
-        return live_refused();
+    let live = match account_live(&app, &account, gateways::As::Ops).await {
+        Ok(live) => live,
+        Err(e) => return gateway_failed(e),
+    };
+    if let Some(refusal) = refused_for(&app, &headers, live) {
+        return refusal;
+    }
+    if live && !confirmed(&ask, &account) {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "type the account's name to confirm" })),
+        )
+            .into_response();
     }
     let reason = ask["reason"]
         .as_str()
@@ -1050,27 +1324,62 @@ fn no_gateway() -> Response {
         .into_response()
 }
 
-/// Whether an account's gateway trades live (from its welcome); unreachable counts as live,
-/// so Flatten and Resume fail closed.
-async fn is_live(app: &App, account: &str) -> bool {
-    match app
-        .gateways
-        .call(account, None, Duration::from_secs(5))
-        .await
-    {
-        Ok((w, _)) => w["environment"] != "paper",
-        Err(_) => true,
+/// Whether the body's `confirm` names the account exactly.
+fn confirmed(ask: &serde_json::Value, account: &str) -> bool {
+    ask["confirm"].as_str() == Some(account)
+}
+
+/// The account's `environment` as the accounts service reports it
+/// (`alpaca-account`, in each service's `accounts.accounts`, matched by
+/// `name`), from the console's latest snapshot. Its value only when every
+/// report agrees; `None` when no service reports the account, or they differ.
+fn account_environment(app: &App, account: &str) -> Option<String> {
+    let snapshot = app.poller.snapshot_json();
+    let reports: Vec<Option<String>> = snapshot["services"]
+        .as_object()
+        .into_iter()
+        .flat_map(|services| services.values())
+        .filter_map(|svc| svc.pointer("/accounts/accounts")?.as_array())
+        .flatten()
+        .filter(|a| a["name"].as_str() == Some(account))
+        .map(|a| a["environment"].as_str().map(str::to_owned))
+        .collect();
+    let first = reports.first()?;
+    if reports.iter().all(|r| r == first) {
+        first.clone()
+    } else {
+        None
     }
 }
 
-/// Flatten (sell everything at market) and Resume are for paper accounts only: a live
-/// account holds more than the console's orders.
-fn live_refused() -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        axum::Json(json!({ "error": "not offered for a live account from the console" })),
-    )
-        .into_response()
+/// Whether an account trades live, from its accounts-service `environment`:
+/// `paper` is paper; `live`, any other value, or none (unknown) is live.
+fn is_live(environment: Option<&str>) -> bool {
+    environment != Some("paper")
+}
+
+/// Whether a write on the account is a live one: the accounts service's
+/// environment (see [`account_environment`]) or the gateway's welcome, as the
+/// client `who` that will send it, not saying `paper`. Both must say `paper`
+/// for a paper write, so a gateway mapped to the wrong account still needs the
+/// token. A gateway that can't be reached is an error, not a guess.
+async fn account_live(app: &App, account: &str, who: gateways::As) -> Result<bool, String> {
+    if is_live(account_environment(app, account).as_deref()) {
+        return Ok(true);
+    }
+    match app
+        .gateways
+        .call_as(who, account, None, Duration::from_secs(5))
+        .await
+    {
+        Ok((welcome, _)) => Ok(is_live(welcome["environment"].as_str())),
+        Err(e) => Err(e),
+    }
+}
+
+/// A gateway that failed or couldn't be reached, as the API's error document.
+fn gateway_failed(e: String) -> Response {
+    (StatusCode::BAD_GATEWAY, axum::Json(json!({ "error": e }))).into_response()
 }
 
 async fn gateway_request(
@@ -1103,4 +1412,253 @@ fn no_store(body: impl IntoResponse) -> Response {
 
 fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ME: &str = "me@example.net";
+
+    fn gate(token: Option<&str>) -> WriteGate {
+        WriteGate {
+            logins: vec![ME.to_owned()],
+            token: token.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn tokens_compare_whole() {
+        assert!(constant_time_eq(b"made-up", b"made-up"));
+        assert!(!constant_time_eq(b"made-up", b"made-uq"));
+        assert!(!constant_time_eq(b"made-up", b"made"));
+        assert!(!constant_time_eq(b"", b"made-up"));
+    }
+
+    #[test]
+    fn a_paper_write_needs_only_the_login() {
+        let g = gate(Some("secret"));
+        assert_eq!(g.decide(Some(ME), None, false), None);
+        // A settings or reminder write is a paper-style write: the login is enough.
+        let no_token = gate(None);
+        assert_eq!(no_token.decide(Some(ME), None, false), None);
+    }
+
+    #[test]
+    fn environment_live_needs_the_token() {
+        let g = gate(Some("secret"));
+        assert_eq!(
+            g.decide(Some(ME), None, true),
+            Some((StatusCode::UNAUTHORIZED, BAD_TOKEN))
+        );
+        assert_eq!(
+            g.decide(Some(ME), Some("guess"), true),
+            Some((StatusCode::UNAUTHORIZED, BAD_TOKEN))
+        );
+        assert_eq!(g.decide(Some(ME), Some("secret"), true), None);
+    }
+
+    #[test]
+    fn environment_missing_is_treated_as_live() {
+        let g = gate(Some("secret"));
+        assert!(is_live(None));
+        assert!(is_live(Some("live")));
+        assert!(is_live(Some("sandbox")));
+        assert!(!is_live(Some("paper")));
+        assert_eq!(
+            g.decide(Some(ME), None, is_live(None)),
+            Some((StatusCode::UNAUTHORIZED, BAD_TOKEN))
+        );
+        assert_eq!(g.decide(Some(ME), Some("secret"), is_live(None)), None);
+    }
+
+    #[test]
+    fn a_live_write_with_no_token_configured_says_so() {
+        let g = gate(None);
+        assert_eq!(
+            g.decide(Some(ME), Some("anything"), true),
+            Some((StatusCode::FORBIDDEN, NO_TOKEN,))
+        );
+    }
+
+    #[test]
+    fn a_live_flatten_needs_the_account_name_typed() {
+        let g = gate(Some("secret"));
+        // The token passes the gate; the typed confirmation is checked by the handler.
+        assert_eq!(g.decide(Some(ME), Some("secret"), true), None);
+        assert!(confirmed(&json!({ "confirm": "paper-1" }), "paper-1"));
+        assert!(!confirmed(&json!({ "confirm": "paper-2" }), "paper-1"));
+        assert!(!confirmed(&json!({ "confirm": "Paper-1" }), "paper-1"));
+        assert!(!confirmed(&json!({}), "paper-1"));
+    }
+
+    #[test]
+    fn an_empty_allowlist_refuses_all_writes() {
+        let g = WriteGate {
+            logins: Vec::new(),
+            token: Some("secret".to_owned()),
+        };
+        assert_eq!(
+            g.decide(Some(ME), None, false),
+            Some((StatusCode::FORBIDDEN, NO_LOGINS))
+        );
+        assert_eq!(
+            g.decide(Some(ME), Some("secret"), true),
+            Some((StatusCode::FORBIDDEN, NO_LOGINS))
+        );
+        assert_eq!(
+            g.refuse_login(None),
+            Some((StatusCode::FORBIDDEN, NO_LOGINS))
+        );
+    }
+
+    #[test]
+    fn a_wrong_or_missing_login_is_refused() {
+        let g = gate(Some("secret"));
+        assert_eq!(
+            g.decide(None, Some("secret"), true),
+            Some((StatusCode::FORBIDDEN, NOT_ALLOWED))
+        );
+        assert_eq!(
+            g.decide(Some("other@example.net"), None, false),
+            Some((StatusCode::FORBIDDEN, NOT_ALLOWED))
+        );
+        assert_eq!(
+            g.decide(Some("other@example.net"), Some("secret"), true),
+            Some((StatusCode::FORBIDDEN, NOT_ALLOWED))
+        );
+    }
+
+    /// The console's routes on a free port, with no services configured.
+    async fn serve(gate: WriteGate) -> String {
+        let app = Arc::new(App {
+            poller: Poller::new(PollerConfig {
+                topology: "/nonexistent/topology.json".to_owned(),
+                docker: None,
+                project: None,
+            }),
+            jobs: None,
+            queue: None,
+            store: None,
+            store_token: None,
+            prefs: None,
+            reminders: None,
+            journal: None,
+            profiles: None,
+            gateways: gateways::Gateways::from_env(),
+            gate: gate.clone(),
+            polls: AtomicU64::new(0),
+            delta: delta::Delta::new(0),
+            collections: Vec::new(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, routes(gate).with_state(app))
+                .await
+                .unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// A request's status and its `error`, if any.
+    async fn ask(method: reqwest::Method, url: &str, login: Option<&str>) -> (u16, Option<String>) {
+        let mut req = reqwest::Client::new()
+            .request(method, url)
+            .header("content-type", "application/json")
+            .body("{}");
+        if let Some(l) = login {
+            req = req.header("tailscale-user-login", l);
+        }
+        let r = req.send().await.unwrap();
+        let status = r.status().as_u16();
+        let v: serde_json::Value = r.json().await.unwrap_or_default();
+        (status, v["error"].as_str().map(str::to_owned))
+    }
+
+    /// Every write route (path, methods), as the page sends them.
+    const WRITES: &[(&str, &[&str])] = &[
+        ("/api/orders/paper-1", &["POST"]),
+        ("/api/orders/paper-1/tt-1/cancel", &["POST"]),
+        ("/api/accounts/paper-1/flatten", &["POST"]),
+        ("/api/accounts/paper-1/resume", &["POST"]),
+        ("/api/jobs/submit", &["POST"]),
+        ("/api/queue/jobs", &["POST", "PATCH"]),
+        ("/api/store/volumes/approve", &["POST"]),
+        ("/api/reminders", &["POST"]),
+        ("/api/prefs/tinytrader-theme", &["PUT"]),
+        ("/api/journal", &["POST"]),
+        ("/api/journal/j1", &["PUT", "DELETE"]),
+        ("/api/profiles", &["POST"]),
+    ];
+
+    #[tokio::test]
+    async fn with_no_allowlist_every_write_is_refused_and_reads_stay_open() {
+        let base = serve(WriteGate {
+            logins: Vec::new(),
+            token: Some("made-up-token".to_owned()),
+        })
+        .await;
+        for (path, methods) in WRITES {
+            for m in *methods {
+                let method = reqwest::Method::from_bytes(m.as_bytes()).unwrap();
+                let (status, error) = ask(method, &format!("{base}{path}"), Some(ME)).await;
+                assert_eq!(status, 403, "{m} {path}");
+                assert_eq!(error.as_deref(), Some(NO_LOGINS), "{m} {path}");
+            }
+        }
+        // Reads are not gated: they answer as they would (404 here: nothing configured).
+        for path in [
+            "/api/journal",
+            "/api/prefs",
+            "/api/reminders",
+            "/api/profiles",
+        ] {
+            let (status, _) = ask(reqwest::Method::GET, &format!("{base}{path}"), None).await;
+            assert_eq!(status, 404, "GET {path}");
+        }
+        let r: serde_json::Value = reqwest::get(format!("{base}/api/write-gate"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            json!({ "writes": false, "allowed": false, "live_orders": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn every_write_route_needs_an_allowed_login() {
+        let base = serve(gate(None)).await;
+        for (path, methods) in WRITES {
+            for m in *methods {
+                let method = reqwest::Method::from_bytes(m.as_bytes()).unwrap();
+                let url = format!("{base}{path}");
+                for login in [None, Some("other@example.net")] {
+                    let (status, error) = ask(method.clone(), &url, login).await;
+                    assert_eq!(status, 403, "{m} {path} as {login:?}");
+                    assert_eq!(error.as_deref(), Some(NOT_ALLOWED), "{m} {path}");
+                }
+                // An allowed login gets past the gate (to a 4xx from the route itself here).
+                let (status, error) = ask(method, &url, Some(ME)).await;
+                assert_ne!(error.as_deref(), Some(NOT_ALLOWED), "{m} {path}");
+                assert_ne!(status, 403, "{m} {path}");
+            }
+        }
+        let r: serde_json::Value = reqwest::Client::new()
+            .get(format!("{base}/api/write-gate"))
+            .header("tailscale-user-login", ME)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            json!({ "writes": true, "allowed": true, "live_orders": false })
+        );
+    }
 }
