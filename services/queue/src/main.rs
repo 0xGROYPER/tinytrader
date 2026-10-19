@@ -98,15 +98,42 @@ enum Mode {
 /// Copy the secrets this service was given into the volume jobs mount, each
 /// as a file readable by the job's user, which isn't this service's.
 fn place_secrets(names: &[String], dir: &std::path::Path) -> Result<(), String> {
+    copy_secrets(std::path::Path::new("/run/secrets"), names, dir)
+}
+
+/// Copy each secret from `from_dir` into `dir`, read-only (0444). Each copy is
+/// written to a temporary file beside it and renamed over the old one, so a
+/// read-only copy from an earlier start is replaced rather than rewritten.
+fn copy_secrets(
+    from_dir: &std::path::Path,
+    names: &[String],
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for name in names.iter().filter(|n| !n.is_empty()) {
-        let from = PathBuf::from("/run/secrets").join(name);
+        let from = from_dir.join(name);
         let value = std::fs::read(&from).map_err(|e| format!("secret {name}: {e}"))?;
         let to = dir.join(name);
-        std::fs::write(&to, value).map_err(|e| format!("secret {name}: {e}"))?;
-        std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o444))
+        let tmp = dir.join(format!(".{name}.tmp"));
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("secret {name}: {e}")),
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| format!("secret {name}: {e}"))?;
+        file.write_all(&value)
+            .and_then(|()| file.sync_all())
+            .map_err(|e| format!("secret {name}: {e}"))?;
+        drop(file);
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o444))
             .map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &to).map_err(|e| format!("secret {name}: {e}"))?;
     }
     Ok(())
 }
@@ -252,5 +279,44 @@ async fn main() {
             () = q.wake.notified() => {}
             () = tokio::time::sleep(Duration::from_secs(5)) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_secrets;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn copying_secrets_again_replaces_the_read_only_copies() {
+        let root =
+            std::env::temp_dir().join(format!("tinytrader-queue-secrets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let from = root.join("run-secrets");
+        let to = root.join("volume/secrets");
+        std::fs::create_dir_all(&from).unwrap();
+        let names = vec!["api-key".to_owned()];
+
+        std::fs::write(from.join("api-key"), "first").unwrap();
+        copy_secrets(&from, &names, &to).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(to.join("api-key")).unwrap(),
+            "first"
+        );
+
+        std::fs::write(from.join("api-key"), "second").unwrap();
+        copy_secrets(&from, &names, &to).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(to.join("api-key")).unwrap(),
+            "second"
+        );
+        let mode = std::fs::metadata(to.join("api-key"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o444);
+        assert!(!to.join(".api-key.tmp").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
