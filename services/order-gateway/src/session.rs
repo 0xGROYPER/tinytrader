@@ -1782,11 +1782,17 @@ impl<B: Broker> Session<B> {
         self.emit(ts, "order", &body, Aud::Prefix(cid))
     }
 
+    /// Applies a REST answer for an order. An answer that matches what the gateway holds
+    /// changes nothing, and neither does one that would move a settled order back to a
+    /// working status: REST can lag the stream, so that answer is stale.
     fn reconcile_order(&mut self, bo: BrokerOrder) -> Result<(), String> {
-        let same = self.orders.get(&bo.client_order_id).map(|st| {
-            st.phase == Phase::Done && st.status == bo.status && st.filled == bo.filled_qty
+        let skip = self.orders.get(&bo.client_order_id).is_some_and(|st| {
+            st.phase == Phase::Done
+                && ((st.status == bo.status && st.filled == bo.filled_qty)
+                    || (settled(&st.status, st.tif.as_deref())
+                        && !settled(&bo.status, st.tif.as_deref())))
         });
-        if same == Some(true) {
+        if skip {
             return Ok(());
         }
         self.on_order(OrderUpdate {
@@ -1837,11 +1843,13 @@ impl<B: Broker> Session<B> {
                 return Ok(Turn::Waiting);
             };
             let critical = rc.startup;
+            // A lookup queued for an order that has since settled (a stream event, say) is
+            // skipped: its answer could only be older than what the gateway holds.
             if let Step::Order(cid) = &step
                 && !self
                     .orders
                     .get(cid)
-                    .is_some_and(|s| matches!(s.phase, Phase::Done | Phase::Absent))
+                    .is_some_and(|s| matches!(s.phase, Phase::Done | Phase::Absent) && s.open())
             {
                 continue;
             }
@@ -1884,6 +1892,20 @@ impl<B: Broker> Session<B> {
                     }
                 };
                 if let Some(why) = gate {
+                    // Only a reconcile that opens the gate waits on it. A reconnect's reconcile
+                    // with the gate already open is dropped, as before reconciles ran in calls:
+                    // retrying it would claim every poll while the account call keeps failing,
+                    // and the lookups, clears and degraded listing that settle orders would
+                    // never run. The next reconnect starts a new one.
+                    let required =
+                        !self.gate_ok || self.reconcile.as_ref().is_some_and(|rc| rc.startup);
+                    if !required {
+                        let again = self.reconcile.take().is_some_and(|rc| rc.again);
+                        if again {
+                            self.reconcile(false)?;
+                        }
+                        return Ok(Turn::Gated);
+                    }
                     let announce = self.reconcile.as_mut().is_some_and(|rc| {
                         rc.steps.push_front(Step::Gate);
                         std::mem::take(&mut rc.announce)
@@ -2552,8 +2574,8 @@ fn line_aud(v: &Value) -> Aud {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClearHalf, OrderState, Pending, Phase, Refusal, Seen, Session, clear_verdict, close_check,
-        listing_full, session_order_expired, wall_ns,
+        ClearHalf, OrderState, OrderUpdate, Pending, Phase, Refusal, Seen, Session, clear_verdict,
+        close_check, listing_full, session_order_expired, wall_ns,
     };
     use crate::broker::{
         AccountInfo, Broker, BrokerError, BrokerOrder, CancelResult, Capabilities, FlattenResult,
@@ -2581,6 +2603,10 @@ mod tests {
         order_429: Option<u64>,
         /// What the open listing returns.
         listing: Vec<BrokerOrder>,
+        /// What a by-id lookup finds; any other client id is a 404.
+        found: Vec<BrokerOrder>,
+        /// What the next drain delivers.
+        updates: Vec<Update>,
     }
 
     fn listed(cid: &str) -> BrokerOrder {
@@ -2641,7 +2667,7 @@ mod tests {
         fn flatten(&mut self) -> FlattenResult {
             FlattenResult::Unknown { reason: "timeout" }
         }
-        fn order(&mut self, _: &OrderRef) -> Query<Option<BrokerOrder>> {
+        fn order(&mut self, r: &OrderRef) -> Query<Option<BrokerOrder>> {
             self.calls.borrow_mut().push("order");
             if let Some(ms) = self.order_429 {
                 return Err(BrokerError {
@@ -2652,8 +2678,16 @@ mod tests {
                     retry_after_ms: Some(ms),
                 });
             }
+            let value = match r {
+                OrderRef::Client(cid) => self
+                    .found
+                    .iter()
+                    .find(|o| o.client_order_id == *cid)
+                    .cloned(),
+                OrderRef::Broker(_) => None,
+            };
             Ok(Reply {
-                value: None,
+                value,
                 raw: "{}".into(),
             })
         }
@@ -2711,7 +2745,9 @@ mod tests {
         fn calendar(&mut self, _: &str, _: &str) -> Query<Vec<SessionDay>> {
             Err(unsupported())
         }
-        fn poll_updates(&mut self, _: &mut Vec<Update>) {}
+        fn poll_updates(&mut self, out: &mut Vec<Update>) {
+            out.append(&mut self.updates);
+        }
     }
 
     /// A session on a fresh state root, with its calls recorded in the returned log.
@@ -2742,6 +2778,8 @@ mod tests {
             account_ok: false,
             order_429: None,
             listing: Vec::new(),
+            found: Vec::new(),
+            updates: Vec::new(),
         };
         let mut s = Session::new(cfg, stub, journal, &[], Arc::new(AtomicU64::new(0)));
         s.gate_ok = true;
@@ -3046,6 +3084,86 @@ mod tests {
             before = now;
         }
         assert_eq!(calls.borrow().len(), 6);
+    }
+
+    fn filled(cid: &str) -> BrokerOrder {
+        BrokerOrder {
+            status: "filled".into(),
+            filled_qty: 1,
+            avg_price: Some("1.00".into()),
+            ..listed(cid)
+        }
+    }
+
+    #[test]
+    fn a_reconnect_with_a_failing_account_call_still_settles_an_unknown_order() {
+        // The gate is open, and every account call fails. A stream reconnect's reconcile is
+        // dropped at its gate, so the poll's lookup still runs and settles the order.
+        let (mut s, calls) = session("reconnect-gate", None);
+        s.b.account_ok = false;
+        unresolved(&mut s, "wse-u", "gtc", None);
+        s.b.found = vec![filled("wse-u")];
+        s.b.updates.push(Update::StreamUp);
+        poll(&mut s);
+        assert_eq!(*calls.borrow(), vec!["account"]);
+        assert!(s.reconcile.is_none());
+        assert!(s.gate_ok);
+        // Another reconnect fails its gate the same way; the lookup runs after it.
+        s.b.updates.push(Update::StreamUp);
+        poll(&mut s);
+        poll(&mut s);
+        assert_eq!(*calls.borrow(), vec!["account", "account", "order"]);
+        let st = &s.orders["wse-u"];
+        assert_eq!(st.phase, Phase::Done);
+        assert_eq!(st.status, "filled");
+    }
+
+    #[test]
+    fn a_startup_reconcile_keeps_retrying_a_failing_gate() {
+        let (mut s, calls) = session("startup-gate", None);
+        s.gate_ok = false;
+        s.reconcile(true).unwrap();
+        unresolved(&mut s, "wse-u", "gtc", None);
+        for _ in 0..3 {
+            poll(&mut s);
+        }
+        assert_eq!(*calls.borrow(), vec!["account"; 3]);
+        assert!(s.reconcile.is_some());
+        assert!(!s.gate_ok);
+    }
+
+    #[test]
+    fn a_stale_lookup_never_reopens_a_filled_order() {
+        let (mut s, calls) = session("stale-lookup", None);
+        s.b.account_ok = true;
+        done(&mut s, "wse-f", "new", "gtc");
+        s.b.found = vec![listed("wse-f")];
+        s.reconcile(false).unwrap();
+        poll(&mut s);
+        assert_eq!(*calls.borrow(), vec!["account"]);
+        // The stream fills the order before its queued lookup runs.
+        let bo = filled("wse-f");
+        s.on_order(OrderUpdate {
+            event: "fill".into(),
+            ts_broker: 0,
+            fill: None,
+            legs: None,
+            position_qty: None,
+            reason: None,
+            source: "stream",
+            raw: bo.raw.clone(),
+            order: bo,
+        })
+        .unwrap();
+        // The queued lookup is skipped: the next call is the recent listing.
+        poll(&mut s);
+        assert_eq!(*calls.borrow(), vec!["account", "orders_since"]);
+        // A lookup that answers "new" anyway, from any path, leaves it filled.
+        s.reconcile_order(listed("wse-f")).unwrap();
+        let st = &s.orders["wse-f"];
+        assert_eq!(st.status, "filled");
+        assert_eq!(st.filled, 1);
+        assert!(!st.open());
     }
 
     #[test]
