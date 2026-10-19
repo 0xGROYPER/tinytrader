@@ -15,6 +15,12 @@
 // The first time a device syncs, its watchlists, alerts and watchlist views
 // are merged in too; its views, if they differ, are kept aside in
 // `tinytrader-workspaces-before-sync`.
+//
+// A save is a write like the others (lib/api.js): it needs the console's login
+// allowlist, not the order token. A save the console refuses is shown in the page's banner
+// (`refusedNote`, tt-prefs-refused) until one goes through.
+
+import { orderFetch } from './api.js';
 
 const SYNCED = new Set([
   'tinytrader-workspaces', 'tinytrader-ready', 'tinytrader-tree', 'tinytrader-tree-2', 'tinytrader-folders',
@@ -94,16 +100,29 @@ function send(k) {
   clearTimeout(timer);
   timer = setTimeout(() => { const keys = [...waiting]; waiting.clear(); for (const key of keys) save(key, 0); }, 400);
 }
+/** A save the console refused for a reason other than a stale version, shown in the banner ('' when none). */
+export let refusedNote = '';
+function refuse(note) {
+  refusedNote = note;
+  document.dispatchEvent(new CustomEvent('tt-prefs-refused'));
+}
 async function save(k, tries) {
   const v = get(k);
   let r;
   try {
-    r = await fetch(`/api/prefs/${encodeURIComponent(k)}`, {
-      method: 'PUT', headers: { 'content-type': 'application/json', 'if-match': known.get(k) ?? version(remote?.[k] ?? null) }, body: JSON.stringify(v),
-    });
-  } catch (_) { return; }
-  if (r.ok) { known.set(k, version(v)); return; }
-  if (r.status !== 409 || tries > 2) return;
+    r = await orderFetch(`/api/prefs/${encodeURIComponent(k)}`, v, 'PUT', { 'if-match': known.get(k) ?? version(remote?.[k] ?? null) });
+  } catch (_) { refuse('Settings were not saved: the console could not be reached.'); return; }
+  if (r.ok) {
+    known.set(k, version(v));
+    if (refusedNote) refuse('');
+    return;
+  }
+  if (r.status !== 409) {
+    const why = (await r.json().catch(() => ({})))?.error;
+    refuse(`Settings were not saved: the console refused the save (${why || `HTTP ${r.status}`}).`);
+    return;
+  }
+  if (tries > 2) return;
   // Someone saved since: merge theirs with ours, keep it here, and save the merge.
   const theirs = (await r.json().catch(() => ({}))).current;
   const t = typeof theirs === 'string' ? theirs : null;

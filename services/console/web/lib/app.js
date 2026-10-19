@@ -2,7 +2,8 @@
 // workspaces on Dockview, the palette and the switcher, the docs pages, and
 // polling the fleet. The widgets are modules under ../widgets (decision 0010).
 // Settings shared between devices: read before anything here runs.
-import './prefs.js';
+import { refusedNote } from './prefs.js';
+import { writeGate } from './api.js';
 import { esc, bytes, duration, fmt, ago, etStamp } from './format.js';
 import { fleet, setTopology, statusOf, subOf, serviceFor } from './fleet.js';
 import { widget, widgetNames } from './widgets.js';
@@ -1362,6 +1363,8 @@ document.addEventListener('click', e => {
   if (!$('bell-pop').hidden && !near(e, '.bell-wrap')) bellToggle(false);
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('bell-pop').hidden) bellToggle(false); });
+// The write gate's note for the banner ('' when writes are on for this viewer); see loadWriteGate.
+let gateNote = '';
 function status() {
   updateHeaderStatus();
   const age = state.lastOk ? (Date.now() - state.lastOk) / 1000 : null;
@@ -1371,8 +1374,22 @@ function status() {
   const d = fleet.snap?.docker;
   if (d?.configured && d.error) problems.push('Docker API unavailable: ' + d.error + '. Container state is missing.');
   if (fleet.snap?.error) problems.push(fleet.snap.error);
+  if (gateNote) problems.push(gateNote);
+  if (refusedNote && !gateNote) problems.push(refusedNote);
   $('banner').hidden = !problems.length;
   $('banner').textContent = problems.join(' ');
+}
+document.addEventListener('tt-prefs-refused', status);
+// The console's write gate as this viewer meets it (GET /api/write-gate): when
+// writes are off, the banner says so, since every change made here is refused.
+async function loadWriteGate() {
+  const g = await writeGate();
+  gateNote = !g ? ''
+    : !g.writes ? 'Changes are off: the console has no allowed logins configured (CONSOLE_ORDER_LOGINS). Orders, settings, the journal and reminders are read-only.'
+    : g.hosts === false ? 'Changes are off: the console has no allowed host names configured (CONSOLE_HOSTS). Orders, settings, the journal and reminders are read-only.'
+    : !g.allowed ? 'Changes are off here: this login, or the address the console was opened at, is not one the console allows. Orders, settings, the journal and reminders are read-only.'
+    : '';
+  status();
 }
 async function loadTopology() {
   try { const r = await fetch('/api/topology', { cache: 'no-store' }); if (r.ok) { setTopology(await r.json()); document.title = fleet.topo.name ? `tinytrader · ${fleet.topo.name}` : 'tinytrader'; } } catch (_) {}
@@ -1493,7 +1510,8 @@ if (profileWanted()) startProfile();
     const home = view && lay.list.find(l => layViews(l).includes(view));
     if (home) { state.focusView = view; laySwitch(home.name); }
   }
-  await loadTopology(); await poll();
+  await loadTopology(); await poll(); loadWriteGate();
+  setInterval(loadWriteGate, 60000);
   setInterval(poll, 2000);
   setInterval(loadTopology, 5000);
 })();
