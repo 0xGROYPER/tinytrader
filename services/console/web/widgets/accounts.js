@@ -1,18 +1,21 @@
 // Accounts: a card per brokerage account (live first) with equity, the day's
 // change, balances, an equity chart, the largest positions and every open
-// order however it was placed (the console's can be cancelled here). A paper
-// account with an order gateway also gets Flatten (close every position at
-// market, through the gateway, after typing the account's name) and, while
-// its gateway halts opens, Resume opening. An account with an order gateway
-// gets Close… on each option group: the order ticket (lib/ticket.js), at
+// order however it was placed (the console's can be cancelled here). An account
+// with an order gateway also gets Flatten (close every position at market,
+// through the gateway, after typing the account's name) and, while its gateway
+// halts opens, Resume opening. Live accounts get both too: they send the order
+// token, and Resume is confirmed by typing the name. An account with an order
+// gateway gets Close… on each option group: the order ticket (lib/ticket.js), at
 // market or a limit, sent as the console's trade client (POST
 // /api/orders/{account}). A new order is built in the Spread builder:
 // Spread builder on a card opens it with that account picked for its ticket.
 // Liquidate (any account the console trades, live too) closes option
 // positions at once (lib/liquidate.js): every one is listed with a box to
 // tick (all ticked to start), the orders the ticked ones make are shown with
-// their prices, the console's own open orders are cancelled first, and a
-// live account asks once more.
+// their prices, the console's own open orders are cancelled first, each order
+// is checked against a fresh read just before it is sent, and a live account
+// asks once more. A run with an order whose outcome is unknown holds the
+// account until its open orders are read again.
 //
 // Account (one account): the same for one account, picked at its top (the
 // live account until another is picked, kept with the panel), with room for
@@ -24,9 +27,10 @@ import { defineWidget, paint } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { askHeld } from '../lib/position.js';
-import { createTicket, tradable, routed, occLabel, ourPrefix } from '../lib/ticket.js';
-import { closable, plan, uncovered, quotes, priced, send, cancelOurs } from '../lib/liquidate.js';
+import { createTicket, tradable, routed, occLabel, ourPrefix, unresolvedOf } from '../lib/ticket.js';
+import { closable, plan, uncovered, quotes, priced, send, cancelOurs, hold, holdOf, reread, fitted } from '../lib/liquidate.js';
 import { get } from '../lib/cache.js';
+import { orderFetch, refused, refusedText } from '../lib/api.js';
 
 /** An account's option positions by underlying and expiry, for the Spread builder's payoff. */
 const heldGroups = new Map();
@@ -58,39 +62,49 @@ async function readGateways(update) {
   } catch (_) { gateways = {}; }
   update();
 }
-// Flatten in progress per account: {stage: 'confirm' | 'busy' | 'done', typed, result, error}.
+// Flatten or resume in progress per account: {stage: 'confirm' | 'busy' | 'done', what: 'flatten' | 'resume', typed, result, error}.
 const flat = {};
-async function post(path, body) {
-  const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+// Whether an account trades live: anything but paper (its environment, as the console reads it), as the server decides.
+const liveAcct = a => a?.environment !== 'paper';
+/** A write; a refusal by the console's write gate is thrown in plain words. */
+async function post(path, body, live = false) {
+  const r = await orderFetch(path, body, 'POST', {}, live);
   let v = null; try { v = await r.json(); } catch (_) {}
+  if (refused(r)) throw new Error(refusedText(r, v));
   if (!r.ok) throw new Error(v?.error || `${r.status} ${r.statusText}`);
   return v;
 }
 
 function flattenPanel(a) {
   const name = a?.name, g = name && gateways[name];
-  if (a?.environment === 'live' || g?.environment === 'live') return '';
   if (!g) return '';
   if (g.error) return `<p class="muted acct-note" title="${esc(g.error)}">Order gateway unreachable.</p>`;
   const f = flat[name] || {};
-  const halted = g.state === 'killed';
+  const live = liveAcct(a) || g.environment !== 'paper', halted = g.state === 'killed';
   const buttons = `<div class="acct-actions">
     <button type="button" class="btn small danger" data-flat-open="${esc(name)}"${f.stage === 'busy' ? ' disabled' : ''}>Flatten</button>
     ${halted ? `<button type="button" class="btn small" data-flat-resume="${esc(name)}">Resume opening</button><span class="pill p-warn">opens halted</span>` : ''}</div>`;
+  if (f.stage === 'confirm' && f.what === 'resume') {
+    return `<div class="acct-flat">
+      <b>Allow opening orders again in ${esc(a.label || name)}${live ? ' (LIVE, real money)' : ''}?</b>
+      <label style="font-size:12px">Type <b>${esc(name)}</b> to confirm <input class="acct-flat-input" data-flat-typed="${esc(name)}" value="${esc(f.typed || '')}" autocomplete="off" spellcheck="false"></label>
+      <div class="acct-actions"><button type="button" class="btn small" data-flat-go="${esc(name)}"${f.typed === name ? '' : ' disabled'}>Resume now</button>
+      <button type="button" class="btn small" data-flat-cancel="${esc(name)}">Cancel</button></div></div>`;
+  }
   if (f.stage === 'confirm') {
     const pos = a.positions || [];
     return `<div class="acct-flat">
-      <b>Close every position in ${esc(a.label || name)} at market?</b>
+      <b>Close every position in ${esc(a.label || name)}${live ? ' (LIVE, real money)' : ''} at market?</b>
       <p class="muted" style="margin:0;font-size:12px">${pos.length ? pos.map(p => `${esc(p.symbol)} ${esc(String(p.qty))}`).join(', ') : 'No positions now; open orders are cancelled.'}</p>
       <p class="muted" style="margin:0;font-size:12px">Open orders are cancelled first. Options close at whatever the spread is. New opening orders stay refused until Resume opening.</p>
       <label style="font-size:12px">Type <b>${esc(name)}</b> to confirm <input class="acct-flat-input" data-flat-typed="${esc(name)}" value="${esc(f.typed || '')}" autocomplete="off" spellcheck="false"></label>
       <div class="acct-actions"><button type="button" class="btn small danger" data-flat-go="${esc(name)}"${f.typed === name ? '' : ' disabled'}>Flatten now</button>
       <button type="button" class="btn small" data-flat-cancel="${esc(name)}">Cancel</button></div></div>`;
   }
-  if (f.stage === 'busy') return `<div class="acct-flat"><b>Flattening ${esc(name)}…</b></div>`;
+  if (f.stage === 'busy') return `<div class="acct-flat"><b>${f.what === 'resume' ? 'Resuming' : 'Flattening'} ${esc(name)}…</b></div>`;
   if (f.stage === 'done') {
     const rows = (f.result?.positions || []).map(p => `<tr><td style="color:var(--fg)">${esc(p.symbol)}</td><td>${p.status === 200 ? 'closing order placed' : esc(String(p.broker_raw?.message || p.status))}</td></tr>`).join('');
-    const head = f.error ? `<b class="neg">Flatten failed: ${esc(f.error)}</b>`
+    const head = f.error ? `<b class="neg">${f.what === 'resume' ? 'Resume' : 'Flatten'} failed: ${esc(f.error)}</b>`
       : f.result?.outcome === 'ok' ? `<b>Flatten sent${rows ? '' : ': nothing to close'}.</b>`
       : `<b class="neg">Flatten ${esc(f.result?.outcome || '')}: ${esc(f.result?.reason || f.result?.message || '')}</b> <span class="muted">Check positions before trying again.</span>`;
     return `<div class="acct-flat">${head}${rows ? `<table class="pos-tbl"><tbody>${rows}</tbody></table>` : ''}
@@ -106,8 +120,11 @@ function liquidatePanel(a) {
   if (!name || !tradable(name)) return '';
   const { held, left } = closable(a.positions);
   const L = liq[name];
-  const button = held.length ? `<div class="acct-actions"><button type="button" class="btn liq-btn" data-liq-open="${esc(name)}"${L?.stage === 'sending' ? ' disabled' : ''}>Liquidate</button></div>` : '';
-  if (!L) return button;
+  // An unknown result may be live: nothing is sent here until the account is read again (lib/liquidate.js).
+  const holding = holdOf(name, a);
+  const holdNote = holding ? `<p class="neg" style="margin:0 0 6px;font-size:12px">A result from the last run is unknown and may be live. Open orders must be re-read before anything is sent to this account. ${esc(holding)}</p>` : '';
+  const button = held.length ? `<div class="acct-actions"><button type="button" class="btn liq-btn" data-liq-open="${esc(name)}"${L?.stage === 'sending' || holding ? ' disabled' : ''}>Liquidate</button></div>` : '';
+  if (!L) return holdNote + button;
   // Contracts no longer held drop out of the pick.
   for (const sym of L.pick) if (!held.some(h => h.symbol === sym)) L.pick.delete(sym);
   const { orders } = plan(a.positions, L.pick);
@@ -137,6 +154,8 @@ function liquidatePanel(a) {
     ours ? `Cancels the console's ${ours} open order${ours > 1 ? 's' : ''} first.` : '',
     theirs ? `<span class="neg">${theirs} open order${theirs > 1 ? 's' : ''} placed elsewhere stay${theirs > 1 ? '' : 's'}, and can keep a contract from closing: cancel ${theirs > 1 ? 'them' : 'it'} where ${theirs > 1 ? 'they were' : 'it was'} placed.</span>` : '',
     left.length ? `Left out: ${left.map(x => `${esc(occLabel(x.symbol))} (${esc(x.why)})`).join(', ')}.` : '',
+    L.left?.length ? `Left out at send, from a fresh read: ${L.left.map(x => `${esc(occLabel(x.symbol))} (${esc(x.why)})`).join(', ')}.` : '',
+    L.error ? `<span class="neg">${esc(L.error)}</span>` : '',
     naked.length && L.stage === 'review' ? `<span class="neg"><b>Leaves uncovered:</b> ${naked.map(h => `−${Math.abs(h.qty)} ${esc(occLabel(h.symbol))}`).join(', ')}: a long it closes may be what covers ${naked.length > 1 ? 'them' : 'it'}. Tick ${naked.length > 1 ? 'them' : 'it'} too, or</span> <label class="liq-pick"><input type="checkbox" data-liq-ack="${esc(name)}"${L.ackNaked ? ' checked' : ''}> leave ${naked.length > 1 ? 'them' : 'it'} open uncovered</label>` : '',
   ].filter(Boolean).map(x => `<p class="muted" style="margin:0;font-size:12px">${x}</p>`).join('');
   const confirming = L.confirm > Date.now();
@@ -146,10 +165,10 @@ function liquidatePanel(a) {
     : `<b>Close option positions in ${esc(a.label || name)}${live ? ' (LIVE, real money)' : ''}: ${n} of ${held.length} ticked, ${orders.length} order${orders.length === 1 ? '' : 's'}.</b>`;
   const seg = L.stage === 'review' ? `<span class="tk-seg" role="group" aria-label="Price"><button type="button" data-liq-type="limit" data-liq="${esc(name)}" aria-pressed="${!L.market}" title="The natural and 5% (at least $0.05) past it: fills like market unless the quotes jump">Marketable limit</button><button type="button" data-liq-type="market" data-liq="${esc(name)}" aria-pressed="${L.market}" title="Fills at whatever the market gives">Market</button></span>` : '';
   const acts = L.stage === 'review'
-    ? `<button type="button" class="btn liq-btn" data-liq-go="${esc(name)}"${orders.length && L.q && !blocked ? '' : ' disabled'}>${confirming ? `Confirm: close ${n} for real` : `Close ${n} now`}</button><button type="button" class="btn small" data-liq-cancel="${esc(name)}">${confirming ? 'Not yet' : 'Cancel'}</button>`
-    : L.stage === 'done' ? `<button type="button" class="btn small" data-liq-cancel="${esc(name)}">Done</button>${held.length ? `<button type="button" class="btn small danger" data-liq-open="${esc(name)}">Again for what's left</button>` : ''}` : '';
+    ? `<button type="button" class="btn liq-btn" data-liq-go="${esc(name)}"${orders.length && L.q && !blocked && !holding ? '' : ' disabled'}>${confirming ? `Confirm: close ${n} for real` : `Close ${n} now`}</button><button type="button" class="btn small" data-liq-cancel="${esc(name)}">${confirming ? 'Not yet' : 'Cancel'}</button>`
+    : L.stage === 'done' ? `<button type="button" class="btn small" data-liq-cancel="${esc(name)}">Done</button>${held.length ? `<button type="button" class="btn small danger" data-liq-open="${esc(name)}"${holding ? ' disabled' : ''}>Again for what's left</button>` : ''}` : '';
   return `<div class="acct-flat liq${live ? ' liq-live' : ''}">${head}${seg}
-    ${body}${notes}
+    ${body}${holdNote}${notes}
     <div class="acct-actions">${acts}</div></div>`;
 }
 
@@ -257,6 +276,9 @@ function accountCard(svc, a, pick, book = false) {
     return `<article class="${pick ? 'acct acct-one' : 'card acct'}">${head}<p class="muted" style="margin:0">${esc(err ? 'Cannot read the account: ' + err : 'Waiting for the first reading…')}</p></article>`;
   }
   const pos = a.positions || [];
+  // The gateway's count of unresolved orders: opens are refused until they resolve (closes are not blocked here).
+  const unresolved = unresolvedOf(a.name);
+  const unresolvedNote = unresolved ? `<p class="neg" style="margin:0 0 6px;font-size:12px">${unresolved} order${unresolved > 1 ? 's' : ''} unresolved on this account: new opens are blocked until they resolve.</p>` : '';
   const stats = [['Cash', money(acc.cash, cur)], ['Buying power', money(acc.buying_power, cur)]];
   if (acc.long_market_value) stats.push(['Long', money(acc.long_market_value, cur)]);
   if (acc.short_market_value) stats.push(['Short', money(acc.short_market_value, cur)]);
@@ -272,7 +294,7 @@ function accountCard(svc, a, pick, book = false) {
     <td style="color:var(--fg)" title="${esc(p.symbol)}">${esc(shortSym(p.symbol))}</td><td>${esc(String(p.qty ?? '—'))}</td>${pick ? `<td>${px(p.avg_entry_price)}</td><td>${px(p.current_price)}</td>` : ''}<td>${money(p.market_value, cur)}</td>
     <td class="${tone(p.unrealized_pl)}" title="${pct(p.unrealized_plpc)}">${signed(p.unrealized_pl, cur)}</td>
     <td class="${tone(p.change_today)} acct-today">${pct(p.change_today)}</td></tr>`).join('');
-  return `<article class="${pick ? 'acct acct-one' : 'card acct'}">${head}
+  return `<article class="${pick ? 'acct acct-one' : 'card acct'}">${head}${unresolvedNote}
     <div class="acct-stats">${stats.map(([k, v]) => `<span>${k} <b>${v}</b></span>`).join('')}</div>
     ${book ? '' : `<div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2" data-height="${pick ? 90 : 56}"></div>`}
     ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Position</th><th>Qty</th>${pick ? '<th>Avg</th><th>Last</th>' : ''}<th>Value</th><th>P/L</th><th class="acct-today">Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
@@ -355,30 +377,40 @@ function mount(el, single = false, book = false) {
     if (d.cancelOrder) {
       const [name, id] = d.cancelOrder.split('|');
       cancelling[d.cancelOrder] = 'Cancelling…'; update();
-      try { const v = await post(`/api/orders/${encodeURIComponent(name)}/${encodeURIComponent(id)}/cancel`, {}); cancelling[d.cancelOrder] = v.outcome === 'accepted' ? 'Cancel sent' : `Cancel ${v.outcome || 'failed'}`; }
-      catch (err) { cancelling[d.cancelOrder] = 'Cancel failed'; console.warn(err); }
+      const live = accountOf(name)?.environment === 'live';
+      try { const v = await post(`/api/orders/${encodeURIComponent(name)}/${encodeURIComponent(id)}/cancel`, {}, live); cancelling[d.cancelOrder] = v.outcome === 'accepted' ? 'Cancel sent' : `Cancel ${v.outcome || 'failed'}`; }
+      catch (err) { cancelling[d.cancelOrder] = err.message.startsWith('refused') ? 'Cancel refused' : 'Cancel failed'; console.warn(err); }
       update(); return;
     }
     if (d.liqOpen || d.liqType || d.liqGo || d.liqCancel || d.liqAll || d.liqNone) { liquidate(d); return; }
-    if (d.flatOpen) { flat[d.flatOpen] = { stage: 'confirm', typed: '' }; update(); el.querySelector(`[data-flat-typed="${CSS.escape(d.flatOpen)}"]`)?.focus(); }
+    if (d.flatOpen) { flat[d.flatOpen] = { stage: 'confirm', what: 'flatten', typed: '' }; update(); el.querySelector(`[data-flat-typed="${CSS.escape(d.flatOpen)}"]`)?.focus(); }
     else if (d.flatCancel) { delete flat[d.flatCancel]; update(); }
     else if (d.flatGo) {
-      const name = d.flatGo;
-      flat[name] = { stage: 'busy' }; update();
-      try { flat[name] = { stage: 'done', result: await post(`/api/accounts/${encodeURIComponent(name)}/flatten`, { confirm: name, reason: 'flatten from the console' }) }; }
-      catch (err) { flat[name] = { stage: 'done', error: err.message }; }
+      const name = d.flatGo, resume = flat[name]?.what === 'resume', live = flatLive(name);
+      flat[name] = { stage: 'busy', what: resume ? 'resume' : 'flatten' }; update();
+      try {
+        const v = resume ? await post(`/api/accounts/${encodeURIComponent(name)}/resume`, { confirm: name, reason: 'resumed from the console' }, live)
+          : await post(`/api/accounts/${encodeURIComponent(name)}/flatten`, { confirm: name, reason: 'flatten from the console' }, live);
+        flat[name] = resume ? {} : { stage: 'done', what: 'flatten', result: v };
+      }
+      catch (err) { flat[name] = { stage: 'done', what: resume ? 'resume' : 'flatten', error: err.message }; }
       gwAt = 0; update();
     } else if (d.flatResume) {
-      try { await post(`/api/accounts/${encodeURIComponent(d.flatResume)}/resume`, { reason: 'resumed from the console' }); }
-      catch (err) { flat[d.flatResume] = { stage: 'done', error: err.message }; }
+      // A live account's resume is confirmed by typing its name first.
+      if (flatLive(d.flatResume)) { flat[d.flatResume] = { stage: 'confirm', what: 'resume', typed: '' }; update(); el.querySelector(`[data-flat-typed="${CSS.escape(d.flatResume)}"]`)?.focus(); return; }
+      try { await post(`/api/accounts/${encodeURIComponent(d.flatResume)}/resume`, { confirm: d.flatResume, reason: 'resumed from the console' }); }
+      catch (err) { flat[d.flatResume] = { stage: 'done', what: 'resume', error: err.message }; }
       gwAt = 0; update();
     }
   };
   // Liquidate: review (quotes read), then cancel ours, wait for them to go, and send every close.
   const accountOf = name => allAccounts().find(x => x.a?.name === name)?.a;
+  // Flatten and resume on an account the account service or its gateway says is not paper send the order token.
+  const flatLive = name => liveAcct(accountOf(name)) || gateways[name]?.environment !== 'paper';
   async function liquidate(d) {
     const name = d.liqOpen || d.liq || d.liqGo || d.liqCancel || d.liqAll || d.liqNone, L = liq[name];
     if (d.liqOpen) {
+      if (L?.stage === 'sending') return; // a run is in flight: its sends are not repeated
       const held = closable(accountOf(name)?.positions).held;
       liq[name] = { stage: 'review', market: false, confirm: 0, q: null, pick: new Set(held.map(h => h.symbol)), ackNaked: false };
       update();
@@ -395,22 +427,42 @@ function mount(el, single = false, book = false) {
     if (d.liqType) { L.market = d.liqType === 'market'; L.confirm = 0; update(); return; }
     if (!d.liqGo || L.stage !== 'review') return;
     const a = accountOf(name), live = a?.environment === 'live';
+    if (holdOf(name, a)) { update(); return; }
     if (live && L.confirm <= Date.now()) { L.confirm = Date.now() + 6000; update(); setTimeout(update, 6100); return; }
     const { orders } = plan(a?.positions, L.pick);
     if (!orders.length) return;
     if (uncovered(closable(a?.positions).held, L.pick).length && !L.ackNaked) { L.confirm = 0; update(); return; }
-    L.stage = 'sending'; L.sent = orders; L.results = orders.map(() => null); update();
-    // Our own working orders hold contracts: cancelled, then gone from the account (at most 5 s).
-    if (await cancelOurs(name, a?.orders)) {
-      for (let i = 0; i < 25 && (accountOf(name)?.orders || []).some(o => (o.client_order_id || '').startsWith(ourPrefix())); i++) await new Promise(r => setTimeout(r, 200));
+    // Set before any await: a second run cannot start while this one reads or sends.
+    L.stage = 'sending'; L.sent = orders; L.results = orders.map(() => null); L.left = []; L.error = ''; update();
+    const unread = (from, text) => {
+      L.error = text;
+      for (let j = from; j < orders.length; j++) L.results[j] = { ok: false, text: 'not sent: the positions could not be re-read' };
+    };
+    // Read first: if the account can't be read, nothing is cancelled or sent.
+    const first = await reread(name);
+    if (!first.account) unread(0, `${first.why}; nothing was sent.`);
+    else {
+      // Our own working orders hold contracts: cancelled, then gone from the account (at most 5 s).
+      if (await cancelOurs(name, a?.orders, live)) {
+        for (let i = 0; i < 25 && (accountOf(name)?.orders || []).some(o => (o.client_order_id || '').startsWith(ourPrefix())); i++) await new Promise(r => setTimeout(r, 200));
+      }
+      // The account's updated_at as the cancel step leaves it: each later read must be from this poll or a newer one (null refuses every read).
+      const cancelledAt = accountOf(name)?.updated_at ?? null;
+      // Fresh quotes, then the orders one at a time: each is checked against a fresh read just before it is sent.
+      L.q = await quotes(orders.flatMap(o => o.legs.map(l => l.symbol)));
+      for (let i = 0; i < orders.length; i++) {
+        const fresh = await reread(name, cancelledAt);
+        if (!fresh.account) { unread(i, `${fresh.why}; the rest were not sent.`); break; }
+        const f = fitted(orders[i], fresh.account);
+        L.left.push(...f.left);
+        if (!f.order) { L.results[i] = { ok: false, text: `not sent: ${[...new Set(f.left.map(x => x.why))].join('; ')}` }; update(); continue; }
+        const p = priced(f.order, L.q, L.market);
+        L.results[i] = p ? await send(name, live, f.order, p) : { ok: false, text: 'not sent: no quote on every leg' };
+        update();
+      }
     }
-    // Fresh quotes, then every order at once.
-    L.q = await quotes(orders.flatMap(o => o.legs.map(l => l.symbol)));
-    await Promise.all(orders.map(async (o, i) => {
-      const p = priced(o, L.q, L.market);
-      L.results[i] = p ? await send(name, live, o, p) : { ok: false, text: 'not sent: no quote on every leg' };
-      update();
-    }));
+    // An order that may be live holds the account until its open orders are read again (lib/liquidate.js).
+    hold(name, accountOf(name)?.updated_at, L.results.filter(r => r.maybe).map(r => r.id || null));
     L.stage = 'done'; update();
   }
 
