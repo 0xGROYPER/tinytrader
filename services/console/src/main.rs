@@ -66,10 +66,14 @@
 //!   account's gateway state, its `unresolved` count and the console's open orders), `POST
 //!   /api/orders/{account}` (`{order, confirm: account}`) and `POST
 //!   /api/orders/{account}/{client_order_id}/cancel`.
-//!   Every write route needs `CONSOLE_ORDER_LOGINS` (the Tailscale logins
-//!   allowed to write, comma-separated) and `CONSOLE_HOSTS` (the host names
-//!   the console is reached by, comma-separated, ports optional); an empty
-//!   list refuses all writes (`WriteGate`). A live account's order, cancel,
+//!   Every write route needs `CONSOLE_WRITE_LOGINS` (the logins allowed to
+//!   write, comma-separated; `CONSOLE_ORDER_LOGINS` is still read as its old
+//!   name) and `CONSOLE_HOSTS` (the host names the console is reached by,
+//!   comma-separated, ports optional); an empty list refuses all writes
+//!   (`WriteGate`). The login is read from the header `CONSOLE_LOGIN_HEADER`
+//!   names (default `Tailscale-User-Login`), which an authenticating reverse
+//!   proxy in front of the console sets; the console refuses to start if it
+//!   isn't a valid header name. A live account's order, cancel,
 //!   flatten or resume also needs the order token in the page's
 //!   `X-Order-Token`: the file `CONSOLE_ORDER_TOKEN_FILE` names (one line,
 //!   e.g. 64 hex characters), or else `CONSOLE_ORDER_TOKEN`. So does a paper
@@ -120,7 +124,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State as AxumState;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderName, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde_json::json;
@@ -170,9 +174,19 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let write_gate = WriteGate::from_env();
+    let write_gate = match WriteGate::from_env() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("console: {e}");
+            std::process::exit(2);
+        }
+    };
+    eprintln!(
+        "console: the write login is read from the {} header",
+        write_gate.login_header
+    );
     if write_gate.logins.is_empty() {
-        eprintln!("console: writes are refused until CONSOLE_ORDER_LOGINS is set");
+        eprintln!("console: writes are refused until CONSOLE_WRITE_LOGINS is set");
     }
     if write_gate.hosts.is_empty() {
         eprintln!("console: writes are refused until CONSOLE_HOSTS is set");
@@ -944,15 +958,21 @@ fn routes(write_gate: WriteGate) -> Router<Arc<App>> {
 ///   (comma-separated host names, each with or without a port; without one,
 ///   any port matches). This stops a page that rebinds its own DNS name to
 ///   the console's address from writing. Empty or unset refuses every write.
-/// - the Tailscale login: `Tailscale-User-Login` must be one of
-///   `CONSOLE_ORDER_LOGINS` (comma-separated, exact match). Empty or unset
-///   refuses every write.
+/// - the login: the header `CONSOLE_LOGIN_HEADER` names (default
+///   `Tailscale-User-Login`) must be one of `CONSOLE_WRITE_LOGINS`
+///   (comma-separated, exact match; `CONSOLE_ORDER_LOGINS` is its old name,
+///   still read). Empty or unset refuses every write.
 ///
-/// The login header is trusted only because `tailscale serve` removes any
-/// copy a client sends and sets its own. Anything that reaches the console's
-/// port without going through `tailscale serve` can send any login it likes:
-/// a process on the host, or another container on the same Docker network.
-/// So the port must stay on loopback and off any shared network.
+/// The login header is set by an authenticating reverse proxy in front of the
+/// console, for example `tailscale serve` (`Tailscale-User-Login`),
+/// Cloudflare Access (`Cf-Access-Authenticated-User-Email`), oauth2-proxy
+/// (`X-Forwarded-Email` or `X-Auth-Request-Email`) or Authelia
+/// (`Remote-User`). It is trusted only because that proxy removes any copy a
+/// client sends and sets its own. Anything that reaches the console's port
+/// without going through the proxy can send any login it likes: a process on
+/// the host, or another container on the same Docker network. So the port
+/// must be reachable only through the proxy: on loopback (or a network only
+/// the proxy shares), never a shared one.
 ///
 /// A live account's order, cancel, flatten or resume also needs the order
 /// token: `X-Order-Token` must equal `CONSOLE_ORDER_TOKEN` (or the file
@@ -972,6 +992,8 @@ fn routes(write_gate: WriteGate) -> Router<Arc<App>> {
 /// viewer's request may make them, and whether live orders are on.
 #[derive(Clone)]
 struct WriteGate {
+    /// The header the login is read from (`CONSOLE_LOGIN_HEADER`).
+    login_header: HeaderName,
     logins: Vec<String>,
     /// The allowed Host names, lowercased, each with its port if one was given.
     hosts: Vec<String>,
@@ -983,9 +1005,9 @@ struct WriteGate {
 /// A refusal: a status and the message to send.
 type Refusal = (StatusCode, &'static str);
 
-/// The refusal for every write while `CONSOLE_ORDER_LOGINS` is empty.
+/// The refusal for every write while `CONSOLE_WRITE_LOGINS` is empty.
 const NO_LOGINS: &str =
-    "writes are disabled: the console has no allowed logins configured (CONSOLE_ORDER_LOGINS)";
+    "writes are disabled: the console has no allowed logins configured (CONSOLE_WRITE_LOGINS)";
 /// The refusal for every write while `CONSOLE_HOSTS` is empty.
 const NO_HOSTS: &str =
     "writes are disabled: the console has no allowed host names configured (CONSOLE_HOSTS)";
@@ -1001,8 +1023,66 @@ const NO_TOKEN: &str = "this write needs the order token, and the console has no
 /// The response header that marks the gate's own refusals.
 const GATE_HEADER: &str = "x-write-gate";
 
+/// The login header when `CONSOLE_LOGIN_HEADER` is unset or empty: what
+/// `tailscale serve` sets.
+const DEFAULT_LOGIN_HEADER: &str = "Tailscale-User-Login";
+
+/// The login header `CONSOLE_LOGIN_HEADER` names (`value`), or the default
+/// when it's unset or empty. An error when it isn't a valid HTTP header
+/// name, or names a header the gate already reads for something else.
+fn login_header(value: Option<&str>) -> Result<HeaderName, String> {
+    let name = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(DEFAULT_LOGIN_HEADER);
+    let header = HeaderName::from_bytes(name.as_bytes())
+        .map_err(|_| format!("CONSOLE_LOGIN_HEADER is not a valid HTTP header name: {name:?}"))?;
+    if [header::HOST.as_str(), "x-order-token"].contains(&header.as_str()) {
+        return Err(format!(
+            "CONSOLE_LOGIN_HEADER can't be {name:?}: the write gate reads that header for something else"
+        ));
+    }
+    Ok(header)
+}
+
+/// The allowed logins from `CONSOLE_WRITE_LOGINS` (`write`), or else from its
+/// old name `CONSOLE_ORDER_LOGINS` (`order`), and a note to log when the old
+/// name is set.
+fn write_logins(write: Option<&str>, order: Option<&str>) -> (Vec<String>, Option<&'static str>) {
+    let list = |v: Option<&str>| -> Vec<String> {
+        v.unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let (write, order) = (list(write), list(order));
+    match (write.is_empty(), order.is_empty()) {
+        (_, true) => (write, None),
+        (true, false) => (
+            order,
+            Some("CONSOLE_ORDER_LOGINS is deprecated; rename it to CONSOLE_WRITE_LOGINS"),
+        ),
+        (false, false) => (
+            write,
+            Some(
+                "CONSOLE_ORDER_LOGINS is ignored because CONSOLE_WRITE_LOGINS is set; remove CONSOLE_ORDER_LOGINS",
+            ),
+        ),
+    }
+}
+
 impl WriteGate {
-    fn from_env() -> Self {
+    fn from_env() -> Result<Self, String> {
+        let login_header = login_header(std::env::var("CONSOLE_LOGIN_HEADER").ok().as_deref())?;
+        let (logins, note) = write_logins(
+            std::env::var("CONSOLE_WRITE_LOGINS").ok().as_deref(),
+            std::env::var("CONSOLE_ORDER_LOGINS").ok().as_deref(),
+        );
+        if let Some(note) = note {
+            eprintln!("console: {note}");
+        }
         let list = |var: &str| -> Vec<String> {
             env(var, "")
                 .split(',')
@@ -1011,7 +1091,6 @@ impl WriteGate {
                 .map(str::to_owned)
                 .collect()
         };
-        let logins = list("CONSOLE_ORDER_LOGINS");
         let hosts = list("CONSOLE_HOSTS")
             .iter()
             .filter_map(|h| normal_host(h))
@@ -1031,15 +1110,30 @@ impl WriteGate {
                 .as_str(),
             "false" | "0" | "no" | "off"
         );
-        Self {
+        Ok(Self {
+            login_header,
             logins,
             hosts,
             token,
             paper_flatten_token,
-        }
+        })
     }
 
-    /// Whether `login` is one of the allowed Tailscale logins.
+    /// The request's login (from the configured login header) and order
+    /// token, if sent.
+    fn login_and_token<'a>(
+        &self,
+        headers: &'a axum::http::HeaderMap,
+    ) -> (Option<&'a str>, Option<&'a str>) {
+        (
+            headers
+                .get(&self.login_header)
+                .and_then(|v| v.to_str().ok()),
+            headers.get("x-order-token").and_then(|v| v.to_str().ok()),
+        )
+    }
+
+    /// Whether `login` is one of the allowed logins.
     fn login_allowed(&self, login: Option<&str>) -> bool {
         login.is_some_and(|l| self.logins.iter().any(|a| a == l))
     }
@@ -1147,20 +1241,10 @@ fn request_host<'a>(
         .or_else(|| uri.authority().map(axum::http::uri::Authority::as_str))
 }
 
-/// The request's Tailscale login and order token, if sent.
-fn login_and_token(headers: &axum::http::HeaderMap) -> (Option<&str>, Option<&str>) {
-    (
-        headers
-            .get("tailscale-user-login")
-            .and_then(|v| v.to_str().ok()),
-        headers.get("x-order-token").and_then(|v| v.to_str().ok()),
-    )
-}
-
 /// The refusal response for a write that needs the order token or not (as
 /// its handler found it), if any.
 fn refused_for(app: &App, headers: &axum::http::HeaderMap, needs_token: bool) -> Option<Response> {
-    let (login, token) = login_and_token(headers);
+    let (login, token) = app.gate.login_and_token(headers);
     app.gate.decide(login, token, needs_token).map(refusal)
 }
 
@@ -1184,7 +1268,7 @@ async fn write_gate_get(
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let (login, _) = login_and_token(&headers);
+    let (login, _) = app.gate.login_and_token(&headers);
     let host = request_host(&headers, &uri);
     no_store(axum::Json(json!({
         "writes": !app.gate.logins.is_empty(),
@@ -1211,7 +1295,7 @@ async fn write_gate(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let (login, _) = login_and_token(req.headers());
+    let (login, _) = gate.login_and_token(req.headers());
     match gate.refuse_request(request_host(req.headers(), req.uri()), login) {
         Some(r) => refusal(r),
         None => next.run(req).await,
@@ -1570,6 +1654,7 @@ mod tests {
 
     fn gate(token: Option<&str>) -> WriteGate {
         WriteGate {
+            login_header: login_header(None).unwrap(),
             logins: vec![ME.to_owned()],
             hosts: vec!["127.0.0.1".to_owned()],
             token: token.map(str::to_owned),
@@ -1646,9 +1731,8 @@ mod tests {
     fn an_empty_allowlist_refuses_all_writes() {
         let g = WriteGate {
             logins: Vec::new(),
-            hosts: vec!["127.0.0.1".to_owned()],
             token: Some("secret".to_owned()),
-            paper_flatten_token: true,
+            ..gate(None)
         };
         assert_eq!(
             g.decide(Some(ME), None, false),
@@ -1777,9 +1861,8 @@ mod tests {
     async fn with_no_allowlist_every_write_is_refused_and_reads_stay_open() {
         let base = serve(WriteGate {
             logins: Vec::new(),
-            hosts: vec!["127.0.0.1".to_owned()],
             token: Some("made-up-token".to_owned()),
-            paper_flatten_token: true,
+            ..gate(None)
         })
         .await;
         for (path, methods) in WRITES {
@@ -1843,6 +1926,133 @@ mod tests {
             r,
             json!({ "writes": true, "hosts": true, "allowed": true, "live_orders": false })
         );
+    }
+
+    #[test]
+    fn the_login_header_defaults_to_tailscales_and_must_be_valid() {
+        for unset in [None, Some(""), Some("  ")] {
+            assert_eq!(login_header(unset).unwrap(), "tailscale-user-login");
+        }
+        for (set, want) in [
+            (
+                "Cf-Access-Authenticated-User-Email",
+                "cf-access-authenticated-user-email",
+            ),
+            ("X-Forwarded-Email", "x-forwarded-email"),
+            ("X-Auth-Request-Email", "x-auth-request-email"),
+            (" Remote-User ", "remote-user"),
+        ] {
+            assert_eq!(login_header(Some(set)).unwrap(), want, "{set}");
+        }
+        for bad in [
+            "Remote User",
+            "Remote-User:",
+            "Remote\u{e9}-User",
+            "Remote/User",
+            "Host",
+            "X-Order-Token",
+        ] {
+            let err = login_header(Some(bad)).unwrap_err();
+            assert!(err.contains("CONSOLE_LOGIN_HEADER"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn write_logins_reads_the_old_name_too() {
+        let ls = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(write_logins(None, None), (Vec::new(), None));
+        assert_eq!(
+            write_logins(Some(" a@example.net , b@example.net,"), None),
+            (ls(&["a@example.net", "b@example.net"]), None)
+        );
+        let (logins, note) = write_logins(None, Some("a@example.net"));
+        assert_eq!(logins, ls(&["a@example.net"]));
+        assert!(note.unwrap().contains("deprecated"));
+        let (logins, note) = write_logins(Some(""), Some("a@example.net"));
+        assert_eq!(logins, ls(&["a@example.net"]));
+        assert!(note.unwrap().contains("deprecated"));
+        // Both set: the new name wins, and the old one is said to be ignored.
+        let (logins, note) = write_logins(Some("b@example.net"), Some("a@example.net"));
+        assert_eq!(logins, ls(&["b@example.net"]));
+        assert!(note.unwrap().contains("ignored"));
+    }
+
+    /// Whether `/api/write-gate` says this request may write, sending `headers`.
+    async fn may_write(base: &str, headers: &[(&str, &str)]) -> bool {
+        let mut req = reqwest::Client::new().get(format!("{base}/api/write-gate"));
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let r: serde_json::Value = req.send().await.unwrap().json().await.unwrap();
+        r["allowed"] == true
+    }
+
+    #[tokio::test]
+    async fn the_default_login_header_is_read() {
+        let base = serve(gate(None)).await;
+        let url = format!("{base}/api/reminders");
+        let (status, error, marked) = ask_full(
+            reqwest::Method::POST,
+            &url,
+            None,
+            &[("Tailscale-User-Login", ME)],
+            "{}",
+        )
+        .await;
+        // Past the gate, to the route's own 404 (no reminders configured).
+        assert_eq!((status, error.as_deref(), marked), (404, None, false));
+        assert!(may_write(&base, &[("Tailscale-User-Login", ME)]).await);
+        // Another proxy's header isn't read unless configured.
+        let (status, error, marked) = ask_full(
+            reqwest::Method::POST,
+            &url,
+            None,
+            &[("X-Forwarded-Email", ME)],
+            "{}",
+        )
+        .await;
+        assert_eq!(
+            (status, error.as_deref(), marked),
+            (403, Some(NOT_ALLOWED), true)
+        );
+        assert!(!may_write(&base, &[("X-Forwarded-Email", ME)]).await);
+    }
+
+    #[tokio::test]
+    async fn a_custom_login_header_is_read_and_tailscales_is_ignored() {
+        let base = serve(WriteGate {
+            login_header: login_header(Some("Cf-Access-Authenticated-User-Email")).unwrap(),
+            ..gate(None)
+        })
+        .await;
+        let custom = [("Cf-Access-Authenticated-User-Email", ME)];
+        for (path, methods) in WRITES {
+            for m in *methods {
+                let method = reqwest::Method::from_bytes(m.as_bytes()).unwrap();
+                let url = format!("{base}{path}");
+                // The default header, even with an allowed login, is not read.
+                let (status, error, marked) =
+                    ask_full(method.clone(), &url, Some(ME), &[], "{}").await;
+                assert_eq!(
+                    (status, error.as_deref(), marked),
+                    (403, Some(NOT_ALLOWED), true),
+                    "{m} {path}"
+                );
+                // The configured header gets past the gate.
+                let (status, error, marked) = ask_full(method, &url, None, &custom, "{}").await;
+                assert_ne!(error.as_deref(), Some(NOT_ALLOWED), "{m} {path}");
+                assert!(!marked, "{m} {path}");
+                assert_ne!(status, 403, "{m} {path}");
+            }
+        }
+        assert!(may_write(&base, &custom).await);
+        assert!(!may_write(&base, &[("Tailscale-User-Login", ME)]).await);
+        // Both sent: only the configured one counts.
+        let other = [
+            ("Cf-Access-Authenticated-User-Email", "other@example.net"),
+            ("Tailscale-User-Login", ME),
+        ];
+        assert!(!may_write(&base, &other).await);
     }
 
     #[test]
@@ -1918,10 +2128,7 @@ mod tests {
     async fn writes_need_an_allowed_host() {
         // Reached as 127.0.0.1:<port>, which is not on this list.
         let base = serve(WriteGate {
-            hosts: vec![
-                "console.example.net".to_owned(),
-                "127.0.0.1:1".to_owned(),
-            ],
+            hosts: vec!["console.example.net".to_owned(), "127.0.0.1:1".to_owned()],
             ..gate(None)
         })
         .await;

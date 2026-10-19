@@ -1385,7 +1385,7 @@ document.addEventListener('tt-prefs-refused', status);
 async function loadWriteGate() {
   const g = await writeGate();
   gateNote = !g ? ''
-    : !g.writes ? 'Changes are off: the console has no allowed logins configured (CONSOLE_ORDER_LOGINS). Orders, settings, the journal and reminders are read-only.'
+    : !g.writes ? 'Changes are off: the console has no allowed logins configured (CONSOLE_WRITE_LOGINS). Orders, settings, the journal and reminders are read-only.'
     : g.hosts === false ? 'Changes are off: the console has no allowed host names configured (CONSOLE_HOSTS). Orders, settings, the journal and reminders are read-only.'
     : !g.allowed ? 'Changes are off here: this login, or the address the console was opened at, is not one the console allows. Orders, settings, the journal and reminders are read-only.'
     : '';
