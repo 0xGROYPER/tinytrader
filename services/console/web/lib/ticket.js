@@ -13,7 +13,7 @@ import { onChange } from './channels.js';
 import { get, stream } from './cache.js';
 import { esc } from './format.js';
 import { notSentText } from './orders.js';
-import { orderFetch } from './api.js';
+import { orderFetch, isLive } from './api.js';
 
 const OCC = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/;
 const r2 = x => Math.round(x * 100) / 100;
@@ -119,7 +119,7 @@ export function createTicket(box, hooks = {}) {
 
   function view() {
     if (!t) return '';
-    const p = pricing(), accts = routing?.accounts || [], isLive = x => x?.environment === 'live';
+    const p = pricing(), accts = routing?.accounts || [];
     if (routing && !routing.unavailable && !accts.some(x => x.account === t.acct && !x.error)) t.acct = accts.find(x => !x.error && !isLive(x))?.account || '';
     const live = isLive(accts.find(x => x.account === t.acct));
     // Nothing picked shows as such, never as the first account listed.
@@ -171,7 +171,7 @@ export function createTicket(box, hooks = {}) {
 
   async function send() {
     if (!t || t.sending || t.done) return;
-    const p = pricing(), live = (routing?.accounts || []).find(x => x.account === t.acct)?.environment === 'live';
+    const p = pricing(), live = isLive((routing?.accounts || []).find(x => x.account === t.acct));
     // A live order asks once more; the ask lapses after a few seconds.
     if (live && t.confirm <= Date.now()) { t.confirm = Date.now() + 6000; draw(true); setTimeout(() => draw(true), 6100); return; }
     const net = t.market ? p.natural : limitNet(p);

@@ -30,7 +30,7 @@ import { askHeld } from '../lib/position.js';
 import { createTicket, tradable, routed, occLabel, ourPrefix, unresolvedOf } from '../lib/ticket.js';
 import { closable, plan, uncovered, quotes, priced, send, cancelOurs, hold, holdOf, reread, fitted } from '../lib/liquidate.js';
 import { get } from '../lib/cache.js';
-import { orderFetch, refused, refusedText } from '../lib/api.js';
+import { orderFetch, refused, refusedText, isLive } from '../lib/api.js';
 
 /** An account's option positions by underlying and expiry, for the Spread builder's payoff. */
 const heldGroups = new Map();
@@ -64,8 +64,6 @@ async function readGateways(update) {
 }
 // Flatten or resume in progress per account: {stage: 'confirm' | 'busy' | 'done', what: 'flatten' | 'resume', typed, result, error}.
 const flat = {};
-// Whether an account trades live: anything but paper (its environment, as the console reads it), as the server decides.
-const liveAcct = a => a?.environment !== 'paper';
 /** A write; a refusal by the console's write gate is thrown in plain words. */
 async function post(path, body, live = false) {
   const r = await orderFetch(path, body, 'POST', {}, live);
@@ -80,7 +78,7 @@ function flattenPanel(a) {
   if (!g) return '';
   if (g.error) return `<p class="muted acct-note" title="${esc(g.error)}">Order gateway unreachable.</p>`;
   const f = flat[name] || {};
-  const live = liveAcct(a) || g.environment !== 'paper', halted = g.state === 'killed';
+  const live = isLive(a) || isLive(g), halted = g.state === 'killed';
   const buttons = `<div class="acct-actions">
     <button type="button" class="btn small danger" data-flat-open="${esc(name)}"${f.stage === 'busy' ? ' disabled' : ''}>Flatten</button>
     ${halted ? `<button type="button" class="btn small" data-flat-resume="${esc(name)}">Resume opening</button><span class="pill p-warn">opens halted</span>` : ''}</div>`;
@@ -130,7 +128,7 @@ function liquidatePanel(a) {
   const { orders } = plan(a.positions, L.pick);
   // Shorts the pick would leave without the long that covers them: said so, and sending waits for an explicit yes.
   const naked = uncovered(held, L.pick), blocked = naked.length > 0 && !L.ackNaked;
-  const live = a.environment === 'live';
+  const live = isLive(a);
   const legsOf = o => o.legs.map(l => `<span class="${l.side === 'buy' ? 'pos' : 'neg'}">${l.side === 'buy' ? '+' : '−'}${l.ratio * o.qty}</span> ${esc(occLabel(l.symbol))}`).join('<br>');
   const priceOf = o => {
     const p = L.q && priced(o, L.q, L.market);
@@ -199,7 +197,7 @@ function accountsView(withHeading = true) {
   // Every account of every service that serves an `accounts` stream.
   const accts = (fleet.topo?.services || []).filter(s => s.accounts)
     .flatMap(s => (svcState(s.id).accounts?.accounts || []).map(a => ({ svc: s, a })))
-    .sort((x, y) => (x.a?.environment === 'live' ? 0 : 1) - (y.a?.environment === 'live' ? 0 : 1) || (x.a?.label || x.svc.id).localeCompare(y.a?.label || y.svc.id));
+    .sort((x, y) => (isLive(x.a) ? 0 : 1) - (isLive(y.a) ? 0 : 1) || (x.a?.label || x.svc.id).localeCompare(y.a?.label || y.svc.id));
   if (!accts.length) return '';
   const grid = `<div class="cards acct-cards">${accts.map(({ svc, a }) => accountCard(svc, a)).join('')}</div>`;
   return withHeading ? `<section><div class="sec-head"><h2>Accounts</h2><span class="muted" style="font-size:13px">Balances and positions</span></div>${grid}</section>` : grid;
@@ -238,7 +236,7 @@ async function readVols(update) {
   const svc = barsSource();
   if (!svc) return;
   const now = Date.now();
-  const roots = [...new Set(allAccounts().filter(x => x.a?.environment === 'live').flatMap(x => (x.a?.positions || []).map(p => rootOf(p.symbol))))]
+  const roots = [...new Set(allAccounts().filter(x => isLive(x.a)).flatMap(x => (x.a?.positions || []).map(p => rootOf(p.symbol))))]
     .filter(r => r && (!vols.has(r) || now - vols.get(r).at > VOL_TTL));
   if (!roots.length) return;
   for (const r of roots) vols.set(r, { v: vols.get(r)?.v ?? null, at: now });
@@ -264,10 +262,10 @@ function varOf(pos) {
  * @param {boolean} [book] The Positions view: no equity chart; equity and value at risk instead.
  */
 function accountCard(svc, a, pick, book = false) {
-  const acc = a?.account || {}, cur = acc.currency, env = a?.environment || 'paper';
+  const acc = a?.account || {}, cur = acc.currency, env = a?.environment || 'unknown';
   const day = acc.equity != null && acc.last_equity != null ? acc.equity - acc.last_equity : null;
   // One line: the account, then its equity and the day's change (the Positions view shows equity in its stats).
-  const head = `<div class="acct-head"><h3>${pick ?? esc(a?.label || svc.label || svc.id)}${book ? '' : `<span class="env env-${env === 'live' ? 'live' : 'paper'}">${esc(env)}</span>`}
+  const head = `<div class="acct-head"><h3>${pick ?? esc(a?.label || svc.label || svc.id)}${book ? '' : `<span class="env env-${isLive(a) ? 'live' : 'paper'}">${esc(env)}</span>`}
     ${acc.status && acc.status !== 'ACTIVE' ? `<span class="pill p-warn">${esc(acc.status.toLowerCase())}</span>` : ''}
     ${acc.trading_blocked || acc.account_blocked ? '<span class="pill p-crit">blocked</span>' : ''}</h3>
     ${a?.updated_at && !book ? `<span class="acct-eq"><b>${money(acc.equity, cur)}</b>${day != null ? `<span class="${tone(day)}">${signed(day, cur)} (${pct(acc.last_equity ? day / acc.last_equity : null)})</span>` : ''}</span>` : ''}</div>`;
@@ -320,18 +318,18 @@ const draw = () => accountsView(false) || '<p class="muted">No account service i
 /** Every account of every service serving them: [{ svc, a }], live first. */
 const allAccounts = () => (fleet.topo?.services || []).filter(s => s.accounts)
   .flatMap(s => (svcState(s.id).accounts?.accounts || []).map(a => ({ svc: s, a })))
-  .sort((x, y) => (x.a?.environment === 'live' ? 0 : 1) - (y.a?.environment === 'live' ? 0 : 1));
+  .sort((x, y) => (isLive(x.a) ? 0 : 1) - (isLive(y.a) ? 0 : 1));
 
 /** The Positions view: the live account's card (equity and value at risk in its stats), no chart. */
 function bookView() {
-  const one = allAccounts().find(x => x.a?.updated_at && x.a?.environment === 'live');
+  const one = allAccounts().find(x => x.a?.updated_at && isLive(x.a));
   if (!one) return '<p class="muted">No live account is reporting.</p>';
   return `<div class="cards acct-cards">${accountCard(one.svc, one.a, undefined, true)}</div>`;
 }
 /** One account: `want` (a name), else the live one, else the first. */
 function drawOne(want) {
   const list = allAccounts();
-  const one = list.find(x => (x.a?.name || x.a?.label) === want) || list.find(x => x.a?.environment === 'live') || list[0];
+  const one = list.find(x => (x.a?.name || x.a?.label) === want) || list.find(x => isLive(x.a)) || list[0];
   if (!one) return '<p class="muted">No account service is running.</p>';
   const name = x => x.a?.name || x.a?.label || x.svc.id;
   const pick = `<select class="acct-pick" aria-label="Account">${list.map(x => `<option value="${esc(name(x))}"${x === one ? ' selected' : ''}>${esc(x.a?.label || name(x))}</option>`).join('')}</select>`;
@@ -377,7 +375,7 @@ function mount(el, single = false, book = false) {
     if (d.cancelOrder) {
       const [name, id] = d.cancelOrder.split('|');
       cancelling[d.cancelOrder] = 'Cancelling…'; update();
-      const live = accountOf(name)?.environment === 'live';
+      const live = isLive(accountOf(name));
       try { const v = await post(`/api/orders/${encodeURIComponent(name)}/${encodeURIComponent(id)}/cancel`, {}, live); cancelling[d.cancelOrder] = v.outcome === 'accepted' ? 'Cancel sent' : `Cancel ${v.outcome || 'failed'}`; }
       catch (err) { cancelling[d.cancelOrder] = err.message.startsWith('refused') ? 'Cancel refused' : 'Cancel failed'; console.warn(err); }
       update(); return;
@@ -406,7 +404,7 @@ function mount(el, single = false, book = false) {
   // Liquidate: review (quotes read), then cancel ours, wait for them to go, and send every close.
   const accountOf = name => allAccounts().find(x => x.a?.name === name)?.a;
   // Flatten and resume on an account the account service or its gateway says is not paper send the order token.
-  const flatLive = name => liveAcct(accountOf(name)) || gateways[name]?.environment !== 'paper';
+  const flatLive = name => isLive(accountOf(name)) || isLive(gateways[name]);
   async function liquidate(d) {
     const name = d.liqOpen || d.liq || d.liqGo || d.liqCancel || d.liqAll || d.liqNone, L = liq[name];
     if (d.liqOpen) {
@@ -426,7 +424,7 @@ function mount(el, single = false, book = false) {
     if (d.liqCancel) { if (L.confirm > Date.now()) L.confirm = 0; else delete liq[name]; update(); return; }
     if (d.liqType) { L.market = d.liqType === 'market'; L.confirm = 0; update(); return; }
     if (!d.liqGo || L.stage !== 'review') return;
-    const a = accountOf(name), live = a?.environment === 'live';
+    const a = accountOf(name), live = isLive(a);
     if (holdOf(name, a)) { update(); return; }
     if (live && L.confirm <= Date.now()) { L.confirm = Date.now() + 6000; update(); setTimeout(update, 6100); return; }
     const { orders } = plan(a?.positions, L.pick);

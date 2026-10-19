@@ -21,6 +21,7 @@ import { svcState, serviceFor, servicesFor } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
 import { occLabel } from '../lib/ticket.js';
 import { get } from '../lib/cache.js';
+import { isLive } from '../lib/api.js';
 import { publish } from '../lib/channels.js';
 import { entries, add, change as changeNote, remove, DEFAULT_TAGS } from '../lib/journal.js';
 
@@ -42,7 +43,7 @@ const notesByDay = list => {
 function accounts() {
   for (const s of servicesFor('accounts')) {
     const list = svcState(s.id).accounts?.accounts || [];
-    if (list.length) return list.map(a => ({ name: a.name, label: a.label || a.name, live: a.environment === 'live' }));
+    if (list.length) return list.map(a => ({ name: a.name, label: a.label || a.name, live: isLive(a) }));
   }
   return [];
 }
