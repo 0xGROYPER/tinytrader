@@ -5,7 +5,7 @@
 | **Purpose** | What the console's page (and the terminal UI's console mode) reads and does: the deployment and its state, services' data passed through, and the few actions the console takes (order tickets, flatten, drive approval, jobs). |
 | **Transport** | HTTP/1.1, JSON, on `CONSOLE_LISTEN` (default `127.0.0.1:8080`). |
 | **Versioning** | `/api/topology` and `/api/state` carry `"schema": "tinytrader.fleet/1"` ([fleet](fleet.md)). The rest is unversioned and additive. |
-| **Auth** | Reads are open: anyone who can reach the port can read, so bind to loopback or a private network. Every write goes through the [write gate](#the-write-gate): a `Host` and a Tailscale login on allowlists, and for a live account's orders (and any flatten or resume) also the order token. With either allowlist unconfigured, every write is refused. Writes must also be JSON and same-origin (a page on another site gets `403`). Tokens for the services behind it (gateways, store) stay in the console and are never returned. |
+| **Auth** | Reads are open: anyone who can reach the port can read, so bind to loopback or a private network. Every write goes through the [write gate](#the-write-gate): a `Host` and a login (set by an authenticating reverse proxy) on allowlists, and for a live account's orders (and any flatten or resume) also the order token. With either allowlist unconfigured, every write is refused. Writes must also be JSON and same-origin (a page on another site gets `403`). Tokens for the services behind it (gateways, store) stay in the console and are never returned. |
 | **Errors** | `{"error": "..."}` with a 4xx or 5xx status. Passed-through answers keep the upstream's status and body. |
 | **Health** | The console's own [observe](observe.md) endpoints. |
 | **Stability** | `/api/topology`, `/api/state`, `/api/events`, `/api/stream` are **stable**. The order, account, jobs and queue routes are **experimental**. Prefs, reminders and profiles are optional modules, **experimental**. |
@@ -32,14 +32,12 @@ Pick `{service}` by capability from `/api/topology` (the first service with a `c
 Reads (`GET`) are open. Every write route is behind the write gate, checked before anything is forwarded to a service or sent to a gateway:
 
 1. **Host.** The request's `Host` must be one of `CONSOLE_HOSTS`: comma-separated host names, each with or without a port (without one, any port matches; case and a trailing dot don't matter). This stops a web page that points its own DNS name at the console's address from making changes through the viewer's browser. Refused with `403`. With `CONSOLE_HOSTS` empty or unset, **every write is refused** (`403`, saying so).
-2. **Login.** The request's `Tailscale-User-Login` header must be one of `CONSOLE_ORDER_LOGINS` (comma-separated, exact match). `tailscale serve` sets that header on what it forwards from a tailnet user. Refused with `403`. With `CONSOLE_ORDER_LOGINS` empty or unset, **every write is refused** (`403`, saying the console has no allowed logins configured), and the page shows a banner saying changes are off.
+2. **Login.** The request's login header (the one `CONSOLE_LOGIN_HEADER` names, default `Tailscale-User-Login`) must be one of `CONSOLE_WRITE_LOGINS` (comma-separated, exact match). The authenticating reverse proxy in front of the console sets that header to the signed-in user (see [The login header](#the-login-header)). Refused with `403`. With `CONSOLE_WRITE_LOGINS` empty or unset, **every write is refused** (`403`, saying the console has no allowed logins configured), and the page shows a banner saying changes are off.
 3. **Order token.** An order, cancel, flatten or resume on a live account also needs `X-Order-Token` equal to the console's order token, read from the file `CONSOLE_ORDER_TOKEN_FILE` names, or else from `CONSOLE_ORDER_TOKEN`. So does a flatten or resume on a paper account, unless `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` is `false` (default `true`). It is compared in constant time and never logged. A missing or wrong token gets `401`. With no token configured, those writes are refused (`403`, saying so) and everything else still works. Paper orders and cancels need only the login.
 
 Every refusal by the gate carries the header `X-Write-Gate: refused` and `"gate": true` in its JSON body, next to `error`. A `401` or `403` without them came from the service behind the console (the jobs service, the queue or the store), not from the gate.
 
 An account is live unless both the accounts service's `environment` for it and its gateway's welcome say `paper`; an account the accounts service doesn't report (or reports differently from two services) counts as live. A live account's flatten and resume also need `confirm` naming the account.
-
-The login header is trusted only because `tailscale serve` removes any copy a client sends and sets its own. Anything that reaches the console's port without going through `tailscale serve` can send whatever login it likes: any process on the host, and any other container on the same Docker network. So keep `CONSOLE_LISTEN` on loopback, and keep the console off Docker networks it shares with other services. The order token is what still stops such a request from trading a live account, or flattening any account.
 
 The write routes: `POST /api/orders/{account}`, `POST /api/orders/{account}/{id}/cancel`, `POST /api/accounts/{account}/flatten` and `/resume`, `POST /api/jobs/...`, `POST` and `PATCH /api/queue/...`, `POST /api/store/volumes/approve`, `POST /api/reminders`, `PUT /api/prefs/{key}`, `POST /api/journal`, `PUT` and `DELETE /api/journal/{id}`, and `POST /api/profiles`.
 
@@ -47,7 +45,27 @@ The write routes: `POST /api/orders/{account}`, `POST /api/orders/{account}/{id}
 |---|---|
 | `GET /api/write-gate` | `{"writes": bool, "hosts": bool, "allowed": bool, "live_orders": bool}`: whether any logins are configured, whether any host names are configured, whether this request's Host and login may write, and whether an order token is configured. Never the logins, the host names or the token. |
 
-To turn it on: set `CONSOLE_ORDER_LOGINS` to the Tailscale logins allowed to make changes, set `CONSOLE_HOSTS` to the name the console is opened at (for example its Tailscale name), serve the console through `tailscale serve`, and (for live accounts and flatten) put one line of random text, for example 64 hex characters, in a file the console reads as `CONSOLE_ORDER_TOKEN_FILE`. The page asks for the token at the first write that needs it in a tab and keeps it for that tab only.
+To turn it on: serve the console through an authenticating reverse proxy, set `CONSOLE_LOGIN_HEADER` to the header it sets (unless it is `Tailscale-User-Login`), set `CONSOLE_WRITE_LOGINS` to the logins allowed to make changes, set `CONSOLE_HOSTS` to the name the console is opened at through the proxy, and (for live accounts and flatten) put one line of random text, for example 64 hex characters, in a file the console reads as `CONSOLE_ORDER_TOKEN_FILE`. The page asks for the token at the first write that needs it in a tab and keeps it for that tab only.
+
+### The login header
+
+The console doesn't authenticate anyone itself. It trusts a login header set by an authenticating reverse proxy in front of it, and `CONSOLE_LOGIN_HEADER` says which header that is (default `Tailscale-User-Login`, so existing deployments are unchanged). The console refuses to start if the name isn't a valid HTTP header name. Some proxies and the headers they set:
+
+| Proxy | `CONSOLE_LOGIN_HEADER` |
+|---|---|
+| `tailscale serve` | `Tailscale-User-Login` (the default) |
+| Cloudflare Access | `Cf-Access-Authenticated-User-Email` |
+| oauth2-proxy | `X-Forwarded-Email` (or `X-Auth-Request-Email`, depending on how it is set up) |
+| Authelia | `Remote-User` |
+
+Only the configured header is read: with another one set, a `Tailscale-User-Login` a request carries is ignored. `CONSOLE_WRITE_LOGINS` holds the values that proxy sets (usually email addresses or user names).
+
+The header is trusted only because two things hold, and both are up to the deployment:
+
+- **The proxy strips any copy a client sends** and sets its own. Check this for the proxy you use; a proxy that passes a client's header through lets anyone choose their login.
+- **The console's port is reachable only through the proxy.** Anything that reaches the port directly can send whatever login it likes: any process on the host, and any other container on the same Docker network. So keep `CONSOLE_LISTEN` on loopback (or on a network only the proxy shares), and keep the console off Docker networks it shares with other services.
+
+The order token is what still stops a request that gets around the proxy from trading a live account, or flattening any account.
 
 ## Orders and accounts (experimental)
 
@@ -109,7 +127,8 @@ Their writes are behind the [write gate](#the-write-gate) (the login only).
 | `CONSOLE_DOCKER` | Docker Engine API base URL (a read-only proxy), for discovery. Optional. |
 | `CONSOLE_COMPOSE_PROJECT` | Only containers of this Compose project. Optional; also the default deployment name. |
 | `CONSOLE_NOTIFY` (or `_FILE`) | An ntfy-style URL to post down and back notices to. |
-| `CONSOLE_ORDER_LOGINS` | The Tailscale logins allowed to write, comma-separated. Empty or unset: every write is refused. |
+| `CONSOLE_LOGIN_HEADER` | The header the login is read from, set by the authenticating reverse proxy in front of the console (default `Tailscale-User-Login`). Not a valid header name: the console refuses to start. See [The login header](#the-login-header). |
+| `CONSOLE_WRITE_LOGINS` | The logins allowed to write, comma-separated. Empty or unset: every write is refused. `CONSOLE_ORDER_LOGINS`, its old name, is still read when this is unset, with a deprecation note in the log. |
 | `CONSOLE_HOSTS` | The host names the console is opened at, comma-separated, ports optional. A write with any other `Host` is refused. Empty or unset: every write is refused. |
 | `CONSOLE_ORDER_TOKEN_FILE` (or `CONSOLE_ORDER_TOKEN`) | The order token a live account's order, cancel, flatten or resume needs, and a paper account's flatten or resume. Unset: those are refused. |
 | `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` | `true` (default) or `false`: whether a paper account's flatten and resume need the order token too. |

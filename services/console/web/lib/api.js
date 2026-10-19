@@ -8,7 +8,9 @@ export async function jobsApi(path, body) {
 }
 // Every write goes through the console's write gate (services/console/src/main.rs,
 // WriteGate): the request's Host must be one of CONSOLE_HOSTS and the
-// Tailscale login one of CONSOLE_ORDER_LOGINS, or the write is refused (403).
+// login (the header CONSOLE_LOGIN_HEADER names, set by the authenticating
+// proxy in front of the console) one of CONSOLE_WRITE_LOGINS, or the write is
+// refused (403). The page sends no login itself.
 // A live account's order, cancel, flatten or resume also carries the
 // console's order token (CONSOLE_ORDER_TOKEN) as X-Order-Token, and so does a
 // paper account's flatten or resume unless CONSOLE_TOKEN_FOR_PAPER_FLATTEN is
