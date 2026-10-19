@@ -11,8 +11,9 @@
 //!   put mids are closest, their median; the price when fewer than three
 //!   strikes have both, or when parity lands more than 10% away from it.
 //! - **Quotes.** A contract's volatility is inverted from its two-sided mid
-//!   (bid above zero, not crossed); none when the mid is at or below its
-//!   discounted intrinsic value, or for a one-sided quote.
+//!   (bid above zero, not crossed, not too wide: `chain::WIDE`); none when
+//!   the mid is at or below its discounted intrinsic value, or for a
+//!   one-sided quote.
 //! - **Greeks** from that volatility: delta and gamma against the
 //!   underlying's price (`F = S·e^((r−q)T)`, so `dF/dS = F/S`), theta per
 //!   calendar day, vega per volatility point.

@@ -7,6 +7,14 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
+/// A quote whose spread is over this fraction of its mid has no price:
+/// 0.08 × 4.88 on a thin name says nothing about the contract, and its mid
+/// inverts to a volatility (and a price) higher than the next strike's.
+pub const WIDE: f64 = 0.5;
+/// Spreads up to this always price: a few cents on a cheap contract is
+/// tight, whatever the fraction.
+pub const TIGHT: f64 = 0.10;
+
 /// One option contract and its latest quote, IV and greeks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Contract {
@@ -26,11 +34,15 @@ pub struct Contract {
 }
 
 impl Contract {
-    /// Midpoint of a two-sided quote.
+    /// Midpoint of a two-sided quote; none when the quote is too wide to
+    /// say what the contract is worth (see [`WIDE`]).
     #[must_use]
     pub fn mid(&self) -> Option<f64> {
         match (self.bid, self.ask) {
-            (Some(b), Some(a)) if b > 0.0 && a >= b => Some((a + b) / 2.0),
+            (Some(b), Some(a)) if b > 0.0 && a >= b => {
+                let mid = (a + b) / 2.0;
+                (a - b <= TIGHT || a - b <= WIDE * mid).then_some(mid)
+            }
             _ => None,
         }
     }
@@ -243,6 +255,34 @@ pub fn index(underlying: &str, today: &str, pages: &[Value]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wide_quote_has_no_mid() {
+        let mid = |bid, ask| {
+            Contract {
+                symbol: "RGC261120C00020000".into(),
+                expiry: "2026-11-20".into(),
+                call: true,
+                strike: 20.0,
+                bid: Some(bid),
+                ask: Some(ask),
+                last: None,
+                iv: None,
+                delta: None,
+                gamma: None,
+                theta: None,
+                vega: None,
+            }
+            .mid()
+            .map(|m| (m * 1000.0).round() / 1000.0)
+        };
+        assert_eq!(mid(0.08, 4.88), None);
+        assert_eq!(mid(0.52, 0.58), Some(0.55));
+        assert_eq!(mid(1.23, 1.53), Some(1.38));
+        // A few cents wide on a cheap contract still prices.
+        assert_eq!(mid(0.05, 0.10), Some(0.075));
+        assert_eq!(mid(0.05, 0.20), None);
+    }
 
     #[test]
     fn reads_occ_symbols() {

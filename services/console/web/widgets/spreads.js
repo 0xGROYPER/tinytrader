@@ -167,6 +167,44 @@ defineWidget('spreads', {
     // The shown expiry's measures (at-the-money IV, implied distribution) come with its prices.
     const stats = () => my.chain?.expiries?.find(x => x.expiry === my.expiry) || null;
     const atmIV = () => stats()?.atm_iv || null;
+    // A quote's mid; none when one-sided or too wide to say what the contract
+    // is worth (alpaca-data's rule: apart by more than half the mid and a dime).
+    const midOf = q => {
+      if (!q || !(q.bid > 0) || !(q.ask >= q.bid)) return null;
+      const m = (q.bid + q.ask) / 2, w = q.ask - q.bid;
+      return w <= 0.10 || w <= 0.5 * m ? m : null;
+    };
+    // A strike's volatility from the out-of-the-money quotes that price (puts
+    // below the underlying, calls at or above), straight between neighbours,
+    // the nearest one past the ends; else the at-the-money one.
+    const smileIV = strike => {
+      const pts = contracts().filter(c => c.iv && midOf(c) != null && (c.type === 'put' ? c.strike < my.spot : c.strike >= my.spot))
+        .map(c => [c.strike, c.iv]).sort((a, b) => a[0] - b[0]);
+      if (!pts.length) return atmIV();
+      if (strike <= pts[0][0]) return pts[0][1];
+      if (strike >= pts[pts.length - 1][0]) return pts[pts.length - 1][1];
+      let i = 1; while (pts[i][0] < strike) i++;
+      const [k0, v0] = pts[i - 1], [k1, v1] = pts[i];
+      return v0 + (v1 - v0) * (strike - k0) / (k1 - k0);
+    };
+    // A leg's price: its mid, else from its strike's volatility (null without one).
+    const priceOf = (type, strike) => {
+      const q = quote(type, strike), m = midOf(q);
+      if (m != null) return { px: m, est: false };
+      const v = smileIV(strike);
+      return v && my.spot ? { px: bs(type, my.spot, strike, years(), v), est: true } : { px: null, est: true };
+    };
+    // Legs quoted against the strikes beside them: a call bid above a
+    // lower-strike call's ask (or offered below a higher one's bid), puts the
+    // other way. One of the two quotes is wrong; both prices are suspect.
+    const outOfLine = l => {
+      const q = quote(l.type, l.strike);
+      if (!q) return false;
+      const up = l.type === 'call' ? -1 : 1; // which way the price rises with the strike
+      return contracts().some(c => c.type === l.type && c.strike !== l.strike && (
+        (Math.sign(c.strike - l.strike) === up && q.bid > 0 && c.ask > 0 && q.bid > c.ask + 0.005) ||
+        (Math.sign(c.strike - l.strike) === -up && c.bid > 0 && q.ask > 0 && c.bid > q.ask + 0.005)));
+    };
     const years = () => Math.max((Date.parse(`${my.expiry}T20:00:00Z`) - Date.now()) / (365 * 86400e3), 1 / (365 * 24 * 12));
     const legs = () => position.sym === my.sym ? position.legs : [];
     const nearest = (ks, x) => ks.reduce((b, k) => Math.abs(k - x) < Math.abs(b - x) ? k : b, ks[0]);
@@ -182,9 +220,9 @@ defineWidget('spreads', {
     function analyse() {
       const spot = my.spot, t = years(), ls = legs().map(l => ({ ...l, q: quote(l.type, l.strike) }));
       if (!spot || !ls.length) return null;
-      const mid = q => q && q.bid != null && q.ask ? (q.bid + q.ask) / 2 : null;
-      // A leg without a two-sided quote: at its own implied volatility, else the at-the-money one.
-      const iv = l => l.q?.iv || atmIV();
+      const mid = midOf;
+      // A leg without a quote that prices: at the volatility of the strikes around it.
+      const iv = l => (mid(l.q) != null && l.q?.iv) || smileIV(l.strike);
       if (ls.some(l => l.cost == null && mid(l.q) == null && !iv(l))) return null;
       // Signed per-share prices: + paid, - received; a held leg at what was paid for it.
       const now = l => mid(l.q) ?? bs(l.type, spot, l.strike, t, iv(l));
@@ -216,7 +254,8 @@ defineWidget('spreads', {
       for (let i = 1; i < grid.length; i++) if (pay((grid[i - 1] + grid[i]) / 2) > 0) pop += cdf(grid[i]) - cdf(grid[i - 1]);
       // Worth today at an underlying price: each leg at its own implied volatility, less what was paid.
       const today = S => ls.reduce((v, l) => v + l.side * l.qty * bs(l.type, S, l.strike, t, iv(l)), 0) - net;
-      return { net, worth, held, cross, pay, today, spot, sd: (atmIV() || 0.3) * Math.sqrt(t), strikes: ls.map(l => l.strike), maxP, maxL, be, pop, popFrom: pts ? `implied, ${dist.quality} fit` : 'lognormal', missing: ls.some(l => !l.q) };
+      return { net, worth, held, cross, pay, today, spot, sd: (atmIV() || 0.3) * Math.sqrt(t), strikes: ls.map(l => l.strike), maxP, maxL, be, pop, popFrom: pts ? `implied, ${dist.quality} fit` : 'lognormal', missing: ls.some(l => !l.q),
+        wide: ls.filter(l => l.q && l.cost == null && mid(l.q) == null), odd: ls.filter(l => l.cost == null && mid(l.q) != null && outOfLine(l)) };
     }
 
     const money = v => !isFinite(v) ? 'unlimited' : `${v < 0 ? '−' : ''}$${Math.abs(v * 100).toFixed(0)}`;
@@ -252,21 +291,22 @@ defineWidget('spreads', {
       // signed quantity (− sells), market value and delta in shares; the strike
       // steps with ‹ ›, C/P switches type, the quantity steps through zero to flip side.
       const usd = v => `${v < 0 ? '−' : ''}$${Math.abs(v).toFixed(2)}`;
-      const midOf = q => q && q.bid != null && q.ask ? (q.bid + q.ask) / 2 : null;
       let mv = 0, dl = 0, known = true;
       const rows = legs().map((l, i) => {
-        const q = quote(l.type, l.strike), n = l.side * l.qty, m = midOf(q);
-        const value = m == null ? null : n * m * 100, delta = q?.delta == null ? null : n * q.delta * 100;
+        const q = quote(l.type, l.strike), n = l.side * l.qty, { px: m, est } = priceOf(l.type, l.strike);
+        // An estimated leg's delta from the same volatility, by a cent either way.
+        const v = est && m != null ? smileIV(l.strike) : null, d1 = v ? (bs(l.type, my.spot + 0.01, l.strike, years(), v) - bs(l.type, my.spot - 0.01, l.strike, years(), v)) / 0.02 : null;
+        const value = m == null ? null : n * m * 100, delta = est ? (d1 == null ? null : n * d1 * 100) : q?.delta == null ? null : n * q.delta * 100;
         if (value == null) known = false; else mv += value;
         if (delta != null) dl += delta;
         return `<tr data-i="${i}">
           <td class="sb-asset"><div class="sb-asset-in">${q?.symbol
               ? `<button type="button" class="sb-occ mono" data-occ="${esc(q.symbol)}" title="Chart today's mid on Candles (options on the roots the OPRA relays carry)">${esc(q.symbol)}</button>`
               : `<span class="sb-occ mono">${esc(`${my.sym} ${l.strike}${l.type[0].toUpperCase()}`)}</span>`}<span class="sb-steps"><button type="button" class="sb-mini" data-act="down" aria-label="Lower strike" title="Lower strike">‹</button><button type="button" class="sb-mini sb-cp" data-act="type" title="Switch call / put">${l.type === 'call' ? 'C' : 'P'}</button><button type="button" class="sb-mini" data-act="up" aria-label="Higher strike" title="Higher strike">›</button></span></div></td>
-          <td class="num sb-c-price"${q?.bid != null ? ` title="${q.bid.toFixed(2)} × ${q.ask?.toFixed(2) ?? '—'}"` : ''}>${m == null ? '<span class="muted">—</span>' : m.toFixed(2)}<small class="muted">${q?.bid != null ? `${q.bid.toFixed(2)}×${q.ask?.toFixed(2) ?? '—'}` : ''}</small></td>
+          <td class="num sb-c-price"${q?.bid != null ? ` title="${q.bid.toFixed(2)} × ${q.ask?.toFixed(2) ?? '—'}${est ? ': too wide to price; estimated from the volatility of the strikes around it' : ''}"` : ''}>${m == null ? '<span class="muted">—</span>' : est ? `<span class="muted">≈${m.toFixed(2)}</span>` : m.toFixed(2)}<small class="muted">${q?.bid != null ? `${q.bid.toFixed(2)}×${q.ask?.toFixed(2) ?? '—'}` : ''}</small></td>
           <td class="num sb-c-qty"><span class="sb-qty-cell"><button type="button" class="sb-mini" data-act="less" aria-label="One fewer" title="One fewer (shift: the whole position one unit smaller)">−</button><b class="mono ${n < 0 ? 'sb-sell' : 'sb-buy'}">${n > 0 ? '+' : ''}${n}</b><button type="button" class="sb-mini" data-act="more" aria-label="One more" title="One more (shift: the whole position one unit bigger)">+</button></span></td>
           <td class="num sb-c-value">${value == null ? '—' : usd(value)}</td>
-          <td class="num muted sb-c-delta">${delta == null ? '—' : delta.toFixed(0)}</td>
+          <td class="num muted sb-c-delta">${delta == null ? '—' : `${est ? '≈' : ''}${delta.toFixed(0)}`}</td>
           <td class="sb-c-x"><button type="button" class="sb-x" data-act="remove" aria-label="Remove this leg" title="Remove">×</button></td></tr>`;
       }).join('');
       // The header (ticker, expiry) stays put: only the rows are redrawn.
@@ -297,7 +337,18 @@ defineWidget('spreads', {
       tb.textContent = open ? `Trade · ${open} open` : 'Trade';
       tb.title = open ? `${open} open order${open > 1 ? 's' : ''} across the accounts (see Accounts)` : '';
       if (tk.isOpen && (!a || a.held)) tk.close();
-      $('.sb-msg').textContent = my.err || (a?.missing ? 'A leg has no quote on this expiry; it is priced from its implied volatility.' : '') || (my.chain ? '' : my.index ? 'Loading prices…' : 'Loading the chain…');
+      // What the prices can't be trusted for: a quote too wide to price, quotes
+      // out of line with their strikes, a shape whose prices say the opposite
+      // of what it is (a credit spread costing money).
+      const label = l => `${l.strike}${l.type[0].toUpperCase()}`;
+      const expect = !a || a.held ? null : /Credit$|^Iron (condor|fly)$/.test(shape || '') ? 'credit' : /Debit$|^Reverse iron/.test(shape || '') ? 'debit' : null;
+      const notes = a ? [
+        a.missing ? 'A leg has no quote on this expiry; it is priced from the volatility of the strikes around it.' : '',
+        a.wide.length ? `${a.wide.map(l => `${label(l)} (${l.q.bid.toFixed(2)} × ${l.q.ask.toFixed(2)})`).join(', ')}: too wide to price, so ≈ estimated from the strikes around it. A fill there is far from certain.` : '',
+        a.odd.length ? `${a.odd.map(label).join(', ')}: quoted out of line with the strikes beside ${a.odd.length > 1 ? 'them, so their prices are' : 'it, so its price is'} suspect.` : '',
+        expect && (expect === 'credit') !== (a.net < 0) ? `A ${shape.toLowerCase()} is a ${expect}, but these prices make it a ${expect === 'credit' ? 'debit' : 'credit'}: a quote is off. Check each leg's bid × ask.` : '',
+      ].filter(Boolean).join(' ') : '';
+      $('.sb-msg').textContent = my.err || notes || (my.chain ? '' : my.index ? 'Loading prices…' : 'Loading the chain…');
     }
 
     // The payoff chart: P&L at expiry (solid, green above zero and red below) and
