@@ -12,8 +12,10 @@
 // fees and positions still open.
 // The trading journal (lib/journal.js): notes on a day, each with its time,
 // text, tags, a discipline rating and the account it refers to. A day with
-// notes is marked on the calendar; the notes of the picked day sit under it,
-// and a list of every note (filterable by tag, account and date) below.
+// notes is marked on the calendar. A note's text shows only once its day is
+// clicked (on the calendar or in the list), under the calendar; clicking the
+// day again hides it. The list below (filterable by tag, account and date)
+// shows each note's day, account, discipline and tags, not its text.
 import { defineWidget, paint } from '../lib/widgets.js';
 import { svcState, serviceFor, servicesFor } from '../lib/fleet.js';
 import { esc } from '../lib/format.js';
@@ -104,14 +106,14 @@ function monthView(my) {
 
 const acctName = e => e.account ? esc(e.account) : 'all accounts';
 
-/** One note: its time, day, account, discipline, tags and text (escaped; its line breaks kept). */
-function noteRow(e) {
+/** One note: its time, day, account, discipline, tags and, when `full`, its text (escaped; its line breaks kept). */
+function noteRow(e, full) {
   const stars = e.rating ? `<span class="pf-stars" title="Discipline ${e.rating} of 5">${'★'.repeat(e.rating)}${'☆'.repeat(5 - e.rating)}</span>` : '';
   return `<article class="pf-note-row" data-note="${esc(e.id)}">
-    <div class="pf-note-head"><span class="mono muted">${esc(hm(e.at))}</span> <b>${esc(short(e.day))}</b> <span class="muted">${acctName(e)}</span> ${stars}
+    <div class="pf-note-head"><span class="mono muted">${esc(hm(e.at))}</span> ${full ? `<b>${esc(short(e.day))}</b>` : `<button type="button" class="linkish" data-pf-day="${esc(e.day)}" title="Show this day's notes">${esc(short(e.day))}</button>`} <span class="muted">${acctName(e)}</span> ${stars}
       <span class="pf-note-act"><button type="button" class="linkish" data-note-edit="${esc(e.id)}">Edit</button> <button type="button" class="linkish" data-note-del="${esc(e.id)}">Delete</button></span></div>
     ${e.tags.length ? `<div class="pf-tagrow">${e.tags.map(t => `<span class="pf-tag">${esc(t)}</span>`).join('')}</div>` : ''}
-    <p class="pf-note-text">${esc(e.text)}</p></article>`;
+    ${full ? `<p class="pf-note-text">${esc(e.text)}</p>` : ''}</article>`;
 }
 
 /** The notes of the picked day. */
@@ -119,14 +121,16 @@ function noteList(my) {
   const list = (my.jMonth || []).filter(e => e.day === my.day);
   const head = `<div class="pf-head"><b>Notes · ${esc(short(my.day))}</b> <button type="button" class="linkish" data-note-new>+ Note</button></div>`;
   if (my.jErr) return `${head}<p class="muted">${esc(my.jErr)}</p>`;
-  return head + (list.length ? list.map(noteRow).join('') : '<p class="muted">No notes on this day yet.</p>');
+  if (!list.length) return `${head}<p class="muted">No notes on this day yet.</p>`;
+  if (my.opened !== my.day) return `${head}<p class="muted">${list.length} note${list.length > 1 ? 's' : ''}: click the day to read ${list.length > 1 ? 'them' : 'it'}.</p>`;
+  return head + list.map(e => noteRow(e, true)).join('');
 }
 
 /** Every note in the filter's range, with its tag and account applied. */
 function notesList(my) {
   const f = my.filter;
   const rows = my.jAll.filter(e => (!f.tag || e.tags.includes(f.tag)) && (!f.account || (f.account === 'all' ? !e.account : e.account === f.account)));
-  return rows.length ? rows.map(noteRow).join('') : '<p class="muted">No notes match.</p>';
+  return rows.length ? rows.map(e => noteRow(e, false)).join('') : '<p class="muted">No notes match.</p>';
 }
 
 /** The form to write or change a note: its text, tags (the defaults and any added), discipline and account. */
@@ -158,7 +162,7 @@ function filterBar(my) {
 defineWidget('performance', {
   title: 'Performance',
   mount(el) {
-    const my = { acct: '', day: '', month: nyToday().slice(0, 7), perf: /** @type {any} */ (null), trades: /** @type {any} */ (null), pErr: '', tErr: '', pick: -1, pAt: 0, tAt: 0, alive: true,
+    const my = { acct: '', day: '', /** The day whose notes are open: one clicked, never the day picked on load. */ opened: '', month: nyToday().slice(0, 7), perf: /** @type {any} */ (null), trades: /** @type {any} */ (null), pErr: '', tErr: '', pick: -1, pAt: 0, tAt: 0, alive: true,
       /** The journal: this month's notes, every note in the filter's range, and the note being written or changed. */
       jMonth: /** @type {JournalEntry[]} */ ([]), jAll: /** @type {JournalEntry[]} */ ([]), jErr: '', jAt: 0, form: /** @type {any} */ (null), filter: { tag: '', account: '', from: '', to: '' } };
     try { my.acct = JSON.parse(el.dataset.args || '{}').account || ''; } catch (_) {}
@@ -210,8 +214,9 @@ defineWidget('performance', {
       my.form.rating = r ? +r : null; my.form.account = a || null;
     };
     const drawForm = () => { paint($('.pf-nform-box'), my.form ? noteForm(my) : ''); };
+    // Writing or changing a note opens its day's notes.
     const openForm = (e = null) => {
-      syncForm();
+      syncForm(); my.opened = my.day;
       my.form = e
         ? { id: e.id, text: e.text, tags: [...e.tags], rating: e.rating, account: e.account, err: '' }
         : { id: null, text: '', tags: [], rating: null, account: my.acct || null, err: '' };
@@ -222,7 +227,8 @@ defineWidget('performance', {
     const click = e => {
       const b = /** @type {HTMLElement} */ (e.target).closest('[data-pf-day], [data-pf-trade], [data-pf-month]'); if (!b) return;
       const d = /** @type {HTMLElement} */ (b).dataset;
-      if (d.pfDay) showDay(d.pfDay);
+      // A day clicked opens its notes; the open day clicked again closes them.
+      if (d.pfDay) { if (d.pfDay === my.day && my.opened === my.day) { my.opened = ''; draw(); } else { my.opened = d.pfDay; showDay(d.pfDay); } }
       else if (d.pfTrade != null) { my.pick = my.pick === +d.pfTrade ? -1 : +d.pfTrade; draw(); }
       else if (d.pfMonth) { const [y, m] = my.month.split('-').map(Number), t = new Date(Date.UTC(y, m - 1 + +d.pfMonth, 1)); my.month = t.toISOString().slice(0, 7); draw(); loadJournal(); }
     };
@@ -232,7 +238,7 @@ defineWidget('performance', {
       const d = /** @type {HTMLElement} */ (b).dataset;
       if (b.hasAttribute('data-pf-today')) showDay(nyToday());
       else if (b.hasAttribute('data-note-new')) openForm();
-      else if (d.noteEdit != null) { const x = [...my.jMonth, ...my.jAll].find(n => n.id === d.noteEdit); if (x) { if (x.day !== my.day) showDay(x.day); openForm(x); } }
+      else if (d.noteEdit != null) { const x = [...my.jMonth, ...my.jAll].find(n => n.id === d.noteEdit); if (x) { if (x.day !== my.day) showDay(x.day); openForm(x); draw(); } }
       else if (d.noteDel != null) {
         if (!confirm('Delete this note?')) return;
         remove(d.noteDel).then(() => { if (my.form?.id === d.noteDel) { my.form = null; drawForm(); } loadJournal(); loadAll(); })
