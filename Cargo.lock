@@ -722,6 +722,7 @@ dependencies = [
  "axum",
  "clap",
  "databento",
+ "dbn",
  "futures-util",
  "reqwest 0.13.5",
  "rustls",
