@@ -138,6 +138,8 @@ struct Schema {
     symbols: Vec<String>,
     encodings: Vec<String>,
     days: BTreeMap<String, u64>,
+    /// Days holding only some contracts (decision 0018); the rest are complete.
+    partial: Vec<String>,
 }
 
 impl Dataset {
@@ -148,7 +150,7 @@ impl Dataset {
         let schemas: serde_json::Map<String, Value> = self
             .schemas
             .iter()
-            .map(|(k, s)| (k.clone(), json!({ "files": s.files, "bytes": s.bytes, "symbols": s.symbols, "encodings": s.encodings, "days": s.days })))
+            .map(|(k, s)| (k.clone(), json!({ "files": s.files, "bytes": s.bytes, "symbols": s.symbols, "encodings": s.encodings, "days": s.days, "partial": s.partial })))
             .collect();
         json!({ "id": id, "symbol": symbol, "sources": self.sources, "schemas": schemas })
     }
@@ -211,6 +213,9 @@ fn store_dataset(dir: &Path, id: &str, datasets: &mut BTreeMap<String, Dataset>)
 /// folder) to the schema of the dataset listed under `k`.
 fn add_days(dir: &Path, k: &str, schema: &str, datasets: &mut BTreeMap<String, Dataset>) -> bool {
     let mut any = false;
+    // Partial days are those the folder's manifest lists (its coverage); an
+    // unreadable manifest lists none here, and `/coverage` reports the error.
+    let partial = crate::partial::read_manifest(dir).unwrap_or_default();
     for f in entries(dir) {
         let n = file_name(&f);
         let (day, size, encoding) =
@@ -234,6 +239,9 @@ fn add_days(dir: &Path, k: &str, schema: &str, datasets: &mut BTreeMap<String, D
         note_encoding(s, encoding);
         s.files += 1;
         s.bytes += size;
+        if partial.contains_key(&day) && !s.partial.contains(&day) {
+            s.partial.push(day.clone());
+        }
         *s.days.entry(day).or_default() += size;
         any = true;
     }
