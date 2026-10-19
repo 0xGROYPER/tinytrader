@@ -47,7 +47,7 @@ The write routes: `POST /api/orders/{account}`, `POST /api/orders/{account}/{id}
 |---|---|
 | `GET /api/write-gate` | `{"writes": bool, "hosts": bool, "allowed": bool, "live_orders": bool}`: whether any logins are configured, whether any host names are configured, whether this request's Host and login may write, and whether an order token is configured. Never the logins, the host names or the token. |
 
-To turn it on: set `CONSOLE_ORDER_LOGINS` to the Tailscale logins allowed to make changes, set `CONSOLE_HOSTS` to the name the console is opened at (for example its `*.ts.net` name), serve the console through `tailscale serve`, and (for live accounts and flatten) put one line of random text, for example 64 hex characters, in a file the console reads as `CONSOLE_ORDER_TOKEN_FILE`. The page asks for the token at the first write that needs it in a tab and keeps it for that tab only.
+To turn it on: set `CONSOLE_ORDER_LOGINS` to the Tailscale logins allowed to make changes, set `CONSOLE_HOSTS` to the name the console is opened at (for example its Tailscale name), serve the console through `tailscale serve`, and (for live accounts and flatten) put one line of random text, for example 64 hex characters, in a file the console reads as `CONSOLE_ORDER_TOKEN_FILE`. The page asks for the token at the first write that needs it in a tab and keeps it for that tab only.
 
 ## Orders and accounts (experimental)
 

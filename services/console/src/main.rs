@@ -1848,16 +1848,16 @@ mod tests {
     #[test]
     fn hosts_match_by_name_and_port() {
         let g = WriteGate {
-            hosts: ["Console.Example.ts.net", "127.0.0.1:8080", "[::1]"]
+            hosts: ["Console.Example.net", "127.0.0.1:8080", "[::1]"]
                 .iter()
                 .filter_map(|h| normal_host(h))
                 .collect(),
             ..gate(None)
         };
         for ok in [
-            "console.example.ts.net",
-            "console.example.ts.net:443",
-            "CONSOLE.example.ts.net.",
+            "console.example.net",
+            "console.example.net:443",
+            "CONSOLE.example.net.",
             "127.0.0.1:8080",
             "[::1]:9000",
             "[::1]",
@@ -1866,7 +1866,7 @@ mod tests {
         }
         for bad in [
             "evil.example",
-            "console.example.ts.net.evil.example",
+            "console.example.net.evil.example",
             "127.0.0.1",
             "127.0.0.1:8081",
             "[::2]",
@@ -1919,7 +1919,7 @@ mod tests {
         // Reached as 127.0.0.1:<port>, which is not on this list.
         let base = serve(WriteGate {
             hosts: vec![
-                "console.example.ts.net".to_owned(),
+                "console.example.net".to_owned(),
                 "127.0.0.1:1".to_owned(),
             ],
             ..gate(None)
@@ -1940,7 +1940,7 @@ mod tests {
             (403, Some(BAD_HOST), true)
         );
         // The configured name, on any port, gets past the gate (to the route's own 404).
-        let named = [("host", "console.example.ts.net:443")];
+        let named = [("host", "console.example.net:443")];
         let (status, _, marked) =
             ask_full(reqwest::Method::POST, &url, Some(ME), &named, "{}").await;
         assert_eq!((status, marked), (404, false));
