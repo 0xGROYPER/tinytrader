@@ -88,7 +88,9 @@
 //!   everything else still works. With `CONSOLE_LIVE_NEEDS_TOKEN` `false`
 //!   (default `true`), none of those needs the token: an allowed login (and
 //!   the typed confirmation, where asked) is enough, which is safe only when
-//!   `CONSOLE_LISTEN` is reachable solely through the authenticating proxy.
+//!   `CONSOLE_LISTEN` is reachable solely through the authenticating proxy;
+//!   so with it `false`, the console refuses to start unless `CONSOLE_LISTEN`
+//!   is a loopback IP address (`127.0.0.1` or `[::1]`, not a host name).
 //!   Paper orders need only the login. A live
 //!   account's flatten or resume also needs `confirm` naming the account. An
 //!   account is paper only when both the accounts service's `environment` for
@@ -201,18 +203,16 @@ async fn main() {
     if write_gate.hosts.is_empty() {
         eprintln!("console: writes are refused until CONSOLE_HOSTS is set");
     }
+    if !write_gate.live_token && !is_loopback(&listen) {
+        eprintln!(
+            "console: CONSOLE_LIVE_NEEDS_TOKEN is false, so CONSOLE_LISTEN must be a loopback address, and {listen:?} isn't (a host name such as localhost isn't accepted): with no order token, anything that reaches it with an allowed login header could trade live. Set CONSOLE_LISTEN to 127.0.0.1:<port> or [::1]:<port>, behind the authenticating proxy, or leave CONSOLE_LIVE_NEEDS_TOKEN unset."
+        );
+        std::process::exit(2);
+    }
     if !write_gate.live_token {
         eprintln!(
             "console: WARNING: CONSOLE_LIVE_NEEDS_TOKEN is false: live-account orders, cancels, flatten and resume need only an allowed login, no order token. This is safe only if the console's write port (CONSOLE_LISTEN, {listen}) is reachable solely through the authenticating proxy."
         );
-        if !listen
-            .parse::<std::net::SocketAddr>()
-            .is_ok_and(|a| a.ip().is_loopback())
-        {
-            eprintln!(
-                "console: WARNING: CONSOLE_LISTEN ({listen}) is not a loopback address; with no order token, anything that reaches it with an allowed login header can trade live"
-            );
-        }
     } else if write_gate.token.is_none() {
         eprintln!(
             "console: live orders are disabled: the console has no order token configured (CONSOLE_ORDER_TOKEN or _FILE)"
@@ -1293,6 +1293,15 @@ impl WriteGate {
     fn live_orders(&self) -> bool {
         !self.live_token || self.token.is_some()
     }
+}
+
+/// Whether `listen` is provably a loopback address: an IP address and port
+/// whose address is loopback. A host name (even `localhost`) is not.
+fn is_loopback(listen: &str) -> bool {
+    listen
+        .trim()
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|a| a.ip().is_loopback())
 }
 
 /// A true-or-false setting that is on unless set to `false` (or `0`, `no`,
@@ -2717,6 +2726,28 @@ mod tests {
         assert!(on.flatten_needs_token(false));
         assert!(!on.live_orders());
         assert!(gate(Some("t")).live_orders());
+    }
+
+    #[test]
+    fn only_a_loopback_ip_counts_as_loopback() {
+        for ok in [
+            "127.0.0.1:8080",
+            "127.0.0.2:1",
+            "[::1]:8080",
+            " 127.0.0.1:0 ",
+        ] {
+            assert!(is_loopback(ok), "{ok}");
+        }
+        for bad in [
+            "0.0.0.0:8080",
+            "[::]:8080",
+            "192.0.2.5:8080",
+            "localhost:8080",
+            "127.0.0.1",
+            "",
+        ] {
+            assert!(!is_loopback(bad), "{bad}");
+        }
     }
 
     #[tokio::test]
