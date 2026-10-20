@@ -1,6 +1,7 @@
 //! The console refuses to start with a `CONSOLE_LOGIN_HEADER` that isn't a
 //! valid HTTP header name, or with `CONSOLE_LIVE_NEEDS_TOKEN=false` and a
-//! `CONSOLE_LISTEN` that isn't a loopback address.
+//! `CONSOLE_LISTEN` that isn't a loopback address (unless
+//! `CONSOLE_TRUST_NETWORK` is `true`).
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -12,6 +13,7 @@ fn run(vars: &[(&str, &str)], wait: Duration) -> Option<(Option<i32>, String)> {
     cmd.env("CONSOLE_TOPOLOGY", "nonexistent-topology.json")
         .env_remove("CONSOLE_READ_LISTEN")
         .env_remove("CONSOLE_LIVE_NEEDS_TOKEN")
+        .env_remove("CONSOLE_TRUST_NETWORK")
         .env_remove("TINYTRADER_LISTEN")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -91,4 +93,35 @@ fn no_live_token_needs_a_loopback_listen_address() {
     }
     // With the token needed (the default), a non-loopback address still starts.
     assert!(run(&[("CONSOLE_LISTEN", "0.0.0.0:0")], Duration::from_secs(2)).is_none());
+}
+
+#[test]
+fn trusting_the_network_lifts_the_loopback_requirement() {
+    for listen in ["0.0.0.0:0", "[::]:0"] {
+        assert!(
+            run(
+                &[
+                    ("CONSOLE_LISTEN", listen),
+                    ("CONSOLE_LIVE_NEEDS_TOKEN", "false"),
+                    ("CONSOLE_TRUST_NETWORK", "true"),
+                ],
+                Duration::from_secs(2),
+            )
+            .is_none(),
+            "{listen}"
+        );
+    }
+    // Anything but an explicit on still refuses.
+    for off in ["false", "", "maybe"] {
+        let (code, stderr) = run(
+            &[
+                ("CONSOLE_LISTEN", "0.0.0.0:0"),
+                ("CONSOLE_LIVE_NEEDS_TOKEN", "false"),
+                ("CONSOLE_TRUST_NETWORK", off),
+            ],
+            Duration::from_secs(20),
+        )
+        .unwrap_or_else(|| panic!("the console started with CONSOLE_TRUST_NETWORK={off:?}"));
+        assert_eq!(code, Some(2), "{off:?}: {stderr}");
+    }
 }

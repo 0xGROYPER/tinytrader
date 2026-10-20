@@ -90,7 +90,10 @@
 //!   the typed confirmation, where asked) is enough, which is safe only when
 //!   `CONSOLE_LISTEN` is reachable solely through the authenticating proxy;
 //!   so with it `false`, the console refuses to start unless `CONSOLE_LISTEN`
-//!   is a loopback IP address (`127.0.0.1` or `[::1]`, not a host name).
+//!   is a loopback IP address (`127.0.0.1` or `[::1]`, not a host name),
+//!   or `CONSOLE_TRUST_NETWORK` is `true` (default `false`): the operator's
+//!   choice to trust every network that can reach `CONSOLE_LISTEN`, so that
+//!   writes rely on the login header alone.
 //!   Paper orders need only the login. A live
 //!   account's flatten or resume also needs `confirm` naming the account. An
 //!   account is paper only when both the accounts service's `environment` for
@@ -203,9 +206,13 @@ async fn main() {
     if write_gate.hosts.is_empty() {
         eprintln!("console: writes are refused until CONSOLE_HOSTS is set");
     }
-    if !write_gate.live_token && !is_loopback(&listen) {
+    let trust_network = opt_in("CONSOLE_TRUST_NETWORK");
+    if trust_network {
+        eprintln!("console: trusting the network: writes rely on the login header alone");
+    }
+    if !write_gate.live_token && !trust_network && !is_loopback(&listen) {
         eprintln!(
-            "console: CONSOLE_LIVE_NEEDS_TOKEN is false, so CONSOLE_LISTEN must be a loopback address, and {listen:?} isn't (a host name such as localhost isn't accepted): with no order token, anything that reaches it with an allowed login header could trade live. Set CONSOLE_LISTEN to 127.0.0.1:<port> or [::1]:<port>, behind the authenticating proxy, or leave CONSOLE_LIVE_NEEDS_TOKEN unset."
+            "console: CONSOLE_LIVE_NEEDS_TOKEN is false, so CONSOLE_LISTEN must be a loopback address, and {listen:?} isn't (a host name such as localhost isn't accepted): with no order token, anything that reaches it with an allowed login header could trade live. Set CONSOLE_LISTEN to 127.0.0.1:<port> or [::1]:<port>, behind the authenticating proxy, or leave CONSOLE_LIVE_NEEDS_TOKEN unset (or set CONSOLE_TRUST_NETWORK=true if every network that can reach it is trusted)."
         );
         std::process::exit(2);
     }
@@ -1308,6 +1315,20 @@ fn is_loopback(listen: &str) -> bool {
 /// `off`).
 fn flag(var: &str) -> bool {
     flag_on(std::env::var(var).ok().as_deref())
+}
+
+/// A true-or-false setting that is off unless set to `true` (or `1`, `yes`,
+/// `on`).
+fn opt_in(var: &str) -> bool {
+    opt_in_on(std::env::var(var).ok().as_deref())
+}
+
+/// An [`opt_in`]'s value: off when unset.
+fn opt_in_on(value: Option<&str>) -> bool {
+    matches!(
+        value.unwrap_or("").trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
 }
 
 /// A [`flag`]'s value: on when unset.
@@ -2726,6 +2747,23 @@ mod tests {
         assert!(on.flatten_needs_token(false));
         assert!(!on.live_orders());
         assert!(gate(Some("t")).live_orders());
+    }
+
+    #[test]
+    fn an_opt_in_is_off_unless_set_on() {
+        for on in ["true", "TRUE", " yes ", "1", "on"] {
+            assert!(opt_in_on(Some(on)), "{on:?}");
+        }
+        for off in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("0"),
+            Some("no"),
+            Some("maybe"),
+        ] {
+            assert!(!opt_in_on(off), "{off:?}");
+        }
     }
 
     #[test]
