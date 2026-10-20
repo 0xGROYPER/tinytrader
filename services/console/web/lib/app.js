@@ -1387,6 +1387,7 @@ async function loadWriteGate() {
   gateNote = !g ? ''
     : !g.writes ? 'Changes are off: the console has no allowed logins configured (CONSOLE_WRITE_LOGINS). Orders, settings, the journal and reminders are read-only.'
     : g.hosts === false ? 'Changes are off: the console has no allowed host names configured (CONSOLE_HOSTS). Orders, settings, the journal and reminders are read-only.'
+    : g.read_only ? 'Changes are off here: this is the console\'s read-only port (CONSOLE_READ_LISTEN). Orders, settings, the journal and reminders are read-only.'
     : !g.allowed ? 'Changes are off here: this login, or the address the console was opened at, is not one the console allows. Orders, settings, the journal and reminders are read-only.'
     : '';
   status();
