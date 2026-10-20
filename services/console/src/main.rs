@@ -33,6 +33,12 @@
 //!
 //! Configuration (environment):
 //! - `CONSOLE_LISTEN` (or `TINYTRADER_LISTEN`): address to serve on (default `127.0.0.1:8080`)
+//! - `CONSOLE_READ_LISTEN`: a second, read-only address to serve on, e.g.
+//!   `0.0.0.0:8081` (optional). It serves the same routes from the same
+//!   state, but refuses every request that isn't a `GET` or `HEAD` with 403,
+//!   whatever it carries: the listener that accepted the connection decides,
+//!   not a header. So `CONSOLE_LISTEN` can stay on loopback behind the
+//!   authenticating proxy while other services read from this one.
 //! - `CONSOLE_TOPOLOGY`: path to the optional topology file (default `topology.json`)
 //! - `CONSOLE_DOCKER`: Docker Engine API base URL, e.g. `http://docker-proxy:2375` (optional)
 //! - `CONSOLE_COMPOSE_PROJECT`: only show containers from this Compose project (optional)
@@ -79,7 +85,11 @@
 //!   e.g. 64 hex characters), or else `CONSOLE_ORDER_TOKEN`. So does a paper
 //!   account's flatten or resume unless `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` is
 //!   `false` (default `true`). Without a token, those are refused and
-//!   everything else still works. Paper orders need only the login. A live
+//!   everything else still works. With `CONSOLE_LIVE_NEEDS_TOKEN` `false`
+//!   (default `true`), none of those needs the token: an allowed login (and
+//!   the typed confirmation, where asked) is enough, which is safe only when
+//!   `CONSOLE_LISTEN` is reachable solely through the authenticating proxy.
+//!   Paper orders need only the login. A live
 //!   account's flatten or resume also needs `confirm` naming the account. An
 //!   account is paper only when both the accounts service's `environment` for
 //!   it (`alpaca-account`) and its gateway's welcome say `paper`.
@@ -191,11 +201,27 @@ async fn main() {
     if write_gate.hosts.is_empty() {
         eprintln!("console: writes are refused until CONSOLE_HOSTS is set");
     }
-    if write_gate.token.is_none() {
+    if !write_gate.live_token {
+        eprintln!(
+            "console: WARNING: CONSOLE_LIVE_NEEDS_TOKEN is false: live-account orders, cancels, flatten and resume need only an allowed login, no order token. This is safe only if the console's write port (CONSOLE_LISTEN, {listen}) is reachable solely through the authenticating proxy."
+        );
+        if !listen
+            .parse::<std::net::SocketAddr>()
+            .is_ok_and(|a| a.ip().is_loopback())
+        {
+            eprintln!(
+                "console: WARNING: CONSOLE_LISTEN ({listen}) is not a loopback address; with no order token, anything that reaches it with an allowed login header can trade live"
+            );
+        }
+    } else if write_gate.token.is_none() {
         eprintln!(
             "console: live orders are disabled: the console has no order token configured (CONSOLE_ORDER_TOKEN or _FILE)"
         );
     }
+    let read_listen = std::env::var("CONSOLE_READ_LISTEN")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
     let config = PollerConfig {
         topology: env("CONSOLE_TOPOLOGY", "topology.json"),
         docker: std::env::var("CONSOLE_DOCKER")
@@ -331,20 +357,36 @@ async fn main() {
     tokio::spawn(poll_forever(app.clone(), observer.clone()));
 
     let router = routes(write_gate).with_state(app).merge(observer.router());
-    let listener = match tokio::net::TcpListener::bind(&listen).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("console: cannot listen on {listen}: {e}");
-            std::process::exit(2);
+    let bind = |addr: String| async move {
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("console: cannot listen on {addr}: {e}");
+                std::process::exit(2);
+            }
         }
     };
+    let listener = bind(listen.clone()).await;
+    let read_listener = match read_listen {
+        Some(addr) => Some((bind(addr.clone()).await, addr)),
+        None => None,
+    };
+    let stopped = || async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
     eprintln!("console: serving http://{listen}");
-    if let Err(e) = axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-    {
+    let main_server = axum::serve(listener, router.clone()).with_graceful_shutdown(stopped());
+    let results = match read_listener {
+        None => vec![main_server.await],
+        Some((read_listener, addr)) => {
+            eprintln!("console: serving read-only http://{addr} (every write refused)");
+            let read_server =
+                axum::serve(read_listener, read_only(router)).with_graceful_shutdown(stopped());
+            let (a, b) = tokio::join!(main_server.into_future(), read_server.into_future());
+            vec![a, b]
+        }
+    };
+    for e in results.into_iter().filter_map(Result::err) {
         eprintln!("console: server stopped: {e}");
     }
 }
@@ -951,6 +993,37 @@ fn routes(write_gate: WriteGate) -> Router<Arc<App>> {
         ))
 }
 
+/// Marks a request accepted by the read-only listener (`CONSOLE_READ_LISTEN`).
+/// Only [`read_only`] adds it, as a layer on that listener's router: a
+/// client can't send it.
+#[derive(Clone, Copy)]
+struct ReadOnly;
+
+/// The refusal for any write on the read-only listener.
+const READ_ONLY: &str = "this port is read-only";
+
+/// The console's router as served on the read-only listener: the same routes
+/// and state, but any request other than `GET` or `HEAD` is refused (403,
+/// marked as the gate's) before it reaches a route or the write gate,
+/// whatever headers it carries.
+fn read_only(router: Router) -> Router {
+    router
+        .layer(axum::middleware::from_fn(refuse_on_read_only))
+        .layer(axum::Extension(ReadOnly))
+}
+
+/// Middleware for the read-only listener: only `GET` and `HEAD` pass.
+async fn refuse_on_read_only(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if req.method() == axum::http::Method::GET || req.method() == axum::http::Method::HEAD {
+        next.run(req).await
+    } else {
+        refusal((StatusCode::FORBIDDEN, READ_ONLY))
+    }
+}
+
 /// Who may write. Every write route (see [`write_routes`]) is checked here
 /// before anything is forwarded or sent to a gateway:
 ///
@@ -979,7 +1052,11 @@ fn routes(write_gate: WriteGate) -> Router<Arc<App>> {
 /// `CONSOLE_ORDER_TOKEN_FILE` names). So does a paper account's flatten or
 /// resume, unless `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` is `false` (the default
 /// is `true`). Paper orders and cancels need only the login.
-/// Unset, those writes are refused with a message saying so. Whether an account
+/// Unset, those writes are refused with a message saying so. With
+/// `CONSOLE_LIVE_NEEDS_TOKEN` `false` (the default is `true`), none of them
+/// needs the token (a paper flatten never needs more than a live one): the
+/// login, and the typed confirmation where asked, are enough. That is safe
+/// only when the port is reachable solely through the proxy. Whether an account
 /// is live is decided by its handler (see [`account_live`]) from the accounts
 /// service's environment and the gateway's own welcome, never from the request:
 /// either one not saying `paper` makes it live.
@@ -1000,6 +1077,9 @@ struct WriteGate {
     token: Option<String>,
     /// Whether a paper account's flatten or resume needs the order token.
     paper_flatten_token: bool,
+    /// Whether a live account's order, cancel, flatten or resume needs the
+    /// order token (`CONSOLE_LIVE_NEEDS_TOKEN`).
+    live_token: bool,
 }
 
 /// A refusal: a status and the message to send.
@@ -1103,19 +1183,13 @@ impl WriteGate {
                 None
             }
         };
-        let paper_flatten_token = !matches!(
-            env("CONSOLE_TOKEN_FOR_PAPER_FLATTEN", "true")
-                .trim()
-                .to_ascii_lowercase()
-                .as_str(),
-            "false" | "0" | "no" | "off"
-        );
         Ok(Self {
             login_header,
             logins,
             hosts,
             token,
-            paper_flatten_token,
+            paper_flatten_token: flag("CONSOLE_TOKEN_FOR_PAPER_FLATTEN"),
+            live_token: flag("CONSOLE_LIVE_NEEDS_TOKEN"),
         })
     }
 
@@ -1202,11 +1276,37 @@ impl WriteGate {
         }
     }
 
-    /// Whether a flatten or resume on an account that is `live` or not needs
+    /// Whether an order or cancel on an account that is `live` or not needs
     /// the order token.
-    fn flatten_needs_token(&self, live: bool) -> bool {
-        live || self.paper_flatten_token
+    fn order_needs_token(&self, live: bool) -> bool {
+        live && self.live_token
     }
+
+    /// Whether a flatten or resume on an account that is `live` or not needs
+    /// the order token. A paper one never needs it when a live one doesn't.
+    fn flatten_needs_token(&self, live: bool) -> bool {
+        self.live_token && (live || self.paper_flatten_token)
+    }
+
+    /// Whether live orders can be made at all: they need no token, or one is
+    /// configured.
+    fn live_orders(&self) -> bool {
+        !self.live_token || self.token.is_some()
+    }
+}
+
+/// A true-or-false setting that is on unless set to `false` (or `0`, `no`,
+/// `off`).
+fn flag(var: &str) -> bool {
+    flag_on(std::env::var(var).ok().as_deref())
+}
+
+/// A [`flag`]'s value: on when unset.
+fn flag_on(value: Option<&str>) -> bool {
+    !matches!(
+        value.unwrap_or("true").trim().to_ascii_lowercase().as_str(),
+        "false" | "0" | "no" | "off"
+    )
 }
 
 /// A Host as compared: trimmed, lowercased, without a trailing dot on the
@@ -1261,20 +1361,27 @@ fn refusal((status, why): Refusal) -> Response {
 
 /// The write gate as this viewer meets it: `writes` (any logins configured),
 /// `hosts` (any host names configured), `allowed` (this request's Host and
-/// login may write), `live_orders` (an order token is configured). Never the
-/// logins, the host names or the token themselves.
+/// login may write, and it came to the main listener), `live_orders` (live
+/// orders can be made: no token is needed, or one is configured),
+/// `live_token` (a live account's write needs the order token) and
+/// `read_only` (this is the read-only listener). Never the logins, the host
+/// names or the token themselves.
 async fn write_gate_get(
     AxumState(app): AxumState<Arc<App>>,
+    read_only: Option<axum::Extension<ReadOnly>>,
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> Response {
     let (login, _) = app.gate.login_and_token(&headers);
     let host = request_host(&headers, &uri);
+    let read_only = read_only.is_some();
     no_store(axum::Json(json!({
         "writes": !app.gate.logins.is_empty(),
         "hosts": !app.gate.hosts.is_empty(),
-        "allowed": app.gate.refuse_request(host, login).is_none(),
-        "live_orders": app.gate.token.is_some(),
+        "allowed": !read_only && app.gate.refuse_request(host, login).is_none(),
+        "live_orders": app.gate.live_orders(),
+        "live_token": app.gate.live_token,
+        "read_only": read_only,
     })))
 }
 
@@ -1371,7 +1478,7 @@ async fn order_submit(
         Ok(live) => live,
         Err(e) => return gateway_failed(e),
     };
-    if let Some(refusal) = refused_for(&app, &headers, live) {
+    if let Some(refusal) = refused_for(&app, &headers, app.gate.order_needs_token(live)) {
         return refusal;
     }
     let now = std::time::SystemTime::now()
@@ -1426,7 +1533,7 @@ async fn order_cancel(
         Ok(live) => live,
         Err(e) => return gateway_failed(e),
     };
-    if let Some(refusal) = refused_for(&app, &headers, live) {
+    if let Some(refusal) = refused_for(&app, &headers, app.gate.order_needs_token(live)) {
         return refusal;
     }
     trade_request(
@@ -1470,7 +1577,8 @@ async fn trade_request(
 /// Close every position of an account at market through its gateway: halts
 /// opens, cancels open orders, liquidates. The body must name the account in
 /// `confirm`. It needs the order token on a live account, and on a paper one
-/// unless `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` is `false`.
+/// unless `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` is `false`; neither when
+/// `CONSOLE_LIVE_NEEDS_TOKEN` is `false`.
 async fn account_flatten(
     AxumState(app): AxumState<Arc<App>>,
     axum::extract::Path(account): axum::extract::Path<String>,
@@ -1659,6 +1767,7 @@ mod tests {
             hosts: vec!["127.0.0.1".to_owned()],
             token: token.map(str::to_owned),
             paper_flatten_token: true,
+            live_token: true,
         }
     }
 
@@ -1777,6 +1886,17 @@ mod tests {
         upstream: Option<String>,
         gateways: gateways::Gateways,
     ) -> String {
+        serve_both(gate, upstream, gateways, None).await.0
+    }
+
+    /// The console on two free ports, as `main` serves it: the main listener
+    /// and the read-only one, sharing one state (and the journal, if given).
+    async fn serve_both(
+        gate: WriteGate,
+        upstream: Option<String>,
+        gateways: gateways::Gateways,
+        journal: Option<journal::Journal>,
+    ) -> (String, String) {
         let to = |u: &Option<String>| u.clone().map(|u| (u, reqwest::Client::new()));
         let app = Arc::new(App {
             poller: Poller::new(PollerConfig {
@@ -1790,7 +1910,7 @@ mod tests {
             store_token: None,
             prefs: None,
             reminders: None,
-            journal: None,
+            journal,
             profiles: None,
             gateways,
             gate: gate.clone(),
@@ -1798,14 +1918,14 @@ mod tests {
             delta: delta::Delta::new(0),
             collections: Vec::new(),
         });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, routes(gate).with_state(app))
-                .await
-                .unwrap();
-        });
-        format!("http://{addr}")
+        let router = routes(gate).with_state(app);
+        let mut bases = Vec::new();
+        for router in [router.clone(), read_only(router)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            bases.push(format!("http://{}", listener.local_addr().unwrap()));
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        }
+        (bases[0].clone(), bases[1].clone())
     }
 
     /// A request's status and its `error`, if any.
@@ -1891,7 +2011,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             r,
-            json!({ "writes": false, "hosts": true, "allowed": false, "live_orders": true })
+            json!({ "writes": false, "hosts": true, "allowed": false, "live_orders": true, "live_token": true, "read_only": false })
         );
     }
 
@@ -1924,7 +2044,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             r,
-            json!({ "writes": true, "hosts": true, "allowed": true, "live_orders": false })
+            json!({ "writes": true, "hosts": true, "allowed": true, "live_orders": false, "live_token": true, "read_only": false })
         );
     }
 
@@ -2181,7 +2301,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             r,
-            json!({ "writes": true, "hosts": false, "allowed": false, "live_orders": false })
+            json!({ "writes": true, "hosts": false, "allowed": false, "live_orders": false, "live_token": true, "read_only": false })
         );
     }
 
@@ -2302,6 +2422,301 @@ mod tests {
         .await;
         assert_eq!((status, marked), (502, false));
         assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    /// A stand-in gateway that counts connections and answers nothing, for
+    /// the account `live-1`: the count, and the gateways.
+    async fn counting_gateway() -> (Arc<std::sync::atomic::AtomicUsize>, gateways::Gateways) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                drop(conn);
+            }
+        });
+        let gateways =
+            gateways::Gateways::for_test([("live-1".to_owned(), addr.to_string())].into());
+        (seen, gateways)
+    }
+
+    /// A live order for `live-1`, confirmed as the ticket sends it.
+    fn live_order() -> String {
+        json!({ "confirm": "live-1", "live": true, "order": {
+            "qty": 1, "limit_price": 2.1, "legs": [{ "symbol": "XSP261016C00780000", "side": "buy" }]
+        } })
+        .to_string()
+    }
+
+    /// A fresh journal file for one test.
+    fn temp_journal(name: &str) -> journal::Journal {
+        let dir = std::env::temp_dir().join(format!(
+            "tinytrader-console-{name}-{}-{}",
+            std::process::id(),
+            tinytrader_observe::unix_seconds()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        journal::Journal::open(dir.join("journal.json")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_read_only_listener_refuses_every_write_whatever_it_carries() {
+        let (seen, gateways) = counting_gateway().await;
+        let (main, ro) = serve_both(
+            WriteGate {
+                live_token: false,
+                ..gate(Some("made-up-token"))
+            },
+            Some(upstream().await),
+            gateways,
+            Some(temp_journal("ro-writes")),
+        )
+        .await;
+        // Everything the main listener would let through: an allowed login,
+        // the token, an allowed Host, and headers a client might try.
+        let main_host = main.trim_start_matches("http://").to_owned();
+        let tries: Vec<Vec<(&str, &str)>> = vec![
+            vec![],
+            vec![("x-order-token", "made-up-token")],
+            vec![("host", "127.0.0.1"), ("x-order-token", "made-up-token")],
+            vec![
+                ("host", main_host.as_str()),
+                ("x-forwarded-host", main_host.as_str()),
+                ("x-forwarded-port", "8080"),
+                ("x-read-only", "false"),
+                ("x-write-gate", "allowed"),
+            ],
+        ];
+        let mut writes: Vec<(&str, &str)> = WRITES
+            .iter()
+            .flat_map(|(path, methods)| methods.iter().map(move |m| (*path, *m)))
+            .collect();
+        writes.extend([
+            ("/api/orders/live-1", "POST"),
+            ("/api/orders/live-1/tt-1/cancel", "POST"),
+            ("/api/accounts/live-1/flatten", "POST"),
+            ("/api/accounts/live-1/resume", "POST"),
+            // Not a write route, still not a GET: refused too.
+            ("/api/state", "POST"),
+            ("/health", "DELETE"),
+        ]);
+        for (path, m) in &writes {
+            for headers in &tries {
+                let method = reqwest::Method::from_bytes(m.as_bytes()).unwrap();
+                let body = if path.starts_with("/api/orders/live-1") && !path.ends_with("cancel") {
+                    live_order()
+                } else {
+                    json!({ "confirm": "live-1", "day": "2026-10-16", "text": "x" }).to_string()
+                };
+                let (status, error, marked) =
+                    ask_full(method, &format!("{ro}{path}"), Some(ME), headers, &body).await;
+                assert_eq!(
+                    (status, error.as_deref(), marked),
+                    (403, Some(READ_ONLY), true),
+                    "{m} {path} with {headers:?}"
+                );
+            }
+        }
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            0,
+            "nothing reached the gateway"
+        );
+        let r = reqwest::get(format!("{ro}/api/journal")).await.unwrap();
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["entries"], json!([]), "nothing was written");
+        // The read-only listener says so, and that this viewer can't write there.
+        let r: serde_json::Value = reqwest::Client::new()
+            .get(format!("{ro}/api/write-gate"))
+            .header("tailscale-user-login", ME)
+            .header("host", "127.0.0.1")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            json!({ "writes": true, "hosts": true, "allowed": false, "live_orders": true, "live_token": false, "read_only": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_read_only_listener_reads_as_the_main_one_from_the_same_state() {
+        let (main, ro) = serve_both(
+            gate(None),
+            Some(upstream().await),
+            gateways::Gateways::for_test(Default::default()),
+            Some(temp_journal("ro-reads")),
+        )
+        .await;
+        // A write on the main listener is unchanged, and seen from the read-only one.
+        let (status, error, marked) = ask_full(
+            reqwest::Method::POST,
+            &format!("{main}/api/journal"),
+            Some(ME),
+            &[],
+            &json!({ "day": "2026-10-16", "text": "written on the main port" }).to_string(),
+        )
+        .await;
+        assert_eq!((status, error, marked), (200, None, false));
+        for path in [
+            "/api/journal",
+            "/api/topology",
+            "/api/state",
+            "/api/jobs/list",
+            "/api/queue/jobs",
+            "/api/prefs",
+            "/api/reminders",
+            "/api/accounts/gateways",
+            "/",
+            "/lib/api.js",
+        ] {
+            let a = reqwest::get(format!("{main}{path}")).await.unwrap();
+            let b = reqwest::get(format!("{ro}{path}")).await.unwrap();
+            assert_eq!(a.status(), b.status(), "GET {path}");
+            if path != "/api/state" {
+                assert_eq!(
+                    a.bytes().await.unwrap(),
+                    b.bytes().await.unwrap(),
+                    "GET {path}"
+                );
+            }
+        }
+        let v: serde_json::Value = reqwest::get(format!("{ro}/api/journal"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["entries"][0]["text"], "written on the main port");
+        let head = reqwest::Client::new()
+            .head(format!("{ro}/api/topology"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(head.status().as_u16(), 200);
+        // The main listener's gate is as before.
+        let r: serde_json::Value = reqwest::Client::new()
+            .get(format!("{main}/api/write-gate"))
+            .header("tailscale-user-login", ME)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            r,
+            json!({ "writes": true, "hosts": true, "allowed": true, "live_orders": false, "live_token": true, "read_only": false })
+        );
+    }
+
+    #[tokio::test]
+    async fn with_live_needs_token_off_a_live_order_needs_only_the_login() {
+        let (seen, gateways) = counting_gateway().await;
+        let base = serve_with(
+            WriteGate {
+                live_token: false,
+                ..gate(None)
+            },
+            None,
+            gateways,
+        )
+        .await;
+        let url = format!("{base}/api/orders/live-1");
+        // A login that isn't allowed is still refused, and nothing is sent.
+        let (status, error, marked) = ask_full(
+            reqwest::Method::POST,
+            &url,
+            Some("other@example.net"),
+            &[],
+            &live_order(),
+        )
+        .await;
+        assert_eq!(
+            (status, error.as_deref(), marked),
+            (403, Some(NOT_ALLOWED), true)
+        );
+        // Not confirmed as live: refused by the handler, nothing sent.
+        let unconfirmed = json!({ "confirm": "live-1", "order": {} }).to_string();
+        let (status, _, marked) =
+            ask_full(reqwest::Method::POST, &url, Some(ME), &[], &unconfirmed).await;
+        assert_eq!((status, marked), (400, false));
+        assert_eq!(seen.load(Ordering::SeqCst), 0);
+        // An allowed login, no token (none is even configured): sent to the gateway.
+        let (status, _, marked) =
+            ask_full(reqwest::Method::POST, &url, Some(ME), &[], &live_order()).await;
+        assert_eq!((status, marked), (502, false));
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+        let r: serde_json::Value = reqwest::get(format!("{base}/api/write-gate"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            (r["live_orders"].clone(), r["live_token"].clone()),
+            (json!(true), json!(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn by_default_a_live_order_without_the_token_is_still_refused() {
+        let (seen, gateways) = counting_gateway().await;
+        // CONSOLE_LIVE_NEEDS_TOKEN unset (or anything but false) is on.
+        for on in [None, Some(""), Some("true"), Some("yes"), Some("1")] {
+            assert!(flag_on(on), "{on:?}");
+        }
+        for off in ["false", "FALSE", " no ", "0", "off"] {
+            assert!(!flag_on(Some(off)), "{off:?}");
+        }
+        let base = serve_with(gate(Some("made-up-token")), None, gateways).await;
+        let (status, error, marked) = ask_full(
+            reqwest::Method::POST,
+            &format!("{base}/api/orders/live-1"),
+            Some(ME),
+            &[],
+            &live_order(),
+        )
+        .await;
+        assert_eq!(
+            (status, error.as_deref(), marked),
+            (401, Some(BAD_TOKEN), true)
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn live_needs_token_off_drops_the_token_everywhere() {
+        let off = WriteGate {
+            live_token: false,
+            ..gate(None)
+        };
+        for live in [true, false] {
+            assert!(!off.order_needs_token(live));
+            assert!(!off.flatten_needs_token(live));
+            assert_eq!(
+                off.decide(Some(ME), None, off.flatten_needs_token(live)),
+                None
+            );
+        }
+        assert!(off.live_orders());
+        // The login is still needed.
+        assert_eq!(
+            off.decide(None, None, off.order_needs_token(true)),
+            Some((StatusCode::FORBIDDEN, NOT_ALLOWED))
+        );
+        let on = gate(None);
+        assert!(on.order_needs_token(true));
+        assert!(!on.order_needs_token(false));
+        assert!(on.flatten_needs_token(true));
+        assert!(on.flatten_needs_token(false));
+        assert!(!on.live_orders());
+        assert!(gate(Some("t")).live_orders());
     }
 
     #[tokio::test]

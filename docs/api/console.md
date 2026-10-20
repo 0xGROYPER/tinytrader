@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | **Purpose** | What the console's page (and the terminal UI's console mode) reads and does: the deployment and its state, services' data passed through, and the few actions the console takes (order tickets, flatten, drive approval, jobs). |
-| **Transport** | HTTP/1.1, JSON, on `CONSOLE_LISTEN` (default `127.0.0.1:8080`). |
+| **Transport** | HTTP/1.1, JSON, on `CONSOLE_LISTEN` (default `127.0.0.1:8080`), and optionally read-only on `CONSOLE_READ_LISTEN` (see [The read-only port](#the-read-only-port)). |
 | **Versioning** | `/api/topology` and `/api/state` carry `"schema": "tinytrader.fleet/1"` ([fleet](fleet.md)). The rest is unversioned and additive. |
-| **Auth** | Reads are open: anyone who can reach the port can read, so bind to loopback or a private network. Every write goes through the [write gate](#the-write-gate): a `Host` and a login (set by an authenticating reverse proxy) on allowlists, and for a live account's orders (and any flatten or resume) also the order token. With either allowlist unconfigured, every write is refused. Writes must also be JSON and same-origin (a page on another site gets `403`). Tokens for the services behind it (gateways, store) stay in the console and are never returned. |
+| **Auth** | Reads are open: anyone who can reach the port can read, so bind to loopback or a private network. Every write goes through the [write gate](#the-write-gate): a `Host` and a login (set by an authenticating reverse proxy) on allowlists, and for a live account's orders (and any flatten or resume) also the order token, unless `CONSOLE_LIVE_NEEDS_TOKEN` is `false`. With either allowlist unconfigured, every write is refused. Writes must also be JSON and same-origin (a page on another site gets `403`). Tokens for the services behind it (gateways, store) stay in the console and are never returned. |
 | **Errors** | `{"error": "..."}` with a 4xx or 5xx status. Passed-through answers keep the upstream's status and body. |
 | **Health** | The console's own [observe](observe.md) endpoints. |
 | **Stability** | `/api/topology`, `/api/state`, `/api/events`, `/api/stream` are **stable**. The order, account, jobs and queue routes are **experimental**. Prefs, reminders and profiles are optional modules, **experimental**. |
@@ -33,7 +33,7 @@ Reads (`GET`) are open. Every write route is behind the write gate, checked befo
 
 1. **Host.** The request's `Host` must be one of `CONSOLE_HOSTS`: comma-separated host names, each with or without a port (without one, any port matches; case and a trailing dot don't matter). This stops a web page that points its own DNS name at the console's address from making changes through the viewer's browser. Refused with `403`. With `CONSOLE_HOSTS` empty or unset, **every write is refused** (`403`, saying so).
 2. **Login.** The request's login header (the one `CONSOLE_LOGIN_HEADER` names, default `Tailscale-User-Login`) must be one of `CONSOLE_WRITE_LOGINS` (comma-separated, exact match). The authenticating reverse proxy in front of the console sets that header to the signed-in user (see [The login header](#the-login-header)). Refused with `403`. With `CONSOLE_WRITE_LOGINS` empty or unset, **every write is refused** (`403`, saying the console has no allowed logins configured), and the page shows a banner saying changes are off.
-3. **Order token.** An order, cancel, flatten or resume on a live account also needs `X-Order-Token` equal to the console's order token, read from the file `CONSOLE_ORDER_TOKEN_FILE` names, or else from `CONSOLE_ORDER_TOKEN`. So does a flatten or resume on a paper account, unless `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` is `false` (default `true`). It is compared in constant time and never logged. A missing or wrong token gets `401`. With no token configured, those writes are refused (`403`, saying so) and everything else still works. Paper orders and cancels need only the login.
+3. **Order token.** An order, cancel, flatten or resume on a live account also needs `X-Order-Token` equal to the console's order token, read from the file `CONSOLE_ORDER_TOKEN_FILE` names, or else from `CONSOLE_ORDER_TOKEN`. So does a flatten or resume on a paper account, unless `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` is `false` (default `true`). It is compared in constant time and never logged. A missing or wrong token gets `401`. With no token configured, those writes are refused (`403`, saying so) and everything else still works. Paper orders and cancels need only the login. With `CONSOLE_LIVE_NEEDS_TOKEN` set to `false` (default `true`), none of these needs the token, on a live account or a paper one: an allowed login (and the typed confirmation, where one is asked for) is enough, and the page doesn't ask for a token. Do that only with the deployment described in [Behind a proxy in the console's namespace](#behind-a-proxy-in-the-consoles-namespace); the console logs a warning at startup when it is set.
 
 Every refusal by the gate carries the header `X-Write-Gate: refused` and `"gate": true` in its JSON body, next to `error`. A `401` or `403` without them came from the service behind the console (the jobs service, the queue or the store), not from the gate.
 
@@ -43,7 +43,7 @@ The write routes: `POST /api/orders/{account}`, `POST /api/orders/{account}/{id}
 
 | Endpoint | |
 |---|---|
-| `GET /api/write-gate` | `{"writes": bool, "hosts": bool, "allowed": bool, "live_orders": bool}`: whether any logins are configured, whether any host names are configured, whether this request's Host and login may write, and whether an order token is configured. Never the logins, the host names or the token. |
+| `GET /api/write-gate` | `{"writes": bool, "hosts": bool, "allowed": bool, "live_orders": bool, "live_token": bool, "read_only": bool}`: whether any logins are configured, whether any host names are configured, whether this request's Host and login may write (never on the read-only port), whether live orders can be made (no token is needed, or one is configured), whether a live account's write needs the order token, and whether this is the read-only port. Never the logins, the host names or the token. |
 
 To turn it on: serve the console through an authenticating reverse proxy, set `CONSOLE_LOGIN_HEADER` to the header it sets (unless it is `Tailscale-User-Login`), set `CONSOLE_WRITE_LOGINS` to the logins allowed to make changes, set `CONSOLE_HOSTS` to the name the console is opened at through the proxy, and (for live accounts and flatten) put one line of random text, for example 64 hex characters, in a file the console reads as `CONSOLE_ORDER_TOKEN_FILE`. The page asks for the token at the first write that needs it in a tab and keeps it for that tab only.
 
@@ -66,6 +66,21 @@ The header is trusted only because two things hold, and both are up to the deplo
 - **The console's port is reachable only through the proxy.** Anything that reaches the port directly can send whatever login it likes: any process on the host, and any other container on the same Docker network. So keep `CONSOLE_LISTEN` on loopback (or on a network only the proxy shares), and keep the console off Docker networks it shares with other services.
 
 The order token is what still stops a request that gets around the proxy from trading a live account, or flattening any account.
+
+### The read-only port
+
+With `CONSOLE_READ_LISTEN` set (for example `0.0.0.0:8081`), the console serves a second listener with the same routes and the same state as `CONSOLE_LISTEN`. Reads there answer exactly as on the main port. Every request that isn't a `GET` or `HEAD` is refused with `403` (`"this port is read-only"`, marked as the gate's refusal) before it reaches a route, the write gate or a service, whatever login, token, `Host` or other headers it carries: the listener that accepted the connection decides, not anything in the request. `GET /api/write-gate` there says `"read_only": true` and `"allowed": false`, and the page shows that changes are off.
+
+### Behind a proxy in the console's namespace
+
+A deployment where nothing but the authenticating proxy can reach the write port:
+
+- Run an authenticating reverse proxy that shares the console's network namespace: for example a Tailscale sidecar container running `tailscale serve` (the console's container joins the sidecar's network, e.g. Compose's `network_mode: service:<sidecar>`), or oauth2-proxy in the same pod or namespace. Point it at `http://127.0.0.1:8080`.
+- Set `CONSOLE_LISTEN=127.0.0.1:8080`. Only processes in that namespace (the console and the proxy) can reach it, so every request on it came through the proxy, which sets the login header.
+- Set `CONSOLE_READ_LISTEN=0.0.0.0:8081` for the other services that read from the console (dashboards, scripts, other containers on the Docker network). Nothing reaching that port can write.
+- Set `CONSOLE_LOGIN_HEADER`, `CONSOLE_WRITE_LOGINS` and `CONSOLE_HOSTS` for the proxy as usual.
+
+With that in place the order token adds little (the proxy has already authenticated the user, and nothing else can reach the write port), so `CONSOLE_LIVE_NEEDS_TOKEN=false` is reasonable: live orders, cancels, flatten and resume then need only an allowed login and the typed confirmation. Without it (the write port on a shared network, or published on the host), keep the default.
 
 ## Orders and accounts (experimental)
 
@@ -123,6 +138,8 @@ Their writes are behind the [write gate](#the-write-gate) (the login only).
 
 | Variable | |
 |---|---|
+| `CONSOLE_LISTEN` | The address to serve on, reads and writes (default `127.0.0.1:8080`). |
+| `CONSOLE_READ_LISTEN` | A second address to serve on, read-only: every request but `GET` and `HEAD` is refused (`403`). Optional. See [The read-only port](#the-read-only-port). |
 | `CONSOLE_TOPOLOGY` | The [topology file](fleet.md#the-topology-file) (default `topology.json`). |
 | `CONSOLE_DOCKER` | Docker Engine API base URL (a read-only proxy), for discovery. Optional. |
 | `CONSOLE_COMPOSE_PROJECT` | Only containers of this Compose project. Optional; also the default deployment name. |
@@ -132,6 +149,7 @@ Their writes are behind the [write gate](#the-write-gate) (the login only).
 | `CONSOLE_HOSTS` | The host names the console is opened at, comma-separated, ports optional. A write with any other `Host` is refused. Empty or unset: every write is refused. |
 | `CONSOLE_ORDER_TOKEN_FILE` (or `CONSOLE_ORDER_TOKEN`) | The order token a live account's order, cancel, flatten or resume needs, and a paper account's flatten or resume. Unset: those are refused. |
 | `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` | `true` (default) or `false`: whether a paper account's flatten and resume need the order token too. |
+| `CONSOLE_LIVE_NEEDS_TOKEN` | `true` (default) or `false`: whether a live account's order, cancel, flatten or resume needs the order token. `false` drops the token everywhere (a paper flatten too, whatever `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` says); an allowed login, and the typed confirmation where asked, are enough. Safe only when `CONSOLE_LISTEN` is reachable solely through the authenticating proxy; see [Behind a proxy in the console's namespace](#behind-a-proxy-in-the-consoles-namespace). |
 | `CONSOLE_PAGE` | Serve the page from disk instead of the built-in copy. |
 
 The page's static files are `/`, `/lib/*`, `/widgets/*` and `/vendor/*`. They are sent with `Content-Security-Policy: script-src 'self'; frame-ancestors 'none'` and `X-Frame-Options: DENY`: scripts only from the console, and no other site can frame the page. Links and images in rendered documents lose `javascript:`, `data:` and `vbscript:` targets.

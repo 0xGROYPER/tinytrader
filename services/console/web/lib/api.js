@@ -25,7 +25,9 @@ export async function jobsApi(path, body) {
 // refuses for want of it (the server found it needs one, e.g. the account is
 // live) asks and is sent once more; the gate refuses before anything reaches
 // a gateway, so the first try sent nothing. Storage can throw (private
-// windows): the page still works.
+// windows): the page still works. When the server says live writes need no
+// token (CONSOLE_LIVE_NEEDS_TOKEN=false: /api/write-gate's live_token is
+// false), nothing is asked up front; only a gate-marked 401 would ask.
 const TOKEN_KEY = 'tinytrader-order-token';
 let orderTok = null;
 function setToken(t) {
@@ -51,13 +53,16 @@ function askToken() {
 const liveToken = async () => asking ? asking : getToken() || askToken();
 /** Forget a refused token, unless another write has already replaced it. @param {string | null} sent */
 function forget(sent) { if (sent && getToken() === sent) setToken(null); }
+/** Whether a live write needs the order token, as /api/write-gate last said: null until it has been read (or when it can't be), which counts as yes. @type {boolean | null} */
+let tokenNeeded = null;
 /** Whether the console's write gate itself refused this request (nothing was sent on). @param {Response} r */
 const gateRefused = r => r.headers.get('x-write-gate') === 'refused';
 /** A write request (`/api/orders/...`, flatten, resume, jobs, the queue, settings, the journal, ...): the response, as fetch gives it. `null` is sent as `null`; `extra` adds headers. `live` marks a write that needs the order token (a live account's), which sends it.
  * @param {string} path @param {any} body @param {string} [method] @param {Record<string, string>} [extra] @param {boolean} [live] @returns {Promise<Response>} */
 export async function orderFetch(path, body, method = 'POST', extra = {}, live = false) {
   const go = t => fetch(path, { method, cache: 'no-store', headers: { 'content-type': 'application/json', ...extra, ...(t ? { 'x-order-token': t } : {}) }, body: JSON.stringify(body === undefined ? {} : body) });
-  const t = live ? await liveToken() : null;
+  if (live && tokenNeeded === null) await writeGate();
+  const t = !live ? null : tokenNeeded === false ? getToken() : await liveToken();
   let r = await go(t);
   // Only the gate's own 401 is about the token; a service's 401 is passed on as it is.
   if (r.status === 401 && gateRefused(r)) {
@@ -80,9 +85,12 @@ export function refusedText(r, v) {
 }
 /** Whether an account (or a gateway's routing entry) trades live: anything but `environment: 'paper'`, unknown included, as the server decides. @param {any} a */
 export const isLive = a => a?.environment !== 'paper';
-/** The console's write gate as the server reports it for this viewer: `{ writes, hosts, allowed, live_orders }`, or null when it can't be read. */
+/** The console's write gate as the server reports it for this viewer: `{ writes, hosts, allowed, live_orders, live_token, read_only }`, or null when it can't be read. */
 export async function writeGate() {
-  try { const r = await fetch('/api/write-gate', { cache: 'no-store' }); return r.ok ? await r.json() : null; } catch (_) { return null; }
+  let g = null;
+  try { const r = await fetch('/api/write-gate', { cache: 'no-store' }); g = r.ok ? await r.json() : null; } catch (_) {}
+  tokenNeeded = g ? g.live_token !== false : null;
+  return g;
 }
 // The job queue (decision 0012), through the console's /api/queue proxy.
 export async function queueApi(path, body, method) {
