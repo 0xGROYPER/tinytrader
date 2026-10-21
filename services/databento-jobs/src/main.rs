@@ -830,14 +830,24 @@ async fn availability(jobs: &Jobs, c: &Checked) -> Result<Vec<String>, String> {
 /// A store answer about what it holds, refused unless it is 200 (the store
 /// answers 503 until its first scan) and every volume the store knows is
 /// present: `missing_volumes` empty, where its absence means a store too old
-/// to say.
-async fn store_json(jobs: &Jobs, path: &str, query: &[(&str, &str)]) -> Result<Value, String> {
-    let url = reqwest::Url::parse_with_params(&format!("{}{path}", jobs.store), query)
+/// to say. `fresh`: from a full rescan begun after asking (`fresh=1`), which
+/// the store waits up to 120 s for.
+async fn store_json(
+    jobs: &Jobs,
+    path: &str,
+    query: &[(&str, &str)],
+    fresh: bool,
+) -> Result<Value, String> {
+    let mut query = query.to_vec();
+    if fresh {
+        query.push(("fresh", "1"));
+    }
+    let url = reqwest::Url::parse_with_params(&format!("{}{path}", jobs.store), &query)
         .map_err(|e| format!("the store's {path}: {e}"))?;
     let r = jobs
         .http
         .get(url)
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(if fresh { 180 } else { 120 }))
         .send()
         .await
         .map_err(|e| format!("the store's {path}: {e}"))?;
@@ -901,16 +911,18 @@ async fn live_jobs(jobs: &Jobs) -> Result<(Vec<BatchJob>, HashSet<String>), Stri
 /// dataset and schema from `start` to `end` (exclusive): the store's
 /// holdings, Databento's jobs that aren't expired, and every purchase in the
 /// ledger, read now (see `had`). Fails when any of it can't be read in full.
+/// `fresh`: the store's answers from a rescan begun now (for a purchase),
+/// not its last scan (for a price).
 async fn had(
     jobs: &Jobs,
     dataset: &str,
     schema: Schema,
     target: &str,
-    start: time::Date,
-    end: time::Date,
+    (start, end): (time::Date, time::Date),
+    fresh: bool,
 ) -> Result<Vec<had::Piece>, String> {
     let last = end.previous_day().unwrap_or(end).to_string();
-    let catalog = store_json(jobs, "/catalog", &[]).await?;
+    let catalog = store_json(jobs, "/catalog", &[], fresh).await?;
     let coverage = store_json(
         jobs,
         "/coverage",
@@ -922,6 +934,7 @@ async fn had(
             ("start", &start.to_string()),
             ("end", &last),
         ],
+        fresh,
     )
     .await?;
     let (live, ids) = live_jobs(jobs).await?;
@@ -1102,6 +1115,7 @@ async fn plan(
     jobs: &Jobs,
     r: &MissingRequest,
     again: &HashSet<String>,
+    fresh: bool,
 ) -> Result<(Vec<missing::Day>, Vec<String>), (StatusCode, String)> {
     let bad = |e: String| (StatusCode::BAD_REQUEST, e);
     let down = |e: String| (StatusCode::SERVICE_UNAVAILABLE, e);
@@ -1128,7 +1142,7 @@ async fn plan(
         .map_err(|_| bad(format!("unknown schema {}", r.schema)))?;
     let dataset = known_dataset(jobs, &r.dataset).await?;
     let end = last.next_day().ok_or_else(|| bad("bad last day".into()))?;
-    let mut pieces = had(jobs, &dataset, schema, &r.symbol, start, end)
+    let mut pieces = had(jobs, &dataset, schema, &r.symbol, (start, end), fresh)
         .await
         .map_err(down)?;
     let gone: std::collections::BTreeSet<String> = pieces
@@ -1253,7 +1267,7 @@ async fn price_missing(AxState(jobs): AxState<Shared>, Json(mut r): Json<Missing
         Ok(a) => a,
         Err(e) => return e,
     };
-    let (days, notes) = match plan(&jobs, &r, &again).await {
+    let (days, notes) = match plan(&jobs, &r, &again, false).await {
         Ok(p) => p,
         Err((code, e)) => return refused(code, e),
     };
@@ -1363,7 +1377,7 @@ async fn submit_missing(AxState(jobs): AxState<Shared>, Json(s): Json<SubmitMiss
         return refused(StatusCode::SERVICE_UNAVAILABLE, NO_LEDGER);
     }
     // Plan again: what's held, pending, bought and priced may have changed.
-    let (days, _) = match plan(&jobs, &quote.request, &quote.again).await {
+    let (days, _) = match plan(&jobs, &quote.request, &quote.again, true).await {
         Ok(p) => p,
         Err((_, e)) => {
             return refused(
@@ -1467,8 +1481,8 @@ async fn price(AxState(jobs): AxState<Shared>, Json(request): Json<Request>) -> 
         &checked.dataset,
         checked.schema,
         &checked.symbols[0],
-        checked.start,
-        checked.end,
+        (checked.start, checked.end),
+        false,
     )
     .await
     {
@@ -1598,8 +1612,8 @@ async fn submit(AxState(jobs): AxState<Shared>, Json(s): Json<Submit>) -> Reply 
         &checked.dataset,
         checked.schema,
         &checked.symbols[0],
-        checked.start,
-        checked.end,
+        (checked.start, checked.end),
+        true,
     )
     .await
     {

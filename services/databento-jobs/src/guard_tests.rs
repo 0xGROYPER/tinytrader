@@ -213,6 +213,7 @@ struct StoreState {
     catalog: (u16, Value),
     coverage: (u16, Value),
     coverage_asked: Vec<String>,
+    catalog_asked: Vec<String>,
     files_asked: Vec<String>,
     definitions: Vec<u8>,
 }
@@ -255,6 +256,7 @@ fn ready_store() -> StoreState {
         catalog: (200, json!({ "roots": [], "missing_volumes": [] })),
         coverage: (200, json!({ "days": [], "missing_volumes": [] })),
         coverage_asked: Vec::new(),
+        catalog_asked: Vec::new(),
         files_asked: Vec::new(),
         definitions: definitions(&[C1, C2]),
     }
@@ -270,7 +272,11 @@ async fn serve_store(state: StoreHandle) -> String {
     let app = Router::new()
         .route(
             "/catalog",
-            get(|AxState(s): AxState<StoreHandle>| async move { answer(lock(&s).catalog.clone()) }),
+            get(|AxState(s): AxState<StoreHandle>, RawQuery(q): RawQuery| async move {
+                let mut s = lock(&s);
+                s.catalog_asked.push(q.unwrap_or_default());
+                answer(s.catalog.clone())
+            }),
         )
         .route(
             "/coverage",
@@ -1015,4 +1021,29 @@ async fn buying_missing_contracts_again_names_exactly_the_expired_jobs() {
         .await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert_eq!(r.fake.submits(), 1);
+}
+
+#[tokio::test]
+async fn a_purchase_rechecks_against_a_fresh_scan_and_a_price_doesnt() {
+    let r = rig("fresh").await;
+    let fresh = |r: &Rig| {
+        let s = lock(&r.store);
+        let f = |v: &[String]| v.iter().map(|q| q.contains("fresh=1")).collect::<Vec<_>>();
+        (f(&s.catalog_asked), f(&s.coverage_asked))
+    };
+    let clear = |r: &Rig| {
+        let mut s = lock(&r.store);
+        s.catalog_asked.clear();
+        s.coverage_asked.clear();
+    };
+    let (_, v) = r.price_missing().await;
+    assert_eq!(fresh(&r), (vec![false], vec![false]));
+    clear(&r);
+    let (code, v) = r.submit_missing(v["quote"].as_str().unwrap()).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(fresh(&r), (vec![true], vec![true]));
+    clear(&r);
+    let (code, v) = r.submit(&r.quote("QQQ.OPT", DAY, DAY, 0.0), None).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(fresh(&r), (vec![true], vec![true]));
 }
