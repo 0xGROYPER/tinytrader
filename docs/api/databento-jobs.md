@@ -22,6 +22,8 @@
 
 ## Endpoints
 
+**Paid purchases are paused** ([decision 0019](../decisions/0019-purchase-guards.md)): `/submit` and `/submit-missing` refuse anything not priced at exactly $0 with `403`. Free requests, pricing and downloads work as below.
+
 | Endpoint | |
 |---|---|
 | `GET /jobs` | `{"jobs": [...], "store_reachable", "updated_at"}`. Each job: `id`, `state` (`queued`, `processing`, `done`, `expired`), `dataset`, `schema`, `symbols`, `stype_in`, `start`, `end`, `cost_usd`, `bytes`, `received`, `expires`, `held` (where the store has it), `transfer` (download progress), `unfileable` (why the store would refuse it). Times are integer Unix seconds. |
