@@ -69,8 +69,8 @@ struct FakeState {
     costs_asked: usize,
     /// Databento makes the job but the answer is lost.
     submit_lost: bool,
-    /// Databento doesn't answer a submission at all.
-    submit_hangs: bool,
+    /// Databento doesn't answer a submission naming this symbol at all.
+    hang_on: Option<String>,
     costed: Vec<(Vec<String>, had::Window)>,
     submitted: Vec<SubmitJobParams>,
     listed_with: Vec<ListJobsParams>,
@@ -137,7 +137,8 @@ impl api::Databento for Fake {
     }
     fn submit<'a>(&'a self, p: &'a SubmitJobParams) -> Fut<'a, BatchJob> {
         Box::pin(async move {
-            if lock(&self.s).submit_hangs {
+            let hang = lock(&self.s).hang_on.clone();
+            if hang.is_some_and(|h| p.symbols.to_api_string().contains(&h)) {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
             }
             let id = format!("OPRA-NEW{}", self.next.fetch_add(1, Ordering::Relaxed));
@@ -371,6 +372,10 @@ impl Rig {
     }
 
     async fn price_missing(&self) -> (StatusCode, Value) {
+        self.price_missing_again(None).await
+    }
+
+    async fn price_missing_again(&self, again: Option<Value>) -> (StatusCode, Value) {
         let (code, Json(v)) = price_missing(
             AxState(self.jobs.clone()),
             Json(MissingRequest {
@@ -380,6 +385,7 @@ impl Rig {
                 start: DAY.into(),
                 end: DAY.into(),
                 rule: missing::Rule::default(),
+                again,
             }),
         )
         .await;
@@ -387,11 +393,16 @@ impl Rig {
     }
 
     async fn submit_missing(&self, quote: &str) -> (StatusCode, Value) {
+        self.submit_missing_again(quote, None).await
+    }
+
+    async fn submit_missing_again(&self, quote: &str, again: Option<Value>) -> (StatusCode, Value) {
         let (code, Json(v)) = submit_missing(
             AxState(self.jobs.clone()),
             Json(SubmitMissing {
                 quote: quote.into(),
                 confirm_usd: None,
+                again,
             }),
         )
         .await;
@@ -741,20 +752,39 @@ async fn names_are_canonical_and_datasets_known() {
 #[tokio::test]
 async fn a_hung_submission_is_uncertain_and_frees_the_lock() {
     let r = rig("hung").await;
-    lock(&r.fake.s).submit_hangs = true;
-    let both = async {
-        let first = r.submit(&r.quote("SPY.OPT", DAY, DAY, 0.0), None).await.0;
-        let second = r.submit(&r.quote("SPY.OPT", DAY, DAY, 0.0), None).await.0;
-        (first, second)
+    // Databento never answers for SPY: while it hangs, a QQQ purchase still
+    // goes through once the SPY submission gives up.
+    lock(&r.fake.s).hang_on = Some("SPY".into());
+    let (spy, qqq) = (
+        r.quote("SPY.OPT", DAY, DAY, 0.0),
+        r.quote("QQQ.OPT", DAY, DAY, 0.0),
+    );
+    let other = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        r.submit(&qqq, None).await
     };
-    let (first, second) = tokio::time::timeout(Duration::from_secs(5), both)
+    let both = async { tokio::join!(r.submit(&spy, None), other) };
+    let ((first, why), (second, v)) = tokio::time::timeout(Duration::from_secs(5), both)
         .await
         .expect("a hung submission must not hold the purchase lock");
-    assert_eq!(
-        (first, second),
-        (StatusCode::BAD_GATEWAY, StatusCode::CONFLICT)
+    assert_eq!(first, StatusCode::BAD_GATEWAY, "{why}");
+    let why = why["error"].as_str().unwrap();
+    assert!(
+        why.contains("no answer from Databento") && why.contains("outcome is unknown"),
+        "{why}"
     );
-    assert_eq!(r.states(), ["sending", "uncertain"]);
+    assert_eq!(second, StatusCode::OK, "{v}");
+    // The SPY one is never bought again while its outcome isn't known.
+    let (code, v) = r.submit(&r.quote("SPY.OPT", DAY, DAY, 0.0), None).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("outcome isn't known yet"),
+        "{v}"
+    );
+    assert_eq!(r.states(), ["sending", "uncertain", "sending", "submitted"]);
 }
 
 #[tokio::test]
@@ -822,4 +852,161 @@ async fn an_old_automatic_write_off_blocks_until_matched() {
     lock(&r.jobs.ledger).as_mut().unwrap().append(off).unwrap();
     let (code, v) = r.submit(&r.quote("SPY.OPT", DAY, DAY, 0.0), None).await;
     assert_eq!(code, StatusCode::OK, "{v}");
+}
+
+#[tokio::test]
+async fn an_old_automatic_write_off_is_matched_by_reconcile() {
+    let r = rig("written-off-matched").await;
+    let now = tinytrader_observe::unix_seconds();
+    r.write(&fp(&["SPY.OPT"]), "sending", None, now - 900.0);
+    lock(&r.jobs.ledger)
+        .as_mut()
+        .unwrap()
+        .append(ledger::Entry {
+            at: now - 100.0,
+            request: fp(&["SPY.OPT"]),
+            state: "not-submitted".into(),
+            job: None,
+            cost_usd: None,
+            note: Some("no such job appeared in Databento's job list".into()),
+        })
+        .unwrap();
+    // Its job, received soon after it was sent, has expired since.
+    let mut j = job(
+        "OPRA-MATCH",
+        json!("SPY.OPT"),
+        "parent",
+        whole_day(),
+        "expired",
+    );
+    j.ts_received -= time::Duration::seconds(890);
+    r.fake.add(j);
+    refresh(&r.jobs).await.unwrap();
+    assert_eq!(r.states(), ["sending", "not-submitted", "submitted"]);
+    let l = lock(&r.jobs.ledger);
+    assert!(l.as_ref().unwrap().submitted().contains("OPRA-MATCH"));
+}
+
+fn resolution(request: &str, at: f64, job: Option<&str>) -> Json<Resolve> {
+    Json(Resolve {
+        request: request.into(),
+        at,
+        job: job.map(Into::into),
+        note: "checked the portal".into(),
+    })
+}
+
+#[tokio::test]
+async fn never_made_only_after_half_an_hour_and_a_full_read_since() {
+    let r = rig("resolve-none").await;
+    let now = tinytrader_observe::unix_seconds();
+    let req = fp(&["SPY.OPT"]);
+    r.write(&req, "sending", None, now - 60.0);
+    r.write(&req, "uncertain", None, now - 50.0);
+    refresh(&r.jobs).await.unwrap();
+    let (code, Json(v)) =
+        resolve(AxState(r.jobs.clone()), resolution(&req, now - 50.0, None)).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("only after"), "{v}");
+    // Old enough, but no full read since then.
+    let r = rig("resolve-none-2").await;
+    r.write(&req, "sending", None, now - 3600.0);
+    r.write(&req, "uncertain", None, now - 3500.0);
+    let (code, _) = resolve(
+        AxState(r.jobs.clone()),
+        resolution(&req, now - 3500.0, None),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    // A read that couldn't see every job doesn't count.
+    r.fake.add(job(
+        "OPRA-SLOW",
+        json!("QQQ.OPT"),
+        "parent",
+        whole_day(),
+        "queued",
+    ));
+    lock(&r.fake.s).unreadable.insert("OPRA-SLOW".into());
+    refresh(&r.jobs).await.unwrap();
+    let (code, _) = resolve(
+        AxState(r.jobs.clone()),
+        resolution(&req, now - 3500.0, None),
+    )
+    .await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    lock(&r.fake.s).unreadable.clear();
+    refresh(&r.jobs).await.unwrap();
+    let (code, Json(v)) = resolve(
+        AxState(r.jobs.clone()),
+        resolution(&req, now - 3500.0, None),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+}
+
+#[tokio::test]
+async fn resolving_to_a_job_checks_the_job() {
+    let r = rig("resolve-job").await;
+    let now = tinytrader_observe::unix_seconds();
+    let req = fp(&["SPY.OPT"]);
+    r.write(&req, "sending", None, now);
+    r.write(&fp(&["QQQ.OPT"]), "submitted", Some("OPRA-TAKEN"), now);
+    let mut other = job("OPRA-DEFS", json!("SPY.OPT"), "parent", whole_day(), "done");
+    other.schema = Schema::Definition;
+    r.fake.add(other);
+    r.fake.add(job(
+        "OPRA-TAKEN",
+        json!("SPY.OPT"),
+        "parent",
+        whole_day(),
+        "done",
+    ));
+    r.fake.add(job(
+        "OPRA-MINE",
+        json!("SPY.OPT"),
+        "parent",
+        whole_day(),
+        "done",
+    ));
+    for id in ["OPRA-NONE", "OPRA-DEFS", "OPRA-TAKEN"] {
+        let (code, Json(v)) =
+            resolve(AxState(r.jobs.clone()), resolution(&req, now, Some(id))).await;
+        assert_eq!(code, StatusCode::CONFLICT, "{id}: {v}");
+    }
+    let (code, Json(v)) = resolve(
+        AxState(r.jobs.clone()),
+        resolution(&req, now, Some("OPRA-MINE")),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+}
+
+#[tokio::test]
+async fn buying_missing_contracts_again_names_exactly_the_expired_jobs() {
+    let r = rig("again-missing").await;
+    r.write(&fp(&[C1]), "submitted", Some("OPRA-GONE"), 1.0);
+    let (_, v) = r.price_missing().await;
+    assert_eq!(requests(&v), [(json!([DAY, "2026-10-03"]), 1)]);
+    assert!(v["notes"].to_string().contains("OPRA-GONE"), "{v}");
+    assert_eq!(
+        r.price_missing_again(Some(json!(true))).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        r.price_missing_again(Some(json!(["OPRA-OTHER"]))).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let (code, v) = r.price_missing_again(Some(json!(["OPRA-GONE"]))).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(requests(&v), [(json!([DAY, "2026-10-03"]), 2)]);
+    let quote = v["quote"].as_str().unwrap().to_owned();
+    // The submission repeats exactly what the quote named.
+    let (code, _) = r.submit_missing(&quote).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    let (_, v) = r.price_missing_again(Some(json!(["OPRA-GONE"]))).await;
+    let (code, v) = r
+        .submit_missing_again(v["quote"].as_str().unwrap(), Some(json!(["OPRA-GONE"])))
+        .await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(r.fake.submits(), 1);
 }

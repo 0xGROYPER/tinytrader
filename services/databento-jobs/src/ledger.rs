@@ -68,6 +68,21 @@ fn open_step(e: &Entry) -> bool {
         || (e.state == "not-submitted" && e.note.as_deref() == Some(WRITTEN_OFF))
 }
 
+/// Why the ledger's lock couldn't be taken.
+fn lock_error(e: &fs::TryLockError, path: &Path, lock: &Path) -> String {
+    match e {
+        fs::TryLockError::WouldBlock => format!(
+            "another process holds the submissions ledger {} (lock {}); only one databento-jobs may use it",
+            path.display(),
+            lock.display()
+        ),
+        fs::TryLockError::Error(e) => format!(
+            "{}: {e}; this filesystem doesn't support file locking, so the submissions ledger must be on a local disk",
+            lock.display()
+        ),
+    }
+}
+
 pub struct Ledger {
     path: PathBuf,
     entries: Vec<Entry>,
@@ -92,14 +107,8 @@ impl Ledger {
             .write(true)
             .open(&lock_path)
             .map_err(|e| format!("{}: {e}", lock_path.display()))?;
-        lock.try_lock().map_err(|e| match e {
-            fs::TryLockError::WouldBlock => format!(
-                "another process holds the submissions ledger {} (lock {}); only one databento-jobs may use it",
-                path.display(),
-                lock_path.display()
-            ),
-            fs::TryLockError::Error(e) => format!("{}: {e}", lock_path.display()),
-        })?;
+        lock.try_lock()
+            .map_err(|e| lock_error(&e, path, &lock_path))?;
         let entries = match fs::read_to_string(path) {
             Ok(text) => text
                 .lines()
@@ -160,6 +169,13 @@ impl Ledger {
             .rev()
             .find(|e| e.request == request && e.state == "sending")
             .map(|e| e.at)
+    }
+
+    /// When the attempt `e` (an unresolved step) was sent: its `sending`
+    /// step, or `e` itself when earlier.
+    #[must_use]
+    pub fn attempt_at(&self, e: &Entry) -> f64 {
+        self.sent_at(&e.request).unwrap_or(e.at).min(e.at)
     }
 
     /// Requests an earlier version wrote off as not submitted on its own,
@@ -283,6 +299,13 @@ mod tests {
         drop(first);
         assert!(Ledger::open(&path).is_ok());
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_filesystem_without_locks_is_named() {
+        let e = fs::TryLockError::Error(std::io::Error::from(std::io::ErrorKind::Unsupported));
+        let why = lock_error(&e, Path::new("l"), Path::new("l.lock"));
+        assert!(why.contains("must be on a local disk"), "{why}");
     }
 
     #[test]

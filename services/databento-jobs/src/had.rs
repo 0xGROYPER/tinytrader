@@ -540,6 +540,15 @@ mod tests {
             assert_eq!(scope_of(&[m], "SPY.OPT"), all, "{m}");
         }
         assert_eq!(scope_of(&["NQZ6"], "ES.FUT"), all);
+        // For an option parent, only another root's strict OCC contracts or
+        // another option parent are someone else's.
+        for m in ["SPY261002C00728000", "AAPL", "SPY", "QQQ   261002X00500000"] {
+            assert_eq!(scope_of(&[m], "SPY.OPT"), all, "{m}");
+        }
+        assert_eq!(
+            scope_of(&["QQQ.OPT", "QQQ   261002P00500000"], "SPY.OPT"),
+            None
+        );
         assert_eq!(scope_of(&["AAPL"], "TSLA"), None);
     }
 

@@ -221,6 +221,9 @@ struct Jobs {
     purchase: tokio::sync::Mutex<()>,
     /// Databento's dataset list, and when it was read.
     dataset_list: Mutex<Option<(Instant, Vec<String>)>>,
+    /// When the last job-list read that reconcile checked everything against
+    /// (every state, nothing unread) began, in Unix seconds.
+    checked_at: Mutex<Option<f64>>,
     key: String,
     http: reqwest::Client,
     store: String,
@@ -261,6 +264,7 @@ impl Jobs {
             db: Arc::new(api::Timed::new(db)),
             purchase: tokio::sync::Mutex::new(()),
             dataset_list: Mutex::default(),
+            checked_at: Mutex::default(),
             key,
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
@@ -484,18 +488,19 @@ async fn main() {
 /// not found stays unresolved, blocking what it overlaps, until it shows or
 /// the operator resolves it; never by time alone. Nor while a purchase is
 /// in flight: its job may show before its own answer is written.
-fn reconcile(jobs: &Shared, out: &[BatchJob], complete: bool) {
+/// `started`: when the job list was read.
+fn reconcile(jobs: &Shared, out: &[BatchJob], complete: bool, started: f64) {
     let turn = jobs.purchase.try_lock();
     let mut guard = lock(&jobs.ledger);
     let Some(l) = guard.as_mut() else { return };
-    for e in l
-        .unresolved()
-        .into_iter()
-        .filter(|_| complete && turn.is_ok())
-    {
+    let checks = complete && turn.is_ok();
+    if checks {
+        *lock(&jobs.checked_at) = Some(started);
+    }
+    for e in l.unresolved().into_iter().filter(|_| checks) {
         let claimed = l.submitted();
         // Its job was received after it was sent (with a margin for clocks).
-        let sent = l.sent_at(&e.request).unwrap_or(e.at).min(e.at);
+        let sent = l.attempt_at(&e);
         let Some(j) = out.iter().find(|j| {
             !claimed.contains(&j.id)
                 && had::same_request(&e.request, j)
@@ -542,16 +547,20 @@ struct Refreshed {
 /// Read the jobs list and the store's holdings, reconcile the ledger, and
 /// start downloads of followed jobs that are done.
 async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
+    let started = tinytrader_observe::unix_seconds();
     let short = jobs
         .db
         .list_jobs(&api::every_job())
         .await
         .map_err(|e| format!("list jobs: {e}"))?;
     // Expired jobs are read only to match a submission whose outcome isn't
-    // known: those received since the earliest of them.
-    let since = lock(&jobs.ledger)
-        .as_ref()
-        .and_then(|l| l.unresolved().iter().map(|e| e.at).reduce(f64::min));
+    // known: those received since the earliest was sent.
+    let since = lock(&jobs.ledger).as_ref().and_then(|l| {
+        l.unresolved()
+            .iter()
+            .map(|e| l.attempt_at(e))
+            .reduce(f64::min)
+    });
     // What the store already holds, first: only jobs not on disk need
     // their file lists (for the size a download would take).
     let held: Value = match jobs
@@ -628,6 +637,7 @@ async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
         jobs,
         &[out.as_slice(), &expired].concat(),
         unread.is_empty(),
+        started,
     );
 
     let ready: Vec<String> = out
@@ -1065,10 +1075,15 @@ struct MissingRequest {
     end: String,
     #[serde(default)]
     rule: missing::Rule,
+    /// The expired (or no longer listed) jobs bought here whose contracts
+    /// and days this buys again, by ID, as for `/submit`.
+    #[serde(default)]
+    again: Option<Value>,
 }
 
 struct MissingQuote {
     request: MissingRequest,
+    again: HashSet<String>,
     days: Vec<missing::Day>,
     cost_usd: f64,
     at: Instant,
@@ -1077,11 +1092,14 @@ struct MissingQuote {
 /// Plan a request for what's missing: for each day the store has the
 /// parent's definitions for, the contracts wanted less what's had (`had`),
 /// priced per day: one request for the contracts missing all day, and one
-/// for each stretch of hours missing of contracts partly had. Returns the
-/// requests and notes (days with nothing to buy, days without definitions).
+/// for each stretch of hours missing of contracts partly had. Purchases here
+/// that are gone stay subtracted unless `again` names their jobs. Returns
+/// the requests and notes (days with nothing to buy, days without
+/// definitions, gone purchases still subtracted).
 async fn plan(
     jobs: &Jobs,
     r: &MissingRequest,
+    again: &HashSet<String>,
 ) -> Result<(Vec<missing::Day>, Vec<String>), (StatusCode, String)> {
     let bad = |e: String| (StatusCode::BAD_REQUEST, e);
     let down = |e: String| (StatusCode::SERVICE_UNAVAILABLE, e);
@@ -1108,9 +1126,25 @@ async fn plan(
         .map_err(|_| bad(format!("unknown schema {}", r.schema)))?;
     let dataset = known_dataset(jobs, &r.dataset).await?;
     let end = last.next_day().ok_or_else(|| bad("bad last day".into()))?;
-    let pieces = had(jobs, &dataset, schema, &r.symbol, start, end)
+    let mut pieces = had(jobs, &dataset, schema, &r.symbol, start, end)
         .await
         .map_err(down)?;
+    let gone: std::collections::BTreeSet<String> = pieces
+        .iter()
+        .filter_map(|p| match &p.kind {
+            had::Kind::Gone(j) => Some(j.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut extra: Vec<&String> = again.iter().filter(|j| !gone.contains(*j)).collect();
+    extra.sort();
+    if !extra.is_empty() {
+        return Err(bad(format!(
+            "\"again\" names {}, which this request doesn't buy again",
+            json!(extra)
+        )));
+    }
+    pieces.retain(|p| !matches!(&p.kind, had::Kind::Gone(j) if again.contains(j)));
     let get = |url: String| async move {
         let resp = jobs
             .http
@@ -1147,7 +1181,11 @@ async fn plan(
         .collect();
 
     let mut days = Vec::new();
-    let mut notes = Vec::new();
+    let mut notes: Vec<String> = gone
+        .iter()
+        .filter(|j| !again.contains(*j))
+        .map(|j| format!("{j}: bought here, expired or no longer on Databento's list; its contracts and days stay subtracted unless named in \"again\""))
+        .collect();
     let mut d = start;
     while d <= last {
         let key = d.to_string();
@@ -1209,7 +1247,11 @@ async fn plan(
 async fn price_missing(AxState(jobs): AxState<Shared>, Json(mut r): Json<MissingRequest>) -> Reply {
     r.dataset = r.dataset.trim().to_ascii_uppercase();
     r.symbol = r.symbol.trim().to_ascii_uppercase();
-    let (days, notes) = match plan(&jobs, &r).await {
+    let again = match again_ids(r.again.as_ref()) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    let (days, notes) = match plan(&jobs, &r, &again).await {
         Ok(p) => p,
         Err((code, e)) => return refused(code, e),
     };
@@ -1224,6 +1266,7 @@ async fn price_missing(AxState(jobs): AxState<Shared>, Json(mut r): Json<Missing
             id.clone(),
             MissingQuote {
                 request: r,
+                again,
                 days,
                 cost_usd: total,
                 at: Instant::now(),
@@ -1243,6 +1286,9 @@ fn reply_ok(v: Value) -> Reply {
 struct SubmitMissing {
     quote: String,
     confirm_usd: Option<f64>,
+    /// The same jobs the quote named in `again`, repeated.
+    #[serde(default)]
+    again: Option<Value>,
 }
 
 /// Paid purchases are paused until the guards of decision 0019 are built:
@@ -1284,6 +1330,10 @@ fn write_step(
 }
 
 async fn submit_missing(AxState(jobs): AxState<Shared>, Json(s): Json<SubmitMissing>) -> Reply {
+    let again = match again_ids(s.again.as_ref()) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
     let Some(quote) = lock(&jobs.missing_quotes).remove(&s.quote) else {
         return refused(
             StatusCode::CONFLICT,
@@ -1296,13 +1346,22 @@ async fn submit_missing(AxState(jobs): AxState<Shared>, Json(s): Json<SubmitMiss
             "that price has expired; price the request again",
         );
     }
+    if again != quote.again {
+        return refused(
+            StatusCode::CONFLICT,
+            format!(
+                "\"again\" must name exactly the jobs the quote named ({}); price it again",
+                json!(quote.again)
+            ),
+        );
+    }
     // One purchase at a time, from the last check to the ledger's last word.
     let _turn = jobs.purchase.lock().await;
     if lock(&jobs.ledger).is_none() {
         return refused(StatusCode::SERVICE_UNAVAILABLE, NO_LEDGER);
     }
     // Plan again: what's held, pending, bought and priced may have changed.
-    let (days, _) = match plan(&jobs, &quote.request).await {
+    let (days, _) = match plan(&jobs, &quote.request, &quote.again).await {
         Ok(p) => p,
         Err((_, e)) => {
             return refused(
@@ -1654,14 +1713,65 @@ struct Resolve {
     note: String,
 }
 
+/// How long after a submission was sent the operator may say it was never
+/// made, and then only once a full read of the job list since hasn't found
+/// it.
+const WRITE_OFF_AFTER: f64 = 30.0 * 60.0;
+
 /// The operator's word on a submission whose outcome isn't known: the job it
 /// made (`submitted`), or none (`not-submitted`). Only a request's latest
-/// step, if unresolved, can be resolved.
+/// step, if unresolved, can be resolved. A job must be on Databento's list,
+/// for the same dataset and schema, and not another submission's. None only
+/// once the submission is [`WRITE_OFF_AFTER`] old and a complete read of the
+/// job list begun after that didn't find it.
 async fn resolve(AxState(jobs): AxState<Shared>, Json(r): Json<Resolve>) -> Reply {
     if r.note.trim().is_empty() {
         return refused(StatusCode::BAD_REQUEST, "say how you know, in note");
     }
     let _turn = jobs.purchase.lock().await;
+    let Some((dataset, schema, _, _)) = had::parse_fingerprint(&r.request) else {
+        return refused(StatusCode::BAD_REQUEST, "that isn't a request fingerprint");
+    };
+    if let Some(id) = &r.job {
+        let listed = match jobs.db.list_jobs(&api::every_job()).await {
+            Ok(l) => l,
+            Err(e) => {
+                return refused(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Databento's job list: {e}"),
+                );
+            }
+        };
+        if !listed.iter().any(|j| &j.id == id) {
+            return refused(
+                StatusCode::CONFLICT,
+                format!("{id} isn't on Databento's job list"),
+            );
+        }
+        let known = lock(&jobs.details).get(id).cloned();
+        let job = match known {
+            Some(j) => j,
+            None => match jobs.db.job(id).await {
+                Ok(j) => j,
+                Err(e) => {
+                    return refused(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!("Databento's job {id}: {e}"),
+                    );
+                }
+            },
+        };
+        if !job.dataset.eq_ignore_ascii_case(&dataset) || job.schema.as_str() != schema {
+            return refused(
+                StatusCode::CONFLICT,
+                format!(
+                    "{id} is {} {}, not this request's dataset and schema",
+                    job.dataset,
+                    job.schema.as_str()
+                ),
+            );
+        }
+    }
     let mut guard = lock(&jobs.ledger);
     let Some(l) = guard.as_mut() else {
         return refused(StatusCode::SERVICE_UNAVAILABLE, NO_LEDGER);
@@ -1676,6 +1786,29 @@ async fn resolve(AxState(jobs): AxState<Shared>, Json(r): Json<Resolve>) -> Repl
             "no unresolved submission of that request at that time",
         );
     };
+    match &r.job {
+        Some(id) if l.submitted().contains(id) => {
+            return refused(
+                StatusCode::CONFLICT,
+                format!("{id} is already another submission's job"),
+            );
+        }
+        Some(_) => {}
+        None => {
+            let after = l.attempt_at(&e) + WRITE_OFF_AFTER;
+            let now = tinytrader_observe::unix_seconds();
+            let checked = lock(&jobs.checked_at).is_some_and(|t| t >= after);
+            if now < after || !checked {
+                return refused(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "it can be written off as never made only after {} and a complete read of Databento's job list begun after then (every 30 s or so) that doesn't find it",
+                        tinytrader_schedule::describe((after * 1e9) as u64)
+                    ),
+                );
+            }
+        }
+    }
     let state = if r.job.is_some() {
         "submitted"
     } else {
