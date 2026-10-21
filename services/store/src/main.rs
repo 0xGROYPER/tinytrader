@@ -29,7 +29,10 @@
 //!   used is remembered in its state file (`STORE_STATE`), so one that is
 //!   missing is reported in `missing_volumes`, never left out. `POST
 //!   /volumes/{name}/retire` forgets one that is away for good, keeping a
-//!   record of what it held.
+//!   record of what it held. `/coverage` answers from the last scan, and
+//!   waits for a rescan asked for after a filing. `POST
+//!   /volumes/{name}/ignore` skips a path the store can't read, by an
+//!   operator's decision.
 //!
 //! - **Writes** (the uploads, filing, adopting and approving drives) are
 //!   refused from a web page of another origin, and, when a token is
@@ -115,6 +118,14 @@ struct Store {
     /// Every volume the store has used, kept in `state_path`.
     remembered: Mutex<state::Remembered>,
     state_path: PathBuf,
+    /// What the last scan found on each volume: `/coverage` answers from it.
+    index: Mutex<Arc<Index>>,
+    /// Rescans asked for (after a filing), and how many of them finished
+    /// scans have covered: `/coverage` waits for those asked for.
+    requested: AtomicU64,
+    completed: AtomicU64,
+    /// How long `/coverage` waits for a rescan asked for.
+    wait: Duration,
     events: Events,
     rescan: tokio::sync::Notify,
     bytes_in: AtomicU64,
@@ -124,6 +135,15 @@ struct Store {
 }
 
 type Shared = Arc<Store>;
+
+/// The places the last scan found, by volume, and when.
+#[derive(Default)]
+struct Index {
+    scanned_at: f64,
+    volumes: Vec<(String, Vec<catalog::Place>)>,
+    /// What the scan couldn't read, on volumes that are there.
+    errors: Vec<String>,
+}
 type Reply = (StatusCode, Json<Value>);
 
 fn reply(code: StatusCode, v: Value) -> Reply {
@@ -301,6 +321,7 @@ fn router(store: Shared, token: WriteToken) -> Router {
         .route("/volumes/approve", post(approve))
         .route("/volumes/{name}/retire", post(retire))
         .route("/volumes/{name}/accept-empty", post(accept_empty))
+        .route("/volumes/{name}/ignore", post(ignore).delete(unignore))
         .route("/files", get(list_files))
         .route("/files/{volume}/{*path}", get(send_file))
         .layer(axum::middleware::from_fn(
@@ -352,23 +373,38 @@ async fn scan(store: &Shared, observer: &Observer) {
                 .collect();
         }
     }
+    // Rescans asked for until now are covered by this one.
+    let target = store.requested.load(Ordering::SeqCst);
     let (volumes, limits) = (store.volumes(), store.limits);
-    let held: Vec<String> = lock(&store.remembered)
-        .volumes
-        .iter()
-        .filter(|(_, k)| state::held_any(k))
-        .map(|(n, _)| n.clone())
-        .collect();
-    let scanned = tokio::task::spawn_blocking(move || {
+    let (held, ignored): (Vec<String>, Vec<Value>) = {
+        let r = lock(&store.remembered);
+        let held = r
+            .volumes
+            .iter()
+            .filter(|(_, k)| state::held_any(k))
+            .map(|(n, _)| n.clone())
+            .collect();
+        (held, r.ignored.clone())
+    };
+    let found = tokio::task::spawn_blocking(move || {
         volumes
             .iter()
             .map(|v| {
-                let mut root = match volumes::present(v) {
-                    Ok(()) => catalog::scan_root(&v.name, &v.path, limits),
+                let mine: Vec<&Value> = ignored.iter().filter(|i| i["volume"] == v.name.as_str()).collect();
+                let skip: Vec<PathBuf> = mine.iter().filter_map(|i| i["path"].as_str()).map(PathBuf::from).collect();
+                let (mut root, places) = match volumes::present(v) {
+                    Ok(()) => catalog::scan_volume(&v.name, &v.path, limits, &skip),
                     Err(e) => {
-                        json!({ "name": v.name, "path": v.path, "present": false, "datasets": [], "unrecognised": [], "errors": [e], "pending_files": [] })
+                        let root = json!({ "name": v.name, "path": v.path, "present": false, "datasets": [], "unrecognised": [], "errors": [e], "pending_files": [] });
+                        (root, Vec::new())
                     }
                 };
+                let errors: Vec<String> = if root["present"] == true {
+                    root["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(str::to_owned)).collect()
+                } else {
+                    Vec::new()
+                };
+                root["ignored"] = json!(mine);
                 // Data that was there and is gone is unknown, not absent.
                 if root["present"] == true
                     && held.contains(&v.name)
@@ -378,12 +414,23 @@ async fn scan(store: &Shared, observer: &Observer) {
                     errors.push(json!(emptied(v)));
                 }
                 root["writable"] = json!(v.writable);
-                root
+                (root, (v.name.clone(), places), errors)
             })
             .collect::<Vec<_>>()
     })
     .await
     .unwrap_or_default();
+    let mut index = Index {
+        scanned_at: unix_seconds(),
+        ..Index::default()
+    };
+    let mut scanned = Vec::new();
+    for (root, places, errors) in found {
+        scanned.push(root);
+        index.volumes.push(places);
+        index.errors.extend(errors);
+    }
+    let scanned_at = index.scanned_at;
     let worst = scanned
         .iter()
         .filter_map(|r| r["volume"]["status"].as_str())
@@ -407,8 +454,9 @@ async fn scan(store: &Shared, observer: &Observer) {
         detail = format!("{detail}; cannot keep the list of volumes: {e}");
     }
     let degraded = !missing.is_empty() || catalog::severity(&worst) >= 2;
+    *lock(&store.index) = Arc::new(index);
     *lock(&store.catalog) = json!({
-        "generated_at": unix_seconds(),
+        "generated_at": scanned_at,
         "thresholds": { "warning": store.limits.warning, "critical": store.limits.critical, "floor": store.limits.floor },
         "roots": scanned,
         "missing_volumes": missing,
@@ -423,9 +471,27 @@ async fn scan(store: &Shared, observer: &Observer) {
         },
         &detail,
     );
+    store.completed.fetch_max(target, Ordering::SeqCst);
 }
 
 impl Store {
+    /// Ask for a rescan (after a filing, an import or a merge, or a change of
+    /// what is ignored); `/coverage` waits for it.
+    /// The paths an operator has said to skip on the volume `name`.
+    fn ignored_paths(&self, name: &str) -> Vec<PathBuf> {
+        lock(&self.remembered)
+            .ignored
+            .iter()
+            .filter(|i| i["volume"] == name)
+            .filter_map(|i| i["path"].as_str().map(PathBuf::from))
+            .collect()
+    }
+
+    fn request_rescan(&self) {
+        self.requested.fetch_add(1, Ordering::SeqCst);
+        self.rescan.notify_one();
+    }
+
     /// A store over the configured volumes, then every remembered volume the
     /// configuration doesn't name, so one that is missing is reported.
     fn new(
@@ -450,6 +516,10 @@ impl Store {
             discover,
             limits,
             catalog: Mutex::new(Value::Null),
+            index: Mutex::default(),
+            requested: AtomicU64::new(0),
+            completed: AtomicU64::new(0),
+            wait: Duration::from_secs(60),
             remembered: Mutex::new(remembered),
             state_path,
             events: Events::default(),
@@ -692,7 +762,7 @@ async fn incorporate(
                 format!("incorporated {pdir}/{batch}: {n} files"),
                 summary.to_string(),
             );
-            store.rescan.notify_one();
+            store.request_rescan();
             reply(StatusCode::OK, summary)
         }
         Ok(Err(e)) => {
@@ -742,7 +812,7 @@ async fn import(
                 format!("imported {pdir}/{id}: {n} days"),
                 summary.to_string(),
             );
-            store.rescan.notify_one();
+            store.request_rescan();
             reply(StatusCode::OK, summary)
         }
         Ok(Err(e)) => {
@@ -807,6 +877,22 @@ async fn coverage(AxState(store): AxState<Shared>, Query(q): Query<CoverageQuery
     {
         return refused(StatusCode::BAD_REQUEST, "unsafe dataset, symbol or schema");
     }
+    // A day just filed is in the scan after it: wait for that (bounded).
+    let want = store.requested.load(Ordering::SeqCst);
+    let deadline = tokio::time::Instant::now() + store.wait;
+    while store.completed.load(Ordering::SeqCst) < want {
+        if tokio::time::Instant::now() >= deadline {
+            return refused(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the store is rescanning after a change; ask again shortly",
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let index = lock(&store.index).clone();
+    if let Some(e) = index.errors.first() {
+        return refused(StatusCode::INTERNAL_SERVER_ERROR, e.clone());
+    }
     // Missing: not there now, or found missing by the last scan (unreadable,
     // or emptied of what it held).
     let (roots, gone): (Vec<Volume>, Vec<Volume>) = store
@@ -825,10 +911,18 @@ async fn coverage(AxState(store): AxState<Shared>, Query(q): Query<CoverageQuery
     }
     missing.sort();
     let missing = json!(missing);
-    let roots: Vec<(String, PathBuf)> = roots.into_iter().map(|v| (v.name, v.path)).collect();
+    // Only volumes there now.
+    let names: Vec<String> = roots.into_iter().map(|v| v.name).collect();
+    let scanned_at = index.scanned_at;
     let result = tokio::task::spawn_blocking(move || {
-        partial::coverage(
-            &roots,
+        let found: Vec<(&str, &[catalog::Place])> = index
+            .volumes
+            .iter()
+            .filter(|(n, _)| names.contains(n))
+            .map(|(n, p)| (n.as_str(), p.as_slice()))
+            .collect();
+        partial::coverage_in(
+            &found,
             &provider,
             &q.dataset,
             q.symbol.as_deref(),
@@ -841,7 +935,7 @@ async fn coverage(AxState(store): AxState<Shared>, Query(q): Query<CoverageQuery
     match result {
         Ok(Ok(days)) => reply(
             StatusCode::OK,
-            json!({ "days": days, "missing_volumes": missing }),
+            json!({ "days": days, "missing_volumes": missing, "scanned_at": scanned_at }),
         ),
         Ok(Err(e)) => refused(StatusCode::INTERNAL_SERVER_ERROR, e),
         Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -981,7 +1075,7 @@ async fn adopt(
                 format!("filed {} in place: {n} files", dir.display()),
                 summary.to_string(),
             );
-            store.rescan.notify_one();
+            store.request_rescan();
             reply(StatusCode::OK, summary)
         }
         Ok(Err(e)) => {
@@ -1101,12 +1195,128 @@ async fn approve(AxState(store): AxState<Shared>, Json(req): Json<ApproveRequest
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(v.clone());
-            store.rescan.notify_one();
+            store.request_rescan();
             reply(StatusCode::OK, json!({ "name": v.name, "path": v.path }))
         }
         Ok(Err(e)) => refused(StatusCode::BAD_REQUEST, e),
         Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+#[derive(Deserialize)]
+struct IgnoreRequest {
+    path: PathBuf,
+    reason: Option<String>,
+    by: Option<String>,
+}
+
+/// The volume `name`, and `path` on it (absolute, or relative to it) as an
+/// absolute path strictly inside it.
+fn on_volume(store: &Store, name: &str, path: &Path) -> Result<(Volume, PathBuf), Reply> {
+    let Some(v) = store.volumes().into_iter().find(|v| v.name == name) else {
+        return Err(refused(StatusCode::NOT_FOUND, format!("no volume {name}")));
+    };
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        v.path.join(path)
+    };
+    let inside = full.strip_prefix(&v.path).is_ok_and(|rel| {
+        rel.components().next().is_some()
+            && rel
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+    });
+    if !inside {
+        return Err(refused(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} is not a path inside {name} ({})",
+                path.display(),
+                v.path.display()
+            ),
+        ));
+    }
+    Ok((v, full))
+}
+
+/// Skip a path on a volume that the store can't read (decision 0019): an
+/// operator's decision, recorded with who, when and why. The path is then
+/// never counted, nor an error, until it is un-ignored; what it holds is
+/// taken as not held.
+async fn ignore(
+    AxState(store): AxState<Shared>,
+    UrlPath(name): UrlPath<String>,
+    Json(req): Json<IgnoreRequest>,
+) -> Reply {
+    let (_, path) = match on_volume(&store, &name, &req.path) {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
+    let Some(reason) = req.reason.filter(|r| !r.trim().is_empty()) else {
+        return refused(StatusCode::BAD_REQUEST, "say why (\"reason\")");
+    };
+    let record = json!({
+        "volume": name, "path": path, "reason": reason, "by": req.by, "at": unix_seconds(),
+    });
+    {
+        let mut r = lock(&store.remembered);
+        if r.ignored
+            .iter()
+            .any(|i| i["volume"] == name.as_str() && i["path"] == record["path"])
+        {
+            return refused(
+                StatusCode::CONFLICT,
+                format!("{} is already ignored", path.display()),
+            );
+        }
+        r.ignored.push(record.clone());
+        if let Err(e) = state::save(&store.state_path, &r) {
+            r.ignored.pop();
+            return refused(StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
+    }
+    store.events.push(
+        format!("ignoring {} on {name}", path.display()),
+        record.to_string(),
+    );
+    store.request_rescan();
+    reply(StatusCode::OK, record)
+}
+
+/// Stop skipping a path: it is read, and counted or an error, again.
+async fn unignore(
+    AxState(store): AxState<Shared>,
+    UrlPath(name): UrlPath<String>,
+    Json(req): Json<IgnoreRequest>,
+) -> Reply {
+    let (_, path) = match on_volume(&store, &name, &req.path) {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
+    let removed = {
+        let mut r = lock(&store.remembered);
+        let before = r.ignored.clone();
+        r.ignored
+            .retain(|i| !(i["volume"] == name.as_str() && i["path"] == json!(path)));
+        if r.ignored.len() == before.len() {
+            return refused(
+                StatusCode::NOT_FOUND,
+                format!("{} isn't ignored", path.display()),
+            );
+        }
+        if let Err(e) = state::save(&store.state_path, &r) {
+            r.ignored = before;
+            return refused(StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
+        json!({ "volume": name, "path": path })
+    };
+    store.events.push(
+        format!("no longer ignoring {} on {name}", path.display()),
+        removed.to_string(),
+    );
+    store.request_rescan();
+    reply(StatusCode::OK, removed)
 }
 
 /// Why a volume that held datasets and now holds none is missing, and what
@@ -1149,11 +1359,15 @@ async fn accept_empty(
         return refused(StatusCode::CONFLICT, e);
     }
     let (path, limits) = (volume.path.clone(), store.limits);
-    let root =
-        match tokio::task::spawn_blocking(move || catalog::scan_root(&name, &path, limits)).await {
-            Ok(r) => r,
-            Err(e) => return refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-        };
+    let skip = store.ignored_paths(&name);
+    let root = match tokio::task::spawn_blocking(move || {
+        catalog::scan_volume(&name, &path, limits, &skip).0
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
     if root["datasets"].as_array().is_some_and(|d| !d.is_empty())
         || root["errors"].as_array().is_some_and(|e| !e.is_empty())
     {
@@ -1200,7 +1414,7 @@ async fn accept_empty(
         format!("accepted volume {} as empty", volume.name),
         record.to_string(),
     );
-    store.rescan.notify_one();
+    store.request_rescan();
     reply(StatusCode::OK, record)
 }
 
@@ -1277,7 +1491,7 @@ async fn retire(AxState(store): AxState<Shared>, UrlPath(name): UrlPath<String>)
     store
         .events
         .push(format!("retired volume {name}"), record.to_string());
-    store.rescan.notify_one();
+    store.request_rescan();
     reply(StatusCode::OK, record)
 }
 
@@ -1329,8 +1543,16 @@ mod tests {
         s
     }
 
-    /// Serve a store on a free loopback port.
+    /// Serve a store on a free loopback port, rescanning when asked, as the
+    /// store does.
     async fn serve_store(store: Shared, token: WriteToken) -> String {
+        let s = store.clone();
+        tokio::spawn(async move {
+            loop {
+                s.rescan.notified().await;
+                scanned(&s).await;
+            }
+        });
         let app = router(store, token);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
@@ -1408,11 +1630,17 @@ mod tests {
             ("/volumes/approve", APPROVE),
             ("/volumes/v/accept-empty", ""),
             ("/volumes/v/retire", ""),
+            ("/volumes/v/ignore", r#"{"path":"x","reason":"y"}"#),
         ] {
             assert_eq!(status(&addr, "POST", path, None, body).await, 401, "{path}");
             // Past the guard, the store answers for itself (not 401).
             assert_ne!(status(&addr, "POST", path, good, body).await, 401, "{path}");
         }
+        let unignore = r#"{"path":"x"}"#;
+        assert_eq!(
+            status(&addr, "DELETE", "/volumes/v/ignore", None, unignore).await,
+            401
+        );
         // Reads stay open.
         for path in [
             "/catalog",
@@ -1452,9 +1680,10 @@ mod tests {
         assert_eq!((code, cat["missing_volumes"].clone()), (200, json!([])));
         let (code, cov) = get(&addr, COVERAGE).await;
         assert_eq!(
-            (code, cov),
-            (200, json!({ "days": [], "missing_volumes": [] }))
+            (code, cov["days"].clone(), cov["missing_volumes"].clone()),
+            (200, json!([]), json!([]))
         );
+        assert_eq!(cov["scanned_at"], cat["generated_at"]);
         // The provider must be given.
         let (code, _) = get(&addr, &COVERAGE.replace("provider=databento&", "")).await;
         assert_eq!(code, 400);
@@ -1625,6 +1854,172 @@ mod tests {
             json!([]),
             "and stays so"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn coverage_answers_from_the_scan_and_waits_for_a_rescan_asked_for() {
+        let dir = scratch("index");
+        let vol = dir.join("v");
+        let day = vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("2026-10-01.dbn.zst"), b"x").unwrap();
+        let mut s = store(&[("v", &vol)], &dir.join("state.json"));
+        Arc::get_mut(&mut s).unwrap().wait = Duration::from_millis(300);
+        scanned(&s).await;
+        // Served without a rescan loop: rescans happen only as below.
+        let app = router(s.clone(), WriteToken::open());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let days = |cov: &Value| -> Vec<String> {
+            cov["days"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| {
+                    format!(
+                        "{} {}",
+                        d["day"].as_str().unwrap(),
+                        d["kind"].as_str().unwrap()
+                    )
+                })
+                .collect()
+        };
+        // Not walked per request: a file that appears waits for a scan...
+        std::fs::write(day.join("2026-10-02.dbn.zst"), b"x").unwrap();
+        let (_, cov) = get(&addr, COVERAGE).await;
+        assert_eq!(days(&cov), ["2026-10-01 complete"]);
+        // ...but the manifest is read as it is now.
+        let entry = json!({ "file": "2026-10-01.dbn.zst", "coverage": { "kind": "contracts", "stype": "raw_symbol", "symbols": ["SPY   261002C00728000"], "window": [0, 1] } });
+        std::fs::write(
+            day.join("manifest.json"),
+            json!({ "days": { "2026-10-01": entry } }).to_string(),
+        )
+        .unwrap();
+        let (_, cov) = get(&addr, COVERAGE).await;
+        assert_eq!(days(&cov), ["2026-10-01 partial"]);
+        // A rescan asked for (as after a filing) is waited for.
+        s.request_rescan();
+        let later = s.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            scanned(&later).await;
+        });
+        let (code, cov) = get(&addr, COVERAGE).await;
+        assert_eq!(
+            (code, days(&cov)),
+            (
+                200,
+                vec![
+                    "2026-10-01 partial".to_owned(),
+                    "2026-10-02 complete".to_owned()
+                ]
+            )
+        );
+        // Not forever: no rescan comes, so 503.
+        s.request_rescan();
+        let (code, body) = get(&addr, COVERAGE).await;
+        assert_eq!(code, 503, "{body}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_operator_can_ignore_a_path_the_store_cannot_read() {
+        let dir = scratch("ignore");
+        let vol = dir.join("v");
+        let junk = vol.join("backups/old.dbn.zst");
+        std::fs::create_dir_all(junk.parent().unwrap()).unwrap();
+        std::fs::write(&junk, b"truncated").unwrap();
+        let old = std::time::SystemTime::now() - Duration::from_secs(600);
+        std::fs::File::options()
+            .write(true)
+            .open(&junk)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let state_file = dir.join("state.json");
+        let s = store(&[("v", &vol)], &state_file);
+        scanned(&s).await;
+        let addr = serve_store(s, WriteToken::open()).await;
+        let (_, cat) = get(&addr, "/catalog").await;
+        assert_eq!(cat["missing_volumes"], json!(["v"]));
+        let why = cat["roots"][0]["errors"][0].as_str().unwrap();
+        assert!(
+            why.contains(&junk.display().to_string()) && why.contains("POST /volumes/v/ignore"),
+            "{why}"
+        );
+        assert_eq!(get(&addr, COVERAGE).await.0, 500);
+
+        const IGNORE: &str = "/volumes/v/ignore";
+        let body = json!({ "path": junk, "reason": "a truncated copy; the original is on data", "by": "operator" }).to_string();
+        assert_eq!(
+            status(
+                &addr,
+                "POST",
+                IGNORE,
+                None,
+                &json!({ "path": junk }).to_string()
+            )
+            .await,
+            400,
+            "a reason is needed"
+        );
+        assert_eq!(
+            status(
+                &addr,
+                "POST",
+                IGNORE,
+                None,
+                r#"{"path":"/etc","reason":"x"}"#
+            )
+            .await,
+            400,
+            "inside the volume only"
+        );
+        assert_eq!(
+            status(
+                &addr,
+                "POST",
+                IGNORE,
+                None,
+                r#"{"path":"backups/../..","reason":"x"}"#
+            )
+            .await,
+            400
+        );
+        let (code, rec) = call(&addr, "POST", IGNORE, None, &body).await;
+        assert_eq!(code, 200, "{rec}");
+        assert_eq!(
+            status(&addr, "POST", IGNORE, None, &body).await,
+            409,
+            "already"
+        );
+        let (code, _) = get(&addr, COVERAGE).await;
+        assert_eq!(code, 200, "after the rescan it asked for");
+        let (_, cat) = get(&addr, "/catalog").await;
+        assert_eq!(cat["missing_volumes"], json!([]));
+        assert_eq!(
+            cat["roots"][0]["ignored"][0]["reason"],
+            "a truncated copy; the original is on data"
+        );
+        let kept = state::load(&state_file).unwrap();
+        assert_eq!(
+            (
+                kept.ignored[0]["by"].clone(),
+                kept.ignored[0]["at"].is_number()
+            ),
+            (json!("operator"), true)
+        );
+
+        // Un-ignored (by a path relative to the volume): an error again.
+        let rel = r#"{"path":"backups/old.dbn.zst"}"#;
+        assert_eq!(status(&addr, "DELETE", IGNORE, None, rel).await, 200);
+        assert_eq!(status(&addr, "DELETE", IGNORE, None, rel).await, 404);
+        assert_eq!(get(&addr, COVERAGE).await.0, 500);
+        let (_, cat) = get(&addr, "/catalog").await;
+        assert_eq!(cat["missing_volumes"], json!(["v"]));
+        assert!(state::load(&state_file).unwrap().ignored.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

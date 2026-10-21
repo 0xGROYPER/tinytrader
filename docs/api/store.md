@@ -26,6 +26,7 @@ Shared conventions are in the [API overview](README.md).
 | `POST /adopt/{provider}` | write | File a download folder already on a volume, where it is. |
 | `POST /volumes/approve` | write | Approve a drive found in the mount directory. |
 | `POST /volumes/{name}/retire` | write | Forget a remembered volume that is away for good ([below](#remembered-volumes)). |
+| `POST /volumes/{name}/ignore`, `DELETE` | write | Skip, or stop skipping, a path on a volume that can't be read ([below](#post-volumesnameignore)). |
 | `POST /volumes/{name}/accept-empty` | write | Accept that a mounted volume which held datasets is now empty ([below](#post-volumesnameaccept-empty)). |
 
 Writes are refused from a web page of another origin.
@@ -89,8 +90,9 @@ bought again), so they say what the store holds or say they can't
 - A batch file named for a range of days (`…-20261001-20261031.cbbo-1m…`)
   counts every day of it, both ends included. When a batch is split by
   symbol, or a file's name doesn't say its days, the batch counts every day of
-  its query (`start` and `end` in `metadata.json`); without them it is an
-  error.
+  its query (`start` and `end` in `metadata.json`, the end excluded, as
+  Databento means it: an end of `2026-10-10` or `2026-10-10T00:00:00Z` stops
+  at 2026-10-09); without them it is an error.
 - No DBN file on a volume goes uncounted. Every `.dbn` or `.dbn.zst` file
   the layouts above don't account for (named some other way, deeper than the
   layouts are read, loose) is counted from its own header (dataset, schema,
@@ -104,7 +106,10 @@ bought again), so they say what the store holds or say they can't
   root's `pending_files` and read again on the next scan.
 - A download folder with `metadata.json` but no `manifest.json` (one
   extracted by hand) counts by its files' headers, or, when it has no DBN
-  files or has data in other encodings, by every day of its query.
+  files or has data in other encodings, by every day of its query. A folder
+  with both and no data holds nothing.
+- The store's own folders in a provider's folder, `provenance/` (receipts)
+  and `migrations/` (its ledger), hold no data and are never counted.
 - A volume is missing, with the reason in its root's `errors`, when a folder
   on it can't be read; when a DBN file's header, a manifest or a batch's
   `metadata.json` can't be read; when its path must be a mount point and
@@ -112,6 +117,8 @@ bought again), so they say what the store holds or say they can't
   cleanly); or when it held datasets when last read in full and now holds
   none ([accept it as empty](#post-volumesnameaccept-empty) if it really
   is).
+- Each error names the path it is about, and how to
+  [ignore](#post-volumesnameignore) that path if it should be.
 
 ### `GET /catalog`
 
@@ -156,6 +163,29 @@ as missing, and the state file keeps a record of it under `retired`:
 volume is mounted, `404` for a volume the store doesn't know. A volume named
 in `STORE_VOLUMES` comes back when the store restarts; take it out of the
 configuration too.
+
+#### `POST /volumes/{name}/ignore`
+
+One unreadable folder, a bad `metadata.json` or an old truncated DBN file
+makes its whole volume missing, which stops every purchase. When the path
+holds nothing that should count (a broken copy, a folder of another
+program's), an operator can say so:
+
+```json
+{ "path": "/Volumes/Data/backups/old.dbn.zst", "reason": "a truncated copy; the original is filed", "by": "dawson" }
+```
+
+`path` is absolute, or relative to the volume, and inside it; `reason` is
+required. The state file keeps `{ volume, path, reason, by, at }` under
+`ignored`, and each catalog root lists its own in `ignored`. From the rescan
+that follows, the path, and everything under it, is skipped: never counted
+and never an error. That is a decision to fail open for that path: what it
+holds is taken as not held, and may be bought again. `400` for a path
+outside the volume or no reason, `404` for an unknown volume, `409` if it is
+already ignored.
+
+`DELETE /volumes/{name}/ignore` with `{ "path": … }` stops skipping it
+(`404` if it isn't ignored).
 
 #### `POST /volumes/{name}/accept-empty`
 
@@ -205,7 +235,8 @@ immutable, so a file once read can be kept.
   folder, case ignored: `?pattern=*/OPRA.PILLAR/SPY.OPT/definition/*&provider=databento`.
 - `limit` (default and most 100,000) caps the list; `truncated` says whether
   more matched.
-- Sorted by volume, then path. The volumes are walked on each request.
+- Sorted by volume, then path. The volumes are walked on each request; with
+  `provider`, only that provider's folders.
 
 ### `GET /files/{volume}/{path}`
 
@@ -263,7 +294,7 @@ kept in `provenance/{id}/`, and each step is recorded in `migrations/`.
     "records": 68851, "sha256": "…",
     "coverage": { "kind": "contracts", "stype": "raw_symbol", "symbols": ["SPY   261002C00728000", "…"], "window": [1790946000000000000, 1790985600000000000] },
     "pending": false, "conflict": false }
-], "missing_volumes": [] }
+], "missing_volumes": [], "scanned_at": 1792500000.0 }
 ```
 
 Every day the catalog counts for that provider is there: days in the store
@@ -287,3 +318,10 @@ the next time that day is filed.
 
 An unreadable folder, a malformed manifest or a batch's unreadable
 `metadata.json` is a `500`, never an answer with days left out.
+
+`/coverage` answers from what the last scan found (`scanned_at`, seconds
+since the epoch), and reads the manifests of the matching schema folders as
+they are now, so a merge into a partial day shows at once. A filing, an
+import, a merge, or a change of what is ignored asks for a rescan; until it
+is done `/coverage` waits (at most 60 seconds, then `503`), so a day just
+filed is never missed.

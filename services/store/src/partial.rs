@@ -840,6 +840,7 @@ fn of_parent(parent: &str, symbol: &str) -> bool {
 /// # Errors
 /// If a folder of the provider or the dataset can't be read, or a manifest
 /// or a batch's metadata is malformed: never an answer with days left out.
+#[cfg(test)]
 pub fn coverage(
     volumes: &[(String, PathBuf)],
     provider: &str,
@@ -849,50 +850,52 @@ pub fn coverage(
     start: &str,
     end: &str,
 ) -> Result<Vec<Value>, String> {
+    let mut found = Vec::new();
+    for (volume, root) in volumes.iter().filter(|(_, r)| r.is_dir()) {
+        found.push((volume.as_str(), crate::catalog::places(root)?));
+    }
+    let index: Vec<(&str, &[crate::catalog::Place])> =
+        found.iter().map(|(v, p)| (*v, p.as_slice())).collect();
+    coverage_in(&index, provider, dataset, symbol, schema, start, end)
+}
+
+/// As [`coverage`], from the places a scan found on each volume (`index`),
+/// and the current manifests of the matching schema folders, so a merge into
+/// a partial day shows at once.
+///
+/// # Errors
+/// If a matching schema folder's manifest is malformed.
+pub fn coverage_in(
+    index: &[(&str, &[crate::catalog::Place])],
+    provider: &str,
+    dataset: &str,
+    symbol: Option<&str>,
+    schema: &str,
+    start: &str,
+    end: &str,
+) -> Result<Vec<Value>, String> {
     let mut copies: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let wanted = |day: &str| day >= start && day <= end;
-    for (volume, root) in volumes.iter().filter(|(_, r)| r.is_dir()) {
-        for place in crate::catalog::places(root)? {
+    for &(volume, places) in index {
+        for place in places {
             match place {
-                crate::catalog::Place::Store { provider: p, dir }
-                    if ours(p.as_deref(), provider) && dir.ends_with(dataset) =>
+                crate::catalog::Place::Days {
+                    provider: p,
+                    dataset: d,
+                    symbol: s,
+                    schema: k,
+                    dir,
+                    days,
+                } if ours(p.as_deref(), provider)
+                    && d.eq_ignore_ascii_case(dataset)
+                    && s.as_deref() == symbol
+                    && k == schema =>
                 {
-                    let mut dir = dir;
-                    if let Some(s) = symbol {
-                        dir = dir.join(s);
-                    }
-                    let dir = dir.join(schema);
-                    let entries = match fs::read_dir(&dir) {
-                        Ok(e) => e,
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                        Err(e) => return Err(format!("{}: {e}", dir.display())),
-                    };
-                    let manifest = read_manifest(&dir)?;
-                    for e in entries {
-                        let e = e.map_err(|e| format!("{}: {e}", dir.display()))?;
-                        let name = e.file_name().to_string_lossy().into_owned();
-                        let (day, filed) = match import_day(&name) {
-                            Some(day) => (day, true),
-                            // The older layout: a folder of the day's files.
-                            None if name.len() == 10
-                                && ingest::day_ns(&name).is_some()
-                                && e.path().is_dir() =>
-                            {
-                                (name, false)
-                            }
-                            None => continue,
-                        };
-                        if !wanted(&day) {
-                            continue;
-                        }
-                        let (size, entry) = if filed {
-                            let size = e.metadata().map_err(|e| e.to_string())?.len();
-                            (size, manifest.get(&day))
-                        } else {
-                            (crate::catalog::usage(&e.path()).bytes, None)
-                        };
-                        let r = row(&day, volume, filed, size, entry);
-                        copies.entry(day).or_default().push(r);
+                    let manifest = read_manifest(dir)?;
+                    for (day, size, filed) in days.iter().filter(|d| wanted(&d.0)) {
+                        let entry = if *filed { manifest.get(day) } else { None };
+                        let r = row(day, volume, *filed, *size, entry);
+                        copies.entry(day.clone()).or_default().push(r);
                     }
                 }
                 crate::catalog::Place::Batch {
@@ -924,7 +927,7 @@ pub fn coverage(
                     };
                     for (i, day) in h.days().into_iter().enumerate() {
                         if wanted(&day) {
-                            let size = if i == 0 { size } else { 0 };
+                            let size = if i == 0 { *size } else { 0 };
                             let r = held_row(&day, volume, size, &contracts, (h.start, h.end));
                             copies.entry(day).or_default().push(r);
                         }
@@ -1705,7 +1708,8 @@ mod tests {
         // A name that doesn't say its day: the query's, given as dates.
         let mut odd = q.clone();
         odd["start"] = json!("2026-10-08T00:00:00Z");
-        odd["end"] = json!("2026-10-09");
+        // Its end excluded, as Databento means it.
+        odd["end"] = json!("2026-10-10");
         raw_batch(
             &vol.join("Databento/OPRA-U"),
             &odd,
@@ -1821,7 +1825,7 @@ mod tests {
         );
         // Without a manifest, and no DBN: its query's days.
         let csv = vol.join("misc/deeper/still/OPRA-C");
-        put(&csv.join("metadata.json"), json!({ "query": { "dataset": "OPRA.PILLAR", "schema": "cbbo-1m", "symbols": ["SPY.OPT"], "start": "2026-10-09", "end": "2026-10-09" } }).to_string().as_bytes());
+        put(&csv.join("metadata.json"), json!({ "query": { "dataset": "OPRA.PILLAR", "schema": "cbbo-1m", "symbols": ["SPY.OPT"], "start": "2026-10-09", "end": "2026-10-10" } }).to_string().as_bytes());
         put(&csv.join("opra-pillar-20261009.cbbo-1m.csv"), b"a,b");
         // Not counted: Alpaca's provider folder.
         put(
@@ -2023,6 +2027,50 @@ mod tests {
             held("QQQ.OPT"),
             ["2026-10-04 complete", "2026-10-05 complete"]
         );
+    }
+
+    #[test]
+    fn the_stores_own_folders_and_receipts_hold_nothing() {
+        let vol = scratch("own-folders");
+        let q = json!({ "dataset": "OPRA.PILLAR", "schema": "cbbo-1m", "symbols": ["SPY.OPT"], "start": "2026-10-01", "end": "2026-10-04" });
+        let receipts = |dir: PathBuf, manifest: bool| {
+            put(
+                &dir.join("metadata.json"),
+                json!({ "query": q }).to_string().as_bytes(),
+            );
+            put(&dir.join(IMPORT), b"{}");
+            if manifest {
+                put(&dir.join("manifest.json"), b"{}");
+            }
+        };
+        receipts(vol.join("Databento/provenance/OPRA-P"), true);
+        receipts(vol.join("Databento/provenance/OPRA-Q"), false);
+        put(
+            &vol.join("Databento/migrations/2026-10-19-import-x.events.jsonl"),
+            b"{}",
+        );
+        // A download with its manifest but no data holds nothing either.
+        receipts(vol.join("Databento/downloads/OPRA-E"), true);
+        assert_eq!(spy_coverage(&vol), Vec::<Value>::new());
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        assert_eq!(
+            (cat["datasets"].clone(), cat["errors"].clone()),
+            (json!([]), json!([]))
+        );
+        // Without its manifest, outside the store's folders, its query
+        // counts, the end excluded; an end later in a day includes it.
+        receipts(vol.join("Databento/downloads/OPRA-F"), false);
+        assert_eq!(
+            days_of(&spy_coverage(&vol)),
+            ["2026-10-01", "2026-10-02", "2026-10-03"]
+        );
+        let mut late = q.clone();
+        late["end"] = json!("2026-10-04T12:00:00Z");
+        put(
+            &vol.join("Databento/downloads/OPRA-F/metadata.json"),
+            json!({ "query": late }).to_string().as_bytes(),
+        );
+        assert_eq!(spy_coverage(&vol).len(), 4);
     }
 
     #[test]

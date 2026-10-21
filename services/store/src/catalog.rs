@@ -42,10 +42,24 @@ pub fn severity(status: &str) -> u8 {
 /// One root: `{ name, path, present, volume: { total_bytes, available_bytes,
 /// used_fraction, status }, datasets: [{ provider, id, symbol, filed, sources,
 /// schemas: { schema: { files, bytes, symbols, days: { "YYYY-MM-DD": bytes },
-/// partial, unfiled } } }], dataset_bytes, unrecognised: [names], errors }`.
+/// partial, unfiled } } }], dataset_bytes, unrecognised: [names], errors,
+/// pending_files }`.
+#[cfg(test)]
 pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
+    scan_volume(name, path, t, &[]).0
+}
+
+/// As [`scan_root`], skipping the `ignored` paths, with every place found
+/// (the index `/coverage` answers from).
+pub fn scan_volume(
+    name: &str,
+    path: &Path,
+    t: Thresholds,
+    ignored: &[PathBuf],
+) -> (Value, Vec<Place>) {
     if !path.is_dir() {
-        return json!({ "name": name, "path": path, "present": false, "datasets": [], "unrecognised": [], "errors": [], "pending_files": [] });
+        let root = json!({ "name": name, "path": path, "present": false, "datasets": [], "unrecognised": [], "errors": [], "pending_files": [] });
+        return (root, Vec::new());
     }
     let volume = match shared_folder_filesystem(path) {
         // Folders shared into a container by Docker Desktop report the
@@ -57,7 +71,10 @@ pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
         None => volume(path, t),
     };
 
-    let mut scan = Scan::default();
+    let mut scan = Scan {
+        skip: ignored.iter().cloned().collect(),
+        ..Scan::default()
+    };
     let mut unrecognised = Vec::new();
     let mut other = Vec::new();
     for entry in listing(path, true, &mut scan) {
@@ -73,19 +90,19 @@ pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
     }
     let Scan {
         datasets,
-        mut errors,
+        errors,
         pending,
+        places,
         ..
     } = scan;
-    errors.sort();
-    errors.dedup();
+    let errors = described(errors, name);
     let other_bytes: u64 = other.iter().filter_map(|o| o["bytes"].as_u64()).sum();
     let dataset_bytes: u64 = datasets
         .values()
         .flat_map(|d| d.schemas.values())
         .map(|s| s.bytes)
         .sum();
-    json!({
+    let root = json!({
         "name": name,
         "path": path,
         "present": true,
@@ -97,7 +114,24 @@ pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
         "unrecognised": unrecognised,
         "errors": errors,
         "pending_files": pending,
-    })
+    });
+    (root, places)
+}
+
+/// Each error, once, with how to skip its path if it should be: an operator
+/// can ignore a path the store can't read (`POST /volumes/{name}/ignore`).
+fn described(mut errors: Vec<(PathBuf, String)>, volume: &str) -> Vec<String> {
+    errors.sort();
+    errors.dedup();
+    errors
+        .into_iter()
+        .map(|(path, e)| {
+            format!(
+                "{e} (to skip {0} for good: POST /volumes/{volume}/ignore with {{\"path\": \"{0}\", \"reason\": \"…\"}})",
+                path.display()
+            )
+        })
+        .collect()
 }
 
 /// The store's name for the provider whose top-level folder this is, case
@@ -112,9 +146,15 @@ pub fn provider_name(folder: &str) -> Option<String> {
 /// folder without its manifest, by its query), or any other DBN file, by its
 /// header.
 pub enum Place {
-    Store {
+    /// A schema folder in the store layout, with its day files (or older
+    /// day folders, not filed) and their sizes.
+    Days {
         provider: Option<String>,
+        dataset: String,
+        symbol: Option<String>,
+        schema: String,
         dir: PathBuf,
+        days: Vec<(String, u64, bool)>,
     },
     Batch {
         provider: Option<String>,
@@ -133,14 +173,21 @@ pub enum Place {
 /// # Errors
 /// If a folder can't be read, or a manifest, a batch's metadata or a DBN
 /// file's header is unreadable.
+#[cfg(test)]
 pub fn places(root: &Path) -> Result<Vec<Place>, String> {
-    let mut scan = Scan::default();
-    for entry in listing(root, true, &mut scan) {
-        top(&entry, &mut scan);
-    }
-    match scan.errors.first() {
-        Some(e) => Err(e.clone()),
-        None => Ok(scan.places),
+    let (r, places) = scan_volume(
+        "v",
+        root,
+        Thresholds {
+            warning: 100.0,
+            critical: 100.0,
+            floor: 100.0,
+        },
+        &[],
+    );
+    match r["errors"][0].as_str() {
+        Some(e) => Err(e.to_owned()),
+        None => Ok(places),
     }
 }
 
@@ -148,6 +195,12 @@ pub fn places(root: &Path) -> Result<Vec<Place>, String> {
 /// then every DBN file they didn't claim. Returns whether any were found.
 fn top(entry: &Path, scan: &mut Scan) -> bool {
     let provider = provider_name(&file_name(entry));
+    // The store's own records in a provider's folder hold no data.
+    if provider.is_some() {
+        for own in OWN {
+            scan.skip.insert(entry.join(own));
+        }
+    }
     let found = visit(entry, 0, provider.as_deref(), scan);
     loose(entry, provider.as_deref(), scan) || found
 }
@@ -216,13 +269,26 @@ fn key(provider: Option<&str>, id: &str, symbol: Option<&str>) -> Key {
 #[derive(Default)]
 struct Scan {
     datasets: BTreeMap<Key, Dataset>,
-    /// Folders, manifests, metadata or headers that couldn't be read.
-    errors: Vec<String>,
+    /// Folders, manifests, metadata or headers that couldn't be read, by path.
+    errors: Vec<(PathBuf, String)>,
+    /// Paths never counted: the store's own folders, and those an operator
+    /// ignores.
+    skip: HashSet<PathBuf>,
     places: Vec<Place>,
     /// Files and folders the layouts have counted.
     claimed: HashSet<PathBuf>,
     /// DBN files still being written, read again on the next scan.
     pending: Vec<String>,
+}
+
+/// Folders the store writes in a provider's folder: receipts and its
+/// ledger, never data. (Uploads wait in the hidden `.incoming`.)
+const OWN: [&str; 2] = ["provenance", "migrations"];
+
+impl Scan {
+    fn fail(&mut self, path: &Path, e: String) {
+        self.errors.push((path.to_path_buf(), e));
+    }
 }
 
 /// How recently a file whose header can't be read must have changed to be
@@ -266,10 +332,6 @@ fn visit(dir: &Path, depth: usize, provider: Option<&str>, scan: &mut Scan) -> b
     }
     let name = file_name(dir);
     if is_dataset_name(&name) {
-        scan.places.push(Place::Store {
-            provider: provider.map(str::to_owned),
-            dir: dir.to_path_buf(),
-        });
         return store_dataset(dir, &name, provider, scan);
     }
     if dir.join("metadata.json").is_file() && dir.join("manifest.json").is_file() {
@@ -296,7 +358,9 @@ fn loose(path: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
         return false;
     }
     if meta.is_dir() {
-        let mut found = path.join("metadata.json").is_file() && unmanifested(path, provider, scan);
+        let mut found = path.join("metadata.json").is_file()
+            && !path.join("manifest.json").exists()
+            && unmanifested(path, provider, scan);
         for child in listing(path, true, scan) {
             found |= loose(&child, provider, scan);
         }
@@ -323,7 +387,7 @@ fn loose(path: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
             if recent {
                 scan.pending.push(path.display().to_string());
             } else {
-                scan.errors.push(e);
+                scan.fail(path, e);
             }
             return false;
         }
@@ -378,7 +442,7 @@ fn unmanifested(dir: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
     {
         Ok(m) => m,
         Err(e) => {
-            scan.errors.push(format!("{}: {e}", path.display()));
+            scan.fail(dir, format!("{}: {e}", path.display()));
             return false;
         }
     };
@@ -404,7 +468,7 @@ fn unmanifested(dir: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
         return false;
     }
     let (Some(days), Some(schema)) = (query_days(q), q["schema"].as_str()) else {
-        scan.errors.push(format!(
+        scan.fail(dir, format!(
             "{}: a download without its manifest, whose metadata.json gives no query start, end and schema",
             dir.display()
         ));
@@ -532,9 +596,10 @@ fn add_days(dir: &Path, k: &Key, schema: &str, scan: &mut Scan) -> bool {
     // Partial days are those the folder's manifest lists (its coverage); an
     // unreadable manifest is an error of the volume.
     let partial = crate::partial::read_manifest(dir).unwrap_or_else(|e| {
-        scan.errors.push(e);
+        scan.fail(dir, e);
         BTreeMap::new()
     });
+    let mut held = Vec::new();
     for f in listing(dir, true, scan) {
         let n = file_name(&f);
         let (day, size, encoding) = if let Some(day) =
@@ -552,6 +617,7 @@ fn add_days(dir: &Path, k: &Key, schema: &str, scan: &mut Scan) -> bool {
             continue;
         };
         scan.claimed.insert(f.clone());
+        held.push((day.clone(), size, encoding != "day folders"));
         let s = scan
             .datasets
             .entry(k.clone())
@@ -570,6 +636,17 @@ fn add_days(dir: &Path, k: &Key, schema: &str, scan: &mut Scan) -> bool {
         }
         *s.days.entry(day).or_default() += size;
         any = true;
+    }
+    if any {
+        let (provider, dataset, symbol) = k.clone();
+        scan.places.push(Place::Days {
+            provider,
+            dataset,
+            symbol,
+            schema: schema.to_owned(),
+            dir: dir.to_path_buf(),
+            days: held,
+        });
     }
     any
 }
@@ -662,8 +739,9 @@ fn days_between(first: &str, last: &str) -> Vec<String> {
         .collect()
 }
 
-/// The days of a batch's query, from its `metadata.json`: `start` to `end`
-/// as nanoseconds (end excluded) or dates (end counted, to be safe).
+/// The days of a batch's query, from its `metadata.json`: `start` to `end`,
+/// the end excluded (as Databento means it), as nanoseconds or as dates
+/// (`YYYY-MM-DD`, with a time or not).
 fn query_days(q: &Value) -> Option<Vec<String>> {
     let day = |v: &Value, end: bool| -> Option<String> {
         let ns = v.as_u64().or_else(|| {
@@ -677,11 +755,19 @@ fn query_days(q: &Value) -> Option<Vec<String>> {
             } else {
                 ns
             })),
-            None => v
-                .as_str()
-                .and_then(|s| s.get(..10))
-                .filter(|d| crate::ingest::day_ns(d).is_some())
-                .map(str::to_owned),
+            None => {
+                let s = v.as_str()?;
+                let ns = crate::ingest::day_ns(s.get(..10)?)?;
+                // An end at midnight excludes that day; later in it, includes it.
+                let time = s[10..].trim_start_matches(['T', ' ']);
+                let time = &time[..time.find(['Z', '+', '-']).unwrap_or(time.len())];
+                let midnight = !time.bytes().any(|b| (b'1'..=b'9').contains(&b));
+                Some(crate::ingest::day_of(if end && midnight {
+                    ns.saturating_sub(1)
+                } else {
+                    ns
+                }))
+            }
         }
     };
     let days = days_between(&day(&q["start"], false)?, &day(&q["end"], true)?);
@@ -774,7 +860,7 @@ fn databento_batch(dir: &Path, provider: Option<&str>, scan: &mut Scan) -> bool 
         Ok(Some(b)) if !b.files.is_empty() => b,
         Ok(_) => return false,
         Err(e) => {
-            scan.errors.push(e);
+            scan.fail(dir, e);
             return false;
         }
     };
@@ -862,13 +948,20 @@ pub fn read_entries(dir: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// As [`read_entries`]; when `strict` (a provider's or a dataset's folder),
 /// a folder that can't be read is noted as an error.
+/// Paths the scan skips are left out.
 fn listing(dir: &Path, strict: bool, scan: &mut Scan) -> Vec<PathBuf> {
-    read_entries(dir).unwrap_or_else(|e| {
-        if strict {
-            scan.errors.push(e);
+    match read_entries(dir) {
+        Ok(mut entries) => {
+            entries.retain(|e| !scan.skip.contains(e));
+            entries
         }
-        Vec::new()
-    })
+        Err(e) => {
+            if strict {
+                scan.fail(dir, e);
+            }
+            Vec::new()
+        }
+    }
 }
 
 fn file_name(p: &Path) -> String {

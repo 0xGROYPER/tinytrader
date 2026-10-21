@@ -17,7 +17,7 @@ const SCHEMA: &str = "tinytrader.store-state/1";
 
 /// The state file: `{ schema, volumes: { name: { path, writable,
 /// require_mount, held } }, retired: [{ name, path, retired_at, held }],
-/// accepted_empty: [...] }`.
+/// accepted_empty: [...], ignored: [...] }`.
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
 pub struct Remembered {
     #[serde(default)]
@@ -30,6 +30,9 @@ pub struct Remembered {
     /// held_before }`.
     #[serde(default)]
     pub accepted_empty: Vec<Value>,
+    /// Paths an operator said to skip: `{ volume, path, reason, by, at }`.
+    #[serde(default)]
+    pub ignored: Vec<Value>,
 }
 
 /// A volume the store has used.

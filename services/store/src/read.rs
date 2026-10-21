@@ -31,7 +31,18 @@ pub fn list(volumes: &[Volume], pattern: &str, provider: Option<&str>, limit: us
     let mut truncated = false;
     'volumes: for v in volumes {
         let mut found = Vec::new();
-        walk(&v.path, &v.path, &mut found);
+        match provider {
+            // Only that provider's folders are walked.
+            Some(p) => {
+                for top in fs::read_dir(&v.path).into_iter().flatten().flatten() {
+                    let name = top.file_name().to_string_lossy().into_owned();
+                    if name.eq_ignore_ascii_case(p) && top.path().is_dir() {
+                        walk(&v.path, &top.path(), &mut found);
+                    }
+                }
+            }
+            None => walk(&v.path, &v.path, &mut found),
+        }
         found.sort();
         for (rel, bytes) in found {
             let name = format!("{}/{rel}", v.name);
