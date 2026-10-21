@@ -1130,6 +1130,19 @@ struct SubmitMissing {
     confirm_usd: Option<f64>,
 }
 
+/// Paid purchases are paused until the guards of decision 0019 are built:
+/// anything not priced at exactly $0 is refused (a NaN or negative price
+/// too); free requests go through.
+fn paused(cost_usd: f64) -> Option<Reply> {
+    let free = cost_usd == 0.0;
+    (!free).then(|| {
+        refused(
+            StatusCode::FORBIDDEN,
+            format!("this costs ${cost_usd:.2}, and paid purchases are paused (decision 0019)"),
+        )
+    })
+}
+
 async fn submit_missing(AxState(jobs): AxState<Shared>, Json(s): Json<SubmitMissing>) -> Reply {
     let Some(quote) = lock(&jobs.missing_quotes).remove(&s.quote) else {
         return refused(
@@ -1168,6 +1181,9 @@ async fn submit_missing(AxState(jobs): AxState<Shared>, Json(s): Json<SubmitMiss
                 days.len()
             ),
         );
+    }
+    if let Some(r) = paused(now) {
+        return r;
     }
     if now > 0.0 && s.confirm_usd.is_none_or(|c| (c - now).abs() > 1e-9) {
         return refused(
@@ -1404,6 +1420,9 @@ async fn submit(AxState(jobs): AxState<Shared>, Json(s): Json<Submit>) -> Reply 
                 quote.cost_usd
             ),
         );
+    }
+    if let Some(r) = paused(now) {
+        return r;
     }
     if now > 0.0 && s.confirm_usd.is_none_or(|c| (c - now).abs() > 1e-9) {
         return refused(
@@ -1980,5 +1999,17 @@ mod tests {
             .check()
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod paused_tests {
+    #[test]
+    fn only_an_exact_zero_is_free() {
+        assert!(super::paused(0.0).is_none());
+        assert!(super::paused(-0.0).is_none());
+        for c in [0.01, 1e-12, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(super::paused(c).is_some(), "{c} must be refused");
+        }
     }
 }
