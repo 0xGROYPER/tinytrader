@@ -619,6 +619,10 @@ mod tests {
             "outside Databento's folder"
         );
         assert!(
+            whole(&copy("v1", json!(null), "SPY.OPT")),
+            "outside Databento's folder, even on a volume /coverage lists"
+        );
+        assert!(
             whole(&copy("v1", json!("databento"), "spy.opt")),
             "spelled differently"
         );
