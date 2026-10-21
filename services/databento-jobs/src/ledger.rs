@@ -6,12 +6,14 @@
 //! - `sending`: about to submit this exact request (written first);
 //! - `submitted`: Databento answered with this job ID;
 //! - `uncertain`: the submission failed or its outcome is unknown;
-//! - `not-submitted`: reconciliation found no job for an uncertain one.
+//! - `not-submitted`: the operator found it was never made
+//!   (`POST /ledger/resolve`); nothing writes this on its own.
 //!
 //! A request whose latest step is `sending` or `uncertain` may already have
-//! been bought, so it can't be submitted again until reconciled against
-//! Databento's job list: matched to the job it created, or, after
-//! [`SETTLE_SECONDS`] with no such job, recorded as not submitted.
+//! been bought, so it blocks every purchase it overlaps until it is found on
+//! Databento's job list (then `submitted`, with its job) or resolved by the
+//! operator. Never by time alone: a job that doesn't show yet may still be
+//! one (decision 0019).
 
 use std::collections::HashSet;
 use std::fs;
@@ -19,10 +21,6 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-
-/// How long a submission may take to appear in Databento's job list before
-/// an uncertain one is taken as never created.
-pub const SETTLE_SECONDS: f64 = 600.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -105,9 +103,9 @@ impl Ledger {
         self.entries.iter().rev().find(|e| e.request == request)
     }
 
-    /// The step that blocks submitting `request` again, if any.
+    /// The latest step of `request`, if it is unresolved.
     #[must_use]
-    pub fn blocking(&self, request: &str) -> Option<&Entry> {
+    pub fn unresolved_step(&self, request: &str) -> Option<&Entry> {
         self.latest(request)
             .filter(|e| e.state == "sending" || e.state == "uncertain")
     }
@@ -125,13 +123,19 @@ impl Ledger {
             .collect()
     }
 
-    /// Every submission here that Databento accepted (a job, so a purchase).
+    /// Every purchase made here, or that may have been: each step with a job
+    /// (whatever its state), and each request whose latest step is
+    /// unresolved.
     #[must_use]
-    pub fn purchases(&self) -> Vec<&Entry> {
-        self.entries
+    pub fn purchases(&self) -> Vec<Entry> {
+        let mut out: Vec<Entry> = self
+            .entries
             .iter()
-            .filter(|e| e.state == "submitted" && e.job.is_some())
-            .collect()
+            .filter(|e| e.job.is_some())
+            .cloned()
+            .collect();
+        out.extend(self.unresolved());
+        out
     }
 
     /// Every job ID submitted here.
@@ -171,20 +175,24 @@ mod tests {
         {
             let mut l = Ledger::open(&path).unwrap();
             l.append(entry(&r, "sending", None)).unwrap();
-            assert!(l.blocking(&r).is_some());
+            assert!(l.unresolved_step(&r).is_some());
             l.append(entry(&r, "uncertain", None)).unwrap();
         }
-        // Reopened (a restart): still blocked, and listed for reconciliation.
+        // Reopened (a restart): still a purchase, and listed for reconciliation.
         let mut l = Ledger::open(&path).unwrap();
-        assert_eq!(l.blocking(&r).map(|e| e.state.as_str()), Some("uncertain"));
-        assert_eq!(l.unresolved().len(), 1);
+        assert_eq!(
+            l.unresolved_step(&r).map(|e| e.state.as_str()),
+            Some("uncertain")
+        );
+        assert_eq!((l.unresolved().len(), l.purchases().len()), (1, 1));
         l.append(entry(&r, "submitted", Some("OPRA-1"))).unwrap();
-        assert!(l.blocking(&r).is_none());
+        assert!(l.unresolved_step(&r).is_none());
         assert!(l.unresolved().is_empty());
         assert!(l.submitted().contains("OPRA-1"));
-        // A different request is never blocked by this one.
+        // Still a purchase once found, and after its job is gone.
+        assert_eq!(l.purchases().len(), 1);
         assert!(
-            l.blocking(&fingerprint(
+            l.unresolved_step(&fingerprint(
                 "OPRA.PILLAR",
                 "cmbp-1",
                 &["QQQ.OPT".into()],

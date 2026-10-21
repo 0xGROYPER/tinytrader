@@ -1,7 +1,7 @@
 //! Buying only what's missing (decision 0018, section 5): for each day of a
 //! request on an option parent (`SPY.OPT`), the contracts wanted (that day's
-//! definitions, filtered by a rule) less those the store holds and those in
-//! jobs on Databento's list, bought as one contract-list request per day.
+//! definitions, filtered by a rule) less what's had already (`had`), bought
+//! as contract-list requests per day.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -95,47 +95,6 @@ pub fn wanted(defs: &[Contract], day: time::Date, rule: &Rule) -> BTreeSet<Strin
         .collect()
 }
 
-/// What a day needs, given what's wanted, the store's coverage of that day
-/// (from `GET /coverage`: none, complete, or partial with contracts), and
-/// the contract lists of jobs on Databento's list for that day (`None` in the
-/// list: a job for the whole parent).
-#[must_use]
-pub fn to_buy(
-    wanted: &BTreeSet<String>,
-    held: Option<&Value>,
-    pending: &[Option<BTreeSet<String>>],
-) -> (BTreeSet<String>, usize, usize) {
-    let all = wanted.len();
-    if held.is_some_and(|h| h["kind"] == "complete") {
-        return (BTreeSet::new(), all, 0);
-    }
-    let held: BTreeSet<&str> = held
-        .map(|h| {
-            h["coverage"]["symbols"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut rest: BTreeSet<String> = wanted
-        .iter()
-        .filter(|s| !held.contains(s.as_str()))
-        .cloned()
-        .collect();
-    let after_held = rest.len();
-    if pending.iter().any(Option::is_none) {
-        rest.clear();
-    }
-    for p in pending.iter().flatten() {
-        rest.retain(|s| !p.contains(s));
-    }
-    let skipped_held = all - after_held;
-    let skipped_pending = after_held - rest.len();
-    (rest, skipped_held, skipped_pending)
-}
-
 /// The option parent (`SPY.OPT`) whose contracts these all are, if they are
 /// all OCC symbols of one root.
 #[must_use]
@@ -148,10 +107,12 @@ pub fn parent_of(symbols: &[String]) -> Option<String> {
         .then(|| format!("{first}.OPT"))
 }
 
-/// A day's line in a quote.
+/// A request in a quote: one day's contracts over that whole day, or over
+/// the hours of it they still need.
 #[derive(Clone, Debug)]
 pub struct Day {
     pub day: time::Date,
+    pub window: crate::had::Window,
     pub symbols: Vec<String>,
     pub cost_usd: f64,
     pub bytes: u64,
@@ -163,7 +124,9 @@ impl Day {
     #[must_use]
     pub fn to_json(&self) -> Value {
         json!({
-            "day": self.day.to_string(), "contracts": self.symbols.len(), "cost_usd": self.cost_usd,
+            "day": self.day.to_string(), "contracts": self.symbols.len(),
+            "window": [crate::had::stamp(self.window.0), crate::had::stamp(self.window.1)],
+            "hours": self.window != crate::had::day_window(self.day), "cost_usd": self.cost_usd,
             "billable_bytes": self.bytes, "skipped_held": self.skipped_held, "skipped_pending": self.skipped_pending,
         })
     }
@@ -229,27 +192,6 @@ mod tests {
             },
         );
         assert_eq!(week.len(), 3);
-    }
-
-    #[test]
-    fn subtracts_held_and_pending_contracts() {
-        let w: BTreeSet<String> = ["A", "B", "C", "D"].map(String::from).into();
-        let partial = json!({ "kind": "partial", "coverage": { "symbols": ["A", "B"] } });
-        let (rest, h, p) = to_buy(&w, Some(&partial), &[Some(["C".to_owned()].into())]);
-        assert_eq!((rest, h, p), (["D".to_owned()].into(), 2, 1));
-        let complete = json!({ "kind": "complete" });
-        assert!(to_buy(&w, Some(&complete), &[]).0.is_empty());
-        assert_eq!(
-            to_buy(&w, None, &[None]),
-            (BTreeSet::new(), 0, 4),
-            "a whole-parent job pending covers the day, counted as pending"
-        );
-        assert_eq!(
-            to_buy(&w, Some(&partial), &[None]),
-            (BTreeSet::new(), 2, 2),
-            "held contracts count as held, the rest as pending"
-        );
-        assert_eq!(to_buy(&w, None, &[]).0.len(), 4);
     }
 
     #[test]
