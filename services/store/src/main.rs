@@ -300,6 +300,7 @@ fn router(store: Shared, token: WriteToken) -> Router {
         .route("/adopt/{provider}", post(adopt))
         .route("/volumes/approve", post(approve))
         .route("/volumes/{name}/retire", post(retire))
+        .route("/volumes/{name}/accept-empty", post(accept_empty))
         .route("/files", get(list_files))
         .route("/files/{volume}/{*path}", get(send_file))
         .layer(axum::middleware::from_fn(
@@ -374,10 +375,7 @@ async fn scan(store: &Shared, observer: &Observer) {
                     && root["datasets"].as_array().is_none_or(Vec::is_empty)
                     && let Some(errors) = root["errors"].as_array_mut()
                 {
-                    errors.push(json!(format!(
-                        "{} held datasets when last read, and now holds none; is the right drive mounted?",
-                        v.path.display()
-                    )));
+                    errors.push(json!(emptied(v)));
                 }
                 root["writable"] = json!(v.writable);
                 root
@@ -1111,6 +1109,101 @@ async fn approve(AxState(store): AxState<Shared>, Json(req): Json<ApproveRequest
     }
 }
 
+/// Why a volume that held datasets and now holds none is missing, and what
+/// to do about it.
+fn emptied(v: &Volume) -> String {
+    format!(
+        "{} held datasets when last read, and now holds none; mount the right drive, or if it really is empty now, POST /volumes/{}/accept-empty",
+        v.path.display(),
+        v.name
+    )
+}
+
+#[derive(Deserialize, Default)]
+struct AcceptEmpty {
+    /// Who says so, for the record.
+    by: Option<String>,
+}
+
+/// Accept that a mounted volume which held datasets is now empty (decision
+/// 0019): it is no longer missing for that, and the state file keeps a
+/// record of who said so, when, and what it held before. Only a volume that
+/// is mounted and scans with no datasets, and no errors, is accepted.
+async fn accept_empty(
+    AxState(store): AxState<Shared>,
+    UrlPath(name): UrlPath<String>,
+    body: axum::body::Bytes,
+) -> Reply {
+    let req: AcceptEmpty = if body.is_empty() {
+        AcceptEmpty::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => return refused(StatusCode::BAD_REQUEST, e.to_string()),
+        }
+    };
+    let Some(volume) = store.volumes().into_iter().find(|v| v.name == name) else {
+        return refused(StatusCode::NOT_FOUND, format!("no volume {name}"));
+    };
+    if let Err(e) = volumes::present(&volume) {
+        return refused(StatusCode::CONFLICT, e);
+    }
+    let (path, limits) = (volume.path.clone(), store.limits);
+    let root =
+        match tokio::task::spawn_blocking(move || catalog::scan_root(&name, &path, limits)).await {
+            Ok(r) => r,
+            Err(e) => return refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
+    if root["datasets"].as_array().is_some_and(|d| !d.is_empty())
+        || root["errors"].as_array().is_some_and(|e| !e.is_empty())
+    {
+        return refused(
+            StatusCode::CONFLICT,
+            format!("{} doesn't scan empty: {}", volume.name, root["errors"]),
+        );
+    }
+    let record = {
+        let mut r = lock(&store.remembered);
+        let Some(k) = r.volumes.get_mut(&volume.name) else {
+            return refused(StatusCode::NOT_FOUND, format!("no volume {}", volume.name));
+        };
+        let before = std::mem::replace(&mut k.held, json!({}));
+        let record = json!({
+            "name": volume.name, "path": volume.path, "accepted_at": unix_seconds(),
+            "by": req.by, "held_before": before,
+        });
+        r.accepted_empty.push(record.clone());
+        if let Err(e) = state::save(&store.state_path, &r) {
+            r.accepted_empty.pop();
+            if let Some(k) = r.volumes.get_mut(&volume.name) {
+                k.held = before;
+            }
+            return refused(StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
+        record
+    };
+    {
+        let reason = emptied(&volume);
+        let mut c = lock(&store.catalog);
+        for root in c["roots"].as_array_mut().into_iter().flatten() {
+            if root["name"] == volume.name.as_str()
+                && let Some(e) = root["errors"].as_array_mut()
+            {
+                e.retain(|x| x != reason.as_str());
+            }
+        }
+        if let Some(m) = c["missing_volumes"].as_array_mut() {
+            m.retain(|x| x != volume.name.as_str());
+        }
+    }
+    store.events.push(
+        format!("accepted volume {} as empty", volume.name),
+        record.to_string(),
+    );
+    store.rescan.notify_one();
+    reply(StatusCode::OK, record)
+}
+
 /// Forget a remembered volume that is away for good (decision 0019): it no
 /// longer counts as missing, and the state file keeps a record of what it
 /// held when last seen, and when it was retired. A volume that is mounted
@@ -1313,6 +1406,8 @@ mod tests {
             ("/import/databento/I1", ""),
             ("/adopt/databento", APPROVE),
             ("/volumes/approve", APPROVE),
+            ("/volumes/v/accept-empty", ""),
+            ("/volumes/v/retire", ""),
         ] {
             assert_eq!(status(&addr, "POST", path, None, body).await, 401, "{path}");
             // Past the guard, the store answers for itself (not 401).
@@ -1480,16 +1575,22 @@ mod tests {
         let state_file = dir.join("state.json");
         let s = store(&[("v", &vol)], &state_file);
         scanned(&s).await;
+        let addr = serve_store(s.clone(), WriteToken::open()).await;
+        const ACCEPT: &str = "/volumes/v/accept-empty";
+        let by = r#"{"by":"operator"}"#;
+        assert_eq!(
+            status(&addr, "POST", ACCEPT, None, by).await,
+            409,
+            "it isn't empty"
+        );
         std::fs::remove_dir_all(vol.join("Databento")).unwrap();
         scanned(&s).await;
-        let addr = serve_store(s, WriteToken::open()).await;
         let (_, cat) = get(&addr, "/catalog").await;
         assert_eq!(cat["missing_volumes"], json!(["v"]));
+        let why = cat["roots"][0]["errors"][0].as_str().unwrap();
         assert!(
-            cat["roots"][0]["errors"][0]
-                .as_str()
-                .unwrap()
-                .contains("now holds none")
+            why.contains("now holds none") && why.contains(ACCEPT),
+            "{why}"
         );
         let (_, cov) = get(&addr, COVERAGE).await;
         assert_eq!(cov["missing_volumes"], json!(["v"]));
@@ -1497,6 +1598,33 @@ mod tests {
         assert!(state::held_any(
             &state::load(&state_file).unwrap().volumes["v"]
         ));
+
+        // Accepted as empty: no longer missing, and the record kept.
+        assert_eq!(
+            status(&addr, "POST", "/volumes/zz/accept-empty", None, "").await,
+            404
+        );
+        let (code, body) = call(&addr, "POST", ACCEPT, None, by).await;
+        assert_eq!(code, 200, "{body}");
+        let (_, cat) = get(&addr, "/catalog").await;
+        assert_eq!(cat["missing_volumes"], json!([]));
+        let (_, cov) = get(&addr, COVERAGE).await;
+        assert_eq!(cov["missing_volumes"], json!([]));
+        let after = state::load(&state_file).unwrap();
+        assert!(!state::held_any(&after.volumes["v"]));
+        let record = &after.accepted_empty[0];
+        assert_eq!(record["by"], "operator");
+        assert!(record["accepted_at"].is_number());
+        assert_eq!(
+            record["held_before"]["databento/OPRA.PILLAR/SPY.OPT"]["cbbo-1m"]["days"],
+            1
+        );
+        scanned(&s).await;
+        assert_eq!(
+            lock(&s.catalog)["missing_volumes"],
+            json!([]),
+            "and stays so"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -26,6 +26,7 @@ Shared conventions are in the [API overview](README.md).
 | `POST /adopt/{provider}` | write | File a download folder already on a volume, where it is. |
 | `POST /volumes/approve` | write | Approve a drive found in the mount directory. |
 | `POST /volumes/{name}/retire` | write | Forget a remembered volume that is away for good ([below](#remembered-volumes)). |
+| `POST /volumes/{name}/accept-empty` | write | Accept that a mounted volume which held datasets is now empty ([below](#post-volumesnameaccept-empty)). |
 
 Writes are refused from a web page of another origin.
 
@@ -88,12 +89,25 @@ bought again), so they say what the store holds or say they can't
   symbol, or a file's name doesn't say its days, the batch counts every day of
   its query (`start` and `end` in `metadata.json`); without them it is an
   error.
+- No DBN file on a volume goes uncounted. Every `.dbn` or `.dbn.zst` file
+  the layouts above don't account for (named some other way, deeper than the
+  layouts are read, loose) is counted from its own header (dataset, schema,
+  symbols, start and end), under the provider folder it is in, or
+  `databento`, as not filed. A file of a list of contracts (`stype_in
+  raw_symbol`) holds those contracts, partially; otherwise the header's
+  symbols, whole. Hidden folders, such as a provider's `.incoming`, are
+  skipped. Headers are read once and kept while a file's size and last change
+  stay the same.
+- A download folder with `metadata.json` but no `manifest.json` (one
+  extracted by hand) counts by its files' headers, or, when it has no DBN
+  files or has data in other encodings, by every day of its query.
 - A volume is missing, with the reason in its root's `errors`, when a folder
-  on it can't be read; when it has a batch download deeper than the catalog
-  reads (four folders down); when its path must be a mount point and isn't
-  (an empty folder left in `/Volumes` by a drive that wasn't unmounted
+  on it can't be read; when a DBN file's header, a manifest or a batch's
+  `metadata.json` can't be read; when its path must be a mount point and
+  isn't (an empty folder left in `/Volumes` by a drive that wasn't unmounted
   cleanly); or when it held datasets when last read in full and now holds
-  none.
+  none ([accept it as empty](#post-volumesnameaccept-empty) if it really
+  is).
 
 ### `GET /catalog`
 
@@ -138,6 +152,26 @@ as missing, and the state file keeps a record of it under `retired`:
 volume is mounted, `404` for a volume the store doesn't know. A volume named
 in `STORE_VOLUMES` comes back when the store restarts; take it out of the
 configuration too.
+
+#### `POST /volumes/{name}/accept-empty`
+
+A volume that held datasets when last read in full, and now holds none, is
+missing: most often the wrong drive, or an empty folder, is mounted there.
+When it really has been emptied, say so, optionally with who you are:
+
+```json
+{ "by": "dawson" }
+```
+
+It is accepted only while it is mounted and scans with no datasets and no
+errors (`409` otherwise, `404` for a volume the store doesn't know). It is
+then no longer missing, and the state file keeps a record under
+`accepted_empty`:
+
+```json
+{ "name": "newdrive", "path": "/Volumes/NewDrive", "accepted_at": 1792500000.0, "by": "dawson",
+  "held_before": { "databento/OPRA.PILLAR/SPY.OPT": { "cbbo-1m": { "days": 21, "first": "2026-09-01", "last": "2026-09-30", "bytes": 123456 } } } }
+```
 
 ## Reading files
 

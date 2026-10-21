@@ -15,8 +15,9 @@ use crate::ingest::sync_dir;
 
 const SCHEMA: &str = "tinytrader.store-state/1";
 
-/// The state file: `{ schema, volumes: { name: { path, writable, held } },
-/// retired: [{ name, path, retired_at, held }] }`.
+/// The state file: `{ schema, volumes: { name: { path, writable,
+/// require_mount, held } }, retired: [{ name, path, retired_at, held }],
+/// accepted_empty: [...] }`.
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
 pub struct Remembered {
     #[serde(default)]
@@ -25,6 +26,10 @@ pub struct Remembered {
     pub volumes: BTreeMap<String, Known>,
     #[serde(default)]
     pub retired: Vec<Value>,
+    /// Volumes accepted as empty: `{ name, path, accepted_at, by,
+    /// held_before }`.
+    #[serde(default)]
+    pub accepted_empty: Vec<Value>,
 }
 
 /// A volume the store has used.
