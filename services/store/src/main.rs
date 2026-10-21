@@ -366,7 +366,7 @@ async fn scan(store: &Shared, observer: &Observer) {
                 let mut root = match volumes::present(v) {
                     Ok(()) => catalog::scan_root(&v.name, &v.path, limits),
                     Err(e) => {
-                        json!({ "name": v.name, "path": v.path, "present": false, "datasets": [], "unrecognised": [], "errors": [e] })
+                        json!({ "name": v.name, "path": v.path, "present": false, "datasets": [], "unrecognised": [], "errors": [e], "pending_files": [] })
                     }
                 };
                 // Data that was there and is gone is unknown, not absent.

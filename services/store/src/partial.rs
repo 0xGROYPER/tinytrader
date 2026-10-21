@@ -748,14 +748,35 @@ fn row(day: &str, volume: &str, filed: bool, size: u64, entry: Option<&Value>) -
     }
 }
 
+/// Does data of `found` (a provider, or none outside every provider's
+/// folder) count for `provider`? Data with no provider counts for Databento,
+/// whose layout and names it has: a copy in a backup still blocks buying it
+/// again.
+fn ours(found: Option<&str>, provider: &str) -> bool {
+    found.unwrap_or("databento") == provider
+}
+
+/// Symbol types whose symbols say what they hold.
+const CLASSIFIED: [&str; 5] = [
+    "parent",
+    "raw_symbol",
+    "continuous",
+    "nasdaq_symbol",
+    "cms_symbol",
+];
+
 /// What a holding of `symbols`, requested as `stype_in`, holds of `symbol`
 /// (or, with none, of the dataset): `None` nothing, an empty set all of it,
-/// otherwise those of its contracts the holding lists.
+/// otherwise those of its contracts the holding lists. Symbols that can't be
+/// told apart (instrument IDs, or no type) hold all of it, to be safe.
 fn holds(
     symbols: &[String],
     stype_in: Option<&str>,
     symbol: Option<&str>,
 ) -> Option<BTreeSet<String>> {
+    if symbols.is_empty() || !stype_in.is_some_and(|t| CLASSIFIED.contains(&t)) {
+        return Some(BTreeSet::new());
+    }
     let all = symbols
         .iter()
         .any(|s| s.eq_ignore_ascii_case("ALL_SYMBOLS"));
@@ -833,11 +854,8 @@ pub fn coverage(
     for (volume, root) in volumes.iter().filter(|(_, r)| r.is_dir()) {
         for place in crate::catalog::places(root)? {
             match place {
-                // A dataset in the store layout outside any provider's folder
-                // has Databento's layout, and counts as Databento's.
                 crate::catalog::Place::Store { provider: p, dir }
-                    if p.as_deref().unwrap_or("databento") == provider
-                        && dir.ends_with(dataset) =>
+                    if ours(p.as_deref(), provider) && dir.ends_with(dataset) =>
                 {
                     let mut dir = dir;
                     if let Some(s) = symbol {
@@ -880,7 +898,7 @@ pub fn coverage(
                 crate::catalog::Place::Batch {
                     provider: p,
                     batch: b,
-                } if p == provider && b.dataset == dataset => {
+                } if ours(p.as_deref(), provider) && b.dataset.eq_ignore_ascii_case(dataset) => {
                     let Some(contracts) = holds(&b.symbols, b.stype_in.as_deref(), symbol) else {
                         continue;
                     };
@@ -897,8 +915,8 @@ pub fn coverage(
                     provider: p,
                     header: h,
                     size,
-                } if p == provider
-                    && h.dataset == dataset
+                } if ours(p.as_deref(), provider)
+                    && h.dataset.eq_ignore_ascii_case(dataset)
                     && h.schema.as_deref().is_none_or(|s| s == schema) =>
                 {
                     let Some(contracts) = holds(&h.symbols, h.stype_in.as_deref(), symbol) else {
@@ -1733,8 +1751,19 @@ mod tests {
     /// A cbbo-1m DBN file of no records whose header lists `symbols`
     /// (requested as `stype`) from `first` to `last` (whole days).
     fn header_bytes(symbols: &[&str], stype: SType, first: &str, last: &str) -> Vec<u8> {
+        header_of("OPRA.PILLAR", symbols, stype, first, last)
+    }
+
+    /// As `header_bytes`, of `dataset`.
+    fn header_of(
+        dataset: &str,
+        symbols: &[&str],
+        stype: SType,
+        first: &str,
+        last: &str,
+    ) -> Vec<u8> {
         let m = Metadata::builder()
-            .dataset("OPRA.PILLAR")
+            .dataset(dataset)
             .schema(Some(Schema::Cbbo1M))
             .start(ingest::day_ns(first).unwrap())
             .end(NonZeroU64::new(
@@ -1832,13 +1861,36 @@ mod tests {
             .find(|d| d["provider"] == "databento" && d["symbol"] == "SPY.OPT")
             .unwrap();
         assert_eq!(ds["filed"], false);
+        // Outside Databento's folder (the download at the top, the one in
+        // misc) they have no provider.
+        let elsewhere = cat["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["provider"].is_null())
+            .map(|d| d["schemas"]["cbbo-1m"]["days"].as_object().unwrap().len())
+            .sum::<usize>();
+        assert_eq!(elsewhere, 3, "{cat}");
         assert_eq!(
             ds["schemas"]["cbbo-1m"]["days"].as_object().unwrap().len(),
-            6,
+            4,
             "{ds}"
         );
-        // A header that can't be read is an error, not skipped.
-        put(&vol.join("Databento/junk.dbn.zst"), b"not dbn");
+        // A header that can't be read, changed just now, is being written:
+        // pending, read again next scan. Older, it is an error.
+        let junk = vol.join("Databento/junk.dbn.zst");
+        put(&junk, b"not dbn");
+        assert_eq!(spy(&[("v", &vol)], "databento").unwrap().len(), 7);
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        assert_eq!(cat["errors"], json!([]));
+        assert_eq!(cat["pending_files"], json!([junk.display().to_string()]));
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(200);
+        fs::File::options()
+            .write(true)
+            .open(&junk)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         assert!(
             spy(&[("v", &vol)], "databento")
                 .unwrap_err()
@@ -1846,6 +1898,7 @@ mod tests {
         );
         let cat = crate::catalog::scan_root("v", &vol, T);
         assert!(cat["errors"][0].as_str().unwrap().contains("junk"), "{cat}");
+        assert_eq!(cat["pending_files"], json!([]));
     }
 
     fn spy_coverage(vol: &Path) -> Vec<Value> {
@@ -1869,15 +1922,107 @@ mod tests {
             .set_modified(at)
             .unwrap();
         assert_eq!(spy_coverage(&vol).len(), 1, "from the cache");
-        // Changed: read again.
-        let later = at + std::time::Duration::from_secs(1);
+        // Changed (and not just now, so not taken as being written).
+        let earlier = at - std::time::Duration::from_secs(200);
         fs::File::options()
             .write(true)
             .open(&file)
             .unwrap()
-            .set_modified(later)
+            .set_modified(earlier)
             .unwrap();
         assert!(spy(&[("v", &vol)], "databento").is_err());
+    }
+
+    #[test]
+    fn data_outside_provider_folders_has_no_provider() {
+        let vol = scratch("no-provider-files");
+        // Databento's data in a backup, its dataset spelled another way.
+        put(
+            &vol.join("backups/old/spy.dbn.zst"),
+            &header_of(
+                "opra.pillar",
+                &["SPY.OPT"],
+                SType::Parent,
+                "2026-10-03",
+                "2026-10-03",
+            ),
+        );
+        // A crypto recording.
+        put(
+            &vol.join("coinbase/btc.dbn.zst"),
+            &header_of(
+                "COINBASE.L2",
+                &["BTC-USD"],
+                SType::RawSymbol,
+                "2026-10-03",
+                "2026-10-03",
+            ),
+        );
+        put(
+            &vol.join("Alpaca/spy.dbn.zst"),
+            &header_bytes(&["SPY.OPT"], SType::Parent, "2026-10-04", "2026-10-04"),
+        );
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        let providers: Vec<(Value, Value)> = cat["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| (d["provider"].clone(), d["id"].clone()))
+            .collect();
+        assert_eq!(
+            providers,
+            [
+                (Value::Null, json!("COINBASE.L2")),
+                (Value::Null, json!("opra.pillar")),
+                (json!("alpaca"), json!("OPRA.PILLAR")),
+            ]
+        );
+        // The backup's copy blocks a Databento purchase; Alpaca's doesn't.
+        assert_eq!(days_of(&spy_coverage(&vol)), ["2026-10-03"]);
+        assert_eq!(
+            days_of(&spy(&[("v", &vol)], "alpaca").unwrap()),
+            ["2026-10-04"]
+        );
+    }
+
+    #[test]
+    fn instrument_ids_hold_every_symbol_of_the_dataset() {
+        let vol = scratch("instrument-ids");
+        put(
+            &vol.join("Databento/ids.dbn.zst"),
+            &header_bytes(&["12345"], SType::InstrumentId, "2026-10-04", "2026-10-04"),
+        );
+        put(
+            &vol.join("Databento/qqq.dbn.zst"),
+            &header_bytes(&["QQQ.OPT"], SType::Parent, "2026-10-05", "2026-10-05"),
+        );
+        let v = [("v".to_owned(), vol.clone())];
+        let held = |symbol: &str| -> Vec<String> {
+            coverage(
+                &v,
+                "databento",
+                "OPRA.PILLAR",
+                Some(symbol),
+                "cbbo-1m",
+                "2026-10-01",
+                "2026-10-09",
+            )
+            .unwrap()
+            .iter()
+            .map(|d| {
+                format!(
+                    "{} {}",
+                    d["day"].as_str().unwrap(),
+                    d["kind"].as_str().unwrap()
+                )
+            })
+            .collect()
+        };
+        assert_eq!(held("SPY.OPT"), ["2026-10-04 complete"]);
+        assert_eq!(
+            held("QQQ.OPT"),
+            ["2026-10-04 complete", "2026-10-05 complete"]
+        );
     }
 
     #[test]

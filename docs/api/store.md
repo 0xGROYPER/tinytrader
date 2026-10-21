@@ -75,10 +75,12 @@ bought again), so they say what the store holds or say they can't
   `500` instead. An empty list means every volume was read.
 - Every dataset has a `provider`, the store's name for the volume's top-level
   folder it sits in, case ignored (`Databento/` and `databento/` are both
-  `databento`; `Alpaca/` is `alpaca`). A Databento batch download outside any
-  provider's folder is `databento`; a dataset in the store layout outside any
-  provider's folder has no provider (`null`) in the catalog, and counts as
-  Databento's in `/coverage`. Datasets are listed by
+  `databento`; `Alpaca/` is `alpaca`). Data outside every provider's folder
+  (a batch download at the top of a volume, a backup, `tmp`, a crypto
+  recording) has no provider (`null`) in the catalog, with the dataset,
+  schema and symbols its files say, and counts as Databento's in
+  `/coverage`, so a copy of Databento's data anywhere blocks buying it again,
+  while a recording of another dataset never matches. Datasets are listed by
   provider, id and symbol, never merged across providers: each vendor's ids
   stay its own.
 - `filed` is true when every day of the dataset is in the store layout.
@@ -92,12 +94,14 @@ bought again), so they say what the store holds or say they can't
 - No DBN file on a volume goes uncounted. Every `.dbn` or `.dbn.zst` file
   the layouts above don't account for (named some other way, deeper than the
   layouts are read, loose) is counted from its own header (dataset, schema,
-  symbols, start and end), under the provider folder it is in, or
-  `databento`, as not filed. A file of a list of contracts (`stype_in
+  symbols, start and end), under the provider folder it is in, if any, as not
+  filed. A file of a list of contracts (`stype_in
   raw_symbol`) holds those contracts, partially; otherwise the header's
   symbols, whole. Hidden folders, such as a provider's `.incoming`, are
   skipped. Headers are read once and kept while a file's size and last change
-  stay the same.
+  stay the same. A file whose header can't be read yet and that changed in
+  the last two minutes is taken as still being written: it is listed in its
+  root's `pending_files` and read again on the next scan.
 - A download folder with `metadata.json` but no `manifest.json` (one
   extracted by hand) counts by its files' headers, or, when it has no DBN
   files or has data in other encodings, by every day of its query.
@@ -267,7 +271,9 @@ layout, complete or partial by the schema folder's manifest, and days in a
 batch download or a day folder of the older layout, as `complete` with
 `"filed": false`. A batch bought as a list of contracts (`stype_in
 raw_symbol`) holds those of the symbol's contracts, for its whole day, as
-`partial`.
+`partial`. A dataset is matched ignoring case. Data whose symbols can't be
+told apart (requested by instrument ID, or with no symbol type) is taken to
+hold every symbol of its dataset, whole, for the days it covers.
 
 A day held on several volumes, or in several forms, is one row. `volumes`
 names them all. If any copy is complete the day is complete; otherwise its

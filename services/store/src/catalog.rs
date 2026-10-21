@@ -10,8 +10,9 @@
 //! Each dataset belongs to a provider, named for the volume's top-level folder
 //! it sits in (case ignored: `Databento/` and `databento/` are one provider),
 //! and is listed by provider, id and symbol, never merged across providers
-//! (decision 0019). A folder of a provider or a dataset that can't be read is
-//! an error of the volume, not an empty folder.
+//! (decision 0019). Data outside every provider's folder (a batch download
+//! at the top of a volume, a backup, a recording) has no provider. A folder
+//! that can't be read is an error of the volume, not an empty folder.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -44,7 +45,7 @@ pub fn severity(status: &str) -> u8 {
 /// partial, unfiled } } }], dataset_bytes, unrecognised: [names], errors }`.
 pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
     if !path.is_dir() {
-        return json!({ "name": name, "path": path, "present": false, "datasets": [], "unrecognised": [], "errors": [] });
+        return json!({ "name": name, "path": path, "present": false, "datasets": [], "unrecognised": [], "errors": [], "pending_files": [] });
     }
     let volume = match shared_folder_filesystem(path) {
         // Folders shared into a container by Docker Desktop report the
@@ -73,6 +74,7 @@ pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
     let Scan {
         datasets,
         mut errors,
+        pending,
         ..
     } = scan;
     errors.sort();
@@ -94,6 +96,7 @@ pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
         "other_bytes": other_bytes,
         "unrecognised": unrecognised,
         "errors": errors,
+        "pending_files": pending,
     })
 }
 
@@ -114,11 +117,11 @@ pub enum Place {
         dir: PathBuf,
     },
     Batch {
-        provider: String,
+        provider: Option<String>,
         batch: Batch,
     },
     Loose {
-        provider: String,
+        provider: Option<String>,
         header: Header,
         size: u64,
     },
@@ -146,7 +149,7 @@ pub fn places(root: &Path) -> Result<Vec<Place>, String> {
 fn top(entry: &Path, scan: &mut Scan) -> bool {
     let provider = provider_name(&file_name(entry));
     let found = visit(entry, 0, provider.as_deref(), scan);
-    loose(entry, provider.as_deref().unwrap_or("databento"), scan) || found
+    loose(entry, provider.as_deref(), scan) || found
 }
 
 /// Space on the volume holding `path`, classified against the thresholds.
@@ -218,7 +221,13 @@ struct Scan {
     places: Vec<Place>,
     /// Files and folders the layouts have counted.
     claimed: HashSet<PathBuf>,
+    /// DBN files still being written, read again on the next scan.
+    pending: Vec<String>,
 }
+
+/// How recently a file whose header can't be read must have changed to be
+/// taken as still being written.
+const WRITING: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[derive(Default)]
 struct Schema {
@@ -264,8 +273,7 @@ fn visit(dir: &Path, depth: usize, provider: Option<&str>, scan: &mut Scan) -> b
         return store_dataset(dir, &name, provider, scan);
     }
     if dir.join("metadata.json").is_file() && dir.join("manifest.json").is_file() {
-        // A batch outside any provider's folder is Databento's.
-        return databento_batch(dir, provider.unwrap_or("databento"), scan);
+        return databento_batch(dir, provider, scan);
     }
     let mut found = false;
     for child in listing(dir, true, scan) {
@@ -275,10 +283,12 @@ fn visit(dir: &Path, depth: usize, provider: Option<&str>, scan: &mut Scan) -> b
 }
 
 /// Count every DBN file under `path` that the layouts didn't claim, from its
-/// header, as `provider`'s (decision 0019), and a download folder without its
-/// manifest by its query. Hidden folders (such as `.incoming`) are skipped.
-/// Returns whether any were found.
-fn loose(path: &Path, provider: &str, scan: &mut Scan) -> bool {
+/// header, as `provider`'s if in its folder (decision 0019), and a download
+/// folder without its manifest by its query. Hidden folders (such as
+/// `.incoming`) are skipped. A file whose header can't be read yet, changed
+/// in the last two minutes, is still being written: it is listed as pending
+/// and read again on the next scan. Returns whether any were found.
+fn loose(path: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
     };
@@ -305,14 +315,23 @@ fn loose(path: &Path, provider: &str, scan: &mut Scan) -> bool {
     let h = match header(path) {
         Ok(h) => h,
         Err(e) => {
-            scan.errors.push(e);
+            let recent = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < WRITING);
+            if recent {
+                scan.pending.push(path.display().to_string());
+            } else {
+                scan.errors.push(e);
+            }
             return false;
         }
     };
     let raw = h.stype_in.as_deref() == Some("raw_symbol");
     let k = match h.symbols.as_slice() {
-        [one] if !raw => key(Some(provider), &h.dataset, Some(one)),
-        _ => key(Some(provider), &h.dataset, None),
+        [one] if !raw => key(provider, &h.dataset, Some(one)),
+        _ => key(provider, &h.dataset, None),
     };
     let d = scan.datasets.entry(k).or_default();
     let source = format!("files in {}", path.parent().unwrap_or(path).display());
@@ -341,7 +360,7 @@ fn loose(path: &Path, provider: &str, scan: &mut Scan) -> bool {
         }
     }
     scan.places.push(Place::Loose {
-        provider: provider.to_owned(),
+        provider: provider.map(str::to_owned),
         header: h,
         size: meta.len(),
     });
@@ -351,7 +370,7 @@ fn loose(path: &Path, provider: &str, scan: &mut Scan) -> bool {
 /// A download folder with `metadata.json` but no manifest, such as one
 /// extracted by hand: its DBN files are counted by their headers; when it
 /// has none, or has data in other encodings, every day of its query counts.
-fn unmanifested(dir: &Path, provider: &str, scan: &mut Scan) -> bool {
+fn unmanifested(dir: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
     let path = dir.join("metadata.json");
     let meta: Value = match std::fs::read_to_string(&path)
         .map_err(|e| e.to_string())
@@ -750,7 +769,7 @@ pub fn read_batch(dir: &Path) -> Result<Option<Batch>, String> {
 
 /// A Databento batch download, listed under its one symbol, or under none
 /// when it has several. Its days are unfiled.
-fn databento_batch(dir: &Path, provider: &str, scan: &mut Scan) -> bool {
+fn databento_batch(dir: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
     let b = match read_batch(dir) {
         Ok(Some(b)) if !b.files.is_empty() => b,
         Ok(_) => return false,
@@ -764,10 +783,10 @@ fn databento_batch(dir: &Path, provider: &str, scan: &mut Scan) -> bool {
 }
 
 /// Count a batch's days, unfiled, under its one symbol or under none.
-fn count_batch(b: Batch, provider: &str, scan: &mut Scan) -> bool {
+fn count_batch(b: Batch, provider: Option<&str>, scan: &mut Scan) -> bool {
     let k = match b.symbols.as_slice() {
-        [one] => key(Some(provider), &b.dataset, Some(one)),
-        _ => key(Some(provider), &b.dataset, None),
+        [one] => key(provider, &b.dataset, Some(one)),
+        _ => key(provider, &b.dataset, None),
     };
     let d = scan.datasets.entry(k).or_default();
     for (day, schema, encoding, size) in &b.files {
@@ -787,7 +806,7 @@ fn count_batch(b: Batch, provider: &str, scan: &mut Scan) -> bool {
     }
     d.sources.push(format!("databento batch {}", b.job));
     scan.places.push(Place::Batch {
-        provider: provider.to_owned(),
+        provider: provider.map(str::to_owned),
         batch: b,
     });
     true
@@ -907,26 +926,19 @@ mod tests {
                 .unwrap()
                 .clone()
         };
-        // The store layout outside a provider's folder has no provider; the
-        // batch download beside it is Databento's, and listed apart.
+        // Outside every provider's folder, the store layout and the batch
+        // download beside it have no provider, and are one dataset.
         let ds = &find("OPRA.PILLAR");
         assert_eq!(ds["id"], "OPRA.PILLAR");
         assert_eq!(
             (ds["provider"].clone(), ds["filed"].clone()),
-            (Value::Null, json!(true))
+            (Value::Null, json!(false))
         );
         assert_eq!(ds["schemas"]["definition"]["days"]["2026-09-01"], 3);
         assert_eq!(ds["symbol"], "SPY.OPT");
-        let batch = r["datasets"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|d| d["id"] == "OPRA.PILLAR" && d["provider"] == "databento")
-            .unwrap();
-        assert_eq!(batch["symbol"], "SPY.OPT");
-        assert_eq!(batch["filed"], false);
-        assert_eq!(batch["schemas"]["cmbp-1"]["days"]["2026-10-02"], 5);
-        assert_eq!(batch["schemas"]["cmbp-1"]["unfiled"], json!(["2026-10-02"]));
+        assert_eq!(ds["schemas"]["cmbp-1"]["days"]["2026-10-02"], 5);
+        assert_eq!(ds["schemas"]["cmbp-1"]["unfiled"], json!(["2026-10-02"]));
+        assert_eq!(ds["sources"].as_array().unwrap().len(), 2);
         assert_eq!(r["unrecognised"], json!(["misc"]));
         assert_eq!(r["other"][0]["bytes"], 8, "hidden folders count");
         let older = r["datasets"]
