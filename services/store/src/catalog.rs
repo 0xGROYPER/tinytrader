@@ -4,6 +4,12 @@
 //! (`<Provider>/<DATASET>/[<symbol>/]<schema>/<YYYY-MM-DD>.dbn.zst`, which
 //! follows Databento's file naming) and Databento batch downloads (folders
 //! holding `metadata.json` and `manifest.json`).
+//!
+//! Each dataset belongs to a provider, named for the volume's top-level folder
+//! it sits in (case ignored: `Databento/` and `databento/` are one provider),
+//! and is listed by provider, id and symbol, never merged across providers
+//! (decision 0019). A folder of a provider or a dataset that can't be read is
+//! an error of the volume, not an empty folder.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,12 +33,12 @@ pub fn severity(status: &str) -> u8 {
 }
 
 /// One root: `{ name, path, present, volume: { total_bytes, available_bytes,
-/// used_fraction, status }, datasets: [{ id, sources, schemas: { schema:
-/// { files, bytes, symbols, days: { "YYYY-MM-DD": bytes } } } }],
-/// dataset_bytes, unrecognised: [names] }`.
+/// used_fraction, status }, datasets: [{ provider, id, symbol, filed, sources,
+/// schemas: { schema: { files, bytes, symbols, days: { "YYYY-MM-DD": bytes },
+/// partial, unfiled } } }], dataset_bytes, unrecognised: [names], errors }`.
 pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
     if !path.is_dir() {
-        return json!({ "name": name, "path": path, "present": false, "datasets": [], "unrecognised": [] });
+        return json!({ "name": name, "path": path, "present": false, "datasets": [], "unrecognised": [], "errors": [] });
     }
     let volume = match shared_folder_filesystem(path) {
         // Folders shared into a container by Docker Desktop report the
@@ -44,11 +50,12 @@ pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
         None => volume(path, t),
     };
 
-    let mut datasets: BTreeMap<String, Dataset> = BTreeMap::new();
+    let mut scan = Scan::default();
     let mut unrecognised = Vec::new();
     let mut other = Vec::new();
-    for entry in entries(path) {
-        let found = visit(&entry, 0, &mut datasets);
+    for entry in listing(path, true, &mut scan) {
+        let provider = provider_name(&file_name(&entry));
+        let found = visit(&entry, 0, provider.as_deref(), &mut scan);
         if !found {
             let name = file_name(&entry);
             let u = usage(&entry);
@@ -58,6 +65,13 @@ pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
             unrecognised.push(name);
         }
     }
+    let Scan {
+        datasets,
+        mut errors,
+        ..
+    } = scan;
+    errors.sort();
+    errors.dedup();
     let other_bytes: u64 = other.iter().filter_map(|o| o["bytes"].as_u64()).sum();
     let dataset_bytes: u64 = datasets
         .values()
@@ -69,12 +83,53 @@ pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
         "path": path,
         "present": true,
         "volume": volume,
-        "datasets": datasets.into_iter().map(|(id, d)| d.to_json(&id)).collect::<Vec<_>>(),
+        "datasets": datasets.iter().map(|(k, d)| d.to_json(k)).collect::<Vec<_>>(),
         "dataset_bytes": dataset_bytes,
         "other": other,
         "other_bytes": other_bytes,
         "unrecognised": unrecognised,
+        "errors": errors,
     })
+}
+
+/// The store's name for the provider whose top-level folder this is, case
+/// ignored (`Databento` and `databento` are both `databento`).
+#[must_use]
+pub fn provider_name(folder: &str) -> Option<String> {
+    crate::ingest::provider_dir(folder).map(str::to_ascii_lowercase)
+}
+
+/// Where data was found on a volume: a dataset in the store layout, or a
+/// provider's batch download, with the provider it belongs to.
+pub enum Place {
+    Store {
+        provider: Option<String>,
+        dir: PathBuf,
+    },
+    Batch {
+        provider: String,
+        dir: PathBuf,
+    },
+}
+
+/// Every place on the volume at `root` holding datasets, found as the
+/// catalog finds them.
+///
+/// # Errors
+/// If a folder of a provider or a dataset can't be read.
+pub fn places(root: &Path) -> Result<Vec<Place>, String> {
+    let mut scan = Scan {
+        places_only: true,
+        ..Scan::default()
+    };
+    for entry in listing(root, true, &mut scan) {
+        let provider = provider_name(&file_name(&entry));
+        visit(&entry, 0, provider.as_deref(), &mut scan);
+    }
+    match scan.errors.first() {
+        Some(e) => Err(e.clone()),
+        None => Ok(scan.places),
+    }
 }
 
 /// Space on the volume holding `path`, classified against the thresholds.
@@ -125,10 +180,27 @@ struct Dataset {
     schemas: BTreeMap<String, Schema>,
 }
 
-/// The key a dataset is listed under: its name, and its symbol when the
-/// layout has a symbol level.
-fn key(id: &str, symbol: Option<&str>) -> String {
-    symbol.map_or_else(|| id.to_owned(), |s| format!("{id} {s}"))
+/// The key a dataset is listed under: its provider, its id, and its symbol
+/// when the layout has a symbol level.
+type Key = (Option<String>, String, Option<String>);
+
+fn key(provider: Option<&str>, id: &str, symbol: Option<&str>) -> Key {
+    (
+        provider.map(str::to_owned),
+        id.to_owned(),
+        symbol.map(str::to_owned),
+    )
+}
+
+/// What a walk of a volume found so far.
+#[derive(Default)]
+struct Scan {
+    datasets: BTreeMap<Key, Dataset>,
+    /// Folders of a provider or a dataset that couldn't be read.
+    errors: Vec<String>,
+    /// Only note where datasets are, without reading their days.
+    places_only: bool,
+    places: Vec<Place>,
 }
 
 #[derive(Default)]
@@ -140,37 +212,55 @@ struct Schema {
     days: BTreeMap<String, u64>,
     /// Days holding only some contracts (decision 0018); the rest are complete.
     partial: Vec<String>,
+    /// Days not in the store layout: in a batch download, or a day folder.
+    unfiled: Vec<String>,
 }
 
 impl Dataset {
-    fn to_json(&self, key: &str) -> Value {
-        let (id, symbol) = key
-            .split_once(' ')
-            .map_or((key, None), |(a, b)| (a, Some(b)));
+    fn to_json(&self, (provider, id, symbol): &Key) -> Value {
         let schemas: serde_json::Map<String, Value> = self
             .schemas
             .iter()
-            .map(|(k, s)| (k.clone(), json!({ "files": s.files, "bytes": s.bytes, "symbols": s.symbols, "encodings": s.encodings, "days": s.days, "partial": s.partial })))
+            .map(|(k, s)| (k.clone(), json!({ "files": s.files, "bytes": s.bytes, "symbols": s.symbols, "encodings": s.encodings, "days": s.days, "partial": s.partial, "unfiled": s.unfiled })))
             .collect();
-        json!({ "id": id, "symbol": symbol, "sources": self.sources, "schemas": schemas })
+        let filed = self.schemas.values().all(|s| s.unfiled.is_empty());
+        json!({ "provider": provider, "id": id, "symbol": symbol, "filed": filed, "sources": self.sources, "schemas": schemas })
     }
 }
 
-/// Look for datasets under `dir`; returns whether any were found.
-fn visit(dir: &Path, depth: usize, datasets: &mut BTreeMap<String, Dataset>) -> bool {
+/// Look for datasets under `dir`, in `provider`'s folder if any; returns
+/// whether any were found.
+fn visit(dir: &Path, depth: usize, provider: Option<&str>, scan: &mut Scan) -> bool {
     if !dir.is_dir() || depth > 3 {
         return false;
     }
     let name = file_name(dir);
     if is_dataset_name(&name) {
-        return store_dataset(dir, &name, datasets);
+        if scan.places_only {
+            let provider = provider.map(str::to_owned);
+            scan.places.push(Place::Store {
+                provider,
+                dir: dir.to_path_buf(),
+            });
+            return true;
+        }
+        return store_dataset(dir, &name, provider, scan);
     }
     if dir.join("metadata.json").is_file() && dir.join("manifest.json").is_file() {
-        return databento_batch(dir, datasets);
+        // A batch outside any provider's folder is Databento's.
+        let provider = provider.unwrap_or("databento");
+        if scan.places_only {
+            scan.places.push(Place::Batch {
+                provider: provider.to_owned(),
+                dir: dir.to_path_buf(),
+            });
+            return true;
+        }
+        return databento_batch(dir, provider, scan);
     }
     let mut found = false;
-    for child in entries(dir) {
-        found |= visit(&child, depth + 1, datasets);
+    for child in listing(dir, provider.is_some(), scan) {
+        found |= visit(&child, depth + 1, provider, scan);
     }
     found
 }
@@ -178,30 +268,30 @@ fn visit(dir: &Path, depth: usize, datasets: &mut BTreeMap<String, Dataset>) -> 
 /// `<DATASET>/<schema>/<day>`, or with a symbol level in between, where a
 /// day is `<YYYY-MM-DD>.dbn.zst` or a `<YYYY-MM-DD>/` folder holding that
 /// day's files (an older layout).
-fn store_dataset(dir: &Path, id: &str, datasets: &mut BTreeMap<String, Dataset>) -> bool {
+fn store_dataset(dir: &Path, id: &str, provider: Option<&str>, scan: &mut Scan) -> bool {
     let mut found = false;
     let source = format!("store: {}", dir.display());
-    let note = |datasets: &mut BTreeMap<String, Dataset>, k: String| {
-        let d = datasets.entry(k).or_default();
+    let note = |scan: &mut Scan, k: Key| {
+        let d = scan.datasets.entry(k).or_default();
         if !d.sources.contains(&source) {
             d.sources.push(source.clone());
         }
     };
-    for child in entries(dir).into_iter().filter(|c| c.is_dir()) {
-        if add_days(&child, &key(id, None), &file_name(&child), datasets) {
-            note(datasets, key(id, None));
+    for child in listing(dir, true, scan).into_iter().filter(|c| c.is_dir()) {
+        let k = key(provider, id, None);
+        if add_days(&child, &k, &file_name(&child), scan) {
+            note(scan, k);
             found = true;
             continue;
         }
         let sym = file_name(&child);
-        for grandchild in entries(&child).into_iter().filter(|c| c.is_dir()) {
-            if add_days(
-                &grandchild,
-                &key(id, Some(&sym)),
-                &file_name(&grandchild),
-                datasets,
-            ) {
-                note(datasets, key(id, Some(&sym)));
+        for grandchild in listing(&child, true, scan)
+            .into_iter()
+            .filter(|c| c.is_dir())
+        {
+            let k = key(provider, id, Some(&sym));
+            if add_days(&grandchild, &k, &file_name(&grandchild), scan) {
+                note(scan, k);
                 found = true;
             }
         }
@@ -211,12 +301,15 @@ fn store_dataset(dir: &Path, id: &str, datasets: &mut BTreeMap<String, Dataset>)
 
 /// Add every day in `dir` (a `<YYYY-MM-DD>.dbn.zst` file or a `<YYYY-MM-DD>/`
 /// folder) to the schema of the dataset listed under `k`.
-fn add_days(dir: &Path, k: &str, schema: &str, datasets: &mut BTreeMap<String, Dataset>) -> bool {
+fn add_days(dir: &Path, k: &Key, schema: &str, scan: &mut Scan) -> bool {
     let mut any = false;
     // Partial days are those the folder's manifest lists (its coverage); an
-    // unreadable manifest lists none here, and `/coverage` reports the error.
-    let partial = crate::partial::read_manifest(dir).unwrap_or_default();
-    for f in entries(dir) {
+    // unreadable manifest is an error of the volume.
+    let partial = crate::partial::read_manifest(dir).unwrap_or_else(|e| {
+        scan.errors.push(e);
+        BTreeMap::new()
+    });
+    for f in listing(dir, true, scan) {
         let n = file_name(&f);
         let (day, size, encoding) =
             if let Some(day) = n.strip_suffix(".dbn.zst").filter(|d| is_iso_date(d)) {
@@ -230,8 +323,9 @@ fn add_days(dir: &Path, k: &str, schema: &str, datasets: &mut BTreeMap<String, D
             } else {
                 continue;
             };
-        let s = datasets
-            .entry(k.to_owned())
+        let s = scan
+            .datasets
+            .entry(k.clone())
             .or_default()
             .schemas
             .entry(schema.to_owned())
@@ -241,6 +335,9 @@ fn add_days(dir: &Path, k: &str, schema: &str, datasets: &mut BTreeMap<String, D
         s.bytes += size;
         if partial.contains_key(&day) && !s.partial.contains(&day) {
             s.partial.push(day.clone());
+        }
+        if encoding == "day folders" && !s.unfiled.contains(&day) {
+            s.unfiled.push(day.clone());
         }
         *s.days.entry(day).or_default() += size;
         any = true;
@@ -297,24 +394,32 @@ fn note_encoding(s: &mut Schema, encoding: &str) {
     }
 }
 
-/// A Databento batch download: `metadata.json`, `manifest.json` and
-/// `<dataset>-<YYYYMMDD>.<schema>.<encoding>` files.
-fn databento_batch(dir: &Path, datasets: &mut BTreeMap<String, Dataset>) -> bool {
-    let meta: Value = std::fs::read_to_string(dir.join("metadata.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
-    let Some(id) = meta["query"]["dataset"].as_str() else {
-        return false;
+/// What a Databento batch download holds, from its `metadata.json` and the
+/// names of its `<dataset>-<YYYYMMDD>.<schema>.<encoding>` files.
+pub struct Batch {
+    pub dataset: String,
+    pub symbols: Vec<String>,
+    pub stype_in: Option<String>,
+    pub job: String,
+    /// Each data file: its day, schema, encoding and size.
+    pub files: Vec<(String, String, &'static str, u64)>,
+}
+
+/// Read the batch download in `dir`; `None` if its metadata names no dataset.
+///
+/// # Errors
+/// If its `metadata.json` or the folder can't be read.
+pub fn read_batch(dir: &Path) -> Result<Option<Batch>, String> {
+    let path = dir.join("metadata.json");
+    let meta: Value = std::fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let Some(dataset) = meta["query"]["dataset"].as_str() else {
+        return Ok(None);
     };
-    let symbols: Vec<String> = meta["query"]["symbols"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|s| s.as_str().map(str::to_owned))
-        .collect();
-    let mut found = false;
-    for f in entries(dir) {
+    let mut files = Vec::new();
+    for f in read_entries(dir)? {
         let n = file_name(&f);
         let Some((stem, encoding)) = ENCODINGS
             .iter()
@@ -335,38 +440,60 @@ fn databento_batch(dir: &Path, datasets: &mut BTreeMap<String, Dataset>) -> bool
         };
         let day = format!("{}-{}-{}", &compact[..4], &compact[4..6], &compact[6..]);
         let size = f.metadata().map(|m| m.len()).unwrap_or(0);
-        let k = match symbols.as_slice() {
-            [one] => key(id, Some(one)),
-            _ => key(id, None),
-        };
-        let d = datasets.entry(k).or_default();
-        let s = d.schemas.entry(schema.to_owned()).or_default();
+        files.push((day, schema.to_owned(), encoding, size));
+    }
+    Ok(Some(Batch {
+        dataset: dataset.to_owned(),
+        symbols: meta["query"]["symbols"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.as_str().map(str::to_owned))
+            .collect(),
+        stype_in: meta["query"]["stype_in"].as_str().map(str::to_owned),
+        job: meta["job_id"]
+            .as_str()
+            .map_or_else(|| file_name(dir), str::to_owned),
+        files,
+    }))
+}
+
+/// A Databento batch download, listed under its one symbol, or under none
+/// when it has several. Its days are unfiled.
+fn databento_batch(dir: &Path, provider: &str, scan: &mut Scan) -> bool {
+    let b = match read_batch(dir) {
+        Ok(Some(b)) => b,
+        Ok(None) => return false,
+        Err(e) => {
+            scan.errors.push(e);
+            return false;
+        }
+    };
+    if b.files.is_empty() {
+        return false;
+    }
+    let k = match b.symbols.as_slice() {
+        [one] => key(Some(provider), &b.dataset, Some(one)),
+        _ => key(Some(provider), &b.dataset, None),
+    };
+    let d = scan.datasets.entry(k).or_default();
+    for (day, schema, encoding, size) in &b.files {
+        let s = d.schemas.entry(schema.clone()).or_default();
         note_encoding(s, encoding);
         s.files += 1;
         s.bytes += size;
-        *s.days.entry(day).or_default() += size;
-        for sym in &symbols {
+        *s.days.entry(day.clone()).or_default() += size;
+        if !s.unfiled.contains(day) {
+            s.unfiled.push(day.clone());
+        }
+        for sym in &b.symbols {
             if !s.symbols.contains(sym) {
                 s.symbols.push(sym.clone());
             }
         }
-        found = true;
     }
-    if found {
-        let job = meta["job_id"]
-            .as_str()
-            .map_or_else(|| file_name(dir), str::to_owned);
-        let k = match symbols.as_slice() {
-            [one] => key(id, Some(one)),
-            _ => key(id, None),
-        };
-        datasets
-            .entry(k)
-            .or_default()
-            .sources
-            .push(format!("databento batch {job}"));
-    }
-    found
+    d.sources.push(format!("databento batch {}", b.job));
+    true
 }
 
 /// `VENUE.FEED`, e.g. `OPRA.PILLAR`.
@@ -392,16 +519,31 @@ fn is_iso_date(d: &str) -> bool {
 }
 
 /// Visible entries of a directory, sorted.
-fn entries(dir: &Path) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| !file_name(p).starts_with('.'))
-        .collect();
+///
+/// # Errors
+/// If the directory can't be read.
+pub fn read_entries(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let read = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut out = Vec::new();
+    for e in read {
+        let p = e.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+        if !file_name(&p).starts_with('.') {
+            out.push(p);
+        }
+    }
     out.sort();
-    out
+    Ok(out)
+}
+
+/// As [`read_entries`]; when `strict` (a provider's or a dataset's folder),
+/// a folder that can't be read is noted as an error.
+fn listing(dir: &Path, strict: bool, scan: &mut Scan) -> Vec<PathBuf> {
+    read_entries(dir).unwrap_or_else(|e| {
+        if strict {
+            scan.errors.push(e);
+        }
+        Vec::new()
+    })
 }
 
 fn file_name(p: &Path) -> String {
@@ -459,12 +601,26 @@ mod tests {
                 .unwrap()
                 .clone()
         };
+        // The store layout outside a provider's folder has no provider; the
+        // batch download beside it is Databento's, and listed apart.
         let ds = &find("OPRA.PILLAR");
         assert_eq!(ds["id"], "OPRA.PILLAR");
+        assert_eq!(
+            (ds["provider"].clone(), ds["filed"].clone()),
+            (Value::Null, json!(true))
+        );
         assert_eq!(ds["schemas"]["definition"]["days"]["2026-09-01"], 3);
         assert_eq!(ds["symbol"], "SPY.OPT");
-        assert_eq!(ds["schemas"]["cmbp-1"]["days"]["2026-10-02"], 5);
-        assert_eq!(ds["sources"].as_array().unwrap().len(), 2);
+        let batch = r["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "OPRA.PILLAR" && d["provider"] == "databento")
+            .unwrap();
+        assert_eq!(batch["symbol"], "SPY.OPT");
+        assert_eq!(batch["filed"], false);
+        assert_eq!(batch["schemas"]["cmbp-1"]["days"]["2026-10-02"], 5);
+        assert_eq!(batch["schemas"]["cmbp-1"]["unfiled"], json!(["2026-10-02"]));
         assert_eq!(r["unrecognised"], json!(["misc"]));
         assert_eq!(r["other"][0]["bytes"], 8, "hidden folders count");
         let older = r["datasets"]
@@ -475,6 +631,7 @@ mod tests {
             .unwrap();
         assert_eq!(older["symbol"], "QQQ");
         assert_eq!(older["schemas"]["cmbp-1"]["days"]["2026-09-02"], 12);
+        assert_eq!(older["filed"], false, "the older layout's day folders");
         let xnas = find("XNAS.ITCH");
         assert_eq!(xnas["schemas"]["trades"]["encodings"], json!(["csv"]));
         assert_eq!(r["dataset_bytes"], 23);

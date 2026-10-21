@@ -22,9 +22,11 @@ fn served(name: &str) -> bool {
 }
 
 /// Every served file on the volumes whose logical name matches `pattern`
-/// (`*` any run of characters, `/` included; `?` any one character), sorted,
-/// at most `limit`: `{ files: [{ name, volume, path, bytes }], truncated }`.
-pub fn list(volumes: &[Volume], pattern: &str, limit: usize) -> Value {
+/// (`*` any run of characters, `/` included; `?` any one character), and,
+/// given a `provider`, that is in that provider's top-level folder (case
+/// ignored), sorted, at most `limit`: `{ files: [{ name, volume, path, bytes
+/// }], truncated }`.
+pub fn list(volumes: &[Volume], pattern: &str, provider: Option<&str>, limit: usize) -> Value {
     let mut files = Vec::new();
     let mut truncated = false;
     'volumes: for v in volumes {
@@ -33,7 +35,8 @@ pub fn list(volumes: &[Volume], pattern: &str, limit: usize) -> Value {
         found.sort();
         for (rel, bytes) in found {
             let name = format!("{}/{rel}", v.name);
-            if !matches(pattern, &name) {
+            let top = rel.split('/').next().unwrap_or_default();
+            if !matches(pattern, &name) || provider.is_some_and(|p| !top.eq_ignore_ascii_case(p)) {
                 continue;
             }
             if files.len() == limit {
@@ -153,7 +156,7 @@ mod tests {
         fs::write(inc.join("opra-20260903.cmbp-1.dbn.zst"), b"y").unwrap();
         fs::write(d.join("loose.dbn"), b"zz").unwrap();
 
-        let all = list(std::slice::from_ref(&v), "*", MAX_LISTED);
+        let all = list(std::slice::from_ref(&v), "*", None, MAX_LISTED);
         let names: Vec<&str> = all["files"]
             .as_array()
             .unwrap()
@@ -171,11 +174,26 @@ mod tests {
         assert_eq!(all["files"][0]["volume"], "list");
         assert_eq!(all["truncated"], false);
 
-        let some = list(std::slice::from_ref(&v), "*cmbp-1*", MAX_LISTED);
+        let some = list(std::slice::from_ref(&v), "*cmbp-1*", None, MAX_LISTED);
         assert_eq!(some["files"].as_array().unwrap().len(), 1);
-        let one = list(std::slice::from_ref(&v), "*", 1);
+        let one = list(std::slice::from_ref(&v), "*", None, 1);
         assert_eq!(one["files"].as_array().unwrap().len(), 1);
         assert_eq!(one["truncated"], true);
+        // Scoped to a provider, by its folder, case ignored.
+        let alpaca = d.join("alpaca/OPRA.PILLAR/SPY.OPT/cmbp-1");
+        fs::create_dir_all(&alpaca).unwrap();
+        fs::write(alpaca.join("2026-09-01.dbn.zst"), b"a").unwrap();
+        let pattern = "*/OPRA.PILLAR/SPY.OPT/cmbp-1/*";
+        let count = |p: Option<&str>| {
+            list(std::slice::from_ref(&v), pattern, p, MAX_LISTED)["files"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+        assert_eq!(
+            (count(None), count(Some("databento")), count(Some("Alpaca"))),
+            (2, 1, 1)
+        );
         fs::remove_dir_all(&d).unwrap();
     }
 

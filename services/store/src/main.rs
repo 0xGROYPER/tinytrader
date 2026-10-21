@@ -18,11 +18,18 @@
 //!   /import/{provider}/{id}` files DBN that didn't come from a provider
 //!   batch, uploaded the same way with an `import.json`; a day file holding a
 //!   list of contracts is a partial day, merged with any partial day already
-//!   held. `GET /coverage?dataset=&symbol=&schema=&start=&end=` says, for each
-//!   day held, whether it is complete or which contracts and hours it holds.
-//! - **Reading** (see the read module): `GET /files?pattern=&limit=` lists
-//!   the DBN files the volumes hold by logical name, `<volume>/<path>`;
+//!   held. `GET /coverage?provider=&dataset=&symbol=&schema=&start=&end=`
+//!   says, for each day held, whether it is complete or which contracts and
+//!   hours it holds.
+//! - **Reading** (see the read module): `GET /files?pattern=&provider=&limit=`
+//!   lists the DBN files the volumes hold by logical name, `<volume>/<path>`;
 //!   `GET /files/{volume}/{path}` sends one. Read-only, finished files only.
+//! - **Holdings that fail closed** (decision 0019): `/catalog` and `/coverage`
+//!   answer `503` until the first scan is done. Every volume the store has
+//!   used is remembered in its state file (`STORE_STATE`), so one that is
+//!   missing is reported in `missing_volumes`, never left out. `POST
+//!   /volumes/{name}/retire` forgets one that is away for good, keeping a
+//!   record of what it held.
 //!
 //! - **Writes** (the uploads, filing, adopting and approving drives) are
 //!   refused from a web page of another origin, and, when a token is
@@ -37,6 +44,7 @@ mod catalog;
 mod ingest;
 mod partial;
 mod read;
+mod state;
 mod volumes;
 
 use std::path::{Path, PathBuf};
@@ -89,6 +97,11 @@ struct Args {
     /// Volume usage at which capture stops cleanly.
     #[arg(long, default_value_t = 97.0)]
     floor: f64,
+
+    /// The store's state file: every volume it has used. By default
+    /// `~/Library/Application Support/tinytrader/store-state.json`.
+    #[arg(long = "state", env = "STORE_STATE")]
+    state: Option<PathBuf>,
 }
 
 struct Store {
@@ -96,7 +109,11 @@ struct Store {
     volumes: std::sync::RwLock<Vec<Volume>>,
     discover: Option<PathBuf>,
     limits: Thresholds,
+    /// The last scan; null until the first is done.
     catalog: Mutex<Value>,
+    /// Every volume the store has used, kept in `state_path`.
+    remembered: Mutex<state::Remembered>,
+    state_path: PathBuf,
     events: Events,
     rescan: tokio::sync::Notify,
     bytes_in: AtomicU64,
@@ -153,7 +170,25 @@ async fn main() {
         critical: args.critical,
         floor: args.floor,
     };
-    let store = Store::new(volumes, args.discover.clone(), limits);
+    let state_path = args.state.clone().unwrap_or_else(state::default_path);
+    let remembered = match state::load(&state_path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("store: {e}");
+            std::process::exit(2);
+        }
+    };
+    let store = Store::new(
+        volumes,
+        args.discover.clone(),
+        limits,
+        state_path,
+        remembered,
+    );
+    if let Err(e) = store.remember(&[]) {
+        eprintln!("store: cannot keep the list of volumes: {e}");
+        std::process::exit(2);
+    }
     let listen = listen_address("STORE_LISTEN", "127.0.0.1:9120");
     let observer = Observer::new("store", env!("CARGO_PKG_VERSION"));
     let names = store
@@ -247,10 +282,7 @@ async fn main() {
 /// another origin, and need the bearer token when one is configured.
 fn router(store: Shared, token: WriteToken) -> Router {
     Router::new()
-        .route(
-            "/catalog",
-            get(|AxState(s): AxState<Shared>| async move { Json(lock(&s.catalog).clone()) }),
-        )
+        .route("/catalog", get(catalog))
         .route("/incoming", get(list_incoming))
         .route("/incoming/{provider}/{batch}/{file}", put(upload))
         .route("/incorporate/{provider}/{batch}", post(incorporate))
@@ -259,6 +291,7 @@ fn router(store: Shared, token: WriteToken) -> Router {
         .route("/batches/{provider}", get(batches))
         .route("/adopt/{provider}", post(adopt))
         .route("/volumes/approve", post(approve))
+        .route("/volumes/{name}/retire", post(retire))
         .route("/files", get(list_files))
         .route("/files/{volume}/{*path}", get(send_file))
         .layer(axum::middleware::from_fn(
@@ -284,6 +317,15 @@ async fn scan(store: &Shared, observer: &Observer) {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for v in found.marked {
+                // A known drive mounted somewhere new is used there.
+                if let Some(x) = list
+                    .iter_mut()
+                    .find(|x| x.name == v.name && x.path != v.path && !x.path.is_dir())
+                {
+                    eprintln!("store: drive {} is now at {}", v.name, v.path.display());
+                    x.path = v.path;
+                    continue;
+                }
                 if !list.iter().any(|x| x.path == v.path || x.name == v.name) {
                     eprintln!(
                         "store: using approved drive {} at {}",
@@ -320,21 +362,28 @@ async fn scan(store: &Shared, observer: &Observer) {
         .max_by_key(|s| catalog::severity(s))
         .unwrap_or("ok")
         .to_owned();
+    // A volume that isn't there, or whose datasets couldn't all be read, is
+    // missing: what it holds is unknown.
     let missing: Vec<&str> = scanned
         .iter()
-        .filter(|r| r["present"] != true)
+        .filter(|r| r["present"] != true || r["errors"].as_array().is_some_and(|e| !e.is_empty()))
         .filter_map(|r| r["name"].as_str())
         .collect();
-    let detail = if missing.is_empty() {
+    let mut detail = if missing.is_empty() {
         format!("{} volumes; fullest {worst}", scanned.len())
     } else {
         format!("missing: {}", missing.join(", "))
     };
+    if let Err(e) = store.remember(&scanned) {
+        eprintln!("store: cannot keep the list of volumes: {e}");
+        detail = format!("{detail}; cannot keep the list of volumes: {e}");
+    }
     let degraded = !missing.is_empty() || catalog::severity(&worst) >= 2;
     *lock(&store.catalog) = json!({
         "generated_at": unix_seconds(),
         "thresholds": { "warning": store.limits.warning, "critical": store.limits.critical, "floor": store.limits.floor },
         "roots": scanned,
+        "missing_volumes": missing,
         "candidates": candidates,
         "discover": store.discover,
     });
@@ -349,12 +398,31 @@ async fn scan(store: &Shared, observer: &Observer) {
 }
 
 impl Store {
-    fn new(volumes: Vec<Volume>, discover: Option<PathBuf>, limits: Thresholds) -> Shared {
+    /// A store over the configured volumes, then every remembered volume the
+    /// configuration doesn't name, so one that is missing is reported.
+    fn new(
+        mut volumes: Vec<Volume>,
+        discover: Option<PathBuf>,
+        limits: Thresholds,
+        state_path: PathBuf,
+        remembered: state::Remembered,
+    ) -> Shared {
+        for (name, k) in &remembered.volumes {
+            if !volumes.iter().any(|v| &v.name == name) {
+                volumes.push(Volume {
+                    name: name.clone(),
+                    path: k.path.clone(),
+                    writable: k.writable,
+                });
+            }
+        }
         Arc::new(Self {
             volumes: std::sync::RwLock::new(volumes),
             discover,
             limits,
-            catalog: Mutex::new(json!({ "generated_at": null, "roots": [] })),
+            catalog: Mutex::new(Value::Null),
+            remembered: Mutex::new(remembered),
+            state_path,
             events: Events::default(),
             rescan: tokio::sync::Notify::new(),
             bytes_in: AtomicU64::new(0),
@@ -368,6 +436,34 @@ impl Store {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Remember every volume in use, and what each root scanned whole holds;
+    /// the state file is written when that changes.
+    fn remember(&self, roots: &[Value]) -> Result<(), String> {
+        let mut r = lock(&self.remembered);
+        let before = r.clone();
+        for v in self.volumes() {
+            let k = r.volumes.entry(v.name.clone()).or_insert(state::Known {
+                path: v.path.clone(),
+                writable: v.writable,
+                held: Value::Null,
+            });
+            k.path = v.path;
+            k.writable = v.writable;
+        }
+        for root in roots
+            .iter()
+            .filter(|x| x["present"] == true && x["errors"].as_array().is_some_and(Vec::is_empty))
+        {
+            if let Some(k) = root["name"].as_str().and_then(|n| r.volumes.get_mut(n)) {
+                k.held = state::held(root);
+            }
+        }
+        if *r == before {
+            return Ok(());
+        }
+        state::save(&self.state_path, &r)
     }
 
     /// Every writable volume's share of an incoming batch.
@@ -628,10 +724,21 @@ async fn import(
     }
 }
 
+/// The last scan, or `503` until the first is done.
+async fn catalog(AxState(store): AxState<Shared>) -> Reply {
+    let c = lock(&store.catalog).clone();
+    if c.is_null() {
+        return refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the store is still scanning",
+        );
+    }
+    reply(StatusCode::OK, c)
+}
+
 #[derive(Deserialize)]
 struct CoverageQuery {
-    #[serde(default = "databento")]
-    provider: String,
+    provider: Option<String>,
     dataset: String,
     symbol: Option<String>,
     schema: String,
@@ -639,19 +746,30 @@ struct CoverageQuery {
     end: String,
 }
 
-fn databento() -> String {
-    "databento".into()
-}
-
-/// Each held day of a dataset, symbol and schema: complete, or partial with
-/// the contracts and hours it holds (decision 0018).
+/// Each held day of a provider's dataset, symbol and schema: complete, or
+/// partial with the contracts and hours it holds (decision 0018), on any
+/// volume, filed or not, and the remembered volumes that are missing
+/// (decision 0019).
 async fn coverage(AxState(store): AxState<Shared>, Query(q): Query<CoverageQuery>) -> Reply {
-    let Some(pdir) = ingest::provider_dir(&q.provider) else {
+    if lock(&store.catalog).is_null() {
         return refused(
-            StatusCode::NOT_FOUND,
-            format!("unknown provider {}", q.provider),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the store is still scanning",
+        );
+    }
+    let Some(provider) = q.provider.as_deref() else {
+        return refused(
+            StatusCode::BAD_REQUEST,
+            "give the provider (provider=databento or provider=alpaca)",
         );
     };
+    let Some(pdir) = ingest::provider_dir(provider) else {
+        return refused(
+            StatusCode::NOT_FOUND,
+            format!("unknown provider {provider}"),
+        );
+    };
+    let provider = pdir.to_ascii_lowercase();
     if !ingest::safe(&q.dataset)
         || !ingest::safe(&q.schema)
         || q.symbol.as_deref().is_some_and(|s| !ingest::safe(s))
@@ -660,12 +778,19 @@ async fn coverage(AxState(store): AxState<Shared>, Query(q): Query<CoverageQuery
     }
     let roots: Vec<(String, PathBuf)> = store
         .volumes()
-        .iter()
-        .map(|v| (v.name.clone(), v.path.join(pdir)))
+        .into_iter()
+        .map(|v| (v.name, v.path))
         .collect();
+    let missing: Vec<&str> = roots
+        .iter()
+        .filter(|(_, p)| !p.is_dir())
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let missing = json!(missing);
     let result = tokio::task::spawn_blocking(move || {
         partial::coverage(
             &roots,
+            &provider,
             &q.dataset,
             q.symbol.as_deref(),
             &q.schema,
@@ -675,7 +800,10 @@ async fn coverage(AxState(store): AxState<Shared>, Query(q): Query<CoverageQuery
     })
     .await;
     match result {
-        Ok(Ok(days)) => reply(StatusCode::OK, json!({ "days": days })),
+        Ok(Ok(days)) => reply(
+            StatusCode::OK,
+            json!({ "days": days, "missing_volumes": missing }),
+        ),
         Ok(Err(e)) => refused(StatusCode::INTERNAL_SERVER_ERROR, e),
         Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -830,16 +958,23 @@ async fn adopt(
 #[derive(Deserialize)]
 struct ListFiles {
     pattern: Option<String>,
+    provider: Option<String>,
     limit: Option<usize>,
 }
 
 /// The DBN files the volumes hold whose logical name matches `pattern`
-/// (by default all), at most `limit` of them.
+/// (by default all), in `provider`'s folder if given, at most `limit` of
+/// them.
 async fn list_files(AxState(store): AxState<Shared>, Query(q): Query<ListFiles>) -> Reply {
     let volumes = store.volumes();
     let pattern = q.pattern.unwrap_or_else(|| "*".to_owned());
     let limit = q.limit.unwrap_or(read::MAX_LISTED).min(read::MAX_LISTED);
-    match tokio::task::spawn_blocking(move || read::list(&volumes, &pattern, limit)).await {
+    let provider = q.provider;
+    match tokio::task::spawn_blocking(move || {
+        read::list(&volumes, &pattern, provider.as_deref(), limit)
+    })
+    .await
+    {
         Ok(v) => reply(StatusCode::OK, v),
         Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
@@ -935,6 +1070,81 @@ async fn approve(AxState(store): AxState<Shared>, Json(req): Json<ApproveRequest
     }
 }
 
+/// Forget a remembered volume that is away for good (decision 0019): it no
+/// longer counts as missing, and the state file keeps a record of what it
+/// held when last seen, and when it was retired. A volume that is mounted
+/// isn't retired.
+async fn retire(AxState(store): AxState<Shared>, UrlPath(name): UrlPath<String>) -> Reply {
+    let path = store
+        .volumes()
+        .into_iter()
+        .find(|v| v.name == name)
+        .map(|v| v.path)
+        .or_else(|| {
+            lock(&store.remembered)
+                .volumes
+                .get(&name)
+                .map(|k| k.path.clone())
+        });
+    let Some(path) = path else {
+        return refused(StatusCode::NOT_FOUND, format!("no volume {name}"));
+    };
+    if path.is_dir() {
+        return refused(
+            StatusCode::CONFLICT,
+            format!(
+                "{name} is mounted at {}; only a volume away for good is retired",
+                path.display()
+            ),
+        );
+    }
+    // Out of use first, so a scan meanwhile doesn't remember it again.
+    let removed: Vec<Volume> = {
+        let mut list = store
+            .volumes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (gone, kept) = list.drain(..).partition(|v| v.name == name);
+        *list = kept;
+        gone
+    };
+    let record = {
+        let mut r = lock(&store.remembered);
+        let known = r.volumes.remove(&name);
+        let record = json!({
+            "name": name, "path": path, "retired_at": unix_seconds(),
+            "held": known.as_ref().map(|k| &k.held),
+        });
+        r.retired.push(record.clone());
+        if let Err(e) = state::save(&store.state_path, &r) {
+            r.retired.pop();
+            if let Some(k) = known {
+                r.volumes.insert(name, k);
+            }
+            store
+                .volumes
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(removed);
+            return refused(StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
+        record
+    };
+    {
+        let mut c = lock(&store.catalog);
+        for list in ["roots", "missing_volumes"] {
+            if let Some(a) = c[list].as_array_mut() {
+                a.retain(|x| x != name.as_str() && x["name"] != name.as_str());
+            }
+        }
+    }
+    store
+        .events
+        .push(format!("retired volume {name}"), record.to_string());
+    store.rescan.notify_one();
+    reply(StatusCode::OK, record)
+}
+
 /// Today's UTC date, `YYYY-MM-DD`.
 fn today() -> String {
     let days = (unix_seconds() / 86_400.0) as i64;
@@ -954,34 +1164,75 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    /// A store over one empty volume, served on a free loopback port.
-    async fn serve(token: WriteToken) -> (String, PathBuf) {
+    const LIMITS: Thresholds = Thresholds {
+        warning: 100.0,
+        critical: 100.0,
+        floor: 100.0,
+    };
+
+    fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "tinytrader-store-test-auth-{}-{}",
-            std::process::id(),
-            token.required()
+            "tinytrader-store-test-main-{name}-{}",
+            std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let volume = Volume {
-            name: "v".into(),
-            path: dir.clone(),
-            writable: true,
-        };
-        let limits = Thresholds {
-            warning: 100.0,
-            critical: 100.0,
-            floor: 100.0,
-        };
-        let app = router(Store::new(vec![volume], None, limits), token);
+        dir
+    }
+
+    /// A store over these writable volumes, remembering them in `state`.
+    fn store(volumes: &[(&str, &Path)], state: &Path) -> Shared {
+        let volumes = volumes
+            .iter()
+            .map(|(n, p)| Volume {
+                name: (*n).to_owned(),
+                path: p.to_path_buf(),
+                writable: true,
+            })
+            .collect();
+        let s = Store::new(
+            volumes,
+            None,
+            LIMITS,
+            state.to_path_buf(),
+            state::load(state).unwrap(),
+        );
+        s.remember(&[]).unwrap();
+        s
+    }
+
+    /// Serve a store on a free loopback port.
+    async fn serve_store(store: Shared, token: WriteToken) -> String {
+        let app = router(store, token);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (addr, dir)
+        addr
     }
 
-    /// One HTTP/1.1 request; the response's status code.
-    async fn status(addr: &str, method: &str, path: &str, auth: Option<&str>, body: &str) -> u16 {
+    async fn scanned(store: &Shared) {
+        scan(store, &Observer::new("store", "test")).await;
+    }
+
+    /// A store over one empty volume, scanned once, served on a free
+    /// loopback port.
+    async fn serve(token: WriteToken) -> (String, PathBuf) {
+        let dir = scratch(&format!("auth-{}", token.required()));
+        let vol = dir.join("v");
+        std::fs::create_dir_all(&vol).unwrap();
+        let s = store(&[("v", &vol)], &dir.join("state.json"));
+        scanned(&s).await;
+        (serve_store(s, token).await, vol)
+    }
+
+    /// One HTTP/1.1 request; the response's status code and body.
+    async fn call(
+        addr: &str,
+        method: &str,
+        path: &str,
+        auth: Option<&str>,
+        body: &str,
+    ) -> (u16, String) {
         let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
         let auth = auth.map_or(String::new(), |a| format!("authorization: {a}\r\n"));
         let req = format!(
@@ -991,8 +1242,22 @@ mod tests {
         s.write_all(req.as_bytes()).await.unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).await.unwrap();
-        out.split(' ').nth(1).unwrap().parse().unwrap()
+        let code = out.split(' ').nth(1).unwrap().parse().unwrap();
+        let body = out.split_once("\r\n\r\n").map_or("", |(_, b)| b).to_owned();
+        (code, body)
     }
+
+    async fn status(addr: &str, method: &str, path: &str, auth: Option<&str>, body: &str) -> u16 {
+        call(addr, method, path, auth, body).await.0
+    }
+
+    /// A GET: its status code and JSON body.
+    async fn get(addr: &str, path: &str) -> (u16, Value) {
+        let (code, body) = call(addr, "GET", path, None, "").await;
+        (code, serde_json::from_str(&body).unwrap_or(Value::Null))
+    }
+
+    const COVERAGE: &str = "/coverage?provider=databento&dataset=OPRA.PILLAR&symbol=SPY.OPT&schema=cbbo-1m&start=2026-10-01&end=2026-10-09";
 
     const UPLOAD: &str = "/incoming/databento/B1/notes.txt?size=2";
     const APPROVE: &str = r#"{"path":"/nowhere","name":"x"}"#;
@@ -1024,7 +1289,7 @@ mod tests {
             "/files",
             "/incoming",
             "/batches/databento",
-            "/coverage?dataset=OPRA.PILLAR&symbol=SPY.OPT&schema=cbbo-1m&start=2026-01-01&end=2026-01-02",
+            COVERAGE,
         ] {
             assert_eq!(status(&addr, "GET", path, None, "").await, 200, "{path}");
         }
@@ -1039,6 +1304,119 @@ mod tests {
             status(&addr, "POST", "/volumes/approve", None, APPROVE).await,
             404
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn answers_503_until_the_first_scan() {
+        let dir = scratch("first-scan");
+        let s = store(&[("v", &dir)], &dir.join("state.json"));
+        let addr = serve_store(s.clone(), WriteToken::open()).await;
+        for path in ["/catalog", COVERAGE] {
+            let (code, body) = get(&addr, path).await;
+            assert_eq!(code, 503, "{path}");
+            assert_eq!(body["error"], "the store is still scanning");
+        }
+        scanned(&s).await;
+        let (code, cat) = get(&addr, "/catalog").await;
+        assert_eq!((code, cat["missing_volumes"].clone()), (200, json!([])));
+        let (code, cov) = get(&addr, COVERAGE).await;
+        assert_eq!(
+            (code, cov),
+            (200, json!({ "days": [], "missing_volumes": [] }))
+        );
+        // The provider must be given.
+        let (code, _) = get(&addr, &COVERAGE.replace("provider=databento&", "")).await;
+        assert_eq!(code, 400);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remembers_a_volume_until_it_is_retired() {
+        let dir = scratch("remember");
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        let day = b.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("2026-10-01.dbn.zst"), b"x").unwrap();
+        let state_file = dir.join("state/store-state.json");
+        let first = store(&[("a", &a), ("b", &b)], &state_file);
+        scanned(&first).await;
+        let held = state::load(&state_file).unwrap();
+        assert_eq!(held.volumes.keys().collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(
+            held.volumes["b"].held["databento/OPRA.PILLAR/SPY.OPT"]["cbbo-1m"]["days"],
+            1
+        );
+
+        // Restarted with only `a` configured, and `b` unplugged.
+        std::fs::rename(&b, dir.join("b-away")).unwrap();
+        let s = store(&[("a", &a)], &state_file);
+        scanned(&s).await;
+        let addr = serve_store(s, WriteToken::open()).await;
+        let (_, cat) = get(&addr, "/catalog").await;
+        assert_eq!(cat["missing_volumes"], json!(["b"]));
+        let (code, cov) = get(&addr, COVERAGE).await;
+        assert_eq!((code, cov["missing_volumes"].clone()), (200, json!(["b"])));
+
+        assert_eq!(
+            status(&addr, "POST", "/volumes/a/retire", None, "").await,
+            409,
+            "mounted"
+        );
+        assert_eq!(
+            status(&addr, "POST", "/volumes/zz/retire", None, "").await,
+            404
+        );
+        let (code, body) = call(&addr, "POST", "/volumes/b/retire", None, "").await;
+        assert_eq!(code, 200, "{body}");
+        let (_, cat) = get(&addr, "/catalog").await;
+        assert_eq!(cat["missing_volumes"], json!([]));
+        assert!(
+            cat["roots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["name"] != "b")
+        );
+        let (_, cov) = get(&addr, COVERAGE).await;
+        assert_eq!(cov["missing_volumes"], json!([]));
+        let after = state::load(&state_file).unwrap();
+        assert_eq!(after.volumes.keys().collect::<Vec<_>>(), ["a"]);
+        assert_eq!(after.retired[0]["name"], "b");
+        assert!(after.retired[0]["retired_at"].is_number());
+        assert_eq!(
+            after.retired[0]["held"]["databento/OPRA.PILLAR/SPY.OPT"]["cbbo-1m"]["first"],
+            "2026-10-01"
+        );
+        // And it stays forgotten across a restart.
+        let s = store(&[("a", &a)], &state_file);
+        scanned(&s).await;
+        assert_eq!(lock(&s.catalog)["missing_volumes"], json!([]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_volume_that_cannot_be_read_is_missing_not_empty() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch("unreadable");
+        let vol = dir.join("v");
+        let ds = vol.join("Databento/OPRA.PILLAR");
+        std::fs::create_dir_all(ds.join("SPY.OPT/cbbo-1m")).unwrap();
+        std::fs::set_permissions(&ds, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&ds).is_ok() {
+            // Permissions don't apply (running as root): nothing to show.
+            std::fs::set_permissions(&ds, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let s = store(&[("v", &vol)], &dir.join("state.json"));
+        scanned(&s).await;
+        let addr = serve_store(s, WriteToken::open()).await;
+        let (_, cat) = get(&addr, "/catalog").await;
+        let (code, _) = get(&addr, COVERAGE).await;
+        std::fs::set_permissions(&ds, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(cat["missing_volumes"], json!(["v"]));
+        assert_eq!(code, 500);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
