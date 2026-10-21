@@ -106,7 +106,7 @@ pub fn to_buy(
     pending: &[Option<BTreeSet<String>>],
 ) -> (BTreeSet<String>, usize, usize) {
     let all = wanted.len();
-    if held.is_some_and(|h| h["kind"] == "complete") || pending.iter().any(Option::is_none) {
+    if held.is_some_and(|h| h["kind"] == "complete") {
         return (BTreeSet::new(), all, 0);
     }
     let held: BTreeSet<&str> = held
@@ -125,6 +125,9 @@ pub fn to_buy(
         .cloned()
         .collect();
     let after_held = rest.len();
+    if pending.iter().any(Option::is_none) {
+        rest.clear();
+    }
     for p in pending.iter().flatten() {
         rest.retain(|s| !p.contains(s));
     }
@@ -236,9 +239,15 @@ mod tests {
         assert_eq!((rest, h, p), (["D".to_owned()].into(), 2, 1));
         let complete = json!({ "kind": "complete" });
         assert!(to_buy(&w, Some(&complete), &[]).0.is_empty());
-        assert!(
-            to_buy(&w, None, &[None]).0.is_empty(),
-            "a whole-parent job pending covers the day"
+        assert_eq!(
+            to_buy(&w, None, &[None]),
+            (BTreeSet::new(), 0, 4),
+            "a whole-parent job pending covers the day, counted as pending"
+        );
+        assert_eq!(
+            to_buy(&w, Some(&partial), &[None]),
+            (BTreeSet::new(), 2, 2),
+            "held contracts count as held, the rest as pending"
         );
         assert_eq!(to_buy(&w, None, &[]).0.len(), 4);
     }
