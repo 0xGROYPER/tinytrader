@@ -69,6 +69,8 @@ struct FakeState {
     costs_asked: usize,
     /// Databento makes the job but the answer is lost.
     submit_lost: bool,
+    /// Databento doesn't answer a submission at all.
+    submit_hangs: bool,
     costed: Vec<(Vec<String>, had::Window)>,
     submitted: Vec<SubmitJobParams>,
     listed_with: Vec<ListJobsParams>,
@@ -135,6 +137,9 @@ impl api::Databento for Fake {
     }
     fn submit<'a>(&'a self, p: &'a SubmitJobParams) -> Fut<'a, BatchJob> {
         Box::pin(async move {
+            if lock(&self.s).submit_hangs {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
             let id = format!("OPRA-NEW{}", self.next.fetch_add(1, Ordering::Relaxed));
             let mut j = job(
                 &id,
@@ -313,13 +318,14 @@ async fn rig(name: &str) -> Rig {
     let url = serve_store(store.clone()).await;
     let fake = Arc::new(Fake::default());
     let ledger = ledger::Ledger::open(&dir.join("submissions.jsonl")).unwrap();
-    let jobs = Arc::new(Jobs::new(
-        fake.clone(),
-        "key".into(),
-        &url,
-        None,
-        Some(ledger),
-    ));
+    let mut jobs = Jobs::new(fake.clone(), "key".into(), &url, None, Some(ledger));
+    // Short limits on Databento's answers, to keep the tests fast.
+    jobs.db = Arc::new(api::Timed {
+        inner: fake.clone(),
+        read: Duration::from_secs(2),
+        submit: Duration::from_millis(300),
+    });
+    let jobs = Arc::new(jobs);
     Rig {
         jobs,
         fake,
@@ -730,4 +736,90 @@ async fn names_are_canonical_and_datasets_known() {
     let q = r.quote("SPY.OPT", "2026-10-05", "2026-10-05", 0.0);
     lock(&r.jobs.quotes).get_mut(&q).unwrap().request.dataset = "OPRA.NOPE".into();
     assert_eq!(r.submit(&q, None).await.0, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_hung_submission_is_uncertain_and_frees_the_lock() {
+    let r = rig("hung").await;
+    lock(&r.fake.s).submit_hangs = true;
+    let both = async {
+        let first = r.submit(&r.quote("SPY.OPT", DAY, DAY, 0.0), None).await.0;
+        let second = r.submit(&r.quote("SPY.OPT", DAY, DAY, 0.0), None).await.0;
+        (first, second)
+    };
+    let (first, second) = tokio::time::timeout(Duration::from_secs(5), both)
+        .await
+        .expect("a hung submission must not hold the purchase lock");
+    assert_eq!(
+        (first, second),
+        (StatusCode::BAD_GATEWAY, StatusCode::CONFLICT)
+    );
+    assert_eq!(r.states(), ["sending", "uncertain"]);
+}
+
+#[tokio::test]
+async fn reconcile_matches_jobs_from_when_the_submission_was_sent() {
+    let r = rig("sent-at").await;
+    let now = tinytrader_observe::unix_seconds();
+    r.write(&fp(&["SPY.OPT"]), "sending", None, now - 1000.0);
+    r.write(&fp(&["SPY.OPT"]), "uncertain", None, now);
+    let mut j = job(
+        "OPRA-MATCH",
+        json!("SPY.OPT"),
+        "parent",
+        whole_day(),
+        "queued",
+    );
+    j.ts_received -= time::Duration::seconds(990);
+    r.fake.add(j);
+    refresh(&r.jobs).await.unwrap();
+    assert_eq!(r.states(), ["sending", "uncertain", "submitted"]);
+}
+
+#[tokio::test]
+async fn reconcile_waits_while_a_purchase_is_in_flight() {
+    let r = rig("in-flight").await;
+    let now = tinytrader_observe::unix_seconds();
+    r.write(&fp(&["SPY.OPT"]), "sending", None, now);
+    r.fake.add(job(
+        "OPRA-MATCH",
+        json!("SPY.OPT"),
+        "parent",
+        whole_day(),
+        "queued",
+    ));
+    {
+        let _purchase = r.jobs.purchase.lock().await;
+        refresh(&r.jobs).await.unwrap();
+        assert_eq!(r.states(), ["sending"]);
+    }
+    refresh(&r.jobs).await.unwrap();
+    assert_eq!(r.states(), ["sending", "submitted"]);
+}
+
+#[tokio::test]
+async fn an_old_automatic_write_off_blocks_until_matched() {
+    let r = rig("written-off").await;
+    let now = tinytrader_observe::unix_seconds();
+    r.write(&fp(&["SPY.OPT"]), "sending", None, now - 900.0);
+    let mut off = ledger::Entry {
+        at: now - 100.0,
+        request: fp(&["SPY.OPT"]),
+        state: "not-submitted".into(),
+        job: None,
+        cost_usd: None,
+        note: Some("no such job appeared in Databento's job list".into()),
+    };
+    lock(&r.jobs.ledger)
+        .as_mut()
+        .unwrap()
+        .append(off.clone())
+        .unwrap();
+    let (code, _) = r.submit(&r.quote("SPY.OPT", DAY, DAY, 0.0), None).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    // An operator's write-off doesn't block.
+    off.note = Some("resolved by the operator: checked".into());
+    lock(&r.jobs.ledger).as_mut().unwrap().append(off).unwrap();
+    let (code, v) = r.submit(&r.quote("SPY.OPT", DAY, DAY, 0.0), None).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
 }

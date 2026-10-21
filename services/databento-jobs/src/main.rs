@@ -258,7 +258,7 @@ impl Jobs {
         ledger: Option<ledger::Ledger>,
     ) -> Self {
         Self {
-            db,
+            db: Arc::new(api::Timed::new(db)),
             purchase: tokio::sync::Mutex::new(()),
             dataset_list: Mutex::default(),
             key,
@@ -334,12 +334,20 @@ async fn main() {
         Some(path) => match ledger::Ledger::open(path) {
             Ok(l) => Some(l),
             Err(e) => {
-                eprintln!("databento-jobs: cannot read the submissions ledger: {e}");
+                eprintln!("databento-jobs: cannot open the submissions ledger: {e}");
                 std::process::exit(2);
             }
         },
         None => None,
     };
+    if let Some(l) = &ledger {
+        for e in l.written_off() {
+            eprintln!(
+                "databento-jobs: {} was written off as not submitted by an earlier version without anyone checking; it blocks again until found on Databento's list or resolved (POST /ledger/resolve)",
+                e.request
+            );
+        }
+    }
     let mut jobs = Jobs::new(
         Arc::new(api::Live(tokio::sync::Mutex::new(db))),
         key,
@@ -474,16 +482,24 @@ async fn main() {
 /// done) every job submitted here. Nothing is resolved while any job couldn't
 /// be read (`complete` false): the unread one may be the match. A submission
 /// not found stays unresolved, blocking what it overlaps, until it shows or
-/// the operator resolves it; never by time alone.
+/// the operator resolves it; never by time alone. Nor while a purchase is
+/// in flight: its job may show before its own answer is written.
 fn reconcile(jobs: &Shared, out: &[BatchJob], complete: bool) {
+    let turn = jobs.purchase.try_lock();
     let mut guard = lock(&jobs.ledger);
     let Some(l) = guard.as_mut() else { return };
-    for e in l.unresolved().into_iter().filter(|_| complete) {
+    for e in l
+        .unresolved()
+        .into_iter()
+        .filter(|_| complete && turn.is_ok())
+    {
         let claimed = l.submitted();
+        // Its job was received after it was sent (with a margin for clocks).
+        let sent = l.sent_at(&e.request).unwrap_or(e.at).min(e.at);
         let Some(j) = out.iter().find(|j| {
             !claimed.contains(&j.id)
                 && had::same_request(&e.request, j)
-                && j.ts_received.unix_timestamp() as f64 >= e.at - 120.0
+                && j.ts_received.unix_timestamp() as f64 >= sent - 120.0
         }) else {
             continue;
         };

@@ -10,7 +10,7 @@
 //! one by one; and anything that can't be read (instrument IDs, a symbol
 //! that may belong to the parent under another name) covers it all.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use databento::dbn::SType;
 use databento::historical::batch::BatchJob;
@@ -119,15 +119,31 @@ fn parse_stamp(s: &str) -> Option<i64> {
         .map(ns)
 }
 
+/// The root of an OCC option symbol (`SPY   261002C00728000`).
 fn occ_root(s: &str) -> Option<&str> {
-    (s.len() == 21 && s.is_ascii()).then(|| s[..6].trim_end())
+    let b = s.as_bytes();
+    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    (b.len() == 21
+        && s.is_ascii()
+        && digits(6..12)
+        && matches!(b[12], b'C' | b'P')
+        && digits(13..21))
+    .then(|| s[..6].trim_end())
+}
+
+/// The root of an option parent (`SPY.OPT`).
+fn option_parent(s: &str) -> Option<&str> {
+    let root = s.strip_suffix(".OPT")?;
+    (!root.is_empty() && root.bytes().all(|b| b.is_ascii_alphanumeric())).then_some(root)
 }
 
 /// How much of `target` (a parent such as `SPY.OPT`, or a plain symbol) a
-/// list of symbols covers; `None`: none of it. Fails closed: an empty name,
-/// a number (an instrument ID) or `ALL_SYMBOLS` covers it all, and so does a
-/// symbol that may be one of the target's under another name (a futures
-/// contract of a parent, or a parent of a plain symbol).
+/// list of symbols covers; `None`: none of it. Fails closed: only symbols
+/// recognised as someone else's are judged not to overlap (another option
+/// parent, an OCC contract of another root, and for a plain target another
+/// plain symbol). An empty name, a number (an instrument ID), `ALL_SYMBOLS`
+/// and anything not recognised (a continuous `ES.c.0`, a futures contract,
+/// any other dotted name) cover it all.
 #[must_use]
 pub fn scope_of(symbols: &[&str], target: &str) -> Option<Scope> {
     let target = target.trim().to_ascii_uppercase();
@@ -148,21 +164,25 @@ pub fn scope_of(symbols: &[&str], target: &str) -> Option<Scope> {
         {
             return Some(Scope::All);
         }
-        match kind {
-            Some("OPT") => {
-                if occ_root(&m) == Some(root) {
-                    contracts.insert(m);
-                }
+        if let Some(r) = occ_root(&m) {
+            if r != root {
+                continue;
             }
-            Some(_) if !m.contains('.') && m.starts_with(root) => return Some(Scope::All),
-            Some(_) => {}
-            None => {
-                if let Some((r, _)) = m.split_once('.')
-                    && target.starts_with(r)
-                {
-                    return Some(Scope::All);
-                }
+            if kind == Some("OPT") {
+                contracts.insert(m);
+                continue;
             }
+            return Some(Scope::All);
+        }
+        if option_parent(&m).is_some_and(|r| r != root) {
+            continue;
+        }
+        let other_plain = kind.is_none()
+            && !m.contains('.')
+            && !m.starts_with(&target)
+            && !target.starts_with(&m);
+        if !other_plain {
+            return Some(Scope::All);
         }
     }
     (!contracts.is_empty()).then_some(Scope::Contracts(contracts))
@@ -287,9 +307,11 @@ pub fn ledger_pieces(
 
 /// The store's holdings of `target` (`symbol` in the store), from its
 /// `/catalog` and `/coverage` (asked for this dataset, symbol and schema over
-/// `days`). A day the catalog holds that `/coverage` doesn't explain, or
-/// that the catalog holds under another symbol that may include the
-/// target's, counts as held in full.
+/// `days`). Every copy of a day the catalog shows must be accounted for by
+/// that day's `/coverage` row (same volume, Databento's folder, the
+/// target's exact symbol); any other copy (outside Databento's folder,
+/// under a symbol spelled differently or one that may include the target's,
+/// on a volume the row doesn't list) counts the whole day as held.
 #[must_use]
 pub fn store_pieces(
     catalog: &Value,
@@ -300,7 +322,7 @@ pub fn store_pieces(
     days: Window,
 ) -> Vec<Piece> {
     let mut out = Vec::new();
-    let mut explained = HashSet::new();
+    let mut accounted: HashMap<String, HashSet<String>> = HashMap::new();
     for row in coverage["days"].as_array().into_iter().flatten() {
         let Some(day) = row["day"].as_str() else {
             out.push(held(
@@ -310,7 +332,13 @@ pub fn store_pieces(
             ));
             continue;
         };
-        explained.insert(day.to_owned());
+        accounted.entry(day.to_owned()).or_default().extend(
+            row["volumes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_owned)),
+        );
         let whole = parse_stamp(day).map_or(ALWAYS, |s| (s, s.saturating_add(DAY_NS)));
         let c = &row["coverage"];
         let (scope, window) = if row["kind"] == "complete" {
@@ -332,45 +360,50 @@ pub fn store_pieces(
         );
         out.push(held(scope, window, what));
     }
-    for d in catalog["roots"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|r| r["datasets"].as_array().into_iter().flatten())
-        // Without a provider, it may be Databento's.
-        .filter(|d| {
-            d["provider"]
-                .as_str()
-                .is_none_or(|p| p.eq_ignore_ascii_case("databento"))
-        })
-        .filter(|d| {
-            d["id"]
-                .as_str()
-                .is_some_and(|i| i.eq_ignore_ascii_case(dataset))
-        })
-    {
-        let symbol = d["symbol"].as_str().unwrap_or("");
-        let same = symbol.eq_ignore_ascii_case(target);
-        if !same && scope_of(&[symbol], target).is_none() {
-            continue;
-        }
-        for day in d["schemas"][schema]["days"]
-            .as_object()
+    for root in catalog["roots"].as_array().into_iter().flatten() {
+        let volume = root["name"].as_str();
+        for d in root["datasets"]
+            .as_array()
             .into_iter()
-            .flat_map(|m| m.keys())
+            .flatten()
+            // Without a provider, it may be Databento's.
+            .filter(|d| {
+                d["provider"]
+                    .as_str()
+                    .is_none_or(|p| p.eq_ignore_ascii_case("databento"))
+            })
+            .filter(|d| {
+                d["id"]
+                    .as_str()
+                    .is_some_and(|i| i.eq_ignore_ascii_case(dataset))
+            })
         {
-            let Some(start) = parse_stamp(day) else {
-                continue;
-            };
-            if start < days.0 || start >= days.1 || (same && explained.contains(day)) {
+            let symbol = d["symbol"].as_str().unwrap_or("");
+            if !symbol.eq_ignore_ascii_case(target) && scope_of(&[symbol], target).is_none() {
                 continue;
             }
-            let why = if same {
-                format!("{day} (in the store's catalog, but /coverage doesn't explain it)")
-            } else {
-                format!("{day} (in the store as {symbol})")
-            };
-            out.push(held(Scope::All, (start, start.saturating_add(DAY_NS)), why));
+            let exact =
+                symbol == target && d["provider"].as_str().is_some_and(|p| p == "databento");
+            for day in d["schemas"][schema]["days"]
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.keys())
+            {
+                let Some(start) = parse_stamp(day) else {
+                    continue;
+                };
+                let explained = exact
+                    && volume.is_some_and(|v| accounted.get(day).is_some_and(|a| a.contains(v)));
+                if start < days.0 || start >= days.1 || explained {
+                    continue;
+                }
+                let why = format!(
+                    "{day} (in the store as {} {symbol} on {}, a copy /coverage doesn't account for)",
+                    d["provider"].as_str().unwrap_or("no provider"),
+                    volume.unwrap_or("an unnamed volume")
+                );
+                out.push(held(Scope::All, (start, start.saturating_add(DAY_NS)), why));
+            }
         }
     }
     out
@@ -495,7 +528,19 @@ mod tests {
         // Futures contracts can't be told from their names: any of the root's count.
         assert_eq!(scope_of(&["ESZ6"], "ES.FUT"), all);
         assert_eq!(scope_of(&["ES.FUT"], "ESZ6"), all);
-        assert_eq!(scope_of(&["NQZ6"], "ES.FUT"), None);
+        // Anything not recognised as someone else's covers it all.
+        for m in [
+            "ES.c.0",
+            "SPY.n.0",
+            "SPY.v.1",
+            "NQZ6",
+            "SPY.OPT.X",
+            "SPY  2610",
+        ] {
+            assert_eq!(scope_of(&[m], "SPY.OPT"), all, "{m}");
+        }
+        assert_eq!(scope_of(&["NQZ6"], "ES.FUT"), all);
+        assert_eq!(scope_of(&["AAPL"], "TSLA"), None);
     }
 
     #[test]
@@ -515,12 +560,12 @@ mod tests {
 
     #[test]
     fn a_catalog_day_coverage_doesnt_explain_counts_as_held_in_full() {
-        let catalog = json!({ "roots": [{ "datasets": [
+        let catalog = json!({ "roots": [{ "name": "v1", "datasets": [
             { "provider": "databento", "id": "OPRA.PILLAR", "symbol": "SPY.OPT", "schemas": { "cmbp-1": { "days": { "2026-10-01": {}, "2026-10-02": {} } } } },
             { "provider": "alpaca", "id": "OPRA.PILLAR", "symbol": "SPY.OPT", "schemas": { "cmbp-1": { "days": { "2026-10-03": {} } } } },
         ] }] });
         let coverage = json!({ "days": [
-            { "day": "2026-10-02", "kind": "partial", "coverage": { "symbols": [C1], "window": [day_window(d("2026-10-02")).0 + 13 * 3_600_000_000_000_i64, day_window(d("2026-10-02")).1] } },
+            { "day": "2026-10-02", "kind": "partial", "volumes": ["v1"], "coverage": { "symbols": [C1], "window": [day_window(d("2026-10-02")).0 + 13 * 3_600_000_000_000_i64, day_window(d("2026-10-02")).1] } },
         ] });
         let range = (day_window(d("2026-10-01")).0, day_window(d("2026-10-04")).0);
         let p = store_pieces(
@@ -537,6 +582,45 @@ mod tests {
                 .any(|x| x.scope == Scope::All && x.window == day_window(d("2026-10-01")))
         );
         assert!(p.iter().any(|x| x.scope == Scope::Contracts(set(&[C1]))));
+    }
+
+    #[test]
+    fn a_copy_coverage_doesnt_account_for_counts_the_day_as_held() {
+        let day = day_window(d("2026-10-02"));
+        let coverage = json!({ "days": [
+            { "day": "2026-10-02", "kind": "partial", "volumes": ["v1"], "coverage": { "symbols": [C1], "window": [day.0, day.1] } },
+        ] });
+        let copy = |volume: &str, provider: Value, symbol: &str| {
+            json!({ "roots": [
+            { "name": "v1", "datasets": [{ "provider": "databento", "id": "OPRA.PILLAR", "symbol": "SPY.OPT", "schemas": { "cmbp-1": { "days": { "2026-10-02": {} } } } }] },
+            { "name": volume, "datasets": [{ "provider": provider, "id": "opra.pillar", "symbol": symbol, "schemas": { "cmbp-1": { "days": { "2026-10-02": {} } } } }] },
+        ] })
+        };
+        let whole = |catalog: &Value| {
+            store_pieces(catalog, &coverage, "OPRA.PILLAR", "cmbp-1", "SPY.OPT", day)
+                .iter()
+                .any(|p| p.scope == Scope::All)
+        };
+        assert!(
+            !whole(&copy("v1", json!("databento"), "SPY.OPT")),
+            "accounted for"
+        );
+        assert!(
+            whole(&copy("v2", json!(null), "SPY.OPT")),
+            "outside Databento's folder"
+        );
+        assert!(
+            whole(&copy("v1", json!("databento"), "spy.opt")),
+            "spelled differently"
+        );
+        assert!(
+            whole(&copy("v2", json!("databento"), "SPY.OPT")),
+            "a volume the row doesn't list"
+        );
+        assert!(
+            !whole(&copy("v2", json!("alpaca"), "SPY.OPT")),
+            "another provider's"
+        );
     }
 
     #[test]

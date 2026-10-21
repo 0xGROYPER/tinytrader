@@ -13,7 +13,12 @@
 //! been bought, so it blocks every purchase it overlaps until it is found on
 //! Databento's job list (then `submitted`, with its job) or resolved by the
 //! operator. Never by time alone: a job that doesn't show yet may still be
-//! one (decision 0019).
+//! one (decision 0019). A `not-submitted` that an earlier version wrote on
+//! its own, after a timeout, counts as unresolved again.
+//!
+//! One process at a time: the ledger's `.lock` file is held exclusively for
+//! as long as it is open, so a second service on the same ledger can't
+//! start.
 
 use std::collections::HashSet;
 use std::fs;
@@ -52,17 +57,49 @@ pub fn fingerprint(
     format!("{dataset}|{schema}|{}|{start}|{end}", s.join(","))
 }
 
+/// The note an earlier version wrote with a `not-submitted` it decided on
+/// its own.
+const WRITTEN_OFF: &str = "no such job appeared in Databento's job list";
+
+/// Whether a step leaves its request unresolved.
+fn open_step(e: &Entry) -> bool {
+    e.state == "sending"
+        || e.state == "uncertain"
+        || (e.state == "not-submitted" && e.note.as_deref() == Some(WRITTEN_OFF))
+}
+
 pub struct Ledger {
     path: PathBuf,
     entries: Vec<Entry>,
+    /// Held exclusively while open.
+    _lock: fs::File,
 }
 
 impl Ledger {
     /// Open (or start) the ledger at `path`.
     ///
     /// # Errors
-    /// If the file exists but can't be read, or a line isn't an entry.
+    /// If another process has it open, or the file exists but can't be
+    /// read, or a line isn't an entry.
     pub fn open(path: &Path) -> Result<Self, String> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+        lock.try_lock().map_err(|e| match e {
+            fs::TryLockError::WouldBlock => format!(
+                "another process holds the submissions ledger {} (lock {}); only one databento-jobs may use it",
+                path.display(),
+                lock_path.display()
+            ),
+            fs::TryLockError::Error(e) => format!("{}: {e}", lock_path.display()),
+        })?;
         let entries = match fs::read_to_string(path) {
             Ok(text) => text
                 .lines()
@@ -75,6 +112,7 @@ impl Ledger {
         Ok(Self {
             path: path.to_owned(),
             entries,
+            _lock: lock,
         })
     }
 
@@ -83,9 +121,7 @@ impl Ledger {
     /// # Errors
     /// If it can't be written; the caller must then not submit.
     pub fn append(&mut self, e: Entry) -> Result<(), String> {
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        }
+        let new = !self.path.exists();
         let mut f = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -95,6 +131,12 @@ impl Ledger {
         writeln!(f, "{line}").map_err(|e| format!("{}: {e}", self.path.display()))?;
         f.sync_all()
             .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        // A new file's name is durable only once its folder is.
+        if new && let Some(dir) = self.path.parent() {
+            fs::File::open(dir)
+                .and_then(|d| d.sync_all())
+                .map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
         self.entries.push(e);
         Ok(())
     }
@@ -106,8 +148,28 @@ impl Ledger {
     /// The latest step of `request`, if it is unresolved.
     #[must_use]
     pub fn unresolved_step(&self, request: &str) -> Option<&Entry> {
-        self.latest(request)
-            .filter(|e| e.state == "sending" || e.state == "uncertain")
+        self.latest(request).filter(|e| open_step(e))
+    }
+
+    /// When the latest attempt at `request` was sent (its last `sending`
+    /// step): a job it made was received after this.
+    #[must_use]
+    pub fn sent_at(&self, request: &str) -> Option<f64> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| e.request == request && e.state == "sending")
+            .map(|e| e.at)
+    }
+
+    /// Requests an earlier version wrote off as not submitted on its own,
+    /// now unresolved again.
+    #[must_use]
+    pub fn written_off(&self) -> Vec<Entry> {
+        self.unresolved()
+            .into_iter()
+            .filter(|e| e.state == "not-submitted")
+            .collect()
     }
 
     /// Every request whose latest step is unresolved.
@@ -118,7 +180,7 @@ impl Ledger {
             .iter()
             .rev()
             .filter(|e| seen.insert(e.request.clone()))
-            .filter(|e| e.state == "sending" || e.state == "uncertain")
+            .filter(|e| open_step(e))
             .cloned()
             .collect()
     }
@@ -201,6 +263,46 @@ mod tests {
             ))
             .is_none()
         );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("tinytrader-ledger-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn only_one_process_may_hold_the_ledger() {
+        let d = scratch("lock");
+        let path = d.join("submissions.jsonl");
+        let first = Ledger::open(&path).unwrap();
+        let second = Ledger::open(&path).err().unwrap();
+        assert!(second.contains("another process"), "{second}");
+        drop(first);
+        assert!(Ledger::open(&path).is_ok());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_old_automatic_write_off_is_unresolved_again() {
+        let d = scratch("written-off");
+        let mut l = Ledger::open(&d.join("submissions.jsonl")).unwrap();
+        let mut off = entry("R", "not-submitted", None);
+        off.note = Some(WRITTEN_OFF.into());
+        l.append(entry("R", "sending", None)).unwrap();
+        l.append(entry("R", "uncertain", None)).unwrap();
+        l.append(off).unwrap();
+        assert_eq!(l.unresolved().len(), 1);
+        assert_eq!(l.purchases().len(), 1);
+        assert_eq!(l.written_off().len(), 1);
+        assert!(l.unresolved_step("R").is_some());
+        // The operator's word resolves it.
+        let mut by_hand = entry("R", "not-submitted", None);
+        by_hand.note = Some("resolved by the operator: not in the portal".into());
+        l.append(by_hand).unwrap();
+        assert!(l.unresolved().is_empty() && l.purchases().is_empty());
         let _ = fs::remove_dir_all(&d);
     }
 

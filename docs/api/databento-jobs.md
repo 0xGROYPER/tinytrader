@@ -16,7 +16,7 @@
 |---|---|
 | `DATABENTO_API_KEY` (or `_FILE`) | Required. |
 | `JOBS_STORE` | The store (default `http://127.0.0.1:9120`). |
-| `JOBS_LEDGER` | The submissions ledger file (JSON lines, appended); without it nothing can be submitted. |
+| `JOBS_LEDGER` | The submissions ledger file (JSON lines, appended); without it nothing can be submitted. The service holds an exclusive lock on `<ledger>.lock` while it runs and refuses to start if another process holds it. |
 | `JOBS_YIELD_TO`, `JOBS_CAPTURE_HOURS`, `JOBS_CALENDAR` | Hold downloads while capture is live (as the [queue](queue.md) does). |
 | `JOBS_REFRESH_SECONDS` | How often Databento's job list is read (default 30). |
 
@@ -24,7 +24,7 @@
 
 **Paid purchases are paused** ([decision 0019](../decisions/0019-purchase-guards.md)): `/submit` and `/submit-missing` refuse anything not priced at exactly $0 with `403`. Free requests, pricing and downloads work as below.
 
-**What's had already** (decision 0019, section 2) is one set, used by both submit paths, per day, per contract and per time window: the store's Databento holdings (`/coverage`, and any day `/catalog` holds that `/coverage` doesn't explain, as held in full); every job on Databento's list that isn't expired (the list read in full: every state, all history); and every purchase in the ledger, whether or not its job is still listed, including submissions whose outcome isn't known. Job and ledger symbols are parsed: a list naming the parent or `ALL_SYMBOLS` covers it all, contracts of the parent count one by one, and instrument IDs or anything unreadable cover every day they overlap. Every purchase is refused (`503`) while the store answers anything but `200`, reports `missing_volumes` (or doesn't report them), or Databento's job list or any listed job can't be read. Datasets are compared in Databento's spelling and must be on its dataset list. One purchase runs at a time: both submit paths hold one lock from their last check through the ledger's last write.
+**What's had already** (decision 0019, section 2) is one set, used by both submit paths, per day, per contract and per time window: the store's Databento holdings (`/coverage`, and any day `/catalog` holds that `/coverage` doesn't explain, as held in full); every job on Databento's list that isn't expired (the list read in full: every state, all history); and every purchase in the ledger, whether or not its job is still listed, including submissions whose outcome isn't known. Job and ledger symbols are parsed: a list naming the parent or `ALL_SYMBOLS` covers it all, contracts of the parent count one by one, and instrument IDs or anything unreadable cover every day they overlap. Every purchase is refused (`503`) while the store answers anything but `200`, reports `missing_volumes` (or doesn't report them), or Databento's job list or any listed job can't be read. Datasets are compared in Databento's spelling and must be on its dataset list. One purchase runs at a time: both submit paths hold one lock from their last check through the ledger's last write, and reconciliation waits while a purchase is in flight. Every Databento call is bounded (60 s for reads, 120 s for a submission, which is then written `uncertain`). A submission is matched to a job received after its `sending` step (less two minutes). A `not-submitted` that an earlier version wrote on its own counts as unresolved again; the service logs each at startup.
 
 | Endpoint | |
 |---|---|

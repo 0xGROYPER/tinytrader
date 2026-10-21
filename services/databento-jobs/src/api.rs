@@ -3,6 +3,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
 
 use databento::HistoricalClient;
 use databento::dbn::Schema;
@@ -97,5 +99,66 @@ impl Databento for Live {
         p: &'a GetDatasetConditionParams,
     ) -> Fut<'a, Vec<DatasetConditionDetail>> {
         call!(self, |c| c.metadata().get_dataset_condition(p))
+    }
+}
+
+/// Databento with every call bounded in time, so a hung call never holds
+/// the purchase lock: a read gives up after `read`, a submission after
+/// `submit` (its outcome then unknown, so written `uncertain`).
+pub struct Timed {
+    pub inner: Arc<dyn Databento>,
+    pub read: Duration,
+    pub submit: Duration,
+}
+
+impl Timed {
+    #[must_use]
+    pub fn new(inner: Arc<dyn Databento>) -> Self {
+        Self {
+            inner,
+            read: Duration::from_secs(60),
+            submit: Duration::from_secs(120),
+        }
+    }
+}
+
+fn within<'a, T: 'a>(d: Duration, f: Fut<'a, T>) -> Fut<'a, T> {
+    Box::pin(async move {
+        tokio::time::timeout(d, f)
+            .await
+            .map_err(|_| format!("no answer from Databento in {} s", d.as_secs_f64()))?
+    })
+}
+
+impl Databento for Timed {
+    fn list_jobs<'a>(&'a self, p: &'a ListJobsParams) -> Fut<'a, Vec<BatchJobShort>> {
+        within(self.read, self.inner.list_jobs(p))
+    }
+    fn job<'a>(&'a self, id: &'a str) -> Fut<'a, BatchJob> {
+        within(self.read, self.inner.job(id))
+    }
+    fn files<'a>(&'a self, id: &'a str) -> Fut<'a, Vec<BatchFileDesc>> {
+        within(self.read, self.inner.files(id))
+    }
+    fn submit<'a>(&'a self, p: &'a SubmitJobParams) -> Fut<'a, BatchJob> {
+        within(self.submit, self.inner.submit(p))
+    }
+    fn cost<'a>(&'a self, p: &'a GetCostParams) -> Fut<'a, (f64, u64)> {
+        within(self.read, self.inner.cost(p))
+    }
+    fn datasets(&self) -> Fut<'_, Vec<String>> {
+        within(self.read, self.inner.datasets())
+    }
+    fn schemas<'a>(&'a self, dataset: &'a str) -> Fut<'a, Vec<Schema>> {
+        within(self.read, self.inner.schemas(dataset))
+    }
+    fn range<'a>(&'a self, dataset: &'a str) -> Fut<'a, DatasetRange> {
+        within(self.read, self.inner.range(dataset))
+    }
+    fn conditions<'a>(
+        &'a self,
+        p: &'a GetDatasetConditionParams,
+    ) -> Fut<'a, Vec<DatasetConditionDetail>> {
+        within(self.read, self.inner.conditions(p))
     }
 }
