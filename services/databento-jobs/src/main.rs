@@ -259,6 +259,7 @@ impl Jobs {
         store: &str,
         store_token: Option<String>,
         ledger: Option<ledger::Ledger>,
+        http: reqwest::Client,
     ) -> Self {
         Self {
             db: Arc::new(api::Timed::new(db)),
@@ -266,10 +267,7 @@ impl Jobs {
             dataset_list: Mutex::default(),
             checked_at: Mutex::default(),
             key,
-            http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .expect("http client"),
+            http,
             store: store.trim_end_matches('/').to_owned(),
             store_token,
             quotes: Mutex::default(),
@@ -358,6 +356,10 @@ async fn main() {
         &args.store,
         store_token,
         ledger,
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("http client"),
     );
     jobs.yield_to = args
         .yield_to
@@ -2057,6 +2059,7 @@ async fn room(jobs: &Jobs) -> Result<(u64, u64), String> {
     let r = jobs
         .http
         .get(format!("{}/catalog", jobs.store))
+        .timeout(Duration::from_secs(120))
         .send()
         .await
         .map_err(|e| format!("store: {e}"))?;

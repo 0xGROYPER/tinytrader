@@ -319,7 +319,13 @@ async fn rig(name: &str) -> Rig {
     let url = serve_store(store.clone()).await;
     let fake = Arc::new(Fake::default());
     let ledger = ledger::Ledger::open(&dir.join("submissions.jsonl")).unwrap();
-    let mut jobs = Jobs::new(fake.clone(), "key".into(), &url, None, Some(ledger));
+    // The fake store is plain http: no certificates, so none are loaded
+    // from the system (a build sandbox has none).
+    let http = reqwest::Client::builder()
+        .tls_certs_only(Vec::<reqwest::Certificate>::new())
+        .build()
+        .unwrap();
+    let mut jobs = Jobs::new(fake.clone(), "key".into(), &url, None, Some(ledger), http);
     // Short limits on Databento's answers, to keep the tests fast.
     jobs.db = Arc::new(api::Timed {
         inner: fake.clone(),
