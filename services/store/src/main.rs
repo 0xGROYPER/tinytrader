@@ -71,8 +71,9 @@ use tinytrader_observe::{Events, Observer, State, listen_address, unix_seconds};
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
-    /// A volume as NAME=PATH, or NAME=PATH:ro for read-only. Repeat, or
-    /// separate with `;`.
+    /// A volume as NAME=PATH, or NAME=PATH:ro for read-only. A path under
+    /// /Volumes must be a mount point; add `:anydir` to take any folder.
+    /// Repeat, or separate with `;`.
     #[arg(long = "volume", env = "STORE_VOLUMES", value_delimiter = ';')]
     volumes: Vec<String>,
 
@@ -150,14 +151,21 @@ async fn main() {
         .iter()
         .filter_map(|v| {
             let (name, path) = v.split_once('=')?;
-            let (path, writable) = match path.trim().strip_suffix(":ro") {
-                Some(p) => (p, false),
-                None => (path.trim(), true),
-            };
+            let (mut path, mut writable, mut anydir) = (path.trim(), true, false);
+            loop {
+                if let Some(p) = path.strip_suffix(":ro") {
+                    (path, writable) = (p, false);
+                } else if let Some(p) = path.strip_suffix(":anydir") {
+                    (path, anydir) = (p, true);
+                } else {
+                    break;
+                }
+            }
             Some(Volume {
                 name: name.trim().to_owned(),
                 path: PathBuf::from(path),
                 writable,
+                require_mount: !anydir && Path::new(path).starts_with("/Volumes"),
             })
         })
         .collect();
@@ -320,7 +328,7 @@ async fn scan(store: &Shared, observer: &Observer) {
                 // A known drive mounted somewhere new is used there.
                 if let Some(x) = list
                     .iter_mut()
-                    .find(|x| x.name == v.name && x.path != v.path && !x.path.is_dir())
+                    .find(|x| x.name == v.name && x.path != v.path && volumes::present(x).is_err())
                 {
                     eprintln!("store: drive {} is now at {}", v.name, v.path.display());
                     x.path = v.path;
@@ -344,11 +352,33 @@ async fn scan(store: &Shared, observer: &Observer) {
         }
     }
     let (volumes, limits) = (store.volumes(), store.limits);
+    let held: Vec<String> = lock(&store.remembered)
+        .volumes
+        .iter()
+        .filter(|(_, k)| state::held_any(k))
+        .map(|(n, _)| n.clone())
+        .collect();
     let scanned = tokio::task::spawn_blocking(move || {
         volumes
             .iter()
             .map(|v| {
-                let mut root = catalog::scan_root(&v.name, &v.path, limits);
+                let mut root = match volumes::present(v) {
+                    Ok(()) => catalog::scan_root(&v.name, &v.path, limits),
+                    Err(e) => {
+                        json!({ "name": v.name, "path": v.path, "present": false, "datasets": [], "unrecognised": [], "errors": [e] })
+                    }
+                };
+                // Data that was there and is gone is unknown, not absent.
+                if root["present"] == true
+                    && held.contains(&v.name)
+                    && root["datasets"].as_array().is_none_or(Vec::is_empty)
+                    && let Some(errors) = root["errors"].as_array_mut()
+                {
+                    errors.push(json!(format!(
+                        "{} held datasets when last read, and now holds none; is the right drive mounted?",
+                        v.path.display()
+                    )));
+                }
                 root["writable"] = json!(v.writable);
                 root
             })
@@ -413,6 +443,7 @@ impl Store {
                     name: name.clone(),
                     path: k.path.clone(),
                     writable: k.writable,
+                    require_mount: k.require_mount,
                 });
             }
         }
@@ -447,10 +478,12 @@ impl Store {
             let k = r.volumes.entry(v.name.clone()).or_insert(state::Known {
                 path: v.path.clone(),
                 writable: v.writable,
+                require_mount: v.require_mount,
                 held: Value::Null,
             });
             k.path = v.path;
             k.writable = v.writable;
+            k.require_mount = v.require_mount;
         }
         for root in roots
             .iter()
@@ -470,7 +503,7 @@ impl Store {
     fn parts(&self, provider: &str, batch: &str) -> Vec<ingest::Part> {
         self.volumes()
             .iter()
-            .filter(|v| v.writable)
+            .filter(|v| v.writable && volumes::present(v).is_ok())
             .map(|v| v.path.join(provider))
             .map(|root| ingest::Part {
                 inc: root.join(ingest::INCOMING).join(batch),
@@ -501,7 +534,7 @@ impl Store {
         let need = size.unwrap_or(0);
         self.volumes()
             .iter()
-            .filter(|v| v.writable && v.path.is_dir())
+            .filter(|v| v.writable && volumes::present(v).is_ok())
             .filter_map(|v| {
                 let total = fs4::total_space(&v.path).ok()?;
                 let free = fs4::available_space(&v.path).ok()?.checked_sub(need)?;
@@ -776,17 +809,25 @@ async fn coverage(AxState(store): AxState<Shared>, Query(q): Query<CoverageQuery
     {
         return refused(StatusCode::BAD_REQUEST, "unsafe dataset, symbol or schema");
     }
-    let roots: Vec<(String, PathBuf)> = store
+    // Missing: not there now, or found missing by the last scan (unreadable,
+    // or emptied of what it held).
+    let (roots, gone): (Vec<Volume>, Vec<Volume>) = store
         .volumes()
         .into_iter()
-        .map(|v| (v.name, v.path))
-        .collect();
-    let missing: Vec<&str> = roots
-        .iter()
-        .filter(|(_, p)| !p.is_dir())
-        .map(|(n, _)| n.as_str())
-        .collect();
+        .partition(|v| volumes::present(v).is_ok());
+    let mut missing: Vec<String> = gone.into_iter().map(|v| v.name).collect();
+    for n in lock(&store.catalog)["missing_volumes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        if let Some(n) = n.as_str().filter(|n| !missing.iter().any(|m| m == n)) {
+            missing.push(n.to_owned());
+        }
+    }
+    missing.sort();
     let missing = json!(missing);
+    let roots: Vec<(String, PathBuf)> = roots.into_iter().map(|v| (v.name, v.path)).collect();
     let result = tokio::task::spawn_blocking(move || {
         partial::coverage(
             &roots,
@@ -1075,21 +1116,23 @@ async fn approve(AxState(store): AxState<Shared>, Json(req): Json<ApproveRequest
 /// held when last seen, and when it was retired. A volume that is mounted
 /// isn't retired.
 async fn retire(AxState(store): AxState<Shared>, UrlPath(name): UrlPath<String>) -> Reply {
-    let path = store
+    let volume = store
         .volumes()
         .into_iter()
         .find(|v| v.name == name)
-        .map(|v| v.path)
         .or_else(|| {
-            lock(&store.remembered)
-                .volumes
-                .get(&name)
-                .map(|k| k.path.clone())
+            lock(&store.remembered).volumes.get(&name).map(|k| Volume {
+                name: name.clone(),
+                path: k.path.clone(),
+                writable: k.writable,
+                require_mount: k.require_mount,
+            })
         });
-    let Some(path) = path else {
+    let Some(volume) = volume else {
         return refused(StatusCode::NOT_FOUND, format!("no volume {name}"));
     };
-    if path.is_dir() {
+    let path = volume.path.clone();
+    if volumes::present(&volume).is_ok() {
         return refused(
             StatusCode::CONFLICT,
             format!(
@@ -1147,16 +1190,7 @@ async fn retire(AxState(store): AxState<Shared>, UrlPath(name): UrlPath<String>)
 
 /// Today's UTC date, `YYYY-MM-DD`.
 fn today() -> String {
-    let days = (unix_seconds() / 86_400.0) as i64;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
+    ingest::day_of((unix_seconds() * 1e9) as u64)
 }
 
 #[cfg(test)]
@@ -1188,6 +1222,7 @@ mod tests {
                 name: (*n).to_owned(),
                 path: p.to_path_buf(),
                 writable: true,
+                require_mount: false,
             })
             .collect();
         let s = Store::new(
@@ -1393,6 +1428,75 @@ mod tests {
         let s = store(&[("a", &a)], &state_file);
         scanned(&s).await;
         assert_eq!(lock(&s.catalog)["missing_volumes"], json!([]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_folder_that_is_not_a_mount_point_is_missing() {
+        let dir = scratch("not-mounted");
+        let volume = Volume {
+            name: "x".into(),
+            path: dir.join("x"),
+            writable: true,
+            require_mount: true,
+        };
+        std::fs::create_dir_all(&volume.path).unwrap();
+        let state_file = dir.join("state.json");
+        let s = Store::new(
+            vec![volume],
+            None,
+            LIMITS,
+            state_file.clone(),
+            state::Remembered::default(),
+        );
+        s.remember(&[]).unwrap();
+        assert!(state::load(&state_file).unwrap().volumes["x"].require_mount);
+        scanned(&s).await;
+        assert!(
+            s.place("databento", "B1", "f", None).is_err(),
+            "never written to"
+        );
+        let addr = serve_store(s, WriteToken::open()).await;
+        let (_, cat) = get(&addr, "/catalog").await;
+        assert_eq!(cat["missing_volumes"], json!(["x"]));
+        assert!(
+            cat["roots"][0]["errors"][0]
+                .as_str()
+                .unwrap()
+                .contains("not a mounted drive")
+        );
+        let (_, cov) = get(&addr, COVERAGE).await;
+        assert_eq!(cov["missing_volumes"], json!(["x"]));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_volume_emptied_of_what_it_held_is_missing() {
+        let dir = scratch("emptied");
+        let vol = dir.join("v");
+        let day = vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("2026-10-01.dbn.zst"), b"x").unwrap();
+        let state_file = dir.join("state.json");
+        let s = store(&[("v", &vol)], &state_file);
+        scanned(&s).await;
+        std::fs::remove_dir_all(vol.join("Databento")).unwrap();
+        scanned(&s).await;
+        let addr = serve_store(s, WriteToken::open()).await;
+        let (_, cat) = get(&addr, "/catalog").await;
+        assert_eq!(cat["missing_volumes"], json!(["v"]));
+        assert!(
+            cat["roots"][0]["errors"][0]
+                .as_str()
+                .unwrap()
+                .contains("now holds none")
+        );
+        let (_, cov) = get(&addr, COVERAGE).await;
+        assert_eq!(cov["missing_volumes"], json!(["v"]));
+        // What it held is still remembered.
+        assert!(state::held_any(
+            &state::load(&state_file).unwrap().volumes["v"]
+        ));
         let _ = std::fs::remove_dir_all(dir);
     }
 

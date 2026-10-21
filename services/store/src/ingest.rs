@@ -28,6 +28,9 @@ pub struct Volume {
     pub name: String,
     pub path: PathBuf,
     pub writable: bool,
+    /// Its path must be a mount point (decision 0019): true for drives found
+    /// in the mount directory and paths under `/Volumes`.
+    pub require_mount: bool,
 }
 
 /// Where incoming files wait to be incorporated.
@@ -255,6 +258,19 @@ pub(crate) fn check_header(
 }
 
 /// Nanoseconds since the epoch at 00:00 UTC of a `YYYY-MM-DD` day.
+/// `YYYY-MM-DD` of a time in nanoseconds since the epoch (UTC).
+pub(crate) fn day_of(ns: u64) -> String {
+    let z = (ns / 86_400_000_000_000) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
+}
+
 pub(crate) fn day_ns(day: &str) -> Option<u64> {
     let mut it = day.split('-').map(str::parse::<i64>);
     let (y, m, d) = (it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?);

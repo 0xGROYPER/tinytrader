@@ -76,12 +76,24 @@ bought again), so they say what the store holds or say they can't
   folder it sits in, case ignored (`Databento/` and `databento/` are both
   `databento`; `Alpaca/` is `alpaca`). A Databento batch download outside any
   provider's folder is `databento`; a dataset in the store layout outside any
-  provider's folder has no provider (`null`). Datasets are listed by
+  provider's folder has no provider (`null`) in the catalog, and counts as
+  Databento's in `/coverage`. Datasets are listed by
   provider, id and symbol, never merged across providers: each vendor's ids
   stay its own.
 - `filed` is true when every day of the dataset is in the store layout.
   Days in a batch download, or in the older layout of a folder per day, are
   listed in their schema's `unfiled`.
+- A batch file named for a range of days (`…-20261001-20261031.cbbo-1m…`)
+  counts every day of it, both ends included. When a batch is split by
+  symbol, or a file's name doesn't say its days, the batch counts every day of
+  its query (`start` and `end` in `metadata.json`); without them it is an
+  error.
+- A volume is missing, with the reason in its root's `errors`, when a folder
+  on it can't be read; when it has a batch download deeper than the catalog
+  reads (four folders down); when its path must be a mount point and isn't
+  (an empty folder left in `/Volumes` by a drive that wasn't unmounted
+  cleanly); or when it held datasets when last read in full and now holds
+  none.
 
 ### `GET /catalog`
 
@@ -106,6 +118,11 @@ volume held when last read in full. A remembered volume that isn't mounted
 when the store starts, or is unplugged later, stays in `/catalog` with
 `"present": false` and in `missing_volumes`, so its days are never taken as
 not held. An approved drive mounted under a new path is used there.
+
+Approved drives, and volumes in `STORE_VOLUMES` under `/Volumes`, must be
+mount points (on another device than the folder they sit in), and nothing is
+written to one that isn't. Add `:anydir` to a `STORE_VOLUMES` entry
+(`NAME=PATH:anydir`, with or before `:ro`) to take a plain folder.
 
 #### `POST /volumes/{name}/retire`
 

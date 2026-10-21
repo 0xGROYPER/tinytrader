@@ -32,10 +32,23 @@ pub struct Remembered {
 pub struct Known {
     pub path: PathBuf,
     pub writable: bool,
+    /// Its path must be a mount point; true unless recorded otherwise.
+    #[serde(default = "yes")]
+    pub require_mount: bool,
     /// Its datasets when last scanned: `{ "provider/id/symbol": { schema:
     /// { days, first, last, bytes } } }`.
     #[serde(default)]
     pub held: Value,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Whether the volume held any datasets when last read in full.
+#[must_use]
+pub fn held_any(k: &Known) -> bool {
+    k.held.as_object().is_some_and(|o| !o.is_empty())
 }
 
 /// Where the state file is by default.

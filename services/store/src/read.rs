@@ -138,6 +138,7 @@ mod tests {
                 name: name.to_owned(),
                 path: d.clone(),
                 writable: true,
+                require_mount: false,
             },
             d,
         )

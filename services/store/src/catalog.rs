@@ -231,7 +231,11 @@ impl Dataset {
 /// Look for datasets under `dir`, in `provider`'s folder if any; returns
 /// whether any were found.
 fn visit(dir: &Path, depth: usize, provider: Option<&str>, scan: &mut Scan) -> bool {
-    if !dir.is_dir() || depth > 3 {
+    if !dir.is_dir() {
+        return false;
+    }
+    if depth > 3 {
+        too_deep(dir, 4, scan);
         return false;
     }
     let name = file_name(dir);
@@ -259,10 +263,28 @@ fn visit(dir: &Path, depth: usize, provider: Option<&str>, scan: &mut Scan) -> b
         return databento_batch(dir, provider, scan);
     }
     let mut found = false;
-    for child in listing(dir, provider.is_some(), scan) {
+    for child in listing(dir, true, scan) {
         found |= visit(&child, depth + 1, provider, scan);
     }
     found
+}
+
+/// A batch download below the depth the catalog reads, up to `more` levels
+/// further, is an error of the volume, not skipped: what it holds would
+/// otherwise go uncounted.
+fn too_deep(dir: &Path, more: usize, scan: &mut Scan) {
+    if dir.join("metadata.json").is_file() && dir.join("manifest.json").is_file() {
+        scan.errors.push(format!(
+            "{}: a batch download deeper than the catalog reads; move it nearer the top",
+            dir.display()
+        ));
+        return;
+    }
+    if more > 0 {
+        for child in listing(dir, true, scan).into_iter().filter(|c| c.is_dir()) {
+            too_deep(&child, more - 1, scan);
+        }
+    }
 }
 
 /// `<DATASET>/<schema>/<day>`, or with a symbol level in between, where a
@@ -401,8 +423,61 @@ pub struct Batch {
     pub symbols: Vec<String>,
     pub stype_in: Option<String>,
     pub job: String,
-    /// Each data file: its day, schema, encoding and size.
+    /// Each day of each schema it holds, with the encoding and the bytes
+    /// counted to it (a file covering several days counts on its first).
     pub files: Vec<(String, String, &'static str, u64)>,
+}
+
+/// The days a batch file's name says it holds: `<dataset>-<YYYYMMDD>`, or
+/// `<dataset>-<YYYYMMDD>-<YYYYMMDD>` for a range (both ends included).
+fn named_days(head: &str) -> Option<Vec<String>> {
+    let date = |d: &str| {
+        (d.len() == 8 && d.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| format!("{}-{}-{}", &d[..4], &d[4..6], &d[6..]))
+            .filter(|d| crate::ingest::day_ns(d).is_some())
+    };
+    let mut parts = head.rsplit('-');
+    let last = date(parts.next()?)?;
+    let first = parts.next().and_then(date).unwrap_or_else(|| last.clone());
+    let days = days_between(&first, &last);
+    (!days.is_empty()).then_some(days)
+}
+
+/// Every day from `first` to `last`, both included.
+fn days_between(first: &str, last: &str) -> Vec<String> {
+    const DAY: u64 = 86_400_000_000_000;
+    let (Some(a), Some(b)) = (crate::ingest::day_ns(first), crate::ingest::day_ns(last)) else {
+        return Vec::new();
+    };
+    (a / DAY..=b / DAY)
+        .map(|d| crate::ingest::day_of(d * DAY))
+        .collect()
+}
+
+/// The days of a batch's query, from its `metadata.json`: `start` to `end`
+/// as nanoseconds (end excluded) or dates (end counted, to be safe).
+fn query_days(q: &Value) -> Option<Vec<String>> {
+    let day = |v: &Value, end: bool| -> Option<String> {
+        let ns = v.as_u64().or_else(|| {
+            v.as_str()
+                .filter(|s| s.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|s| s.parse().ok())
+        });
+        match ns {
+            Some(ns) => Some(crate::ingest::day_of(if end {
+                ns.saturating_sub(1)
+            } else {
+                ns
+            })),
+            None => v
+                .as_str()
+                .and_then(|s| s.get(..10))
+                .filter(|d| crate::ingest::day_ns(d).is_some())
+                .map(str::to_owned),
+        }
+    };
+    let days = days_between(&day(&q["start"], false)?, &day(&q["end"], true)?);
+    (!days.is_empty()).then_some(days)
 }
 
 /// Read the batch download in `dir`; `None` if its metadata names no dataset.
@@ -418,7 +493,10 @@ pub fn read_batch(dir: &Path) -> Result<Option<Batch>, String> {
     let Some(dataset) = meta["query"]["dataset"].as_str() else {
         return Ok(None);
     };
+    let q = &meta["query"];
     let mut files = Vec::new();
+    // Files split by symbol, or whose names don't say their days.
+    let mut unnamed: Option<(&'static str, u64)> = None;
     for f in read_entries(dir)? {
         let n = file_name(&f);
         let Some((stem, encoding)) = ENCODINGS
@@ -427,20 +505,48 @@ pub fn read_batch(dir: &Path) -> Result<Option<Batch>, String> {
         else {
             continue;
         };
-        // <dataset>-<YYYYMMDD>.<schema>
-        let Some((head, schema)) = stem.rsplit_once('.') else {
-            continue;
-        };
-        let Some(compact) = head
-            .rsplit('-')
-            .next()
-            .filter(|d| d.len() == 8 && d.bytes().all(|b| b.is_ascii_digit()))
-        else {
-            continue;
-        };
-        let day = format!("{}-{}-{}", &compact[..4], &compact[4..6], &compact[6..]);
         let size = f.metadata().map(|m| m.len()).unwrap_or(0);
-        files.push((day, schema.to_owned(), encoding, size));
+        // <dataset>-<YYYYMMDD>[-<YYYYMMDD>].<schema>; receipts such as
+        // `metadata.json` have no schema.
+        let named = stem
+            .rsplit_once('.')
+            .and_then(|(head, schema)| Some((named_days(head)?, schema)));
+        match named {
+            Some((days, schema)) if meta["customizations"]["split_symbols"] != true => {
+                for (i, day) in days.into_iter().enumerate() {
+                    files.push((
+                        day,
+                        schema.to_owned(),
+                        encoding,
+                        if i == 0 { size } else { 0 },
+                    ));
+                }
+            }
+            _ if stem.contains('.') || encoding.starts_with("dbn") => {
+                let (_, bytes) = unnamed.get_or_insert((encoding, 0));
+                *bytes += size;
+            }
+            _ => {}
+        }
+    }
+    // Their days are the query's, all of them.
+    if let Some((encoding, bytes)) = unnamed {
+        let (Some(days), Some(schema)) = (query_days(q), q["schema"].as_str()) else {
+            return Err(format!(
+                "{}: some files' names don't say their days, and metadata.json gives no query start, end and schema",
+                dir.display()
+            ));
+        };
+        for (i, day) in days.into_iter().enumerate() {
+            if !files.iter().any(|f| f.0 == day && f.1 == schema) {
+                files.push((
+                    day,
+                    schema.to_owned(),
+                    encoding,
+                    if i == 0 { bytes } else { 0 },
+                ));
+            }
+        }
     }
     Ok(Some(Batch {
         dataset: dataset.to_owned(),
