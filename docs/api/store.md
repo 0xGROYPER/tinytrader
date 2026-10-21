@@ -14,8 +14,8 @@ Shared conventions are in the [API overview](README.md).
 
 | Endpoint | | |
 |---|---|---|
-| `GET /catalog` | read | Each volume's datasets by provider, their schemas and days, and how full it is. Each schema lists its `partial` and `unfiled` days ([below](#what-the-store-holds)). |
-| `GET /coverage?provider=&dataset=&symbol=&schema=&start=&end=` | read | Each day held: `complete`, or `partial` with its contracts and time window ([below](#partial-days)). |
+| `GET /catalog?fresh=` | read | Each volume's datasets by provider, their schemas and days, and how full it is. Each schema lists its `partial` and `unfiled` days ([below](#what-the-store-holds)). |
+| `GET /coverage?provider=&dataset=&symbol=&schema=&start=&end=&fresh=` | read | Each day held: `complete`, or `partial` with its contracts and time window ([below](#partial-days)). |
 | `GET /files` | read | DBN files the volumes hold, by logical name (below). |
 | `GET /files/{volume}/{path}` | read | One DBN file, as it is on the volume. |
 | `GET /incoming` | read | Batches uploaded and waiting to be filed. |
@@ -69,6 +69,11 @@ bought again), so they say what the store holds or say they can't
 
 - Both answer `503 {"error": "the store is still scanning"}` until the first
   scan after the store starts is done.
+- Both answer from the last scan, which may be minutes old. With `fresh=1`
+  they ask for a rescan and answer from a scan that started after the
+  request, so data copied onto a drive behind the store's back counts.
+  Requests meanwhile share that scan. It waits at most 120 seconds, then
+  answers `503`. It is a read: no token. **Purchases ask with `fresh=1`.**
 - Both carry `missing_volumes`: the remembered volumes that aren't there now
   ([below](#remembered-volumes)). In `/catalog` a volume whose provider or
   dataset folders couldn't all be read, or that has a malformed manifest, is
@@ -324,4 +329,5 @@ since the epoch), and reads the manifests of the matching schema folders as
 they are now, so a merge into a partial day shows at once. A filing, an
 import, a merge, or a change of what is ignored asks for a rescan; until it
 is done `/coverage` waits (at most 60 seconds, then `503`), so a day just
-filed is never missed.
+filed is never missed. With `fresh=1` it waits for a scan started after the
+request ([above](#what-the-store-holds)).

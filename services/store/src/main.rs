@@ -124,8 +124,10 @@ struct Store {
     /// scans have covered: `/coverage` waits for those asked for.
     requested: AtomicU64,
     completed: AtomicU64,
-    /// How long `/coverage` waits for a rescan asked for.
+    /// How long `/coverage` waits for a rescan asked for, and for one it
+    /// asks for itself (`fresh`).
     wait: Duration,
+    fresh_wait: Duration,
     events: Events,
     rescan: tokio::sync::Notify,
     bytes_in: AtomicU64,
@@ -487,9 +489,38 @@ impl Store {
             .collect()
     }
 
-    fn request_rescan(&self) {
-        self.requested.fetch_add(1, Ordering::SeqCst);
+    /// Returns the rescan's number: a scan that started after it covers it.
+    fn request_rescan(&self) -> u64 {
+        let n = self.requested.fetch_add(1, Ordering::SeqCst) + 1;
         self.rescan.notify_one();
+        n
+    }
+
+    /// Wait (at most `limit`) for a scan to cover rescan `want`.
+    async fn covered(&self, want: u64, limit: Duration) -> Result<(), Reply> {
+        let deadline = tokio::time::Instant::now() + limit;
+        while self.completed.load(Ordering::SeqCst) < want {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(refused(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the store is rescanning; ask again shortly",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok(())
+    }
+
+    /// With `fresh`, ask for a rescan and wait for it (a scan started after
+    /// now; requests meanwhile share it), at most `fresh_wait`; otherwise
+    /// wait only for a rescan already asked for, at most `wait`.
+    async fn settled(&self, fresh: bool) -> Result<(), Reply> {
+        if fresh {
+            self.covered(self.request_rescan(), self.fresh_wait).await
+        } else {
+            self.covered(self.requested.load(Ordering::SeqCst), self.wait)
+                .await
+        }
     }
 
     /// A store over the configured volumes, then every remembered volume the
@@ -520,6 +551,7 @@ impl Store {
             requested: AtomicU64::new(0),
             completed: AtomicU64::new(0),
             wait: Duration::from_secs(60),
+            fresh_wait: Duration::from_secs(120),
             remembered: Mutex::new(remembered),
             state_path,
             events: Events::default(),
@@ -826,15 +858,32 @@ async fn import(
 }
 
 /// The last scan, or `503` until the first is done.
-async fn catalog(AxState(store): AxState<Shared>) -> Reply {
-    let c = lock(&store.catalog).clone();
-    if c.is_null() {
+/// With `fresh=1`, from a scan started after the request.
+async fn catalog(AxState(store): AxState<Shared>, Query(q): Query<Fresh>) -> Reply {
+    if lock(&store.catalog).is_null() {
         return refused(
             StatusCode::SERVICE_UNAVAILABLE,
             "the store is still scanning",
         );
     }
-    reply(StatusCode::OK, c)
+    if let Err(r) = store.settled(q.fresh()).await {
+        return r;
+    }
+    reply(StatusCode::OK, lock(&store.catalog).clone())
+}
+
+/// `fresh=1`: answer from a scan started after the request (decision 0019:
+/// a purchase asks this way, so data copied onto a drive since the last
+/// scan counts).
+#[derive(Deserialize)]
+struct Fresh {
+    fresh: Option<String>,
+}
+
+impl Fresh {
+    fn fresh(&self) -> bool {
+        matches!(self.fresh.as_deref(), Some("1" | "true"))
+    }
 }
 
 #[derive(Deserialize)]
@@ -845,6 +894,7 @@ struct CoverageQuery {
     schema: String,
     start: String,
     end: String,
+    fresh: Option<String>,
 }
 
 /// Each held day of a provider's dataset, symbol and schema: complete, or
@@ -877,17 +927,14 @@ async fn coverage(AxState(store): AxState<Shared>, Query(q): Query<CoverageQuery
     {
         return refused(StatusCode::BAD_REQUEST, "unsafe dataset, symbol or schema");
     }
-    // A day just filed is in the scan after it: wait for that (bounded).
-    let want = store.requested.load(Ordering::SeqCst);
-    let deadline = tokio::time::Instant::now() + store.wait;
-    while store.completed.load(Ordering::SeqCst) < want {
-        if tokio::time::Instant::now() >= deadline {
-            return refused(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the store is rescanning after a change; ask again shortly",
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+    // A day just filed is in the scan after it: wait for that (bounded),
+    // or, with `fresh`, for a scan started now.
+    let fresh = Fresh {
+        fresh: q.fresh.clone(),
+    }
+    .fresh();
+    if let Err(r) = store.settled(fresh).await {
+        return r;
     }
     let index = lock(&store.index).clone();
     if let Some(e) = index.errors.first() {
@@ -1921,6 +1968,43 @@ mod tests {
         s.request_rescan();
         let (code, body) = get(&addr, COVERAGE).await;
         assert_eq!(code, 503, "{body}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fresh_answers_wait_for_a_scan_started_after_them() {
+        let dir = scratch("fresh");
+        let vol = dir.join("v");
+        let day = vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+        std::fs::create_dir_all(&day).unwrap();
+        let mut s = store(&[("v", &vol)], &dir.join("state.json"));
+        Arc::get_mut(&mut s).unwrap().fresh_wait = Duration::from_millis(400);
+        scanned(&s).await;
+        // Served without a rescan loop: the one scan below is run by hand.
+        let app = router(s.clone(), WriteToken::open());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        // Copied onto the drive behind the store's back.
+        std::fs::write(day.join("2026-10-01.dbn.zst"), b"x").unwrap();
+        let (_, stale) = get(&addr, COVERAGE).await;
+        assert_eq!(stale["days"], json!([]), "the last scan's answer");
+        let fresh_cov = format!("{COVERAGE}&fresh=1");
+        let (a, b) = (addr.clone(), addr.clone());
+        let one = tokio::spawn(async move { get(&a, &fresh_cov).await });
+        let two = tokio::spawn(async move { get(&b, "/catalog?fresh=1").await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        scanned(&s).await;
+        let ((c1, cov), (c2, cat)) = (one.await.unwrap(), two.await.unwrap());
+        assert_eq!((c1, c2), (200, 200));
+        assert_eq!(cov["days"][0]["day"], "2026-10-01");
+        assert_eq!(
+            cov["scanned_at"], cat["generated_at"],
+            "both from the one scan"
+        );
+        // No scan comes: 503, not a stale answer.
+        let (code, _) = get(&addr, "/catalog?fresh=1").await;
+        assert_eq!(code, 503);
         let _ = std::fs::remove_dir_all(dir);
     }
 
