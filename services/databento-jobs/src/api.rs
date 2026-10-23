@@ -48,13 +48,40 @@ pub fn every_job() -> ListJobsParams {
     }
 }
 
-/// Databento itself.
-pub struct Live(pub tokio::sync::Mutex<HistoricalClient>);
+/// Databento itself, through a few clients: a call waits for a free one,
+/// not behind every other call (pricing a long request makes hundreds).
+pub struct Live {
+    clients: Vec<tokio::sync::Mutex<HistoricalClient>>,
+    next: std::sync::atomic::AtomicUsize,
+}
+
+impl Live {
+    /// # Panics
+    /// With no clients.
+    #[must_use]
+    pub fn new(clients: Vec<HistoricalClient>) -> Self {
+        assert!(!clients.is_empty(), "at least one Databento client");
+        Self {
+            clients: clients.into_iter().map(tokio::sync::Mutex::new).collect(),
+            next: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    async fn client(&self) -> tokio::sync::MutexGuard<'_, HistoricalClient> {
+        for c in &self.clients {
+            if let Ok(g) = c.try_lock() {
+                return g;
+            }
+        }
+        let i = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % self.clients.len();
+        self.clients[i].lock().await
+    }
+}
 
 macro_rules! call {
     ($self:ident, |$c:ident| $body:expr) => {
         Box::pin(async move {
-            let mut $c = $self.0.lock().await;
+            let mut $c = $self.client().await;
             $body.await.map_err(|e| e.to_string())
         })
     };
@@ -75,7 +102,7 @@ impl Databento for Live {
     }
     fn cost<'a>(&'a self, p: &'a GetCostParams) -> Fut<'a, (f64, u64)> {
         Box::pin(async move {
-            let mut c = self.0.lock().await;
+            let mut c = self.client().await;
             let usd = c.metadata().get_cost(p).await.map_err(|e| e.to_string())?;
             let bytes = c
                 .metadata()
@@ -103,11 +130,13 @@ impl Databento for Live {
 }
 
 /// Databento with every call bounded in time, so a hung call never holds
-/// the purchase lock: a read gives up after `read`, a submission after
-/// `submit` (its outcome then unknown, so written `uncertain`).
+/// the purchase lock: a read gives up after `read`, a price after `cost`
+/// (Databento can take minutes to price a long contract list), a submission
+/// after `submit` (its outcome then unknown, so written `uncertain`).
 pub struct Timed {
     pub inner: Arc<dyn Databento>,
     pub read: Duration,
+    pub cost: Duration,
     pub submit: Duration,
 }
 
@@ -117,6 +146,7 @@ impl Timed {
         Self {
             inner,
             read: Duration::from_secs(60),
+            cost: Duration::from_secs(300),
             submit: Duration::from_secs(120),
         }
     }
@@ -144,7 +174,7 @@ impl Databento for Timed {
         within(self.submit, self.inner.submit(p))
     }
     fn cost<'a>(&'a self, p: &'a GetCostParams) -> Fut<'a, (f64, u64)> {
-        within(self.read, self.inner.cost(p))
+        within(self.cost, self.inner.cost(p))
     }
     fn datasets(&self) -> Fut<'_, Vec<String>> {
         within(self.read, self.inner.datasets())
