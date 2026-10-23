@@ -1,3 +1,7 @@
+# TODO 
+- single machine deployment example with docker compose, multi machine with docker swarm
+- tinytrader-ops build with nix, package to OCI 
+
 # tinytrader
 
 A platform for running trading and research operations: services and an
