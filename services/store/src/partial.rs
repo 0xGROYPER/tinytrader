@@ -302,15 +302,12 @@ fn import_day(name: &str) -> Option<String> {
 /// Do these contracts belong to `parent`? For options, a parent `ROOT.OPT`
 /// holds OCC symbols whose root (the first six characters, padded) is `ROOT`.
 fn belongs(parent: &str, symbols: &BTreeSet<String>) -> Result<(), String> {
-    let Some(root) = parent.strip_suffix(".OPT") else {
+    if !parent.ends_with(".OPT") {
         return Err(format!(
             "only option parents (ROOT.OPT) take contract lists, not {parent}"
         ));
-    };
-    match symbols
-        .iter()
-        .find(|s| s.len() != 21 || s.get(..6).map(str::trim_end) != Some(root))
-    {
+    }
+    match symbols.iter().find(|s| !of_parent(parent, s)) {
         Some(s) => Err(format!("{s:?} isn't a contract of {parent}")),
         None => Ok(()),
     }
@@ -737,51 +734,247 @@ pub fn import_batch(
     import(parts, elsewhere, batch, today)
 }
 
-/// Each held day of `dataset/symbol/schema` from `start` to `end`
-/// (inclusive, `YYYY-MM-DD`), on any of `roots` (provider folders): complete,
-/// or partial with its coverage.
+/// What one copy of a day holds, as `/coverage` reports it.
+fn row(day: &str, volume: &str, filed: bool, size: u64, entry: Option<&Value>) -> Value {
+    match entry {
+        None => {
+            json!({ "day": day, "volume": volume, "kind": "complete", "filed": filed, "size": size })
+        }
+        Some(m) => json!({
+            "day": day, "volume": volume, "kind": "partial", "filed": filed, "size": size,
+            "coverage": m["coverage"], "records": m["records"], "sha256": m["sha256"],
+            "pending": m.get("pending").is_some(),
+        }),
+    }
+}
+
+/// Does data of `found` (a provider, or none outside every provider's
+/// folder) count for `provider`? Data with no provider counts for Databento,
+/// whose layout and names it has: a copy in a backup still blocks buying it
+/// again.
+fn ours(found: Option<&str>, provider: &str) -> bool {
+    found.unwrap_or("databento") == provider
+}
+
+/// Symbol types whose symbols say what they hold.
+const CLASSIFIED: [&str; 5] = [
+    "parent",
+    "raw_symbol",
+    "continuous",
+    "nasdaq_symbol",
+    "cms_symbol",
+];
+
+/// What a holding of `symbols`, requested as `stype_in`, holds of `symbol`
+/// (or, with none, of the dataset): `None` nothing, an empty set all of it,
+/// otherwise those of its contracts the holding lists. Symbols that can't be
+/// told apart (instrument IDs, or no type) hold all of it, to be safe.
+fn holds(
+    symbols: &[String],
+    stype_in: Option<&str>,
+    symbol: Option<&str>,
+) -> Option<BTreeSet<String>> {
+    if symbols.is_empty() || !stype_in.is_some_and(|t| CLASSIFIED.contains(&t)) {
+        return Some(BTreeSet::new());
+    }
+    let all = symbols
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("ALL_SYMBOLS"));
+    let whole = match symbol {
+        Some(s) => all || symbols.iter().any(|x| x.eq_ignore_ascii_case(s)),
+        None => all || symbols.len() != 1,
+    };
+    if whole {
+        return Some(BTreeSet::new());
+    }
+    // A list of contracts of the parent holds those contracts.
+    let contracts: BTreeSet<String> = match symbol {
+        Some(s) if stype_in == Some("raw_symbol") => symbols
+            .iter()
+            .filter(|c| of_parent(s, c))
+            .cloned()
+            .collect(),
+        _ => BTreeSet::new(),
+    };
+    (!contracts.is_empty()).then_some(contracts)
+}
+
+/// An unfiled copy of a day: complete when `contracts` is empty, otherwise
+/// partial with those contracts over the part of `window` in the day.
+fn held_row(
+    day: &str,
+    volume: &str,
+    size: u64,
+    contracts: &BTreeSet<String>,
+    window: (u64, u64),
+) -> Value {
+    let partial = (!contracts.is_empty()).then(|| {
+        let from = ingest::day_ns(day).unwrap_or(0);
+        let held = Coverage {
+            symbols: contracts.clone(),
+            start: window.0.max(from),
+            end: window.1.min(from + 86_400_000_000_000),
+        };
+        json!({ "coverage": held.to_json(), "records": null, "sha256": null })
+    });
+    row(day, volume, false, size, partial.as_ref())
+}
+
+/// Is `symbol` a contract of the option parent `parent` (`ROOT.OPT`)?
+fn of_parent(parent: &str, symbol: &str) -> bool {
+    parent.strip_suffix(".OPT").is_some_and(|root| {
+        symbol.len() == 21
+            && symbol
+                .get(..6)
+                .is_some_and(|r| r.trim_end().eq_ignore_ascii_case(root))
+    })
+}
+
+/// Each held day of `provider`'s `dataset/symbol/schema` from `start` to
+/// `end` (inclusive, `YYYY-MM-DD`), on any of `volumes` (name, path) that is
+/// present: every day the catalog counts, filed or not. A day held on several
+/// volumes, or in several forms, is one row: complete if any copy is,
+/// otherwise the union of their contracts and windows, with `conflict` when
+/// the copies differ.
 ///
 /// # Errors
-/// If a manifest can't be read.
+/// If a folder of the provider or the dataset can't be read, or a manifest
+/// or a batch's metadata is malformed: never an answer with days left out.
+#[cfg(test)]
 pub fn coverage(
-    roots: &[(String, PathBuf)],
+    volumes: &[(String, PathBuf)],
+    provider: &str,
     dataset: &str,
     symbol: Option<&str>,
     schema: &str,
     start: &str,
     end: &str,
 ) -> Result<Vec<Value>, String> {
-    let mut out = BTreeMap::new();
-    for (volume, root) in roots {
-        let mut dir = root.join(dataset);
-        if let Some(s) = symbol {
-            dir = dir.join(s);
-        }
-        let dir = dir.join(schema);
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        let manifest = read_manifest(&dir)?;
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let Some(day) = import_day(&name) else {
-                continue;
-            };
-            if day.as_str() < start || day.as_str() > end {
-                continue;
+    let mut found = Vec::new();
+    for (volume, root) in volumes.iter().filter(|(_, r)| r.is_dir()) {
+        found.push((volume.as_str(), crate::catalog::places(root)?));
+    }
+    let index: Vec<(&str, &[crate::catalog::Place])> =
+        found.iter().map(|(v, p)| (*v, p.as_slice())).collect();
+    coverage_in(&index, provider, dataset, symbol, schema, start, end)
+}
+
+/// As [`coverage`], from the places a scan found on each volume (`index`),
+/// and the current manifests of the matching schema folders, so a merge into
+/// a partial day shows at once.
+///
+/// # Errors
+/// If a matching schema folder's manifest is malformed.
+pub fn coverage_in(
+    index: &[(&str, &[crate::catalog::Place])],
+    provider: &str,
+    dataset: &str,
+    symbol: Option<&str>,
+    schema: &str,
+    start: &str,
+    end: &str,
+) -> Result<Vec<Value>, String> {
+    let mut copies: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let wanted = |day: &str| day >= start && day <= end;
+    for &(volume, places) in index {
+        for place in places {
+            match place {
+                crate::catalog::Place::Days {
+                    provider: p,
+                    dataset: d,
+                    symbol: s,
+                    schema: k,
+                    dir,
+                    days,
+                } if ours(p.as_deref(), provider)
+                    && d.eq_ignore_ascii_case(dataset)
+                    && s.as_deref() == symbol
+                    && k == schema =>
+                {
+                    let manifest = read_manifest(dir)?;
+                    for (day, size, filed) in days.iter().filter(|d| wanted(&d.0)) {
+                        let entry = if *filed { manifest.get(day) } else { None };
+                        let r = row(day, volume, *filed, *size, entry);
+                        copies.entry(day.clone()).or_default().push(r);
+                    }
+                }
+                crate::catalog::Place::Batch {
+                    provider: p,
+                    batch: b,
+                } if ours(p.as_deref(), provider) && b.dataset.eq_ignore_ascii_case(dataset) => {
+                    let Some(contracts) = holds(&b.symbols, b.stype_in.as_deref(), symbol) else {
+                        continue;
+                    };
+                    for (day, _, _, size) in b.files.iter().filter(|f| f.1 == schema) {
+                        if wanted(day) {
+                            let r = held_row(day, volume, *size, &contracts, (0, u64::MAX));
+                            copies.entry(day.clone()).or_default().push(r);
+                        }
+                    }
+                }
+                // Any other DBN file, by its header; one of several schemas
+                // counts for each.
+                crate::catalog::Place::Loose {
+                    provider: p,
+                    header: h,
+                    size,
+                } if ours(p.as_deref(), provider)
+                    && h.dataset.eq_ignore_ascii_case(dataset)
+                    && h.schema.as_deref().is_none_or(|s| s == schema) =>
+                {
+                    let Some(contracts) = holds(&h.symbols, h.stype_in.as_deref(), symbol) else {
+                        continue;
+                    };
+                    for (i, day) in h.days().into_iter().enumerate() {
+                        if wanted(&day) {
+                            let size = if i == 0 { *size } else { 0 };
+                            let r = held_row(&day, volume, size, &contracts, (h.start, h.end));
+                            copies.entry(day).or_default().push(r);
+                        }
+                    }
+                }
+                _ => {}
             }
-            let row = match manifest.get(&day) {
-                None => json!({ "day": day, "volume": volume, "kind": "complete" }),
-                Some(m) => json!({
-                    "day": day, "volume": volume, "kind": "partial",
-                    "coverage": m["coverage"], "records": m["records"], "sha256": m["sha256"],
-                    "pending": m.get("pending").is_some(),
-                }),
-            };
-            out.insert(day, row);
         }
     }
-    Ok(out.into_values().collect())
+    Ok(copies.into_values().map(merge_copies).collect())
+}
+
+/// One day's row from its copies: a complete copy if there is one, otherwise
+/// the union of the partial copies' contracts and windows.
+fn merge_copies(copies: Vec<Value>) -> Value {
+    let same = |a: &Value, b: &Value| {
+        ["kind", "coverage", "size", "sha256"]
+            .iter()
+            .all(|k| a.get(*k) == b.get(*k))
+    };
+    let conflict = copies.windows(2).any(|w| !same(&w[0], &w[1]));
+    let mut volumes: Vec<&str> = copies.iter().filter_map(|c| c["volume"].as_str()).collect();
+    volumes.sort_unstable();
+    volumes.dedup();
+    let filed = copies.iter().any(|c| c["filed"] == true);
+    let mut out = match copies.iter().find(|c| c["kind"] == "complete") {
+        Some(c) => c.clone(),
+        None => {
+            let mut out = copies[0].clone();
+            if conflict {
+                let union = copies
+                    .iter()
+                    .filter_map(|c| Coverage::from_json(&c["coverage"]))
+                    .reduce(|a, b| a.union(&b));
+                out["coverage"] = union.map_or(Value::Null, |u| u.to_json());
+                out["pending"] = json!(copies.iter().any(|c| c["pending"] == true));
+                for k in ["size", "sha256", "records"] {
+                    out[k] = Value::Null;
+                }
+            }
+            out
+        }
+    };
+    out["filed"] = json!(filed);
+    out["volumes"] = json!(volumes);
+    out["conflict"] = json!(conflict);
+    out
 }
 
 #[cfg(test)]
@@ -901,7 +1094,8 @@ mod tests {
         assert!(!part.inc.exists(), "the incoming folder is gone");
         assert!(root.join("provenance/I1").join(IMPORT).exists());
         let days = coverage(
-            &[("v".into(), root.clone())],
+            &[("v".into(), root.parent().unwrap().to_path_buf())],
+            "databento",
             "OPRA.PILLAR",
             Some("SPY.OPT"),
             "cbbo-1m",
@@ -934,7 +1128,8 @@ mod tests {
         let other = root.join("OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-01.dbn.zst");
         fs::write(&other, b"x").unwrap();
         let days = coverage(
-            &[("v".into(), root.clone())],
+            &[("v".into(), root.parent().unwrap().to_path_buf())],
+            "databento",
             "OPRA.PILLAR",
             Some("SPY.OPT"),
             "cbbo-1m",
@@ -1193,6 +1388,704 @@ mod tests {
                 .unwrap_err()
                 .contains("where the data came from")
         );
+    }
+
+    /// `coverage` of OPRA.PILLAR SPY.OPT cbbo-1m over these volumes, for a
+    /// provider, from 2026-10-01 to 2026-10-09.
+    fn spy(volumes: &[(&str, &Path)], provider: &str) -> Result<Vec<Value>, String> {
+        let v: Vec<(String, PathBuf)> = volumes
+            .iter()
+            .map(|(n, p)| ((*n).to_owned(), p.to_path_buf()))
+            .collect();
+        coverage(
+            &v,
+            provider,
+            "OPRA.PILLAR",
+            Some("SPY.OPT"),
+            "cbbo-1m",
+            "2026-10-01",
+            "2026-10-09",
+        )
+    }
+
+    fn put(path: &Path, bytes: &[u8]) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
+    const T: crate::catalog::Thresholds = crate::catalog::Thresholds {
+        warning: 100.0,
+        critical: 100.0,
+        floor: 100.0,
+    };
+
+    #[test]
+    fn keeps_providers_apart() {
+        let vol = scratch("providers");
+        put(
+            &vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-01.dbn.zst"),
+            b"a",
+        );
+        put(
+            &vol.join("alpaca/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-02.dbn.zst"),
+            b"b",
+        );
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        let found: Vec<(Value, Value, Value)> = cat["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| {
+                (
+                    d["provider"].clone(),
+                    d["filed"].clone(),
+                    d["schemas"]["cbbo-1m"]["days"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (json!("alpaca"), json!(true), json!({ "2026-10-02": 1 })),
+                (json!("databento"), json!(true), json!({ "2026-10-01": 1 })),
+            ]
+        );
+        let days = |p: &str| -> Vec<Value> {
+            spy(&[("v", &vol)], p)
+                .unwrap()
+                .iter()
+                .map(|d| d["day"].clone())
+                .collect()
+        };
+        assert_eq!(days("databento"), [json!("2026-10-01")]);
+        assert_eq!(days("alpaca"), [json!("2026-10-02")]);
+    }
+
+    #[test]
+    fn coverage_counts_batch_folders_and_the_older_layout() {
+        let vol = scratch("unfiled");
+        let batch = |dir: PathBuf, stype: &str, symbols: &[&str], day: &str| {
+            put(&dir.join("manifest.json"), b"{}");
+            let meta = json!({ "job_id": file_name_of(&dir), "query": { "dataset": "OPRA.PILLAR", "stype_in": stype, "symbols": symbols } });
+            put(&dir.join("metadata.json"), meta.to_string().as_bytes());
+            put(
+                &dir.join(format!("opra-pillar-{day}.cbbo-1m.dbn.zst")),
+                b"batch",
+            );
+        };
+        // In Databento's folder, and outside any provider's folder.
+        batch(
+            vol.join("Databento/downloads/OPRA-A"),
+            "parent",
+            &["SPY.OPT"],
+            "20261003",
+        );
+        batch(
+            vol.join("OPRA-B"),
+            "parent",
+            &["QQQ.OPT", "SPY.OPT"],
+            "20261005",
+        );
+        batch(
+            vol.join("Databento/OPRA-C"),
+            "raw_symbol",
+            &[C1, "QQQ   261002C00500000"],
+            "20261006",
+        );
+        batch(
+            vol.join("alpaca/OPRA-D"),
+            "parent",
+            &["SPY.OPT"],
+            "20261007",
+        );
+        put(
+            &vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-04/x.dbn.zst"),
+            b"older",
+        );
+        put(
+            &vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-08.dbn.zst"),
+            b"filed",
+        );
+        let days = spy(&[("v", &vol)], "databento").unwrap();
+        let brief: Vec<(&str, &str, bool)> = days
+            .iter()
+            .map(|d| {
+                (
+                    d["day"].as_str().unwrap(),
+                    d["kind"].as_str().unwrap(),
+                    d["filed"] == true,
+                )
+            })
+            .collect();
+        assert_eq!(
+            brief,
+            [
+                ("2026-10-03", "complete", false),
+                ("2026-10-04", "complete", false),
+                ("2026-10-05", "complete", false),
+                ("2026-10-06", "partial", false),
+                ("2026-10-08", "complete", true),
+            ]
+        );
+        assert_eq!(
+            days[3]["coverage"]["symbols"],
+            json!([C1]),
+            "only SPY's contracts"
+        );
+        assert_eq!(days[0]["volumes"], json!(["v"]));
+        // The catalog counts the same days, as unfiled.
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        let ds = cat["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["provider"] == "databento" && d["symbol"] == "SPY.OPT")
+            .unwrap();
+        assert_eq!(ds["filed"], false);
+        assert_eq!(
+            ds["schemas"]["cbbo-1m"]["unfiled"],
+            json!(["2026-10-04", "2026-10-03"])
+        );
+    }
+
+    fn file_name_of(p: &Path) -> String {
+        p.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn merges_a_day_held_on_several_volumes() {
+        let base = scratch("merge-volumes");
+        let vols: Vec<PathBuf> = ["one", "two", "three"]
+            .iter()
+            .map(|n| base.join(n))
+            .collect();
+        // Different contracts of the same day, filed on two volumes apart.
+        let a = day_bytes(&[(C1, 11)], &[(11, 0)]);
+        import(
+            &[stage(
+                &vols[0].join("Databento"),
+                "A",
+                &[(&name(), a.clone())],
+            )],
+            &[],
+            "A",
+            "2026-10-19",
+        )
+        .unwrap();
+        let b = day_bytes(&[(C2, 12)], &[(12, 1)]);
+        import(
+            &[stage(&vols[1].join("Databento"), "B", &[(&name(), b)])],
+            &[],
+            "B",
+            "2026-10-19",
+        )
+        .unwrap();
+        let both = spy(&[("one", &vols[0]), ("two", &vols[1])], "databento").unwrap();
+        assert_eq!(both.len(), 1);
+        assert_eq!(both[0]["kind"], "partial");
+        assert_eq!(both[0]["coverage"]["symbols"], json!([C1, C2]));
+        assert_eq!(both[0]["volumes"], json!(["one", "two"]));
+        assert_eq!(both[0]["conflict"], true);
+        assert_eq!(both[0]["sha256"], Value::Null, "no one copy's hash");
+        // Identical copies don't conflict.
+        import(
+            &[stage(&vols[2].join("Databento"), "A2", &[(&name(), a)])],
+            &[],
+            "A2",
+            "2026-10-19",
+        )
+        .unwrap();
+        let same = spy(&[("one", &vols[0]), ("three", &vols[2])], "databento").unwrap();
+        assert_eq!(
+            (same[0]["conflict"].clone(), same[0]["kind"].clone()),
+            (json!(false), json!("partial"))
+        );
+        // A complete copy wins, whichever volume is read first.
+        put(&file(&vols[2].join("Databento")), b"the whole day");
+        fs::remove_file(
+            vols[2]
+                .join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m")
+                .join(MANIFEST),
+        )
+        .unwrap();
+        let all = spy(
+            &[("one", &vols[0]), ("two", &vols[1]), ("three", &vols[2])],
+            "databento",
+        )
+        .unwrap();
+        assert_eq!(all[0]["kind"], "complete");
+        assert_eq!(all[0]["volumes"], json!(["one", "three", "two"]));
+        assert_eq!(all[0]["conflict"], true);
+    }
+
+    #[test]
+    fn fails_closed_on_a_malformed_manifest_or_an_unreadable_folder() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let vol = scratch("closed");
+        let dir = vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+        put(&dir.join("2026-10-01.dbn.zst"), b"a");
+        put(&dir.join(MANIFEST), b"{ not json");
+        assert!(
+            spy(&[("v", &vol)], "databento")
+                .unwrap_err()
+                .contains(MANIFEST)
+        );
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        assert_eq!(cat["errors"].as_array().unwrap().len(), 1, "{cat}");
+        fs::remove_file(dir.join(MANIFEST)).unwrap();
+        assert_eq!(spy(&[("v", &vol)], "databento").unwrap().len(), 1);
+        // A dataset folder that can't be read isn't an empty one.
+        let ds = vol.join("Databento/OPRA.PILLAR");
+        fs::set_permissions(&ds, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&ds).is_ok();
+        let got = spy(&[("v", &vol)], "databento");
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        fs::set_permissions(&ds, fs::Permissions::from_mode(0o755)).unwrap();
+        if !readable {
+            assert!(got.is_err(), "{got:?}");
+            assert!(!cat["errors"].as_array().unwrap().is_empty(), "{cat}");
+        }
+    }
+
+    /// A Databento batch download in `dir`: `metadata.json` from `query` and
+    /// `split_symbols`, and empty files of these names.
+    fn raw_batch(dir: &Path, query: &Value, split_symbols: bool, files: &[&str]) {
+        put(&dir.join("manifest.json"), b"{}");
+        let meta = json!({ "query": query, "customizations": { "split_symbols": split_symbols } });
+        put(&dir.join("metadata.json"), meta.to_string().as_bytes());
+        for f in files {
+            put(&dir.join(f), b"batch");
+        }
+    }
+
+    fn days_of(days: &[Value]) -> Vec<&str> {
+        days.iter().map(|d| d["day"].as_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn counts_the_store_layout_outside_a_provider_folder_as_databento() {
+        let vol = scratch("no-provider");
+        put(
+            &vol.join("OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-01.dbn.zst"),
+            b"a",
+        );
+        let q = json!({ "dataset": "OPRA.PILLAR", "symbols": ["spy.opt"] });
+        raw_batch(
+            &vol.join("Databento/OPRA-L"),
+            &q,
+            false,
+            &["opra-pillar-20261002.cbbo-1m.dbn.zst"],
+        );
+        let days = spy(&[("v", &vol)], "databento").unwrap();
+        assert_eq!(
+            days_of(&days),
+            ["2026-10-01", "2026-10-02"],
+            "symbols matched ignoring case"
+        );
+        assert!(spy(&[("v", &vol)], "alpaca").unwrap().is_empty());
+    }
+
+    #[test]
+    fn counts_every_day_a_batch_file_or_its_query_covers() {
+        let vol = scratch("ranges");
+        let q = json!({ "dataset": "OPRA.PILLAR", "schema": "cbbo-1m", "symbols": ["SPY.OPT"] });
+        raw_batch(
+            &vol.join("Databento/OPRA-R"),
+            &q,
+            false,
+            &["opra-pillar-20261001-20261003.cbbo-1m.dbn.zst"],
+        );
+        // Split by symbol: the query's days, its end excluded.
+        let mut split = q.clone();
+        split["start"] = json!(ingest::day_ns("2026-10-05").unwrap());
+        split["end"] = json!(ingest::day_ns("2026-10-07").unwrap());
+        raw_batch(
+            &vol.join("Databento/OPRA-S"),
+            &split,
+            true,
+            &["opra-pillar-20261005.cbbo-1m.SPY.OPT.dbn.zst"],
+        );
+        // A name that doesn't say its day: the query's, given as dates.
+        let mut odd = q.clone();
+        odd["start"] = json!("2026-10-08T00:00:00Z");
+        // Its end excluded, as Databento means it.
+        odd["end"] = json!("2026-10-10");
+        raw_batch(
+            &vol.join("Databento/OPRA-U"),
+            &odd,
+            false,
+            &["spy.cbbo-1m.dbn.zst"],
+        );
+        let days = spy(&[("v", &vol)], "databento").unwrap();
+        assert_eq!(
+            days_of(&days),
+            [
+                "2026-10-01",
+                "2026-10-02",
+                "2026-10-03",
+                "2026-10-05",
+                "2026-10-06",
+                "2026-10-08",
+                "2026-10-09"
+            ]
+        );
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        let ds = &cat["datasets"][0]["schemas"]["cbbo-1m"];
+        assert_eq!(ds["days"].as_object().unwrap().len(), 7, "{ds}");
+        assert_eq!(cat["errors"], json!([]));
+        // Without the query's range, the batch is an error, not skipped.
+        raw_batch(
+            &vol.join("Databento/OPRA-V"),
+            &q,
+            true,
+            &["opra-pillar-20261010.cbbo-1m.SPY.OPT.dbn.zst"],
+        );
+        assert!(
+            spy(&[("v", &vol)], "databento")
+                .unwrap_err()
+                .contains("OPRA-V")
+        );
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        assert!(
+            cat["errors"][0].as_str().unwrap().contains("OPRA-V"),
+            "{cat}"
+        );
+    }
+
+    /// A cbbo-1m DBN file of no records whose header lists `symbols`
+    /// (requested as `stype`) from `first` to `last` (whole days).
+    fn header_bytes(symbols: &[&str], stype: SType, first: &str, last: &str) -> Vec<u8> {
+        header_of("OPRA.PILLAR", symbols, stype, first, last)
+    }
+
+    /// As `header_bytes`, of `dataset`.
+    fn header_of(
+        dataset: &str,
+        symbols: &[&str],
+        stype: SType,
+        first: &str,
+        last: &str,
+    ) -> Vec<u8> {
+        let m = Metadata::builder()
+            .dataset(dataset)
+            .schema(Some(Schema::Cbbo1M))
+            .start(ingest::day_ns(first).unwrap())
+            .end(NonZeroU64::new(
+                ingest::day_ns(last).unwrap() + 86_400_000_000_000,
+            ))
+            .stype_in(Some(stype))
+            .stype_out(SType::InstrumentId)
+            .symbols(symbols.iter().map(|s| (*s).to_owned()).collect())
+            .build();
+        let mut out = Vec::new();
+        drop(dbn::encode::dbn::Encoder::with_zstd(&mut out, &m).unwrap());
+        out
+    }
+
+    #[test]
+    fn counts_every_dbn_file_the_layouts_do_not_claim() {
+        let vol = scratch("loose");
+        let parent = |a: &str, b: &str| header_bytes(&["SPY.OPT"], SType::Parent, a, b);
+        // A download extracted by hand: metadata.json, no manifest.
+        let manual = vol.join("OPRA-M.manual-extracted");
+        put(
+            &manual.join("metadata.json"),
+            json!({ "query": { "dataset": "OPRA.PILLAR", "schema": "cbbo-1m" } })
+                .to_string()
+                .as_bytes(),
+        );
+        put(
+            &manual.join("opra-pillar-20261003.cbbo-1m.dbn.zst"),
+            &parent("2026-10-03", "2026-10-03"),
+        );
+        // A loose file, named any way, holding two days.
+        put(
+            &vol.join("Databento/spy-odd-name.dbn.zst"),
+            &parent("2026-10-04", "2026-10-05"),
+        );
+        // In a schema folder, not named for its day.
+        put(
+            &vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/extra.dbn.zst"),
+            &parent("2026-10-06", "2026-10-06"),
+        );
+        // The store layout, deeper than the catalog reads it.
+        put(
+            &vol.join("Databento/a/b/c/d/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-07.dbn.zst"),
+            &parent("2026-10-07", "2026-10-07"),
+        );
+        // A list of contracts: partial, for those of SPY's.
+        put(
+            &vol.join("contracts.dbn"),
+            &header_bytes(
+                &[C1, "QQQ   261002C00500000"],
+                SType::RawSymbol,
+                "2026-10-08",
+                "2026-10-08",
+            ),
+        );
+        // Without a manifest, and no DBN: its query's days.
+        let csv = vol.join("misc/deeper/still/OPRA-C");
+        put(&csv.join("metadata.json"), json!({ "query": { "dataset": "OPRA.PILLAR", "schema": "cbbo-1m", "symbols": ["SPY.OPT"], "start": "2026-10-09", "end": "2026-10-10" } }).to_string().as_bytes());
+        put(&csv.join("opra-pillar-20261009.cbbo-1m.csv"), b"a,b");
+        // Not counted: Alpaca's provider folder.
+        put(
+            &vol.join("alpaca/x.dbn.zst"),
+            &parent("2026-10-01", "2026-10-01"),
+        );
+        let days = spy_coverage(&vol);
+        let brief: Vec<(&str, &str, bool)> = days
+            .iter()
+            .map(|d| {
+                (
+                    d["day"].as_str().unwrap(),
+                    d["kind"].as_str().unwrap(),
+                    d["filed"] == true,
+                )
+            })
+            .collect();
+        assert_eq!(
+            brief,
+            [
+                ("2026-10-03", "complete", false),
+                ("2026-10-04", "complete", false),
+                ("2026-10-05", "complete", false),
+                ("2026-10-06", "complete", false),
+                ("2026-10-07", "complete", false),
+                ("2026-10-08", "partial", false),
+                ("2026-10-09", "complete", false),
+            ]
+        );
+        assert_eq!(days[5]["coverage"]["symbols"], json!([C1]));
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        assert_eq!(cat["errors"], json!([]));
+        let ds = cat["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["provider"] == "databento" && d["symbol"] == "SPY.OPT")
+            .unwrap();
+        assert_eq!(ds["filed"], false);
+        // Outside Databento's folder (the download at the top, the one in
+        // misc) they have no provider.
+        let elsewhere = cat["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|d| d["provider"].is_null())
+            .map(|d| d["schemas"]["cbbo-1m"]["days"].as_object().unwrap().len())
+            .sum::<usize>();
+        assert_eq!(elsewhere, 3, "{cat}");
+        assert_eq!(
+            ds["schemas"]["cbbo-1m"]["days"].as_object().unwrap().len(),
+            4,
+            "{ds}"
+        );
+        // A header that can't be read, changed just now, is being written:
+        // pending, read again next scan. Older, it is an error.
+        let junk = vol.join("Databento/junk.dbn.zst");
+        put(&junk, b"not dbn");
+        assert_eq!(spy(&[("v", &vol)], "databento").unwrap().len(), 7);
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        assert_eq!(cat["errors"], json!([]));
+        assert_eq!(cat["pending_files"], json!([junk.display().to_string()]));
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(200);
+        fs::File::options()
+            .write(true)
+            .open(&junk)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(
+            spy(&[("v", &vol)], "databento")
+                .unwrap_err()
+                .contains("junk")
+        );
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        assert!(cat["errors"][0].as_str().unwrap().contains("junk"), "{cat}");
+        assert_eq!(cat["pending_files"], json!([]));
+    }
+
+    fn spy_coverage(vol: &Path) -> Vec<Value> {
+        spy(&[("v", vol)], "databento").unwrap()
+    }
+
+    #[test]
+    fn reads_each_header_once_while_the_file_is_unchanged() {
+        let vol = scratch("header-cache");
+        let file = vol.join("Databento/loose.dbn.zst");
+        let bytes = header_bytes(&["SPY.OPT"], SType::Parent, "2026-10-03", "2026-10-03");
+        put(&file, &bytes);
+        let at = fs::metadata(&file).unwrap().modified().unwrap();
+        assert_eq!(spy_coverage(&vol).len(), 1);
+        // Same size and last change: the header isn't read again.
+        fs::write(&file, vec![0u8; bytes.len()]).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+        assert_eq!(spy_coverage(&vol).len(), 1, "from the cache");
+        // Changed (and not just now, so not taken as being written).
+        let earlier = at - std::time::Duration::from_secs(200);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(earlier)
+            .unwrap();
+        assert!(spy(&[("v", &vol)], "databento").is_err());
+    }
+
+    #[test]
+    fn data_outside_provider_folders_has_no_provider() {
+        let vol = scratch("no-provider-files");
+        // Databento's data in a backup, its dataset spelled another way.
+        put(
+            &vol.join("backups/old/spy.dbn.zst"),
+            &header_of(
+                "opra.pillar",
+                &["SPY.OPT"],
+                SType::Parent,
+                "2026-10-03",
+                "2026-10-03",
+            ),
+        );
+        // A crypto recording.
+        put(
+            &vol.join("coinbase/btc.dbn.zst"),
+            &header_of(
+                "COINBASE.L2",
+                &["BTC-USD"],
+                SType::RawSymbol,
+                "2026-10-03",
+                "2026-10-03",
+            ),
+        );
+        put(
+            &vol.join("Alpaca/spy.dbn.zst"),
+            &header_bytes(&["SPY.OPT"], SType::Parent, "2026-10-04", "2026-10-04"),
+        );
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        let providers: Vec<(Value, Value)> = cat["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| (d["provider"].clone(), d["id"].clone()))
+            .collect();
+        assert_eq!(
+            providers,
+            [
+                (Value::Null, json!("COINBASE.L2")),
+                (Value::Null, json!("opra.pillar")),
+                (json!("alpaca"), json!("OPRA.PILLAR")),
+            ]
+        );
+        // The backup's copy blocks a Databento purchase; Alpaca's doesn't.
+        assert_eq!(days_of(&spy_coverage(&vol)), ["2026-10-03"]);
+        assert_eq!(
+            days_of(&spy(&[("v", &vol)], "alpaca").unwrap()),
+            ["2026-10-04"]
+        );
+    }
+
+    #[test]
+    fn instrument_ids_hold_every_symbol_of_the_dataset() {
+        let vol = scratch("instrument-ids");
+        put(
+            &vol.join("Databento/ids.dbn.zst"),
+            &header_bytes(&["12345"], SType::InstrumentId, "2026-10-04", "2026-10-04"),
+        );
+        put(
+            &vol.join("Databento/qqq.dbn.zst"),
+            &header_bytes(&["QQQ.OPT"], SType::Parent, "2026-10-05", "2026-10-05"),
+        );
+        let v = [("v".to_owned(), vol.clone())];
+        let held = |symbol: &str| -> Vec<String> {
+            coverage(
+                &v,
+                "databento",
+                "OPRA.PILLAR",
+                Some(symbol),
+                "cbbo-1m",
+                "2026-10-01",
+                "2026-10-09",
+            )
+            .unwrap()
+            .iter()
+            .map(|d| {
+                format!(
+                    "{} {}",
+                    d["day"].as_str().unwrap(),
+                    d["kind"].as_str().unwrap()
+                )
+            })
+            .collect()
+        };
+        assert_eq!(held("SPY.OPT"), ["2026-10-04 complete"]);
+        assert_eq!(
+            held("QQQ.OPT"),
+            ["2026-10-04 complete", "2026-10-05 complete"]
+        );
+    }
+
+    #[test]
+    fn the_stores_own_folders_and_receipts_hold_nothing() {
+        let vol = scratch("own-folders");
+        let q = json!({ "dataset": "OPRA.PILLAR", "schema": "cbbo-1m", "symbols": ["SPY.OPT"], "start": "2026-10-01", "end": "2026-10-04" });
+        let receipts = |dir: PathBuf, manifest: bool| {
+            put(
+                &dir.join("metadata.json"),
+                json!({ "query": q }).to_string().as_bytes(),
+            );
+            put(&dir.join(IMPORT), b"{}");
+            if manifest {
+                put(&dir.join("manifest.json"), b"{}");
+            }
+        };
+        receipts(vol.join("Databento/provenance/OPRA-P"), true);
+        receipts(vol.join("Databento/provenance/OPRA-Q"), false);
+        put(
+            &vol.join("Databento/migrations/2026-10-19-import-x.events.jsonl"),
+            b"{}",
+        );
+        // A download with its manifest but no data holds nothing either.
+        receipts(vol.join("Databento/downloads/OPRA-E"), true);
+        assert_eq!(spy_coverage(&vol), Vec::<Value>::new());
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        assert_eq!(
+            (cat["datasets"].clone(), cat["errors"].clone()),
+            (json!([]), json!([]))
+        );
+        // Without its manifest, outside the store's folders, its query
+        // counts, the end excluded; an end later in a day includes it.
+        receipts(vol.join("Databento/downloads/OPRA-F"), false);
+        assert_eq!(
+            days_of(&spy_coverage(&vol)),
+            ["2026-10-01", "2026-10-02", "2026-10-03"]
+        );
+        let mut late = q.clone();
+        late["end"] = json!("2026-10-04T12:00:00Z");
+        put(
+            &vol.join("Databento/downloads/OPRA-F/metadata.json"),
+            json!({ "query": late }).to_string().as_bytes(),
+        );
+        assert_eq!(spy_coverage(&vol).len(), 4);
+    }
+
+    #[test]
+    fn reports_folders_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let vol = scratch("unreadable-misc");
+        let misc = vol.join("misc");
+        fs::create_dir_all(&misc).unwrap();
+        fs::set_permissions(&misc, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&misc).is_ok();
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        fs::set_permissions(&misc, fs::Permissions::from_mode(0o755)).unwrap();
+        if !readable {
+            assert!(cat["errors"][0].as_str().unwrap().contains("misc"), "{cat}");
+        }
     }
 
     /// Every file in `TT_REAL_PARTIAL_DIR` passes `inspect`, as an import

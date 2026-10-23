@@ -58,6 +58,7 @@ pub fn discover(dir: &Path) -> Found {
                     name,
                     path,
                     writable: true,
+                    require_mount: true,
                 }),
                 _ => eprintln!(
                     "store: {} is not a readable marker; ignoring that drive",
@@ -125,7 +126,34 @@ fn approve_beside(
         name: name.to_owned(),
         path: path.to_path_buf(),
         writable: true,
+        require_mount: true,
     })
+}
+
+/// Whether a volume is there to be read as itself: its folder exists and,
+/// when it must be a mount point, is one (on another device than the folder
+/// it sits in). An empty folder left in `/Volumes` by a drive that wasn't
+/// unmounted cleanly is not the drive.
+///
+/// # Errors
+/// Why it isn't.
+pub fn present(v: &Volume) -> Result<(), String> {
+    let meta = fs::metadata(&v.path).map_err(|e| format!("{}: {e}", v.path.display()))?;
+    if !meta.is_dir() {
+        return Err(format!("{} is not a folder", v.path.display()));
+    }
+    if v.require_mount
+        && let Some(parent) = v.path.parent().filter(|p| !p.as_os_str().is_empty())
+    {
+        let up = fs::metadata(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        if up.dev() == meta.dev() {
+            return Err(format!(
+                "{} is not a mounted drive (an empty folder left behind?)",
+                v.path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -152,6 +180,7 @@ mod tests {
         assert!(approve_beside(&d, &drive, "../x", &[], other).is_err());
         assert!(approve_beside(&d, &drive, "data", &["data".into()], other).is_err());
         let v = approve_beside(&d, &drive, "archive8", &[], other).unwrap();
+        assert!(v.require_mount);
         assert_eq!((v.name.as_str(), v.writable), ("archive8", true));
         let marker: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(drive.join(MARKER)).unwrap()).unwrap();
@@ -161,6 +190,24 @@ mod tests {
             again.contains("exists") || again.contains("File exists"),
             "never over a marker: {again}"
         );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_folder_that_is_not_a_mount_point_is_not_a_drive() {
+        let d = std::env::temp_dir().join(format!("tinytrader-mount-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let mut v = Volume {
+            name: "x".into(),
+            path: d.clone(),
+            writable: true,
+            require_mount: true,
+        };
+        assert!(present(&v).unwrap_err().contains("not a mounted drive"));
+        v.require_mount = false;
+        assert!(present(&v).is_ok());
+        v.path = d.join("gone");
+        assert!(present(&v).is_err());
         let _ = fs::remove_dir_all(&d);
     }
 }
