@@ -108,7 +108,11 @@ fn quote_ttl(cost_usd: f64) -> Duration {
 }
 
 /// Requests priced at once while planning (pricing is free).
-const PRICING_AT_ONCE: usize = 4;
+const PRICING_AT_ONCE: usize = 16;
+
+/// The time between a quote's submissions: Databento takes at most 20 a
+/// minute (and 20 price requests a second, far above `PRICING_AT_ONCE`).
+const SUBMIT_GAP: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 3_500 });
 
 /// The most days one request may span.
 const MAX_DAYS: i64 = 1_500;
@@ -1839,7 +1843,11 @@ async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply
     }
     let by = s.approved_by.as_deref().map(str::trim);
     let mut submitted = Vec::new();
-    for p in &parts {
+    for (i, p) in parts.iter().enumerate() {
+        // Databento takes at most 20 submissions a minute.
+        if i > 0 {
+            tokio::time::sleep(SUBMIT_GAP).await;
+        }
         let request = ledger::fingerprint(
             &a.dataset,
             a.schema.as_str(),
