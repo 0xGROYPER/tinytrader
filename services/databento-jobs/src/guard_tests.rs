@@ -351,6 +351,7 @@ async fn rig_with(name: &str, setup: impl FnOnce(&mut Jobs)) -> Rig {
     jobs.db = Arc::new(api::Timed {
         inner: fake.clone(),
         read: Duration::from_secs(2),
+        cost: Duration::from_secs(2),
         submit: Duration::from_millis(300),
     });
     setup(&mut jobs);

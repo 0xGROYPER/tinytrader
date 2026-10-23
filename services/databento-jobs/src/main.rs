@@ -403,7 +403,7 @@ impl Jobs {
                 );
                 format!("{:08x}", h.finish() as u32)
             },
-            pricing_cap: Duration::from_secs(30 * 60),
+            pricing_cap: Duration::from_secs(4 * 60 * 60),
             paused_until: AtomicU64::new(0),
             yield_to: Vec::new(),
             capture_hours: None,
@@ -445,9 +445,13 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let db = match HistoricalClient::builder()
-        .key(&key)
-        .and_then(databento::historical::ClientBuilder::build)
+    let db = match (0..PRICING_AT_ONCE)
+        .map(|_| {
+            HistoricalClient::builder()
+                .key(&key)
+                .and_then(databento::historical::ClientBuilder::build)
+        })
+        .collect::<Result<Vec<_>, _>>()
     {
         Ok(c) => c,
         Err(e) => {
@@ -474,7 +478,7 @@ async fn main() {
         }
     }
     let mut jobs = Jobs::new(
-        Arc::new(api::Live(tokio::sync::Mutex::new(db))),
+        Arc::new(api::Live::new(db)),
         key,
         &args.store,
         store_token,
