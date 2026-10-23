@@ -1,6 +1,6 @@
 # 0019: Purchase guards that fail closed, vendors by name, and a human yes
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-10-22)
 - **Date:** 2026-10-20
 - **Builds on:** [0002](0002-data-store.md) (the layout and catalog),
   [0007](0007-storage-pool-and-automations.md) (purchased data is kept),
@@ -111,22 +111,39 @@ ships first, as its own change
   Both answers carry `missing_volumes`. The jobs service refuses every
   purchase while that list isn't empty. A drive that's away for good is
   retired explicitly, which records what it held.
+- **A drive is there only when it's mounted.** A remembered volume whose
+  folder isn't a mount point, or that held data and now scans empty, is
+  missing. An operator who really emptied one says so
+  (`POST /volumes/{name}/accept-empty`).
 - **`/coverage` covers everything the catalog counts.** Raw batch folders
   and the older layout appear as `complete`, with `filed: false`. A day on
   two volumes is merged: complete wins, otherwise the union of contracts and
   windows. A conflict is flagged.
-- **Held means verified.** A day counts only if its file is in the store
-  layout with a manifest record whose size matches. Days filed before this
-  record gain manifest entries in a one-time pass that only writes manifests.
-  Files that fail stay in the catalog as `unverified`, which counts as held
-  for purchases (never buy over it) and shows in the console for the
-  operator.
+- **No data file goes uncounted.** Every `.dbn` or `.dbn.zst` file on a
+  volume that the known layouts don't claim is counted from its DBN header
+  (dataset, schema, symbols, start, end), wherever it is: a backup, a
+  scratch folder, a hand-extracted download. A header that can't be read
+  makes the volume missing, unless the file changed in the last two minutes
+  (still being written). The store's own receipts (`provenance/`,
+  `migrations/`) hold nothing.
+- **An operator can set a path aside.** One that can't be read and isn't
+  data blocks every purchase until it's fixed or set aside, with a recorded
+  reason (`POST /volumes/{name}/ignore`).
+- **Answers are quick, and fresh when it matters.** `/coverage` answers from
+  the last scan. A purchase asks with `fresh=1`, which waits for a scan
+  started after the request, so data copied onto a drive by hand counts.
+- **Held means verified** (not built yet). A day counts only if its file is
+  in the store layout with a manifest record whose size matches. Until then,
+  a file counts as held whatever its size, which never causes a purchase.
 
 ### 4. Vendors by name
 
 - **Every dataset has a provider:** the store's provider name, from its
   top-level folder (case ignored: `Databento/` and `databento/` are the same
-  provider). The catalog keys datasets by (provider, dataset, symbol).
+  provider). The catalog keys datasets by (provider, dataset, symbol). Data
+  outside any provider folder has no provider. For a Databento purchase it
+  counts as held whenever its dataset and symbol match, so data in a backup
+  is never bought again, while another vendor's recordings never match.
 - **Dataset ids stay the vendor's own.** Databento's IEX is
   `databento / IEXG.TOPS`, Alpaca's is `alpaca / ALPACA.IEX`. They are told
   apart by provider, never by renaming the vendor's ids.
@@ -138,28 +155,29 @@ ships first, as its own change
 
 ### 5. A person says yes
 
-- **A quote becomes an approval request.** It lists the vendor, dataset,
-  schema, days, contracts, bytes and cost, and every day and contract
-  skipped, with the reason (held, pending, bought here).
-- **These always need a separate yes,** even at $0:
-  - buying again what expired;
-  - any day that overlaps a job or a holding;
-  - any request over a cost limit (default $25).
-- **The yes must come from a person.** `scripts/buy QUOTE` (ops) prints the
-  approval request and asks `y/N`. On `y`, it reads the purchase key with
-  `sudo`, which asks for your password, and sends the approval signed with
-  that key. Agents run without a terminal and can't answer `sudo`, so they
-  can price and prepare a purchase, but only you complete it. The key lives
-  in a root-only file on the machine you buy from. The jobs service holds
-  only what it needs to verify the signature.
-- Free requests keep working without this, so top-off jobs still run.
-- Every approval is written to the ledger: who, when, the quote and the
-  signature.
+- **Every paid purchase needs your approval;** free requests don't. A quote
+  is listed in the console's jobs widget with the dataset, schema, days,
+  contracts, windows, bytes and cost, and what was skipped as held, pending
+  or bought here. You tap Approve or Decline, from any device.
+- **Approve goes through the console's write gate,** the same as a live
+  order: an allowed login, plus the order token when live orders need it.
+  The console then submits the quote to `databento-jobs` with an approval
+  token only it holds (`CONSOLE_JOBS_APPROVE_TOKEN`), your login, and the
+  price you were shown. `databento-jobs` refuses a paid submit without that
+  token, a login and the exact price.
+- **The ledger records each approval** (who, when, the quote, the cost)
+  before the purchase is sent.
+- **The Databento key belongs to the services that use it.** Only the host
+  running `databento-jobs` and the relays can decrypt it, not the operator
+  key or an agent's shell. A purchase made around the service (by streaming
+  from Databento's API) leaves no job and no ledger entry, so nothing could
+  ever subtract it. That's how 15 research sessions were bought and then
+  lost on 2026-10-20 to 22. The mini session is building this part.
 
 ### 6. The hours of a partial day
 
 Coverage is contracts × window. For a held contract whose window misses part
-of the day, `/price-missing` buys the missing hours: one extra request per
+of the day, `/price` buys the missing hours: one extra request per
 day, for those contracts and that time range.
 
 ## Tests
@@ -176,32 +194,23 @@ roots:
 - a day on two volumes;
 - an unread job during reconcile;
 - a ledger purchase that has expired;
-- an unsigned or altered approval;
+- a paid submit without the approval token, a login or the exact price;
 - a partial window.
 
-## Plan and size
+## Built
 
-1. **Pause paid purchases (section 1).** About 20 lines.
-2. **Store (sections 3 and 4).** Provider in the catalog, `503` before the
-   first scan, remembered volumes, merged and complete `/coverage`, the
-   verification pass. About 500 lines of code and 500 of tests.
-3. **databento-jobs (sections 2 and 6).** The lock, one already-bought set,
-   symbol parsing, no auto `not-submitted`, canonical names, the fake
-   Databento. About 600 lines and 900 of tests.
-4. **Approval (section 5).** `scripts/buy`, signature checks, and the ledger
-   record. About 250 lines and 250 of tests.
-5. **Turn paid purchases back on** once the tests pass and you have bought
-   one small, real request through `scripts/buy`.
+- Pause on paid purchases: #41.
+- Store (sections 3 and 4): #43.
+- databento-jobs and the console (sections 2, 5 and 6): #44. Pricing and
+  buying are one pair, `POST /price` (always only what's missing; a whole
+  chain, a rule or explicit contract lists, with optional New York session
+  hours) and `POST /submit`.
+- Not built yet: the size check behind "held means verified", and keeping
+  the Databento key from the operator key (with the mini session).
 
-Stop and report if any part runs well past its estimate.
-
-## Open questions
-
-- The cost limit that forces a separate yes: $25?
-- Which machine you'll buy from, the M2 or the mini. That's where the
-  purchase key goes.
-- Whether the console should also offer the approval. It would need the same
-  key behind your login. This record leaves it to the terminal.
+Paid purchases come back on once both are deployed and the approval token
+is wired on the mini; the first one is a small, real request approved in the
+console.
 
 ## Consequences
 
