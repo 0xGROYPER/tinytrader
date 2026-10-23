@@ -3,7 +3,9 @@
 //!
 //! One JSON line per step, appended, never rewritten:
 //!
-//! - `sending`: about to submit this exact request (written first);
+//! - `approved`: a person approved this paid request (who, and the quote),
+//!   written before it is sent;
+//! - `sending`: about to submit this exact request;
 //! - `submitted`: Databento answered with this job ID;
 //! - `uncertain`: the submission failed or its outcome is unknown;
 //! - `not-submitted`: the operator found it was never made
@@ -27,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     /// Unix seconds.
     pub at: f64,
@@ -40,6 +42,12 @@ pub struct Entry {
     pub cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Who approved a paid purchase (an `approved` step).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// The quote it was approved from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
 }
 
 /// What identifies a request across a submission and Databento's job list:
@@ -235,6 +243,7 @@ mod tests {
             job: job.map(Into::into),
             cost_usd: None,
             note: None,
+            ..Default::default()
         }
     }
 

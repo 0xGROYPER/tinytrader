@@ -4,29 +4,26 @@
 //! - `GET /jobs`: Databento's jobs (not expired), each with what the store
 //!   already holds of it and any download in progress.
 //! - `GET /datasets`, `GET /schemas?dataset=`: for the request form.
-//! - `POST /price` with `{ dataset, schema, symbols, stype_in, start, end }`
-//!   (dates, `end` inclusive): the cost and billable size, and a quote ID,
-//!   with the requested days the store already holds (`held_days`) and the
-//!   earlier purchases it overlaps (`bought`).
-//! - `POST /submit` with `{ quote, confirm_usd, again? }`: prices the quoted
-//!   request again and submits it only if the price is unchanged and, when it
-//!   costs anything, `confirm_usd` is exactly that price. Never what's had
-//!   already (see `had`): it's refused if it overlaps anything the store
-//!   holds, any job on Databento's list that isn't expired, or any purchase
-//!   in the ledger, or if any of those can't be read in full. A purchase in
-//!   the ledger whose job is expired or no longer listed may be bought again
-//!   only by naming its job in `again` (`["OPRA-…"]`). A submission is never
-//!   retried; if its outcome is uncertain it blocks until found on the job
-//!   list or resolved with `POST /ledger/resolve`.
-//! - `POST /price-missing` with `{ dataset, schema, symbol, start, end, rule? }`
-//!   for an option parent (`SPY.OPT`): for each day, the contracts `rule`
-//!   wants (from the store's definitions of that day) less those the store
-//!   holds and those in jobs on Databento's list, priced as one
-//!   contract-list request per day (decision 0018). `POST /submit-missing`
-//!   with `{ quote, confirm_usd }` plans it again and submits it only if
-//!   every day and the price are unchanged. One purchase at a time: both
-//!   submit paths hold one lock from their last check to the ledger's last
-//!   word.
+//! - `POST /price` with `{ dataset, schema, symbol, stype_in?, start, end,
+//!   rule? | contracts?, hours?, again? }` (dates, `end` inclusive): prices
+//!   only what's missing (see `plan`): the store's holdings, Databento's jobs
+//!   and the ledger's purchases are subtracted per day, contract and window.
+//!   The quote lists each request (the whole symbol over a run of days, or a
+//!   day's missing contracts over the hours they need), what was skipped and
+//!   why. Long prices answer `pricing` (202); `GET /quotes/{id}` follows.
+//! - `GET /quotes`, `GET /quotes/{id}`: quotes still good, in full.
+//!   `DELETE /quotes/{id}` declines one (with the approval token).
+//! - `POST /submit` with `{ quote, confirm_usd, again?, approved_by? }`:
+//!   plans the quote again under the purchase lock (one purchase at a time)
+//!   and submits its requests only if they and the total are unchanged. A
+//!   paid one needs a person's approval: the console's bearer token
+//!   (`JOBS_APPROVE_TOKEN` or `_FILE`), who approved it, and `confirm_usd`
+//!   exactly the price; the ledger records the approval before anything is
+//!   sent. Never what's had already, and nothing while any of that can't be
+//!   read in full. A purchase in the ledger whose job is expired or no longer
+//!   listed is bought again only when the quote's `again` names its job. A
+//!   submission is never retried; if its outcome is uncertain it blocks until
+//!   found on the job list or resolved with `POST /ledger/resolve`.
 //! - `POST /ledger/resolve` with `{ request, at, job, note }`: the operator's
 //!   word on a submission whose outcome isn't known.
 //! - `POST /download/{job}`: streams the job's files into the store, each
@@ -46,8 +43,8 @@ mod had;
 mod ledger;
 mod missing;
 
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tinytrader_observe::{lock, secret};
@@ -104,104 +101,207 @@ struct Args {
     ledger: Option<std::path::PathBuf>,
 }
 
-/// How long a price stays good for submitting.
-const QUOTE_TTL: Duration = Duration::from_secs(15 * 60);
+/// How long a price stays good for submitting: an hour when it costs
+/// anything (it waits for a person's approval), else 15 minutes.
+fn quote_ttl(cost_usd: f64) -> Duration {
+    Duration::from_secs(if cost_usd == 0.0 { 15 * 60 } else { 60 * 60 })
+}
 
-/// A request as the form sends it.
+/// Requests priced at once while planning (pricing is free).
+const PRICING_AT_ONCE: usize = 4;
+
+/// The most days one request may span.
+const MAX_DAYS: i64 = 1_500;
+
+fn parse_day(s: &str) -> Result<time::Date, String> {
+    let fmt = time::macros::format_description!("[year]-[month]-[day]");
+    time::Date::parse(s.trim(), fmt).map_err(|_| format!("{s:?} is not a date (YYYY-MM-DD)"))
+}
+
+/// What to price, and then buy: what's missing of one symbol over some days.
 #[derive(Clone, Debug, Deserialize)]
-struct Request {
+struct PriceRequest {
     dataset: String,
     schema: String,
-    symbols: String,
-    #[serde(default = "raw_symbol")]
-    stype_in: String,
+    /// A parent (`SPY.OPT`: the whole chain) or a raw symbol.
+    #[serde(alias = "symbols")]
+    symbol: String,
+    /// `parent` or `raw_symbol`; by default `parent` for a name with a dot.
+    #[serde(default)]
+    stype_in: Option<String>,
     /// First day, `YYYY-MM-DD`.
     start: String,
     /// Last day, inclusive.
     end: String,
+    /// For an option parent: the contracts wanted each day (decision 0018).
+    #[serde(default)]
+    rule: Option<missing::Rule>,
+    /// For an option parent: exactly these contracts, by day.
+    #[serde(default)]
+    contracts: Option<BTreeMap<String, Vec<String>>>,
+    /// Only these hours of each day.
+    #[serde(default)]
+    hours: Option<missing::Hours>,
+    /// The expired (or no longer listed) jobs bought here whose contracts
+    /// and days this buys again, by ID: `["OPRA-…"]`.
+    #[serde(default)]
+    again: Option<Value>,
 }
 
-fn raw_symbol() -> String {
-    "raw_symbol".into()
-}
-
-/// A request checked and turned into the API's terms.
-struct Checked {
+/// A request checked, in the API's terms.
+struct Asked {
     dataset: String,
     schema: Schema,
-    symbols: Vec<String>,
-    stype_in: SType,
+    symbol: String,
+    stype: SType,
     start: time::Date,
     /// Exclusive.
     end: time::Date,
+    rule: Option<missing::Rule>,
+    contracts: Option<BTreeMap<time::Date, BTreeSet<String>>>,
+    hours: Option<missing::Hours>,
 }
 
-impl Request {
-    fn check(&self) -> Result<Checked, String> {
-        let fmt = time::macros::format_description!("[year]-[month]-[day]");
-        let day = |s: &str| {
-            time::Date::parse(s.trim(), fmt)
-                .map_err(|_| format!("{s:?} is not a date (YYYY-MM-DD)"))
-        };
-        let (start, last) = (day(&self.start)?, day(&self.end)?);
+impl PriceRequest {
+    fn check(&self) -> Result<Asked, String> {
+        let (start, last) = (parse_day(&self.start)?, parse_day(&self.end)?);
         if last < start {
             return Err("the last day is before the first".into());
         }
-        let symbols: Vec<String> = self
-            .symbols
-            .split([',', ' '])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .collect();
-        if symbols.is_empty() {
+        if (last - start).whole_days() >= MAX_DAYS {
+            return Err(format!("at most {MAX_DAYS} days at a time"));
+        }
+        let symbol = self.symbol.trim();
+        if symbol.is_empty() {
             // Never a whole dataset by accident.
             return Err("name a symbol".into());
         }
-        if symbols.len() > 1 {
+        if symbol.contains(',') {
             // The store files one symbol per batch (decision 0002).
             return Err("one symbol per request: the store files each symbol on its own, so request each separately".into());
         }
-        let stype_in: SType = self
-            .stype_in
-            .parse()
-            .map_err(|_| format!("unknown symbol type {}", self.stype_in))?;
+        let stype: SType = match &self.stype_in {
+            Some(s) => s.parse().map_err(|_| format!("unknown symbol type {s}"))?,
+            None if symbol.contains('.') => SType::Parent,
+            None => SType::RawSymbol,
+        };
         // Only these can be checked against what's held (decision 0019).
-        if !matches!(stype_in, SType::Parent | SType::RawSymbol) {
+        if !matches!(stype, SType::Parent | SType::RawSymbol) {
             return Err(format!(
                 "a request by {} can't be checked against what's held, so it isn't bought here; use parent or raw_symbol",
-                stype_in.as_str()
+                stype.as_str()
             ));
         }
-        let symbols = if stype_in == SType::Parent {
-            symbols.iter().map(|s| s.to_ascii_uppercase()).collect()
+        let symbol = if stype == SType::Parent {
+            symbol.to_ascii_uppercase()
         } else {
-            symbols
+            symbol.to_owned()
         };
-        Ok(Checked {
+        let option = stype == SType::Parent && symbol.ends_with(".OPT");
+        if !option && (self.rule.is_some() || self.contracts.is_some()) {
+            return Err("a rule or contract lists are only for an option parent (ROOT.OPT)".into());
+        }
+        if self.rule.is_some() && self.contracts.is_some() {
+            return Err("name a rule or contract lists, not both".into());
+        }
+        let contracts = match &self.contracts {
+            None => None,
+            Some(m) => {
+                let mut out = BTreeMap::new();
+                for (k, list) in m {
+                    let d = parse_day(k)?;
+                    if d < start || d > last {
+                        return Err(format!("contracts for {k}, outside {start} to {last}"));
+                    }
+                    out.insert(d, list.iter().map(|c| c.trim().to_owned()).collect());
+                }
+                Some(out)
+            }
+        };
+        if let Some(h) = &self.hours {
+            h.check()?;
+        }
+        Ok(Asked {
             dataset: self.dataset.trim().to_ascii_uppercase(),
             schema: self
                 .schema
                 .parse()
                 .map_err(|_| format!("unknown schema {}", self.schema))?,
-            stype_in,
-            symbols,
+            symbol,
+            stype,
             start,
             end: last.next_day().ok_or("bad last day")?,
+            rule: self.rule.clone(),
+            contracts,
+            hours: self.hours.clone(),
         })
     }
 }
 
-impl Checked {
-    fn window(&self) -> had::Window {
-        (had::day_window(self.start).0, had::day_window(self.end).0)
-    }
+/// A price: being worked out, done, or failed.
+struct Quote {
+    request: Arc<Asked>,
+    again: HashSet<String>,
+    /// When it was asked for, or, once priced, when that was done.
+    at: Instant,
+    /// Requests priced so far, and of how many (0 until known).
+    priced: Arc<(AtomicUsize, AtomicUsize)>,
+    result: Option<Result<Priced, (StatusCode, String)>>,
 }
 
-struct Quote {
-    request: Request,
+struct Priced {
+    parts: Vec<missing::Part>,
+    notes: Vec<String>,
     cost_usd: f64,
-    at: Instant,
+}
+
+impl Quote {
+    fn expired(&self) -> bool {
+        let cost = match &self.result {
+            None => return false,
+            Some(Ok(p)) => p.cost_usd,
+            Some(Err(_)) => 0.0,
+        };
+        self.at.elapsed() >= quote_ttl(cost)
+    }
+
+    /// The quote as `/price` and `/quotes` show it.
+    fn view(&self, id: &str) -> Value {
+        let a = &self.request;
+        let mut again: Vec<&String> = self.again.iter().collect();
+        again.sort();
+        let mut v = json!({
+            "quote": id, "dataset": a.dataset, "schema": a.schema.as_str(), "symbol": a.symbol,
+            "stype_in": a.stype.as_str(), "start": a.start.to_string(),
+            "end": a.end.previous_day().unwrap_or(a.end).to_string(), "hours": a.hours,
+            "rule": a.rule.is_some(), "again": again,
+            "contract_days": a.contracts.as_ref().map(BTreeMap::len),
+            "contracts": a.contracts.as_ref().map(|m| m.values().map(BTreeSet::len).sum::<usize>()),
+            "priced": self.priced.0.load(Ordering::Relaxed), "of": self.priced.1.load(Ordering::Relaxed),
+        });
+        match &self.result {
+            None => v["state"] = json!("pricing"),
+            Some(Err((_, e))) => {
+                v["state"] = json!("failed");
+                v["error"] = json!(e);
+            }
+            Some(Ok(p)) => {
+                let rows: Vec<Value> = p.parts.iter().map(missing::Part::to_json).collect();
+                v["state"] = json!("ready");
+                v["cost_usd"] = json!(p.cost_usd);
+                v["billable_bytes"] = json!(p.parts.iter().map(|r| r.bytes).sum::<u64>());
+                v["requests"] = json!(rows);
+                v["notes"] = json!(p.notes);
+                v["needs_approval"] = json!(p.cost_usd != 0.0);
+                v["valid_seconds"] = json!(
+                    quote_ttl(p.cost_usd)
+                        .saturating_sub(self.at.elapsed())
+                        .as_secs()
+                );
+            }
+        }
+        v
+    }
 }
 
 /// A download into the store.
@@ -217,7 +317,7 @@ struct Transfer {
 struct Jobs {
     db: Arc<dyn api::Databento>,
     /// Held across a whole purchase, from its last check to the ledger's
-    /// last word, by `/submit` and `/submit-missing` alike.
+    /// last word, by `/submit`.
     purchase: tokio::sync::Mutex<()>,
     /// Databento's dataset list, and when it was read.
     dataset_list: Mutex<Option<(Instant, Vec<String>)>>,
@@ -230,7 +330,12 @@ struct Jobs {
     /// The store's write token, if it requires one.
     store_token: Option<String>,
     quotes: Mutex<HashMap<String, Quote>>,
-    missing_quotes: Mutex<HashMap<String, MissingQuote>>,
+    /// The token a paid purchase's approval carries (`JOBS_APPROVE_TOKEN`);
+    /// without one, paid purchases are refused.
+    approve_token: Option<String>,
+    /// How long `/price` waits for a price before answering that it is
+    /// still being worked out.
+    price_wait: Duration,
     transfers: Mutex<HashMap<String, Transfer>>,
     /// Jobs submitted here, downloaded once done.
     follow: Mutex<HashSet<String>>,
@@ -271,7 +376,8 @@ impl Jobs {
             store: store.trim_end_matches('/').to_owned(),
             store_token,
             quotes: Mutex::default(),
-            missing_quotes: Mutex::default(),
+            approve_token: None,
+            price_wait: Duration::from_secs(20),
             transfers: Mutex::default(),
             follow: Mutex::default(),
             ledger: Mutex::new(ledger),
@@ -374,6 +480,16 @@ async fn main() {
         })
         .collect();
     jobs.capture_hours = args.capture_hours;
+    jobs.approve_token = match tinytrader_observe::optional_secret("JOBS_APPROVE_TOKEN") {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("databento-jobs: {e}");
+            std::process::exit(2);
+        }
+    };
+    if jobs.approve_token.is_none() {
+        eprintln!("databento-jobs: paid purchases are off: no approval token (JOBS_APPROVE_TOKEN)");
+    }
     let jobs = Arc::new(jobs);
     let listen = listen_address("JOBS_LISTEN", "127.0.0.1:9121");
     let observer = Observer::new("databento-jobs", env!("CARGO_PKG_VERSION"));
@@ -407,10 +523,14 @@ async fn main() {
         )
         .route("/datasets", get(datasets))
         .route("/schemas", get(schemas))
-        .route("/price", post(price))
+        .route(
+            "/price",
+            // Contract lists for years of days are large.
+            post(price).layer(axum::extract::DefaultBodyLimit::max(64 << 20)),
+        )
         .route("/submit", post(submit))
-        .route("/price-missing", post(price_missing))
-        .route("/submit-missing", post(submit_missing))
+        .route("/quotes", get(quotes_list))
+        .route("/quotes/{id}", get(quote_get).delete(quote_delete))
         .route("/ledger/resolve", post(resolve))
         .route("/download/{job}", post(download))
         // A web page of another origin can't submit (or pay for) anything.
@@ -517,6 +637,7 @@ fn reconcile(jobs: &Shared, out: &[BatchJob], complete: bool, started: f64) {
             job: Some(j.id.clone()),
             cost_usd: e.cost_usd,
             note: Some("found in Databento's job list".into()),
+            ..Default::default()
         };
         let text = format!("reconciled a submission: {}", j.id);
         match l.append(step) {
@@ -762,13 +883,34 @@ async fn cost(
         .stype_in(stype_in)
         .date_time_range((had::at(w.0), had::at(w.1)))
         .build();
-    jobs.db.cost(&params).await
+    // Pricing is free, so a failure that may pass is tried again.
+    for tries in 1.. {
+        match jobs.db.cost(&params).await {
+            Err(e) if tries < 3 && retryable(&e) => {
+                tokio::time::sleep(COST_BACKOFF * tries).await;
+            }
+            r => return r,
+        }
+    }
+    unreachable!()
+}
+
+/// Waits between tries of a price.
+const COST_BACKOFF: Duration = Duration::from_millis(if cfg!(test) { 10 } else { 1000 });
+
+/// Whether a failed call may pass when tried again: no answer, a transport
+/// failure, or a 5xx from Databento.
+fn retryable(e: &str) -> bool {
+    e.contains("no answer from Databento")
+        || e.starts_with("HTTP error")
+        || e.split_whitespace()
+            .any(|w| w.len() == 3 && w.starts_with('5') && w.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Before pricing: refuse a request outside what Databento has for the
 /// schema, and warn about requested days it marks degraded, pending or
 /// missing.
-async fn availability(jobs: &Jobs, c: &Checked) -> Result<Vec<String>, String> {
+async fn availability(jobs: &Jobs, c: &Asked) -> Result<Vec<String>, String> {
     use databento::historical::metadata::{DatasetCondition, GetDatasetConditionParams};
     let mut warnings = Vec::new();
     match jobs.db.range(&c.dataset).await {
@@ -847,7 +989,7 @@ async fn store_json(
     let r = jobs
         .http
         .get(url)
-        .timeout(Duration::from_secs(if fresh { 180 } else { 120 }))
+        .timeout(Duration::from_secs(if fresh { 660 } else { 120 }))
         .send()
         .await
         .map_err(|e| format!("the store's {path}: {e}"))?;
@@ -983,76 +1125,16 @@ async fn known_dataset(jobs: &Jobs, d: &str) -> Result<String, (StatusCode, Stri
     }
 }
 
-/// Why a request overlapping `ov` may not be bought, if it may not: anything
-/// held, pending on Databento or bought here; or bought here and gone
-/// (expired, or no longer listed) unless `again` names exactly those jobs.
-fn refuse_overlaps(ov: &[&had::Piece], again: &HashSet<String>) -> Option<Reply> {
-    use had::Kind;
-    let list = |f: &dyn Fn(&Kind) -> bool| -> Vec<String> {
-        ov.iter()
-            .filter(|p| f(&p.kind))
-            .map(|p| p.what.clone())
-            .collect()
-    };
-    let held = list(&|k| *k == Kind::Held);
-    if !held.is_empty() {
-        return Some(refused(
-            StatusCode::CONFLICT,
-            format!(
-                "the store already holds some of this: {}; request only the rest (for an option parent, /price-missing buys only what's missing)",
-                held.join("; ")
-            ),
-        ));
-    }
-    let bought = list(&|k| matches!(k, Kind::Pending | Kind::Bought));
-    if !bought.is_empty() {
-        return Some(refused(
-            StatusCode::CONFLICT,
-            format!("already bought: {}", bought.join("; ")),
-        ));
-    }
-    let gone: std::collections::BTreeSet<&str> = ov
-        .iter()
-        .filter_map(|p| match &p.kind {
-            Kind::Gone(j) => Some(j.as_str()),
-            _ => None,
-        })
-        .collect();
-    let unnamed: Vec<&str> = gone
-        .iter()
-        .copied()
-        .filter(|j| !again.contains(*j))
-        .collect();
-    if !unnamed.is_empty() {
-        return Some(refused(
-            StatusCode::CONFLICT,
-            format!(
-                "this overlaps earlier purchases that are expired or no longer on Databento's list: {}. If they were never filed, submit with \"again\": {} to buy them again",
-                list(&|k| matches!(k, Kind::Gone(_))).join("; "),
-                json!(unnamed)
-            ),
-        ));
-    }
-    let mut extra: Vec<&String> = again
-        .iter()
-        .filter(|j| !gone.contains(j.as_str()))
-        .collect();
-    extra.sort();
-    (!extra.is_empty()).then(|| {
-        refused(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "\"again\" names {}, which this request doesn't buy again",
-                json!(extra)
-            ),
-        )
-    })
-}
-
-/// Refuses a price that isn't a number of dollars, that changed since the
-/// quote, that is paused, or that isn't confirmed exactly. Only an exact $0
-/// is free.
-fn check_price(now: f64, quoted: f64, confirm: Option<f64>) -> Option<Reply> {
+/// Refuses a price that isn't a number of dollars or that changed since the
+/// quote; and, when it costs anything (only an exact $0 is free), one
+/// without a person's approval (`approval`, see [`approval`]) or not
+/// confirmed exactly.
+fn check_price(
+    now: f64,
+    quoted: f64,
+    confirm: Option<f64>,
+    approval: Option<Reply>,
+) -> Option<Reply> {
     let same = |a: f64, b: f64| (a - b).abs() <= 1e-9;
     if !now.is_finite() || now < 0.0 {
         return Some(refused(
@@ -1066,10 +1148,13 @@ fn check_price(now: f64, quoted: f64, confirm: Option<f64>) -> Option<Reply> {
             format!("the price changed from ${quoted:.2} to ${now:.2}; price the request again"),
         ));
     }
-    if let Some(r) = paused(now) {
-        return Some(r);
+    if now == 0.0 {
+        return None;
     }
-    (now != 0.0 && confirm.is_none_or(|c| !same(c, now))).then(|| {
+    if approval.is_some() {
+        return approval;
+    }
+    confirm.is_none_or(|c| !same(c, now)).then(|| {
         refused(
             StatusCode::PRECONDITION_REQUIRED,
             format!("this costs ${now:.2}; confirm that amount to submit it"),
@@ -1077,75 +1162,72 @@ fn check_price(now: f64, quoted: f64, confirm: Option<f64>) -> Option<Reply> {
     })
 }
 
-/// A request for what's missing of an option parent (decision 0018).
-#[derive(Clone, Debug, Deserialize)]
-struct MissingRequest {
-    dataset: String,
-    schema: String,
-    /// The parent, such as `SPY.OPT`.
-    symbol: String,
-    /// First day, `YYYY-MM-DD`.
-    start: String,
-    /// Last day, inclusive.
-    end: String,
-    #[serde(default)]
-    rule: missing::Rule,
-    /// The expired (or no longer listed) jobs bought here whose contracts
-    /// and days this buys again, by ID, as for `/submit`.
-    #[serde(default)]
-    again: Option<Value>,
+/// Whether two secrets are equal, without stopping at the first difference.
+fn same_secret(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
 }
 
-struct MissingQuote {
-    request: MissingRequest,
-    again: HashSet<String>,
-    days: Vec<missing::Day>,
-    cost_usd: f64,
-    at: Instant,
+/// Whether the request carries the approval token as its bearer token.
+fn approved_by_console(jobs: &Jobs, headers: &axum::http::HeaderMap) -> Result<(), Reply> {
+    let Some(want) = &jobs.approve_token else {
+        return Err(refused(
+            StatusCode::FORBIDDEN,
+            "paid purchases need a person's approval in the console, and this service has no approval token (JOBS_APPROVE_TOKEN), so they are off",
+        ));
+    };
+    let sent = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if sent.is_some_and(|t| same_secret(t.trim(), want)) {
+        Ok(())
+    } else {
+        Err(refused(
+            StatusCode::FORBIDDEN,
+            "a paid purchase needs a person's approval in the console",
+        ))
+    }
 }
 
-/// Plan a request for what's missing: for each day the store has the
-/// parent's definitions for, the contracts wanted less what's had (`had`),
-/// priced per day: one request for the contracts missing all day, and one
-/// for each stretch of hours missing of contracts partly had. Purchases here
-/// that are gone stay subtracted unless `again` names their jobs. Returns
-/// the requests and notes (days with nothing to buy, days without
-/// definitions, gone purchases still subtracted).
+/// Why a paid purchase may not go ahead, if it may not: it needs the
+/// console's approval (the approval token) and who gave it.
+fn approval(jobs: &Jobs, headers: &axum::http::HeaderMap, by: Option<&str>) -> Option<Reply> {
+    if let Err(r) = approved_by_console(jobs, headers) {
+        return Some(r);
+    }
+    by.is_none_or(|b| b.trim().is_empty()).then(|| {
+        refused(
+            StatusCode::FORBIDDEN,
+            "a paid purchase names who approved it (approved_by)",
+        )
+    })
+}
+
+/// Plan a request: what's missing of it, priced. Each day's wanted window
+/// is the whole UTC day, or its `hours`. A day with nothing of the symbol
+/// had in that window is bought whole (runs of such whole days as one
+/// request). Of an option parent, a day partly had (or any day, with a rule
+/// or contract lists) is bought as its missing contracts, from the store's
+/// definitions of that day, over the hours each still needs. Of any other
+/// symbol, a day partly had isn't bought at all. Purchases here that are
+/// gone stay had unless `again` names their jobs. Returns the requests, in
+/// order, and notes (what was skipped, and why). `priced` counts the
+/// requests priced, of how many.
 async fn plan(
     jobs: &Jobs,
-    r: &MissingRequest,
+    a: &Asked,
     again: &HashSet<String>,
     fresh: bool,
-) -> Result<(Vec<missing::Day>, Vec<String>), (StatusCode, String)> {
+    priced: &(AtomicUsize, AtomicUsize),
+) -> Result<(Vec<missing::Part>, Vec<String>), (StatusCode, String)> {
+    use futures_util::TryStreamExt as _;
     let bad = |e: String| (StatusCode::BAD_REQUEST, e);
     let down = |e: String| (StatusCode::SERVICE_UNAVAILABLE, e);
-    let fmt = time::macros::format_description!("[year]-[month]-[day]");
-    let parse = |s: &str| {
-        time::Date::parse(s.trim(), fmt)
-            .map_err(|_| bad(format!("{s:?} is not a date (YYYY-MM-DD)")))
-    };
-    let (start, last) = (parse(&r.start)?, parse(&r.end)?);
-    if last < start {
-        return Err(bad("the last day is before the first".into()));
-    }
-    if (last - start).whole_days() > 366 {
-        return Err(bad("at most a year at a time".into()));
-    }
-    if !r.symbol.ends_with(".OPT") {
-        return Err(bad(
-            "only option parents (ROOT.OPT) are bought by contract".into()
-        ));
-    }
-    let schema: Schema = r
-        .schema
-        .parse()
-        .map_err(|_| bad(format!("unknown schema {}", r.schema)))?;
-    let dataset = known_dataset(jobs, &r.dataset).await?;
-    let end = last.next_day().ok_or_else(|| bad("bad last day".into()))?;
-    let mut pieces = had(jobs, &dataset, schema, &r.symbol, (start, end), fresh)
+    let dataset = known_dataset(jobs, &a.dataset).await?;
+    let mut pieces = had(jobs, &dataset, a.schema, &a.symbol, (a.start, a.end), fresh)
         .await
         .map_err(down)?;
-    let gone: std::collections::BTreeSet<String> = pieces
+    let gone: BTreeSet<String> = pieces
         .iter()
         .filter_map(|p| match &p.kind {
             had::Kind::Gone(j) => Some(j.clone()),
@@ -1161,28 +1243,115 @@ async fn plan(
         )));
     }
     pieces.retain(|p| !matches!(&p.kind, had::Kind::Gone(j) if again.contains(j)));
-    let get = |url: String| async move {
-        let resp = jobs
-            .http
-            .get(&url)
-            .timeout(Duration::from_secs(120))
-            .send()
-            .await
-            .map_err(|e| down(format!("store: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(down(format!("store: HTTP {} for {url}", resp.status())));
+    let mut notes: Vec<String> = gone
+        .iter()
+        .filter(|j| !again.contains(*j))
+        .map(|j| format!("{j}: bought here, expired or no longer on Databento's list; what it bought stays subtracted unless named in \"again\""))
+        .collect();
+
+    let option = a.stype == SType::Parent && a.symbol.ends_with(".OPT");
+    let by_contract = a.rule.is_some() || a.contracts.is_some();
+    let (mut whole, mut by_day) = (Vec::new(), Vec::new());
+    let mut d = a.start;
+    while d < a.end {
+        let next = d.next_day().ok_or_else(|| bad("bad day".into()))?;
+        let window = a
+            .hours
+            .as_ref()
+            .map_or_else(|| had::day_window(d), |h| h.window(d));
+        if a.contracts.as_ref().is_some_and(|m| !m.contains_key(&d)) {
+            d = next;
+            continue;
         }
-        Ok::<_, (StatusCode, String)>(resp)
-    };
-    let listing: Value = get(format!(
-        "{}/files?provider=databento&pattern=*/{dataset}/{}/definition/*",
-        jobs.store, r.symbol
-    ))
+        let touching: Vec<&had::Piece> = pieces
+            .iter()
+            .filter(|p| p.window.0 < window.1 && window.0 < p.window.1)
+            .collect();
+        if !by_contract && touching.is_empty() {
+            whole.push((d, window));
+        } else if option {
+            by_day.push((d, window));
+        } else {
+            let what: Vec<&str> = touching.iter().take(3).map(|p| p.what.as_str()).collect();
+            notes.push(format!("{d}: not bought, it overlaps {}", what.join("; ")));
+        }
+        d = next;
+    }
+
+    // Whole days, consecutive ones as one request (whole UTC days only).
+    let mut parts: Vec<missing::Part> = Vec::new();
+    for (d, window) in whole {
+        if let Some(p) = parts.last_mut()
+            && a.hours.is_none()
+            && p.last.next_day() == Some(d)
+        {
+            p.last = d;
+            p.window.1 = window.1;
+            continue;
+        }
+        parts.push(missing::Part {
+            day: d,
+            last: d,
+            window,
+            whole: true,
+            symbols: vec![a.symbol.clone()],
+            stype: a.stype,
+            cost_usd: 0.0,
+            bytes: 0,
+            skipped_held: 0,
+            skipped_pending: 0,
+        });
+    }
+    if !by_day.is_empty() {
+        let defs = definitions(jobs, &dataset, &a.symbol).await?;
+        let (pieces, defs) = (&pieces, &defs);
+        let days: Vec<(Vec<missing::Part>, Option<String>)> = futures_util::stream::iter(by_day)
+            .map(|(d, window)| contract_day(jobs, a, pieces, defs, d, window))
+            .buffered(PRICING_AT_ONCE)
+            .try_collect()
+            .await?;
+        for (p, note) in days {
+            parts.extend(p);
+            notes.extend(note);
+        }
+    }
+    parts.sort_by_key(|p| (p.day, p.window, !p.whole));
+    priced.1.store(parts.len(), Ordering::Relaxed);
+    let dataset = &dataset;
+    let parts = futures_util::stream::iter(parts)
+        .map(|mut p| async move {
+            let (usd, bytes) = cost(jobs, dataset, a.schema, &p.symbols, p.stype, p.window)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+            p.cost_usd = usd;
+            p.bytes = bytes;
+            priced.0.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, (StatusCode, String)>(p)
+        })
+        .buffered(PRICING_AT_ONCE)
+        .try_collect()
+        .await?;
+    Ok((parts, notes))
+}
+
+/// The store's definition days of `parent`: day → (volume, path).
+async fn definitions(
+    jobs: &Jobs,
+    dataset: &str,
+    parent: &str,
+) -> Result<HashMap<String, (String, String)>, (StatusCode, String)> {
+    let listing: Value = store_get(
+        jobs,
+        &format!(
+            "{}/files?provider=databento&pattern=*/{dataset}/{parent}/definition/*",
+            jobs.store
+        ),
+    )
     .await?
     .json()
     .await
-    .map_err(|e| down(format!("store: {e}")))?;
-    let defs: HashMap<String, (String, String)> = listing["files"]
+    .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")))?;
+    Ok(listing["files"]
         .as_array()
         .into_iter()
         .flatten()
@@ -1194,130 +1363,227 @@ async fn plan(
                 (f["volume"].as_str()?.to_owned(), path.to_owned()),
             ))
         })
-        .collect();
-
-    let mut days = Vec::new();
-    let mut notes: Vec<String> = gone
-        .iter()
-        .filter(|j| !again.contains(*j))
-        .map(|j| format!("{j}: bought here, expired or no longer on Databento's list; its contracts and days stay subtracted unless named in \"again\""))
-        .collect();
-    let mut d = start;
-    while d <= last {
-        let key = d.to_string();
-        let next = d.next_day().ok_or_else(|| bad("bad day".into()))?;
-        let Some((volume, path)) = defs.get(&key) else {
-            if !matches!(d.weekday(), time::Weekday::Saturday | time::Weekday::Sunday) {
-                notes.push(format!(
-                    "{key}: the store has no {} definitions for this day; buy those first",
-                    r.symbol
-                ));
-            }
-            d = next;
-            continue;
-        };
-        let bytes = get(format!("{}/files/{volume}/{path}", jobs.store))
-            .await?
-            .bytes()
-            .await
-            .map_err(|e| down(format!("store: {e}")))?;
-        let wanted = missing::wanted(&missing::contracts(&bytes).map_err(down)?, d, &r.rule);
-        let whole = had::day_window(d);
-        let need = had::need(&wanted, &pieces, whole);
-        let mut parts: Vec<(had::Window, Vec<String>)> = Vec::new();
-        if !need.whole.is_empty() {
-            parts.push((whole, need.whole));
-        }
-        for (windows, contracts) in need.hours {
-            parts.extend(windows.into_iter().map(|w| (w, contracts.clone())));
-        }
-        if parts.is_empty() {
-            notes.push(format!(
-                "{key}: nothing to buy ({} wanted, {} held, {} pending or bought)",
-                wanted.len(),
-                need.skipped_held,
-                need.skipped_pending
-            ));
-        }
-        for (window, contracts) in parts {
-            for chunk in contracts.chunks(missing::MAX_SYMBOLS) {
-                let (usd, bytes) = cost(jobs, &dataset, schema, chunk, SType::RawSymbol, window)
-                    .await
-                    .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
-                days.push(missing::Day {
-                    day: d,
-                    window,
-                    symbols: chunk.to_vec(),
-                    cost_usd: usd,
-                    bytes,
-                    skipped_held: need.skipped_held,
-                    skipped_pending: need.skipped_pending,
-                });
-            }
-        }
-        d = next;
-    }
-    Ok((days, notes))
+        .collect())
 }
 
-async fn price_missing(AxState(jobs): AxState<Shared>, Json(mut r): Json<MissingRequest>) -> Reply {
-    r.dataset = r.dataset.trim().to_ascii_uppercase();
-    r.symbol = r.symbol.trim().to_ascii_uppercase();
+/// A read of the store (120 s at most).
+async fn store_get(jobs: &Jobs, url: &str) -> Result<reqwest::Response, (StatusCode, String)> {
+    let down = |e: String| (StatusCode::SERVICE_UNAVAILABLE, e);
+    let resp = jobs
+        .http
+        .get(url)
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| down(format!("store: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(down(format!("store: HTTP {} for {url}", resp.status())));
+    }
+    Ok(resp)
+}
+
+/// One day of an option parent bought by contract: the contracts wanted
+/// (listed, or by the rule, or the whole chain) less what's had, as
+/// requests over the hours each still needs, unpriced; or a note why
+/// nothing.
+async fn contract_day(
+    jobs: &Jobs,
+    a: &Asked,
+    pieces: &[had::Piece],
+    defs: &HashMap<String, (String, String)>,
+    d: time::Date,
+    window: had::Window,
+) -> Result<(Vec<missing::Part>, Option<String>), (StatusCode, String)> {
+    let key = d.to_string();
+    let Some((volume, path)) = defs.get(&key) else {
+        let why = format!(
+            "{key}: the store has no {} definitions for this day; buy those first",
+            a.symbol
+        );
+        if a.contracts.is_some() {
+            return Err((StatusCode::BAD_REQUEST, why));
+        }
+        let weekend = matches!(d.weekday(), time::Weekday::Saturday | time::Weekday::Sunday);
+        return Ok((Vec::new(), (!weekend).then_some(why)));
+    };
+    let bytes = store_get(jobs, &format!("{}/files/{volume}/{path}", jobs.store))
+        .await?
+        .bytes()
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")))?;
+    let all = missing::contracts(&bytes).map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let wanted = match a.contracts.as_ref().and_then(|m| m.get(&d)) {
+        Some(list) => {
+            let known: HashSet<&str> = all.iter().map(|c| c.symbol.as_str()).collect();
+            let unknown: Vec<&str> = list
+                .iter()
+                .map(String::as_str)
+                .filter(|s| !known.contains(s))
+                .collect();
+            if !unknown.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "{key}: {} of these contracts aren't in the store's definitions for the day: {}",
+                        unknown.len(),
+                        unknown
+                            .iter()
+                            .take(5)
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+            list.clone()
+        }
+        None => missing::wanted(
+            &all,
+            d,
+            a.rule.as_ref().unwrap_or(&missing::Rule::default()),
+        ),
+    };
+    let need = had::need(&wanted, pieces, window);
+    let mut asks: Vec<(had::Window, Vec<String>)> = Vec::new();
+    if !need.whole.is_empty() {
+        asks.push((window, need.whole));
+    }
+    for (windows, contracts) in need.hours {
+        asks.extend(windows.into_iter().map(|w| (w, contracts.clone())));
+    }
+    let note = asks.is_empty().then(|| {
+        format!(
+            "{key}: nothing to buy ({} wanted, {} held, {} pending or bought)",
+            wanted.len(),
+            need.skipped_held,
+            need.skipped_pending
+        )
+    });
+    let mut parts = Vec::new();
+    for (w, contracts) in asks {
+        for chunk in contracts.chunks(missing::MAX_SYMBOLS) {
+            parts.push(missing::Part {
+                day: d,
+                last: d,
+                window: w,
+                whole: false,
+                symbols: chunk.to_vec(),
+                stype: SType::RawSymbol,
+                cost_usd: 0.0,
+                bytes: 0,
+                skipped_held: need.skipped_held,
+                skipped_pending: need.skipped_pending,
+            });
+        }
+    }
+    Ok((parts, note))
+}
+
+/// Price a request (see `plan`). Answers with the quote once priced, or,
+/// when that takes longer than `price_wait`, with the quote still
+/// `pricing` (202): `GET /quotes/{id}` says when it's ready.
+async fn price(AxState(jobs): AxState<Shared>, Json(r): Json<PriceRequest>) -> Reply {
+    let asked = match r.check() {
+        Ok(a) => a,
+        Err(e) => return refused(StatusCode::BAD_REQUEST, e),
+    };
     let again = match again_ids(r.again.as_ref()) {
         Ok(a) => a,
         Err(e) => return e,
     };
-    let (days, notes) = match plan(&jobs, &r, &again, false).await {
-        Ok(p) => p,
-        Err((code, e)) => return refused(code, e),
+    if let Err((code, e)) = known_dataset(&jobs, &asked.dataset).await {
+        return refused(code, e);
+    }
+    let warnings = match availability(&jobs, &asked).await {
+        Ok(w) => w,
+        Err(e) => return refused(StatusCode::BAD_REQUEST, e),
     };
-    let total: f64 = days.iter().map(|d| d.cost_usd).sum();
-    let bytes: u64 = days.iter().map(|d| d.bytes).sum();
-    let id = format!("m{}", jobs.next_quote.fetch_add(1, Ordering::Relaxed));
-    let rows: Vec<Value> = days.iter().map(missing::Day::to_json).collect();
+    let id = format!("q{}", jobs.next_quote.fetch_add(1, Ordering::Relaxed));
+    let asked = Arc::new(asked);
+    let priced = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
     {
-        let mut q = lock(&jobs.missing_quotes);
-        q.retain(|_, x| x.at.elapsed() < QUOTE_TTL);
+        let mut q = lock(&jobs.quotes);
+        q.retain(|_, x| !x.expired());
         q.insert(
             id.clone(),
-            MissingQuote {
-                request: r,
-                again,
-                days,
-                cost_usd: total,
+            Quote {
+                request: asked.clone(),
+                again: again.clone(),
                 at: Instant::now(),
+                priced: priced.clone(),
+                result: None,
             },
         );
     }
-    reply_ok(
-        json!({ "quote": id, "cost_usd": total, "billable_bytes": bytes, "requests": rows.len(), "days": rows, "notes": notes, "valid_seconds": QUOTE_TTL.as_secs() }),
-    )
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let task = {
+        let (jobs, id) = (jobs.clone(), id.clone());
+        async move {
+            let result = plan(&jobs, &asked, &again, false, &priced)
+                .await
+                .map(|(parts, notes)| Priced {
+                    cost_usd: parts.iter().map(|p| p.cost_usd).sum(),
+                    notes: warnings.into_iter().chain(notes).collect(),
+                    parts,
+                });
+            if let Some(q) = lock(&jobs.quotes).get_mut(&id) {
+                q.result = Some(result);
+                q.at = Instant::now();
+            }
+            let _ = done.send(());
+        }
+    };
+    tokio::spawn(task);
+    let _ = tokio::time::timeout(jobs.price_wait, finished).await;
+    let mut quotes = lock(&jobs.quotes);
+    let Some(q) = quotes.get(&id) else {
+        return refused(StatusCode::CONFLICT, "that price was declined");
+    };
+    match &q.result {
+        None => (StatusCode::ACCEPTED, Json(q.view(&id))),
+        Some(Err((code, e))) => {
+            let r = refused(*code, e.clone());
+            quotes.remove(&id);
+            r
+        }
+        Some(Ok(_)) => reply_ok(q.view(&id)),
+    }
+}
+
+/// Every quote that is still good, or still being priced.
+async fn quotes_list(AxState(jobs): AxState<Shared>) -> Reply {
+    let mut q = lock(&jobs.quotes);
+    q.retain(|_, x| !x.expired());
+    let mut ids: Vec<&String> = q.keys().collect();
+    ids.sort_by_key(|i| (i.len(), i.as_str()));
+    reply_ok(json!({ "quotes": ids.iter().map(|i| q[*i].view(i)).collect::<Vec<_>>() }))
+}
+
+async fn quote_get(AxState(jobs): AxState<Shared>, UrlPath(id): UrlPath<String>) -> Reply {
+    match lock(&jobs.quotes).get(&id).filter(|q| !q.expired()) {
+        Some(q) => reply_ok(q.view(&id)),
+        None => refused(StatusCode::NOT_FOUND, "no such quote; it may have expired"),
+    }
+}
+
+/// Decline a quote: it can't be submitted after this. Needs the approval
+/// token, as approving does.
+async fn quote_delete(
+    AxState(jobs): AxState<Shared>,
+    headers: axum::http::HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
+    if let Err(r) = approved_by_console(&jobs, &headers) {
+        return r;
+    }
+    match lock(&jobs.quotes).remove(&id) {
+        Some(_) => reply_ok(json!({ "declined": id })),
+        None => refused(StatusCode::NOT_FOUND, "no such quote; it may have expired"),
+    }
 }
 
 fn reply_ok(v: Value) -> Reply {
     (StatusCode::OK, Json(v))
-}
-
-#[derive(Deserialize)]
-struct SubmitMissing {
-    quote: String,
-    confirm_usd: Option<f64>,
-    /// The same jobs the quote named in `again`, repeated.
-    #[serde(default)]
-    again: Option<Value>,
-}
-
-/// Paid purchases are paused until the guards of decision 0019 are built:
-/// anything not priced at exactly $0 is refused (a NaN or negative price
-/// too); free requests go through.
-fn paused(cost_usd: f64) -> Option<Reply> {
-    let free = cost_usd == 0.0;
-    (!free).then(|| {
-        refused(
-            StatusCode::FORBIDDEN,
-            format!("this costs ${cost_usd:.2}, and paid purchases are paused (decision 0019)"),
-        )
-    })
 }
 
 const NO_LEDGER: &str =
@@ -1342,220 +1608,20 @@ fn write_step(
             job,
             cost_usd: Some(cost_usd),
             note,
+            ..ledger::Entry::default()
         })
-}
-
-async fn submit_missing(AxState(jobs): AxState<Shared>, Json(s): Json<SubmitMissing>) -> Reply {
-    let again = match again_ids(s.again.as_ref()) {
-        Ok(a) => a,
-        Err(e) => return e,
-    };
-    let Some(quote) = lock(&jobs.missing_quotes).remove(&s.quote) else {
-        return refused(
-            StatusCode::CONFLICT,
-            "that price has expired or was already used; price the request again",
-        );
-    };
-    if quote.at.elapsed() >= QUOTE_TTL {
-        return refused(
-            StatusCode::CONFLICT,
-            "that price has expired; price the request again",
-        );
-    }
-    if again != quote.again {
-        return refused(
-            StatusCode::CONFLICT,
-            format!(
-                "\"again\" must name exactly the jobs the quote named ({}); price it again",
-                json!(quote.again)
-            ),
-        );
-    }
-    // One purchase at a time, from the last check to the ledger's last word.
-    let _turn = jobs.purchase.lock().await;
-    if lock(&jobs.ledger).is_none() {
-        return refused(StatusCode::SERVICE_UNAVAILABLE, NO_LEDGER);
-    }
-    // Plan again: what's held, pending, bought and priced may have changed.
-    let (days, _) = match plan(&jobs, &quote.request, &quote.again, true).await {
-        Ok(p) => p,
-        Err((_, e)) => {
-            return refused(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("couldn't plan it again, so nothing is submitted: {e}"),
-            );
-        }
-    };
-    let now: f64 = days.iter().map(|d| d.cost_usd).sum();
-    let same = days.len() == quote.days.len()
-        && days
-            .iter()
-            .zip(&quote.days)
-            .all(|(a, b)| a.day == b.day && a.window == b.window && a.symbols == b.symbols);
-    if !same {
-        return refused(
-            StatusCode::CONFLICT,
-            format!(
-                "what's missing or its price changed (now ${now:.2} for {} requests); price it again",
-                days.len()
-            ),
-        );
-    }
-    if let Some(r) = check_price(now, quote.cost_usd, s.confirm_usd) {
-        return r;
-    }
-    let r = &quote.request;
-    let Ok(schema) = r.schema.parse::<Schema>() else {
-        return refused(StatusCode::BAD_REQUEST, "unknown schema");
-    };
-    let mut submitted = Vec::new();
-    for d in &days {
-        let request = ledger::fingerprint(
-            &r.dataset,
-            schema.as_str(),
-            &d.symbols,
-            &had::stamp(d.window.0),
-            &had::stamp(d.window.1),
-        );
-        if let Err(e) = write_step(&jobs, &request, "sending", None, d.cost_usd, None) {
-            return refused(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("could not write the submissions ledger, so {} wasn't submitted: {e}", d.day), "submitted": submitted }).to_string());
-        }
-        let params = SubmitJobParams::builder()
-            .dataset(&r.dataset)
-            .schema(schema)
-            .symbols(d.symbols.clone())
-            .stype_in(SType::RawSymbol)
-            .date_time_range((had::at(d.window.0), had::at(d.window.1)))
-            .build();
-        let result = jobs.db.submit(&params).await;
-        let (state, job, note) = match &result {
-            Ok(job) => ("submitted", Some(job.id.clone()), None),
-            Err(e) => ("uncertain", None, Some(brief(e))),
-        };
-        if let Err(e) = write_step(&jobs, &request, state, job, d.cost_usd, note) {
-            // Unwritten, the "sending" step still blocks what it overlaps.
-            eprintln!("databento-jobs: cannot write the ledger: {e}");
-        }
-        match result {
-            Ok(job) => {
-                lock(&jobs.follow).insert(job.id.clone());
-                jobs.events.push(
-                    format!(
-                        "submitted {} ({} {} {} contracts of {} on {}, ${:.2})",
-                        job.id,
-                        r.dataset,
-                        schema.as_str(),
-                        d.symbols.len(),
-                        r.symbol,
-                        d.day,
-                        d.cost_usd
-                    ),
-                    json!({ "job": job.id, "cost_usd": d.cost_usd }).to_string(),
-                );
-                submitted.push(json!({ "day": d.day.to_string(), "job": job.id, "contracts": d.symbols.len(), "cost_usd": d.cost_usd }));
-            }
-            Err(e) => {
-                return refused(StatusCode::BAD_GATEWAY, json!({ "error": format!("{}: submission failed or its outcome is unknown ({e}); nothing after it was submitted; check the jobs list", d.day), "submitted": submitted }).to_string());
-            }
-        }
-    }
-    reply_ok(json!({ "submitted": submitted, "cost_usd": now }))
-}
-
-async fn price(AxState(jobs): AxState<Shared>, Json(request): Json<Request>) -> Reply {
-    let checked = match request.check() {
-        Ok(c) => c,
-        Err(e) => return refused(StatusCode::BAD_REQUEST, e),
-    };
-    if let Err((code, e)) = known_dataset(&jobs, &checked.dataset).await {
-        return refused(code, e);
-    }
-    let mut warnings = match availability(&jobs, &checked).await {
-        Ok(w) => w,
-        Err(e) => return refused(StatusCode::BAD_REQUEST, e),
-    };
-    // What's had already; submitting refuses it, so say so now.
-    let window = checked.window();
-    let (held, prior) = match had(
-        &jobs,
-        &checked.dataset,
-        checked.schema,
-        &checked.symbols[0],
-        (checked.start, checked.end),
-        false,
-    )
-    .await
-    {
-        Ok(pieces) => {
-            let ov = had::overlapping(&pieces, &had::Scope::All, window);
-            let (held, other): (Vec<&had::Piece>, Vec<&had::Piece>) =
-                ov.into_iter().partition(|p| p.kind == had::Kind::Held);
-            let mut days: Vec<String> = held
-                .iter()
-                .map(|p| had::at(p.window.0.max(window.0)).date().to_string())
-                .collect();
-            days.sort();
-            days.dedup();
-            (days, other.iter().map(|p| p.what.clone()).collect())
-        }
-        Err(e) => {
-            warnings.push(format!(
-                "couldn't check what's held already ({e}); submitting will refuse until it can"
-            ));
-            (Vec::new(), Vec::new())
-        }
-    };
-    if !held.is_empty() {
-        warnings.push(format!(
-            "the store already holds some of {} of these days ({}); request only the others (for an option parent, /price-missing buys only what's missing)",
-            held.len(),
-            held.join(", ")
-        ));
-    }
-    if !prior.is_empty() {
-        warnings.push(format!("overlaps earlier purchases: {}", prior.join("; ")));
-    }
-    let (usd, bytes) = match cost(
-        &jobs,
-        &checked.dataset,
-        checked.schema,
-        &checked.symbols,
-        checked.stype_in,
-        window,
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(e) => return refused(StatusCode::BAD_GATEWAY, e),
-    };
-    let id = format!("q{}", jobs.next_quote.fetch_add(1, Ordering::Relaxed));
-    let mut quotes = lock(&jobs.quotes);
-    quotes.retain(|_, q| q.at.elapsed() < QUOTE_TTL);
-    quotes.insert(
-        id.clone(),
-        Quote {
-            request,
-            cost_usd: usd,
-            at: Instant::now(),
-        },
-    );
-    (
-        StatusCode::OK,
-        Json(
-            json!({ "quote": id, "warnings": warnings, "cost_usd": usd, "billable_bytes": bytes, "valid_seconds": QUOTE_TTL.as_secs(), "held_days": held, "bought": prior }),
-        ),
-    )
 }
 
 #[derive(Deserialize)]
 struct Submit {
     quote: String,
     confirm_usd: Option<f64>,
-    /// The expired (or no longer listed) jobs bought here that this buys
-    /// again, by ID: `["OPRA-…"]`. Days the store holds are never bought
-    /// again.
+    /// When given, exactly the jobs the quote named in `again`.
     #[serde(default)]
     again: Option<Value>,
+    /// Who approved a paid purchase (the console's login).
+    #[serde(default)]
+    approved_by: Option<String>,
 }
 
 /// The job IDs `again` names; a blanket `true` is refused.
@@ -1576,146 +1642,182 @@ fn again_ids(v: Option<&Value>) -> Result<HashSet<String>, Reply> {
     }
 }
 
-async fn submit(AxState(jobs): AxState<Shared>, Json(s): Json<Submit>) -> Reply {
-    let again = match again_ids(s.again.as_ref()) {
+/// Submit a quote's requests. It runs to its end even if the caller goes
+/// away, so a purchase is never left half-written.
+async fn submit(
+    AxState(jobs): AxState<Shared>,
+    headers: axum::http::HeaderMap,
+    Json(s): Json<Submit>,
+) -> Reply {
+    let approval = approval(&jobs, &headers, s.approved_by.as_deref());
+    tokio::spawn(submit_quote(jobs, s, approval))
+        .await
+        .unwrap_or_else(|e| refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply {
+    let again = match s
+        .again
+        .as_ref()
+        .filter(|a| !a.is_null())
+        .map(|a| again_ids(Some(a)))
+        .transpose()
+    {
         Ok(a) => a,
-        Err(r) => return r,
+        Err(e) => return e,
     };
     // A quote is used once, whatever happens next.
-    let Some(quote) = lock(&jobs.quotes).remove(&s.quote) else {
-        return refused(
-            StatusCode::CONFLICT,
-            "that price has expired or was already used; price the request again",
-        );
+    let quote = {
+        let mut quotes = lock(&jobs.quotes);
+        match quotes.get(&s.quote) {
+            None => {
+                return refused(
+                    StatusCode::CONFLICT,
+                    "that price has expired, was declined or was already used; price the request again",
+                );
+            }
+            Some(q) if q.result.is_none() => {
+                return refused(StatusCode::CONFLICT, "that request is still being priced");
+            }
+            Some(_) => quotes.remove(&s.quote).expect("just found"),
+        }
     };
-    if quote.at.elapsed() >= QUOTE_TTL {
+    let priced = match quote.result {
+        _ if quote.expired() => {
+            return refused(
+                StatusCode::CONFLICT,
+                "that price has expired; price the request again",
+            );
+        }
+        Some(Ok(ref p)) => p,
+        _ => return refused(StatusCode::CONFLICT, "that request couldn't be priced"),
+    };
+    if again.is_some_and(|a| a != quote.again) {
         return refused(
             StatusCode::CONFLICT,
-            "that price has expired; price the request again",
+            format!(
+                "\"again\" must name exactly the jobs the quote named ({}); price it again",
+                json!(quote.again)
+            ),
         );
     }
-    let Ok(checked) = quote.request.check() else {
-        return refused(StatusCode::BAD_REQUEST, "the request is no longer valid");
-    };
+    if priced.parts.is_empty() {
+        return refused(
+            StatusCode::CONFLICT,
+            format!("nothing to buy: {}", priced.notes.join("; ")),
+        );
+    }
     // One purchase at a time, from the last check to the ledger's last word.
     let _turn = jobs.purchase.lock().await;
     if lock(&jobs.ledger).is_none() {
         return refused(StatusCode::SERVICE_UNAVAILABLE, NO_LEDGER);
     }
-    if let Err((code, e)) = known_dataset(&jobs, &checked.dataset).await {
-        return refused(code, e);
-    }
-    // Never buy what's had already, and never when that can't be checked.
-    let window = checked.window();
-    let pieces = match had(
-        &jobs,
-        &checked.dataset,
-        checked.schema,
-        &checked.symbols[0],
-        (checked.start, checked.end),
-        true,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
+    // Plan again: what's held, pending, bought and priced may have changed.
+    let a = &quote.request;
+    let counts = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let parts = match plan(&jobs, a, &quote.again, true, &counts).await {
+        Ok((parts, _)) => parts,
+        Err((_, e)) => {
             return refused(
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("couldn't check what's had already, so nothing is submitted: {e}"),
+                format!("couldn't plan it again, so nothing is submitted: {e}"),
             );
         }
     };
-    if let Some(r) = refuse_overlaps(&had::overlapping(&pieces, &had::Scope::All, window), &again) {
-        return r;
-    }
-    let now = match cost(
-        &jobs,
-        &checked.dataset,
-        checked.schema,
-        &checked.symbols,
-        checked.stype_in,
-        window,
-    )
-    .await
-    {
-        Ok((usd, _)) => usd,
-        Err(e) => {
-            return refused(
-                StatusCode::BAD_GATEWAY,
-                format!("could not price it again: {e}"),
-            );
-        }
-    };
-    if let Some(r) = check_price(now, quote.cost_usd, s.confirm_usd) {
-        return r;
-    }
-    // Written down before it is sent.
-    let request = ledger::fingerprint(
-        &checked.dataset,
-        checked.schema.as_str(),
-        &checked.symbols,
-        &checked.start.to_string(),
-        &checked.end.to_string(),
-    );
-    if let Err(e) = write_step(&jobs, &request, "sending", None, now, None) {
+    let now: f64 = parts.iter().map(|p| p.cost_usd).sum();
+    let same = parts.len() == priced.parts.len()
+        && parts.iter().zip(&priced.parts).all(|(x, y)| x.same(y));
+    if !same {
         return refused(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not write the submissions ledger, so nothing was submitted: {e}"),
+            StatusCode::CONFLICT,
+            format!(
+                "what's missing or its price changed (now ${now:.2} for {} requests); price it again",
+                parts.len()
+            ),
         );
     }
-    let params = SubmitJobParams::builder()
-        .dataset(&checked.dataset)
-        .schema(checked.schema)
-        .symbols(checked.symbols.clone())
-        .stype_in(checked.stype_in)
-        .date_time_range(checked.start..checked.end)
-        .build();
-    match jobs.db.submit(&params).await {
-        Ok(job) => {
-            if let Err(e) = write_step(
-                &jobs,
-                &request,
-                "submitted",
-                Some(job.id.clone()),
-                now,
-                None,
-            ) {
-                // The job exists; reconciliation will record it from the job list.
-                eprintln!(
-                    "databento-jobs: cannot write the ledger after submitting {}: {e}",
-                    job.id
-                );
-            }
-            lock(&jobs.follow).insert(job.id.clone());
-            let text = format!(
-                "submitted {} ({} {} {}, ${now:.2})",
-                job.id,
-                checked.dataset,
-                checked.schema.as_str(),
-                checked.symbols.join(",")
-            );
-            jobs.events
-                .push(text, json!({ "job": job.id, "cost_usd": now }).to_string());
-            (
-                StatusCode::OK,
-                Json(json!({ "job": job.id, "cost_usd": now })),
-            )
+    if let Some(r) = check_price(now, priced.cost_usd, s.confirm_usd, approval) {
+        return r;
+    }
+    let by = s.approved_by.as_deref().map(str::trim);
+    let mut submitted = Vec::new();
+    for p in &parts {
+        let request = ledger::fingerprint(
+            &a.dataset,
+            a.schema.as_str(),
+            &p.symbols,
+            &had::stamp(p.window.0),
+            &had::stamp(p.window.1),
+        );
+        // A paid purchase: who approved it, before anything is sent.
+        let written = if now == 0.0 {
+            Ok(())
+        } else {
+            lock(&jobs.ledger)
+                .as_mut()
+                .ok_or_else(|| NO_LEDGER.to_owned())
+                .and_then(|l| {
+                    l.append(ledger::Entry {
+                        at: tinytrader_observe::unix_seconds(),
+                        request: request.clone(),
+                        state: "approved".into(),
+                        cost_usd: Some(p.cost_usd),
+                        by: by.map(str::to_owned),
+                        quote: Some(s.quote.clone()),
+                        ..ledger::Entry::default()
+                    })
+                })
         }
-        Err(e) => {
+        .and_then(|()| write_step(&jobs, &request, "sending", None, p.cost_usd, None));
+        if let Err(e) = written {
+            return refused(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("could not write the submissions ledger, so the request for {} wasn't submitted: {e}", p.day), "submitted": submitted }).to_string());
+        }
+        let params = SubmitJobParams::builder()
+            .dataset(&a.dataset)
+            .schema(a.schema)
+            .symbols(p.symbols.clone())
+            .stype_in(p.stype)
+            .date_time_range((had::at(p.window.0), had::at(p.window.1)))
+            .build();
+        let result = jobs.db.submit(&params).await;
+        let (state, job, note) = match &result {
+            Ok(job) => ("submitted", Some(job.id.clone()), None),
+            Err(e) => ("uncertain", None, Some(brief(e))),
+        };
+        if let Err(e) = write_step(&jobs, &request, state, job, p.cost_usd, note) {
             // Unwritten, the "sending" step still blocks what it overlaps.
-            if let Err(w) = write_step(&jobs, &request, "uncertain", None, now, Some(brief(&e))) {
-                eprintln!("databento-jobs: cannot write the ledger: {w}");
+            eprintln!("databento-jobs: cannot write the ledger: {e}");
+        }
+        let what = if p.whole {
+            a.symbol.clone()
+        } else {
+            format!("{} contracts of {}", p.symbols.len(), a.symbol)
+        };
+        match result {
+            Ok(job) => {
+                lock(&jobs.follow).insert(job.id.clone());
+                jobs.events.push(
+                    format!(
+                        "submitted {} ({} {} {what}, {} to {}, ${:.2})",
+                        job.id,
+                        a.dataset,
+                        a.schema.as_str(),
+                        p.day,
+                        p.last,
+                        p.cost_usd
+                    ),
+                    json!({ "job": job.id, "cost_usd": p.cost_usd }).to_string(),
+                );
+                let mut row = p.to_json();
+                row["job"] = json!(job.id);
+                submitted.push(row);
             }
-            jobs.events
-                .push(format!("submission failed: {e}"), e.clone());
-            refused(
-                StatusCode::BAD_GATEWAY,
-                format!(
-                    "submission failed or its outcome is unknown ({e}); it blocks what it overlaps until it shows on Databento's job list or is resolved (POST /ledger/resolve)"
-                ),
-            )
+            Err(e) => {
+                return refused(StatusCode::BAD_GATEWAY, json!({ "error": format!("{what} from {}: submission failed or its outcome is unknown ({e}); it blocks what it overlaps until it shows on Databento's job list or is resolved (POST /ledger/resolve); nothing after it was submitted", p.day), "submitted": submitted }).to_string());
+            }
         }
     }
+    reply_ok(json!({ "submitted": submitted, "cost_usd": now }))
 }
 
 #[derive(Deserialize)]
@@ -1837,6 +1939,7 @@ async fn resolve(AxState(jobs): AxState<Shared>, Json(r): Json<Resolve>) -> Repl
         job: r.job.clone(),
         cost_usd: e.cost_usd,
         note: Some(format!("resolved by the operator: {}", r.note.trim())),
+        ..Default::default()
     }) {
         return refused(StatusCode::INTERNAL_SERVER_ERROR, err);
     }
@@ -2197,15 +2300,11 @@ async fn copy(
 mod tests {
     use super::*;
 
-    fn req(symbols: &str, start: &str, end: &str) -> Request {
-        Request {
-            dataset: "OPRA.PILLAR".into(),
-            schema: "cmbp-1".into(),
-            symbols: symbols.into(),
-            stype_in: "parent".into(),
-            start: start.into(),
-            end: end.into(),
-        }
+    fn req(symbol: &str, start: &str, end: &str) -> PriceRequest {
+        serde_json::from_value(json!({
+            "dataset": "OPRA.PILLAR", "schema": "cmbp-1", "symbol": symbol, "start": start, "end": end,
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -2215,11 +2314,19 @@ mod tests {
             (c.start.to_string(), c.end.to_string()),
             ("2025-10-01".into(), "2025-10-02".into())
         );
+        assert_eq!((c.stype, c.symbol.as_str()), (SType::Parent, "SPX.OPT"));
+        assert_eq!(
+            req("TSLA", "2025-10-01", "2025-10-01")
+                .check()
+                .unwrap()
+                .stype,
+            SType::RawSymbol
+        );
     }
 
     #[test]
     fn refuses_requests_without_symbols_or_backwards() {
-        assert!(req(" , ", "2025-10-01", "2025-10-01").check().is_err());
+        assert!(req(" ", "2025-10-01", "2025-10-01").check().is_err());
         assert!(req("SPX.OPT", "2025-10-02", "2025-10-01").check().is_err());
         assert!(
             req("SPY.OPT,QQQ.OPT", "2025-10-01", "2025-10-01")
@@ -2227,24 +2334,83 @@ mod tests {
                 .is_err()
         );
         assert!(
-            Request {
-                schema: "nope".into(),
-                ..req("SPX.OPT", "2025-10-01", "2025-10-01")
-            }
-            .check()
-            .is_err()
+            req("SPX.OPT", "2020-01-01", "2025-10-01").check().is_err(),
+            "too long"
         );
+        let with = |extra: Value| -> PriceRequest {
+            let mut v = serde_json::to_value(json!({ "dataset": "OPRA.PILLAR", "schema": "cmbp-1", "symbol": "SPY.OPT", "start": "2025-10-01", "end": "2025-10-03" })).unwrap();
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            serde_json::from_value(v).unwrap()
+        };
+        assert!(with(json!({ "schema": "nope" })).check().is_err());
+        assert!(
+            with(json!({ "contracts": { "2025-10-04": [] } }))
+                .check()
+                .is_err(),
+            "a day outside"
+        );
+        assert!(
+            with(json!({ "contracts": {}, "rule": {} }))
+                .check()
+                .is_err(),
+            "both"
+        );
+        assert!(
+            with(json!({ "symbol": "TSLA", "rule": {} }))
+                .check()
+                .is_err(),
+            "not an option parent"
+        );
+        assert!(
+            with(json!({ "hours": { "start": "16:00", "end": "09:30" } }))
+                .check()
+                .is_err()
+        );
+        assert!(with(json!({ "contracts": { "2025-10-02": [] }, "hours": { "start": "09:30", "end": "16:01" } })).check().is_ok());
+    }
+
+    #[test]
+    fn only_server_failures_are_priced_again() {
+        assert!(retryable("API error: 503 Service Unavailable busy"));
+        assert!(retryable("no answer from Databento in 60 s"));
+        assert!(retryable("HTTP error: reqwest::Error { kind: Request }"));
+        assert!(!retryable("API error: 400 Bad Request symbols"));
+        assert!(!retryable("API error: 422 Unprocessable Entity"));
     }
 }
 
 #[cfg(test)]
-mod paused_tests {
+mod price_check_tests {
+    use super::*;
+
     #[test]
     fn only_an_exact_zero_is_free() {
-        assert!(super::paused(0.0).is_none());
-        assert!(super::paused(-0.0).is_none());
-        for c in [0.01, 1e-12, -1.0, f64::NAN, f64::INFINITY] {
-            assert!(super::paused(c).is_some(), "{c} must be refused");
+        let no = || Some(refused(StatusCode::FORBIDDEN, "not approved"));
+        assert!(check_price(0.0, 0.0, None, no()).is_none());
+        assert!(check_price(-0.0, 0.0, None, no()).is_none());
+        for c in [0.01, 1e-12] {
+            assert_eq!(
+                check_price(c, c, Some(c), no()).unwrap().0,
+                StatusCode::FORBIDDEN,
+                "{c}"
+            );
+            assert!(
+                check_price(c, c, Some(c), None).is_none(),
+                "{c} approved and confirmed"
+            );
+            assert_eq!(
+                check_price(c, c, None, None).unwrap().0,
+                StatusCode::PRECONDITION_REQUIRED
+            );
+        }
+        for c in [-1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                check_price(c, c, Some(c), None).unwrap().0,
+                StatusCode::BAD_GATEWAY,
+                "{c}"
+            );
         }
     }
 }

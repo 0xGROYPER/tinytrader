@@ -1,5 +1,5 @@
 //! What's had already (decision 0019, sections 2 and 6): one set, used by
-//! both `/submit` and `/submit-missing`, of everything that already covers
+//! `/price` and `/submit` alike, of everything that already covers
 //! some of a symbol's contracts over some hours. It is the union of the
 //! store's holdings, every job on Databento's list that isn't expired, and
 //! every purchase in the ledger, listed or not.
@@ -38,13 +38,6 @@ impl Scope {
         match self {
             Self::All => true,
             Self::Contracts(c) => c.contains(contract),
-        }
-    }
-
-    fn meets(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Contracts(a), Self::Contracts(b)) => !a.is_disjoint(b),
-            _ => true,
         }
     }
 }
@@ -416,15 +409,6 @@ fn held(scope: Scope, window: Window, what: String) -> Piece {
         kind: Kind::Held,
         what,
     }
-}
-
-/// The pieces that overlap a request for `scope` over `window`.
-#[must_use]
-pub fn overlapping<'a>(pieces: &'a [Piece], scope: &Scope, window: Window) -> Vec<&'a Piece> {
-    pieces
-        .iter()
-        .filter(|p| p.window.0 < window.1 && window.0 < p.window.1 && p.scope.meets(scope))
-        .collect()
 }
 
 /// What's left of `whole` after taking out `cut` (each clipped to it), in order.
