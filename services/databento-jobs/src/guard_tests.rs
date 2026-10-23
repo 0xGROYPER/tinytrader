@@ -1543,10 +1543,11 @@ fn condition(day: &str, c: DatasetCondition, modified: Option<&str>) -> DatasetC
     }
 }
 
-/// A store holding SPY's chain on `DAY` from a batch, and an Alpaca dataset.
+/// A store holding SPY's chain filed on two days, and an Alpaca dataset, as
+/// the store's catalog lists them.
 fn holding() -> Value {
     json!({ "roots": [{ "name": "v1", "datasets": [
-        { "provider": "databento", "id": DS, "symbol": "SPY.OPT", "sources": ["databento batch OPRA-1"],
+        { "provider": "databento", "id": DS, "symbol": "SPY.OPT", "filed": true, "sources": ["store: /v1/Databento/OPRA.PILLAR"],
           "schemas": { SCHEMA: { "days": { "2026-10-01": {}, DAY: {} } } } },
         { "provider": "alpaca", "id": "ALPACA.IEX", "symbol": "SPY", "schemas": { "bars": { "days": { DAY: {} } } } },
     ] }], "missing_volumes": [] })
@@ -1565,9 +1566,23 @@ async fn day_conditions_are_sent_to_the_store_and_changes_told() {
         condition(DAY, DatasetCondition::Available, Some("2026-10-20")),
         condition("2026-10-03", DatasetCondition::Pending, None),
     ]);
-    lock(&r.store).conditions_reply.1 = json!({ "changed": [
-        { "dataset": DS, "day": DAY, "from": "degraded", "to": "available", "last_modified": "2026-10-20" },
-    ] });
+    // DAY was filed from a batch whose condition.json said degraded.
+    lock(&r.store).coverage.1 = json!({ "days": [
+        { "day": DAY, "volume": "v1", "kind": "complete", "filed": true, "size": 10,
+          "condition": { "state": "degraded", "last_modified": "2026-10-04", "source": "batch OPRA-1", "checked_at": 1.0 } },
+        { "day": "2026-10-01", "volume": "v1", "kind": "complete", "filed": true, "size": 10,
+          "condition": { "state": "degraded", "last_modified": "2026-10-02", "source": "provider api", "checked_at": 1.0 } },
+    ], "missing_volumes": [] });
+    // As the store answers (PR #49): no last_modified in what changed.
+    let folder = format!("/v1/Databento/{DS}/SPY.OPT/{SCHEMA}");
+    lock(&r.store).conditions_reply.1 = json!({
+        "changed": [
+            { "dataset": DS, "day": DAY, "volume": "v1", "folder": folder, "from": "degraded", "to": "available" },
+            { "dataset": DS, "day": "2026-10-01", "volume": "v1", "folder": folder, "from": "degraded", "to": "available" },
+        ],
+        "unchanged": 0,
+        "not_held": [],
+    });
     let done = conditions::sync(&r.jobs).await.unwrap();
     assert_eq!((done.rows, done.failed.len()), (2, 0), "{done:?}");
     assert_eq!(
@@ -1590,6 +1605,21 @@ async fn day_conditions_are_sent_to_the_store_and_changes_told() {
             && told.contains("re-released 2026-10-20")
             && told.contains("downloading it again"),
         "{told}"
+    );
+    // A day whose condition didn't come from a batch has no such hint.
+    let other = &done.changed[1];
+    assert!(
+        other.contains("2026-10-01")
+            && other.contains("re-released 2026-10-02")
+            && !other.contains("downloading"),
+        "{other}"
+    );
+    // The condition's source was read from the store before it was replaced.
+    assert!(
+        lock(&r.store)
+            .coverage_asked
+            .iter()
+            .any(|q| q.contains("provider=databento") && q.contains("symbol=SPY.OPT"))
     );
     assert_eq!(r.fake.submits(), 0, "nothing is bought");
 }
@@ -1651,4 +1681,27 @@ async fn a_quote_marks_requests_on_days_that_arent_available() {
         "{v}"
     );
     assert!(v["notes"].to_string().contains("degraded"), "{v}");
+}
+
+#[tokio::test]
+async fn a_day_with_no_condition_before_is_told_too() {
+    let r = rig("conditions-new").await;
+    lock(&r.store).catalog.1 = holding();
+    lock(&r.fake.s).conditions = Some(vec![condition(
+        DAY,
+        DatasetCondition::Degraded,
+        Some("2026-10-02"),
+    )]);
+    lock(&r.store).conditions_reply.1 = json!({
+        "changed": [{ "dataset": DS, "day": DAY, "volume": "v1", "folder": "/v1", "from": null, "to": "degraded" }],
+        "unchanged": 3,
+        "not_held": [{ "dataset": DS, "day": "2026-10-05" }],
+    });
+    let done = conditions::sync(&r.jobs).await.unwrap();
+    assert_eq!(
+        done.changed,
+        [format!(
+            "{DS} {DAY}: none → degraded (on v1), re-released 2026-10-02"
+        )]
+    );
 }
