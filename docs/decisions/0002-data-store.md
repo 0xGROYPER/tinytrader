@@ -302,6 +302,13 @@ reported as unknown rather than guessed.
 disconnect, a venue outage, a recording failure. A gap in the source is
 recorded as a fact about the data, distinct from a writer's own failure.
 
+Each filed day's condition is also kept with the day, in its schema folder's
+manifest entry (`condition: { state, last_modified, source, checked_at }`):
+from the batch's `condition.json` when it is filed, or from the provider's
+API through the store ([API](../api/store.md#day-conditions)). `/coverage`
+and the catalog report it, so a degraded day is visible where the day is
+read.
+
 ### Catalog
 
 Manifests are the authority. A **SQLite index** built from them answers

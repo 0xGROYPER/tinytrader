@@ -26,6 +26,8 @@ Shared conventions are in the [API overview](README.md).
 | `POST /adopt/{provider}` | write | File a download folder already on a volume, where it is. |
 | `POST /volumes/approve` | write | Approve a drive found in the mount directory. |
 | `POST /volumes/{name}/retire` | write | Forget a remembered volume that is away for good ([below](#remembered-volumes)). |
+| `POST /conditions/{provider}` | write | Record days' conditions from the provider's API ([below](#day-conditions)). |
+| `POST /conditions/backfill` | write | Record the conditions in the `condition.json` receipts already kept. |
 | `POST /volumes/{name}/ignore`, `DELETE` | write | Skip, or stop skipping, a path on a volume that can't be read ([below](#post-volumesnameignore)). |
 | `POST /volumes/{name}/accept-empty` | write | Accept that a mounted volume which held datasets is now empty ([below](#post-volumesnameaccept-empty)). |
 
@@ -134,7 +136,7 @@ bought again), so they say what the store holds or say they can't
     "datasets": [{ "provider": "databento", "id": "OPRA.PILLAR", "symbol": "SPY.OPT", "filed": true,
       "sources": ["store: /Volumes/Data/Databento/OPRA.PILLAR"],
       "schemas": { "cbbo-1m": { "files": 2, "bytes": 1234, "symbols": [], "encodings": ["dbn.zst"],
-        "days": { "2026-10-01": 600, "2026-10-02": 634 }, "partial": ["2026-10-02"], "unfiled": [] } } }],
+        "days": { "2026-10-01": 600, "2026-10-02": 634 }, "partial": ["2026-10-02"], "unfiled": [], "degraded": [], "missing": [] } } }],
     "volume": { "…": "…" }, "dataset_bytes": 1234, "other": [], "other_bytes": 0, "unrecognised": [] }],
   "thresholds": { "…": "…" }, "candidates": [], "discover": "/Volumes" }
 ```
@@ -213,6 +215,47 @@ then no longer missing, and the state file keeps a record under
   "held_before": { "databento/OPRA.PILLAR/SPY.OPT": { "cbbo-1m": { "days": 21, "first": "2026-09-01", "last": "2026-09-30", "bytes": 123456 } } } }
 ```
 
+## Day conditions
+
+A provider says of each day of a dataset whether it is `available`,
+`degraded` or `missing` ([decision 0002](../decisions/0002-data-store.md#coverage-and-gaps)).
+The store keeps that with each filed day, in its schema folder's
+`manifest.json` entry:
+
+```json
+"2024-06-03": { "condition": { "state": "degraded", "last_modified": "2024-06-05", "source": "batch OPRA-20240605-X", "checked_at": 1792500000.0 } }
+```
+
+An entry holding only its condition is still a complete day. `/coverage`
+rows carry the day's `condition` (`null` when unknown); each `/catalog`
+schema lists its `degraded` and `missing` days.
+
+- **Filing a batch** (`/incorporate`, with or without `parent`, and
+  `/adopt`) records its `condition.json` row for each day it files (source
+  `batch <id>`). The receipt is kept in `provenance/` as before.
+- **`POST /conditions/{provider}`** with `[{ "dataset", "day", "state",
+  "last_modified"? }]` records each row for every schema and symbol of that
+  dataset held that day (source `provider api`): a provider's condition is of
+  the whole dataset. It is how `databento-jobs` reports conditions for
+  imported days, and re-checks, since the store has no provider key. A row
+  that says what is already recorded changes nothing. It answers what
+  changed:
+
+  ```json
+  { "changed": [{ "dataset": "OPRA.PILLAR", "day": "2024-06-03", "volume": "data", "folder": "/Volumes/Data/Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m", "from": "degraded", "to": "available" }],
+    "unchanged": 3, "not_held": [{ "dataset": "OPRA.PILLAR", "day": "2024-06-04" }] }
+  ```
+
+  `400` for a row without a dataset, a day, or a known state.
+- **`POST /conditions/backfill`** records, once, the rows of every
+  `provenance/*/condition.json` the volumes keep, each for the dataset its
+  `metadata.json` (or `import.json`) names, as from its batch. It answers as
+  above, with `batches`, `rows`, and `unknown_dataset` (receipts whose
+  dataset isn't known).
+
+Both apply to the days the last scan found, after any rescan a filing asked
+for, and one at a time with filings.
+
 ## Reading files
 
 A file is named logically, `<volume>/<path within the volume>`, where the
@@ -256,8 +299,9 @@ days, and running work beside the data are later steps.
 
 A day file holding a list of contracts (`stype_in = raw_symbol`), for part
 of a day, is a **partial day** ([decision 0018](../decisions/0018-partial-coverage.md)).
-Its coverage is in the schema folder's `manifest.json`; a day without an entry
-there is complete.
+Its coverage is in the schema folder's `manifest.json`; a day whose entry has
+no `coverage` (only its [condition](#day-conditions)), or that has no entry,
+is complete.
 
 ### `POST /import/{provider}/{id}`
 
@@ -295,11 +339,12 @@ kept in `provenance/{id}/`, and each step is recorded in `migrations/`.
 
 ```json
 { "days": [
-  { "day": "2026-10-01", "volume": "data", "volumes": ["data"], "kind": "complete", "filed": true, "size": 1234, "conflict": false },
+  { "day": "2026-10-01", "volume": "data", "volumes": ["data"], "kind": "complete", "filed": true, "size": 1234, "conflict": false,
+    "condition": { "state": "degraded", "last_modified": "2026-10-03", "source": "batch OPRA-20261003-X", "checked_at": 1792500000.0 } },
   { "day": "2026-10-02", "volume": "data", "volumes": ["data"], "kind": "partial", "filed": true, "size": 4567,
     "records": 68851, "sha256": "…",
     "coverage": { "kind": "contracts", "stype": "raw_symbol", "symbols": ["SPY   261002C00728000", "…"], "window": [1790946000000000000, 1790985600000000000] },
-    "pending": false, "conflict": false }
+    "pending": false, "conflict": false, "condition": null }
 ], "missing_volumes": [], "scanned_at": 1792500000.0 }
 ```
 

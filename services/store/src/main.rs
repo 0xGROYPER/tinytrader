@@ -21,6 +21,10 @@
 //!   held. `GET /coverage?provider=&dataset=&symbol=&schema=&start=&end=`
 //!   says, for each day held, whether it is complete or which contracts and
 //!   hours it holds.
+//! - **Day conditions** (see the conditions module): each filed day keeps
+//!   the provider's `available` / `degraded` / `missing`, from its batch's
+//!   `condition.json`, `POST /conditions/{provider}`, or `POST
+//!   /conditions/backfill` over the receipts kept.
 //! - **Reading** (see the read module): `GET /files?pattern=&provider=&limit=`
 //!   lists the DBN files the volumes hold by logical name, `<volume>/<path>`;
 //!   `GET /files/{volume}/{path}` sends one. Read-only, finished files only.
@@ -44,12 +48,14 @@
 //! the real disks, and binds to loopback by default (`STORE_LISTEN`).
 
 mod catalog;
+mod conditions;
 mod ingest;
 mod partial;
 mod read;
 mod state;
 mod volumes;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -324,6 +330,8 @@ fn router(store: Shared, token: WriteToken) -> Router {
         .route("/volumes/{name}/retire", post(retire))
         .route("/volumes/{name}/accept-empty", post(accept_empty))
         .route("/volumes/{name}/ignore", post(ignore).delete(unignore))
+        .route("/conditions/backfill", post(backfill_conditions))
+        .route("/conditions/{provider}", post(post_conditions))
         .route("/files", get(list_files))
         .route("/files/{volume}/{*path}", get(send_file))
         .layer(axum::middleware::from_fn(
@@ -1465,6 +1473,116 @@ async fn accept_empty(
     reply(StatusCode::OK, record)
 }
 
+/// Record days' conditions from the provider's API (decision 0002): `[{
+/// dataset, day, state, last_modified? }]`, for every schema and symbol of
+/// the dataset held that day. Answers what changed.
+async fn post_conditions(
+    AxState(store): AxState<Shared>,
+    UrlPath(provider): UrlPath<String>,
+    Json(body): Json<Vec<Value>>,
+) -> Reply {
+    let Some(pdir) = ingest::provider_dir(&provider) else {
+        return refused(
+            StatusCode::NOT_FOUND,
+            format!("unknown provider {provider}"),
+        );
+    };
+    let mut rows: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for r in body {
+        let Some(dataset) = r["dataset"].as_str().filter(|d| ingest::safe(d)) else {
+            return refused(StatusCode::BAD_REQUEST, format!("no usable dataset in {r}"));
+        };
+        rows.entry(dataset.to_owned()).or_default().push(r);
+    }
+    let mut parsed = BTreeMap::new();
+    for (dataset, list) in rows {
+        match conditions::parse(&json!(list)) {
+            Ok(p) => parsed.insert(dataset, p),
+            Err(e) => return refused(StatusCode::BAD_REQUEST, e),
+        };
+    }
+    let provider = pdir.to_ascii_lowercase();
+    apply_conditions(&store, move |index, out| {
+        conditions::apply(index, &provider, &parsed, "provider api", out)
+    })
+    .await
+}
+
+/// Record, once, the conditions in every `condition.json` the store keeps in
+/// `provenance/`, as from their batches.
+async fn backfill_conditions(AxState(store): AxState<Shared>) -> Reply {
+    let volumes = store.volumes();
+    let (mut batches, mut rows_read, mut unknown) = (0, 0, Vec::new());
+    let (code, Json(mut body)) = apply_conditions(&store, |index, out| {
+        for v in volumes.iter().filter(|v| volumes::present(v).is_ok()) {
+            for top in catalog::read_entries(&v.path)? {
+                let Some(provider) = catalog::provider_name(&catalog_name(&top)) else {
+                    continue;
+                };
+                for (batch, dataset, rows) in conditions::kept(&top)? {
+                    let Some(dataset) = dataset else {
+                        unknown.push(batch);
+                        continue;
+                    };
+                    batches += 1;
+                    rows_read += rows.len();
+                    let rows = BTreeMap::from([(dataset, rows)]);
+                    conditions::apply(index, &provider, &rows, &format!("batch {batch}"), out)?;
+                }
+            }
+        }
+        Ok(())
+    })
+    .await;
+    if code == StatusCode::OK {
+        body["batches"] = json!(batches);
+        body["rows"] = json!(rows_read);
+        body["unknown_dataset"] = json!(unknown);
+    }
+    (code, Json(body))
+}
+
+fn catalog_name(p: &Path) -> String {
+    p.file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+}
+
+/// Apply conditions to the days the last scan found, after any rescan a
+/// filing asked for, one filing at a time; answers `{ changed, unchanged,
+/// not_held }`.
+async fn apply_conditions(
+    store: &Shared,
+    f: impl FnOnce(&[(String, Vec<catalog::Place>)], &mut conditions::Applied) -> Result<(), String>,
+) -> Reply {
+    if lock(&store.catalog).is_null() {
+        return refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the store is still scanning",
+        );
+    }
+    if let Err(r) = store.settled(false).await {
+        return r;
+    }
+    let _one_at_a_time = store.filing.lock().await;
+    let index = lock(&store.index).clone();
+    let mut out = conditions::Applied::default();
+    let result = tokio::task::block_in_place(|| f(&index.volumes, &mut out));
+    if let Err(e) = result {
+        return refused(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    if !out.changed.is_empty() {
+        store.events.push(
+            format!("recorded {} day conditions", out.changed.len()),
+            json!(out.changed).to_string(),
+        );
+        store.request_rescan();
+    }
+    reply(
+        StatusCode::OK,
+        json!({ "changed": out.changed, "unchanged": out.unchanged, "not_held": out.not_held }),
+    )
+}
+
 /// Forget a remembered volume that is away for good (decision 0019): it no
 /// longer counts as missing, and the state file keeps a record of what it
 /// held when last seen, and when it was retired. A volume that is mounted
@@ -1678,6 +1796,8 @@ mod tests {
             ("/volumes/v/accept-empty", ""),
             ("/volumes/v/retire", ""),
             ("/volumes/v/ignore", r#"{"path":"x","reason":"y"}"#),
+            ("/conditions/databento", "[]"),
+            ("/conditions/backfill", ""),
         ] {
             assert_eq!(status(&addr, "POST", path, None, body).await, 401, "{path}");
             // Past the guard, the store answers for itself (not 401).
@@ -2005,6 +2125,104 @@ mod tests {
         // No scan comes: 503, not a stale answer.
         let (code, _) = get(&addr, "/catalog?fresh=1").await;
         assert_eq!(code, 503);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn records_conditions_from_the_provider_and_its_receipts() {
+        let dir = scratch("conditions");
+        let vol = dir.join("v");
+        let day = vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+        std::fs::create_dir_all(&day).unwrap();
+        for d in ["2026-10-01", "2026-10-03"] {
+            std::fs::write(day.join(format!("{d}.dbn.zst")), b"x").unwrap();
+        }
+        let s = store(&[("v", &vol)], &dir.join("state.json"));
+        scanned(&s).await;
+        let addr = serve_store(s, WriteToken::open()).await;
+        let post = |state: &str| {
+            json!([
+            { "dataset": "OPRA.PILLAR", "day": "2026-10-01", "state": state, "last_modified": "2026-10-02" },
+            { "dataset": "OPRA.PILLAR", "day": "2026-10-02", "state": state },
+        ]).to_string()
+        };
+        const POST: &str = "/conditions/databento";
+        let (code, body) = call(&addr, "POST", POST, None, &post("degraded")).await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(
+            (
+                body["changed"][0]["from"].clone(),
+                body["changed"][0]["to"].clone()
+            ),
+            (Value::Null, json!("degraded"))
+        );
+        assert_eq!(
+            body["not_held"],
+            json!([{ "dataset": "OPRA.PILLAR", "day": "2026-10-02" }])
+        );
+        let (_, again) = call(&addr, "POST", POST, None, &post("degraded")).await;
+        let again: Value = serde_json::from_str(&again).unwrap();
+        assert_eq!(
+            (again["changed"].clone(), again["unchanged"].clone()),
+            (json!([]), json!(1))
+        );
+        // Repaired by the provider.
+        let (_, fixed) = call(&addr, "POST", POST, None, &post("available")).await;
+        let fixed: Value = serde_json::from_str(&fixed).unwrap();
+        assert_eq!(
+            (
+                fixed["changed"][0]["from"].clone(),
+                fixed["changed"][0]["to"].clone()
+            ),
+            (json!("degraded"), json!("available"))
+        );
+        let (_, cov) = get(&addr, COVERAGE).await;
+        let c = &cov["days"][0];
+        assert_eq!(
+            (
+                c["kind"].clone(),
+                c["condition"]["state"].clone(),
+                c["condition"]["source"].clone()
+            ),
+            (json!("complete"), json!("available"), json!("provider api"))
+        );
+        assert_eq!(cov["days"][1]["condition"], Value::Null, "not known");
+        assert_eq!(status(&addr, "POST", POST, None, &post("bad")).await, 400);
+        assert_eq!(
+            status(&addr, "POST", "/conditions/nobody", None, "[]").await,
+            404
+        );
+
+        // Backfilled from the receipts kept in provenance.
+        let kept = vol.join("Databento/provenance/OPRA-K");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(
+            kept.join("metadata.json"),
+            json!({ "query": { "dataset": "OPRA.PILLAR" } }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(kept.join("condition.json"), json!([{ "date": "2026-10-03", "condition": "missing", "last_modified_date": "2026-10-04" }]).to_string()).unwrap();
+        let (code, body) = call(&addr, "POST", "/conditions/backfill", None, "").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(code, 200, "{body}");
+        assert_eq!(
+            (
+                body["batches"].clone(),
+                body["rows"].clone(),
+                body["changed"].as_array().unwrap().len()
+            ),
+            (json!(1), json!(1), 1)
+        );
+        let (_, again) = call(&addr, "POST", "/conditions/backfill", None, "").await;
+        assert!(again.contains(r#""changed":[]"#), "once is enough: {again}");
+        let (_, cov) = get(&addr, COVERAGE).await;
+        assert_eq!(cov["days"][1]["condition"]["source"], "batch OPRA-K");
+        let (_, cat) = get(&addr, "/catalog").await;
+        assert_eq!(
+            cat["roots"][0]["datasets"][0]["schemas"]["cbbo-1m"]["missing"],
+            json!(["2026-10-03"])
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

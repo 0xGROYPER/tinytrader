@@ -306,6 +306,9 @@ struct Schema {
     partial: Vec<String>,
     /// Days not in the store layout: in a batch download, or a day folder.
     unfiled: Vec<String>,
+    /// Days the provider calls degraded, or missing (their condition).
+    degraded: Vec<String>,
+    missing: Vec<String>,
 }
 
 impl Dataset {
@@ -313,7 +316,7 @@ impl Dataset {
         let schemas: serde_json::Map<String, Value> = self
             .schemas
             .iter()
-            .map(|(k, s)| (k.clone(), json!({ "files": s.files, "bytes": s.bytes, "symbols": s.symbols, "encodings": s.encodings, "days": s.days, "partial": s.partial, "unfiled": s.unfiled })))
+            .map(|(k, s)| (k.clone(), json!({ "files": s.files, "bytes": s.bytes, "symbols": s.symbols, "encodings": s.encodings, "days": s.days, "partial": s.partial, "unfiled": s.unfiled, "degraded": s.degraded, "missing": s.missing })))
             .collect();
         let filed = self.schemas.values().all(|s| s.unfiled.is_empty());
         json!({ "provider": provider, "id": id, "symbol": symbol, "filed": filed, "sources": self.sources, "schemas": schemas })
@@ -628,7 +631,13 @@ fn add_days(dir: &Path, k: &Key, schema: &str, scan: &mut Scan) -> bool {
         note_encoding(s, encoding);
         s.files += 1;
         s.bytes += size;
-        if partial.contains_key(&day) && !s.partial.contains(&day) {
+        let entry = partial.get(&day);
+        match entry.and_then(|e| e["condition"]["state"].as_str()) {
+            Some("degraded") if !s.degraded.contains(&day) => s.degraded.push(day.clone()),
+            Some("missing") if !s.missing.contains(&day) => s.missing.push(day.clone()),
+            _ => {}
+        }
+        if entry.is_some_and(crate::partial::is_partial) && !s.partial.contains(&day) {
             s.partial.push(day.clone());
         }
         if encoding == "day folders" && !s.unfiled.contains(&day) {

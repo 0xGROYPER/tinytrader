@@ -224,6 +224,13 @@ pub fn merge(a: &Path, b: &Path, out: &Path) -> Result<u64, String> {
     Ok(records.len() as u64)
 }
 
+/// Is this manifest entry a partial day? Only an entry with its coverage is;
+/// one holding only the day's condition is a complete day.
+#[must_use]
+pub fn is_partial(entry: &Value) -> bool {
+    entry.get("coverage").is_some()
+}
+
 /// A schema folder's manifest: day → entry. A missing file is an empty one.
 pub fn read_manifest(dir: &Path) -> Result<BTreeMap<String, Value>, String> {
     let path = dir.join(MANIFEST);
@@ -243,7 +250,7 @@ pub fn read_manifest(dir: &Path) -> Result<BTreeMap<String, Value>, String> {
 
 /// Replace a schema folder's manifest: written beside it, flushed, renamed
 /// over it, and the folder flushed, so it is always one whole version.
-fn write_manifest(dir: &Path, days: &BTreeMap<String, Value>) -> Result<(), String> {
+pub(crate) fn write_manifest(dir: &Path, days: &BTreeMap<String, Value>) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let text = serde_json::to_string_pretty(&json!({ "schema": MANIFEST_SCHEMA, "days": days }))
         .map_err(|e| e.to_string())?;
@@ -424,7 +431,7 @@ pub fn import(
         for r in &everywhere {
             let p = r.join(&rel);
             if p.exists() {
-                let entry = settle(&r.join(&level), &day)?;
+                let entry = settle(&r.join(&level), &day)?.filter(is_partial);
                 held = Some((p, entry));
                 break;
             }
@@ -577,6 +584,10 @@ pub fn import(
                     .ok_or("the held day's entry vanished")?;
                 let union = held.union(&new);
                 entry["pending"] = json!({ "file": format!("{day}.dbn.zst"), "size": size, "sha256": sha, "records": records, "coverage": union.to_json(), "source": format!("import/{id}") });
+                // The day's condition stays with it.
+                if let Some(c) = entry.get("condition").cloned() {
+                    entry["pending"]["condition"] = c;
+                }
                 set_entry(&dir, &day, Some(entry.clone()))?;
                 ledger.record(json!({ "step": "merged", "inputs": [existing, from], "output": out, "sha256": sha, "records": records }))?;
                 fs::rename(&out, &existing)
@@ -590,6 +601,11 @@ pub fn import(
             }
         }
     }
+
+    // The days' conditions, from a provider batch's condition.json.
+    let mut dirs: Vec<PathBuf> = parts.iter().map(|p| p.inc.clone()).collect();
+    dirs.extend(roots.iter().map(|r| r.join("provenance").join(id)));
+    crate::conditions::record_batch(&dirs, &json!({ "days": done }), id)?;
 
     // The receipt goes to provenance on every volume involved.
     let text = fs::read(&receipt_path).map_err(|e| e.to_string())?;
@@ -736,14 +752,18 @@ pub fn import_batch(
 
 /// What one copy of a day holds, as `/coverage` reports it.
 fn row(day: &str, volume: &str, filed: bool, size: u64, entry: Option<&Value>) -> Value {
-    match entry {
+    let condition = entry
+        .and_then(|m| m.get("condition"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    match entry.filter(|m| is_partial(m)) {
         None => {
-            json!({ "day": day, "volume": volume, "kind": "complete", "filed": filed, "size": size })
+            json!({ "day": day, "volume": volume, "kind": "complete", "filed": filed, "size": size, "condition": condition })
         }
         Some(m) => json!({
             "day": day, "volume": volume, "kind": "partial", "filed": filed, "size": size,
             "coverage": m["coverage"], "records": m["records"], "sha256": m["sha256"],
-            "pending": m.get("pending").is_some(),
+            "pending": m.get("pending").is_some(), "condition": condition,
         }),
     }
 }
@@ -752,7 +772,7 @@ fn row(day: &str, volume: &str, filed: bool, size: u64, entry: Option<&Value>) -
 /// folder) count for `provider`? Data with no provider counts for Databento,
 /// whose layout and names it has: a copy in a backup still blocks buying it
 /// again.
-fn ours(found: Option<&str>, provider: &str) -> bool {
+pub(crate) fn ours(found: Option<&str>, provider: &str) -> bool {
     found.unwrap_or("databento") == provider
 }
 
@@ -974,6 +994,15 @@ fn merge_copies(copies: Vec<Value>) -> Value {
     out["filed"] = json!(filed);
     out["volumes"] = json!(volumes);
     out["conflict"] = json!(conflict);
+    // A condition known for any copy is the day's.
+    if out["condition"].is_null()
+        && let Some(c) = copies
+            .iter()
+            .map(|c| &c["condition"])
+            .find(|c| !c.is_null())
+    {
+        out["condition"] = c.clone();
+    }
     out
 }
 
@@ -1366,13 +1395,108 @@ mod tests {
         );
         fs::remove_file(inc.join("metadata.json")).unwrap();
         fs::write(inc.join("metadata.json"), metadata("raw_symbol")).unwrap();
+        let condition =
+            json!([{ "date": DAY, "condition": "degraded", "last_modified_date": "2026-10-04" }]);
+        fs::write(inc.join("condition.json"), condition.to_string()).unwrap();
         let s = import_batch(&[part], &[], "OPRA-X", "SPY.OPT", "2026-10-19").unwrap();
         assert_eq!(s["days"][0]["day"], DAY);
         assert_eq!(fs::read(file(&root)).unwrap(), bytes);
-        for r in [IMPORT, "manifest.json", "metadata.json"] {
+        // The day's condition, with its coverage.
+        let entry = &read_manifest(file(&root).parent().unwrap()).unwrap()[DAY];
+        assert_eq!(
+            (
+                entry["condition"]["state"].clone(),
+                entry["condition"]["source"].clone()
+            ),
+            (json!("degraded"), json!("batch OPRA-X"))
+        );
+        assert!(is_partial(entry));
+        for r in [IMPORT, "manifest.json", "metadata.json", "condition.json"] {
             assert!(root.join("provenance/OPRA-X").join(r).exists(), "{r} kept");
         }
         assert!(!inc.exists());
+    }
+
+    #[test]
+    fn a_day_with_only_its_condition_is_still_complete() {
+        let root = scratch("condition-only").join("Databento");
+        put(&file(&root), b"the whole day");
+        let dir = file(&root).parent().unwrap().to_path_buf();
+        let degraded = crate::conditions::Row {
+            state: "degraded".into(),
+            last_modified: None,
+        };
+        assert_eq!(
+            crate::conditions::record(&dir, DAY, &degraded, "provider api").unwrap(),
+            Some(Value::Null)
+        );
+        assert_eq!(
+            crate::conditions::record(&dir, DAY, &degraded, "provider api").unwrap(),
+            None,
+            "unchanged"
+        );
+        let vol = root.parent().unwrap();
+        let days = spy(&[("v", vol)], "databento").unwrap();
+        assert_eq!(
+            (
+                days[0]["kind"].clone(),
+                days[0]["condition"]["state"].clone()
+            ),
+            (json!("complete"), json!("degraded"))
+        );
+        let cat = crate::catalog::scan_root("v", vol, T);
+        let s = &cat["datasets"][0]["schemas"]["cbbo-1m"];
+        assert_eq!(
+            (s["partial"].clone(), s["degraded"].clone()),
+            (json!([]), json!([DAY]))
+        );
+        // Still the whole day: a partial import onto it is refused.
+        let a = day_bytes(&[(C1, 11)], &[(11, 0)]);
+        let e = import(
+            &[stage(&root, "W2", &[(&name(), a)])],
+            &[],
+            "W2",
+            "2026-10-19",
+        )
+        .unwrap_err();
+        assert!(e.contains("holds the whole day"), "{e}");
+        // A day without an entry is complete, its condition unknown.
+        put(&dir.join("2026-10-01.dbn.zst"), b"x");
+        let days = spy(&[("v", vol)], "databento").unwrap();
+        assert_eq!(
+            (days[0]["kind"].clone(), days[0]["condition"].clone()),
+            (json!("complete"), Value::Null)
+        );
+    }
+
+    #[test]
+    fn a_merge_keeps_the_days_condition() {
+        let root = scratch("condition-merge").join("Databento");
+        let a = day_bytes(&[(C1, 11)], &[(11, 0)]);
+        import(
+            &[stage(&root, "A", &[(&name(), a)])],
+            &[],
+            "A",
+            "2026-10-19",
+        )
+        .unwrap();
+        let dir = file(&root).parent().unwrap().to_path_buf();
+        let row = crate::conditions::Row {
+            state: "missing".into(),
+            last_modified: Some("2026-10-03".into()),
+        };
+        crate::conditions::record(&dir, DAY, &row, "provider api").unwrap();
+        let b = day_bytes(&[(C2, 12)], &[(12, 1)]);
+        import(
+            &[stage(&root, "B", &[(&name(), b)])],
+            &[],
+            "B",
+            "2026-10-19",
+        )
+        .unwrap();
+        let entry = &read_manifest(&dir).unwrap()[DAY];
+        assert_eq!(entry["coverage"]["symbols"], json!([C1, C2]));
+        assert_eq!(entry["condition"]["state"], "missing");
     }
 
     #[test]
