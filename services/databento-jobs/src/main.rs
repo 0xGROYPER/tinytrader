@@ -37,6 +37,7 @@
 //! the uploads and filing only, never to Databento.
 
 mod api;
+mod conditions;
 #[cfg(test)]
 mod guard_tests;
 mod had;
@@ -257,6 +258,8 @@ struct Priced {
     parts: Vec<missing::Part>,
     notes: Vec<String>,
     cost_usd: f64,
+    /// Databento's condition of each requested day that isn't available.
+    conditions: BTreeMap<time::Date, &'static str>,
 }
 
 impl Quote {
@@ -290,7 +293,27 @@ impl Quote {
                 v["error"] = json!(e);
             }
             Some(Ok(p)) => {
-                let rows: Vec<Value> = p.parts.iter().map(missing::Part::to_json).collect();
+                let rows: Vec<Value> = p
+                    .parts
+                    .iter()
+                    .map(|r| {
+                        let mut row = r.to_json();
+                        // The worst of its days: missing, then pending, then degraded.
+                        let worst = p
+                            .conditions
+                            .range(r.day..=r.last)
+                            .map(|(_, c)| *c)
+                            .min_by_key(|c| {
+                                ["missing", "pending", "degraded"]
+                                    .iter()
+                                    .position(|x| x == c)
+                            });
+                        if let Some(c) = worst {
+                            row["condition"] = json!(c);
+                        }
+                        row
+                    })
+                    .collect();
                 v["state"] = json!("ready");
                 v["cost_usd"] = json!(p.cost_usd);
                 v["billable_bytes"] = json!(p.parts.iter().map(|r| r.bytes).sum::<u64>());
@@ -582,6 +605,8 @@ async fn main() {
         }
     });
 
+    // Databento's day conditions for what the store holds, daily.
+    tokio::spawn(conditions::every_day(jobs.clone()));
     let every = Duration::from_secs(args.refresh.max(10));
     let mut calendar = (tinytrader_schedule::Calendar::default(), None::<Instant>);
     loop {
@@ -935,9 +960,14 @@ fn retryable(e: &str) -> bool {
 /// Before pricing: refuse a request outside what Databento has for the
 /// schema, and warn about requested days it marks degraded, pending or
 /// missing.
-async fn availability(jobs: &Jobs, c: &Asked) -> Result<Vec<String>, String> {
+/// Also each requested day's condition that isn't available.
+async fn availability(
+    jobs: &Jobs,
+    c: &Asked,
+) -> Result<(Vec<String>, BTreeMap<time::Date, &'static str>), String> {
     use databento::historical::metadata::{DatasetCondition, GetDatasetConditionParams};
     let mut warnings = Vec::new();
+    let mut conditions = BTreeMap::new();
     match jobs.db.range(&c.dataset).await {
         Ok(r) => {
             let (from, to) = r
@@ -974,7 +1004,10 @@ async fn availability(jobs: &Jobs, c: &Asked) -> Result<Vec<String>, String> {
                 let list: Vec<String> = days
                     .iter()
                     .filter(|d| d.condition == cond)
-                    .map(|d| d.date.to_string())
+                    .map(|d| {
+                        conditions.insert(d.date, label);
+                        d.date.to_string()
+                    })
                     .collect();
                 if !list.is_empty() {
                     warnings.push(format!(
@@ -991,7 +1024,7 @@ async fn availability(jobs: &Jobs, c: &Asked) -> Result<Vec<String>, String> {
         }
         Err(e) => warnings.push(format!("couldn't check the days' condition: {e}")),
     }
-    Ok(warnings)
+    Ok((warnings, conditions))
 }
 
 /// A store answer about what it holds, refused unless it is 200 (the store
@@ -1563,7 +1596,7 @@ async fn price(AxState(jobs): AxState<Shared>, Json(r): Json<PriceRequest>) -> R
     if let Err((code, e)) = known_dataset(&jobs, &asked.dataset).await {
         return refused(code, e);
     }
-    let warnings = match availability(&jobs, &asked).await {
+    let (warnings, conditions) = match availability(&jobs, &asked).await {
         Ok(w) => w,
         Err(e) => return refused(StatusCode::BAD_REQUEST, e),
     };
@@ -1610,6 +1643,7 @@ async fn price(AxState(jobs): AxState<Shared>, Json(r): Json<PriceRequest>) -> R
                 cost_usd: price_of(&parts),
                 notes: warnings.into_iter().chain(notes).collect(),
                 parts,
+                conditions,
             });
             if let Some(q) = lock(&jobs.quotes).get_mut(&id) {
                 q.result = Some(result);
