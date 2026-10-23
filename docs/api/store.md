@@ -72,8 +72,9 @@ bought again), so they say what the store holds or say they can't
 - Both answer from the last scan, which may be minutes old. With `fresh=1`
   they ask for a rescan and answer from a scan that started after the
   request, so data copied onto a drive behind the store's back counts.
-  Requests meanwhile share that scan. It waits at most 120 seconds, then
-  answers `503`. It is a read: no token. **Purchases ask with `fresh=1`.**
+  Requests meanwhile share that scan. A full scan of the two drives takes
+  about three minutes, so it waits at most 10 minutes (a scan under way, then
+  its own), then answers `503`. It is a read: no token. **Purchases ask with `fresh=1`.**
 - Both carry `missing_volumes`: the remembered volumes that aren't there now
   ([below](#remembered-volumes)). In `/catalog` a volume whose provider or
   dataset folders couldn't all be read, or that has a malformed manifest, is

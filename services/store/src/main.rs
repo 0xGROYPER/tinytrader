@@ -551,7 +551,7 @@ impl Store {
             requested: AtomicU64::new(0),
             completed: AtomicU64::new(0),
             wait: Duration::from_secs(60),
-            fresh_wait: Duration::from_secs(120),
+            fresh_wait: Duration::from_secs(600),
             remembered: Mutex::new(remembered),
             state_path,
             events: Events::default(),
