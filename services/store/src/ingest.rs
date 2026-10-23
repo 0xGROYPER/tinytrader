@@ -668,6 +668,11 @@ fn file_batch(
         }
     }
 
+    // Each filed day's condition, from the batch's condition.json.
+    let mut dirs: Vec<PathBuf> = parts.iter().map(|p| p.inc.clone()).collect();
+    dirs.extend(roots.iter().map(|r| prov(r)));
+    crate::conditions::record_batch(&dirs, &json!({ "files": placed }), batch)?;
+
     // Receipts go to provenance on every volume holding part of the batch,
     // never over a different one (checked above).
     let receipt_names: Vec<String> = receipts.iter().map(|(n, _, _)| n.clone()).collect();
@@ -934,6 +939,58 @@ mod tests {
                 .exists()
         );
         let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn records_each_filed_days_condition() {
+        let root = scratch("conditions").join("Databento");
+        stage(&root, "OPRA-C", &["SPX.OPT"], b"day one");
+        let rows = json!([
+            { "date": "2025-10-01", "condition": "degraded", "last_modified_date": "2025-10-03" },
+            { "date": "2025-10-02", "condition": "available", "last_modified_date": "2025-10-03" },
+        ]);
+        fs::write(
+            root.join(INCOMING).join("OPRA-C/condition.json"),
+            rows.to_string(),
+        )
+        .unwrap();
+        incorporate(&one(&root, "OPRA-C"), &[], "OPRA-C", "2026-10-06").unwrap();
+        let days = crate::partial::read_manifest(root.join(DAY).parent().unwrap()).unwrap();
+        let c = &days["2025-10-01"]["condition"];
+        assert_eq!(
+            (
+                c["state"].clone(),
+                c["last_modified"].clone(),
+                c["source"].clone()
+            ),
+            (
+                json!("degraded"),
+                json!("2025-10-03"),
+                json!("batch OPRA-C")
+            )
+        );
+        assert_eq!(days.len(), 1, "only the days filed");
+        assert!(
+            root.join("provenance/OPRA-C/condition.json").exists(),
+            "the receipt is kept"
+        );
+        let vol = root.parent().unwrap();
+        let v = [("v".to_owned(), vol.to_path_buf())];
+        let cov = crate::partial::coverage(
+            &v,
+            "databento",
+            "OPRA.PILLAR",
+            Some("SPX.OPT"),
+            "cmbp-1",
+            "2025-10-01",
+            "2025-10-01",
+        )
+        .unwrap();
+        assert_eq!(
+            (cov[0]["kind"].clone(), cov[0]["condition"]["state"].clone()),
+            (json!("complete"), json!("degraded"))
+        );
+        let _ = fs::remove_dir_all(vol);
     }
 
     #[test]
