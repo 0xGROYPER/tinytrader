@@ -921,15 +921,16 @@ async fn job_quote_approve(
     if let Some(again) = ask.get("again").filter(|a| !a.is_null()) {
         submit["again"] = again.clone();
     }
-    // A purchase of many requests takes a while; the jobs service finishes
-    // it even if this answer is given up on.
+    // A purchase of many requests takes a while (a fresh price, then a
+    // submission every 3.5 s: 789 requests are about an hour and a quarter);
+    // the jobs service finishes it even if this answer is given up on.
     to_jobs(
         &app,
         &id,
         axum::http::Method::POST,
         "submit",
         Some(submit),
-        1800,
+        3 * 3600,
     )
     .await
 }
