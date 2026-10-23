@@ -74,6 +74,8 @@ struct FakeState {
     costed: Vec<(Vec<String>, had::Window)>,
     /// Errors the next prices answer with, in turn.
     cost_errors: std::collections::VecDeque<String>,
+    /// Prices the next requests get, in turn, before `price`.
+    prices: std::collections::VecDeque<f64>,
     submitted: Vec<SubmitJobParams>,
     listed_with: Vec<ListJobsParams>,
 }
@@ -192,7 +194,10 @@ impl api::Databento for Fake {
             s.costed.push((symbols, w));
             match s.cost_errors.pop_front() {
                 Some(e) => Err(e),
-                None => Ok((s.price, 1000)),
+                None => {
+                    let p = s.prices.pop_front().unwrap_or(s.price);
+                    Ok((p, 1000))
+                }
             }
         })
     }
@@ -763,13 +768,22 @@ async fn the_missing_hours_of_a_partial_day_are_bought_as_their_own_request() {
 #[tokio::test]
 async fn a_price_that_isnt_a_number_of_dollars_is_refused() {
     for price in [f64::NAN, -1.0] {
-        let r = rig("nan").await;
-        lock(&r.fake.s).price = price;
+        let r = paid("nan", price).await;
+        // Never free: it needs the approval, and approved, it is still refused.
         let (code, v) = r.submit(&r.quote("SPY.OPT", DAY, DAY).await, None).await;
-        assert_eq!(code, StatusCode::BAD_GATEWAY, "{v}");
+        assert_eq!(code, StatusCode::FORBIDDEN, "{v}");
         let (_, v) = r.price_contracts(None).await;
-        let (code, v) = r.submit(v["quote"].as_str().unwrap(), None).await;
-        assert_eq!(code, StatusCode::BAD_GATEWAY, "{v}");
+        assert_eq!(v["needs_approval"], true, "{v}");
+        let (code, v) = r
+            .submit_as(
+                v["quote"].as_str().unwrap(),
+                None,
+                Some(APPROVE),
+                Some("me"),
+                Some(price),
+            )
+            .await;
+        assert_ne!(code, StatusCode::OK, "{v}");
         assert_eq!(r.fake.submits(), 0);
     }
 }
@@ -1358,4 +1372,130 @@ async fn a_long_price_is_answered_while_it_is_worked_out() {
         (v["state"].as_str(), v["priced"].as_u64(), v["of"].as_u64()),
         (Some("ready"), Some(5), Some(5))
     );
+}
+
+#[tokio::test]
+async fn whole_days_tile_across_daylight_saving_changes() {
+    let r = rig("dst").await;
+    let all = json!({ "start": "00:00", "end": "24:00", "tz": "America/New_York" });
+    for (start, end) in [("2026-03-07", "2026-03-09"), ("2026-10-31", "2026-11-02")] {
+        let (code, v) = r
+            .price(json!({ "start": start, "end": end, "hours": all }))
+            .await;
+        assert_eq!(code, StatusCode::OK, "{v}");
+        let w: Vec<Value> = rows(&v).iter().map(|x| x["window"].clone()).collect();
+        assert_eq!(w.len(), 3, "{v}");
+        assert_eq!((&w[0][1], &w[1][1]), (&w[1][0], &w[2][0]), "{v}");
+    }
+}
+
+#[test]
+fn a_plan_that_would_buy_twice_is_caught() {
+    let part = |w: had::Window, whole: bool, symbols: &[&str]| missing::Part {
+        day: date(DAY),
+        last: date(DAY),
+        window: w,
+        whole,
+        symbols: symbols.iter().map(|x| (*x).to_owned()).collect(),
+        stype: SType::RawSymbol,
+        cost_usd: 0.0,
+        bytes: 0,
+        skipped_held: 0,
+        skipped_pending: 0,
+    };
+    assert!(overlap(&[part((0, 10), false, &[C1]), part((10, 20), false, &[C1])]).is_none());
+    assert!(overlap(&[part((0, 10), false, &[C1]), part((5, 20), false, &[C2])]).is_none());
+    assert!(overlap(&[part((0, 10), false, &[C1]), part((5, 20), false, &[C2, C1])]).is_some());
+    assert!(
+        overlap(&[
+            part((0, 10), true, &["SPY.OPT"]),
+            part((9, 20), false, &[C2])
+        ])
+        .is_some()
+    );
+}
+
+/// A rig that takes paid purchases, priced at `usd` each.
+async fn paid(name: &str, usd: f64) -> Rig {
+    let r = rig_with(name, |j| j.approve_token = Some(APPROVE.into())).await;
+    lock(&r.fake.s).price = usd;
+    r
+}
+
+#[tokio::test]
+async fn an_unapproved_or_unconfirmed_submit_leaves_the_quote() {
+    let r = paid("keep", 2.5).await;
+    let q = r.quote("SPY.OPT", DAY, DAY).await;
+    assert_eq!(r.submit(&q, None).await.0, StatusCode::FORBIDDEN);
+    let me = Some("me@example.com");
+    assert_eq!(
+        r.submit_as(&q, None, Some(APPROVE), me, Some(2.4)).await.0,
+        StatusCode::PRECONDITION_REQUIRED
+    );
+    let (code, v) = r.submit_as(&q, None, Some(APPROVE), me, Some(2.5)).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(r.fake.submits(), 1);
+}
+
+#[tokio::test]
+async fn each_request_is_priced_as_dollars() {
+    // Two days' requests at $1 and -$1: zero in all, but not free.
+    let r = paid("parts", 0.0).await;
+    lock(&r.fake.s).prices = [1.0, -1.0, 1.0, -1.0].into();
+    let rth = json!({ "start": "09:30", "end": "16:01" });
+    let (_, v) = r
+        .price(json!({ "start": "2026-10-05", "end": "2026-10-06", "hours": rth }))
+        .await;
+    assert_eq!(v["needs_approval"], true, "{v}");
+    let q = v["quote"].as_str().unwrap().to_owned();
+    assert_eq!(r.submit(&q, None).await.0, StatusCode::FORBIDDEN);
+    assert_ne!(
+        r.submit_as(&q, None, Some(APPROVE), Some("me"), Some(0.0))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(r.fake.submits(), 0);
+}
+
+#[tokio::test]
+async fn quote_ids_differ_from_one_start_to_the_next() {
+    let (a, b) = (rig("boot-a").await, rig("boot-b").await);
+    let (qa, qb) = (
+        a.quote("SPY.OPT", DAY, DAY).await,
+        b.quote("SPY.OPT", DAY, DAY).await,
+    );
+    assert!(qa.starts_with("q-") && qa != qb, "{qa} {qb}");
+}
+
+#[tokio::test]
+async fn a_price_that_takes_too_long_fails() {
+    let r = rig_with("cap", |j| {
+        j.price_wait = Duration::ZERO;
+        j.pricing_cap = Duration::from_millis(30);
+    })
+    .await;
+    r.gate(100);
+    let (code, v) = r.price(json!({})).await;
+    assert_eq!(code, StatusCode::ACCEPTED, "{v}");
+    let quote = v["quote"].as_str().unwrap().to_owned();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let (_, Json(v)) = quote_get(AxState(r.jobs.clone()), UrlPath(quote)).await;
+    assert_eq!(v["state"], "failed", "{v}");
+    assert!(v["error"].as_str().unwrap().contains("longer than"), "{v}");
+}
+
+#[tokio::test]
+async fn two_approvals_of_one_quote_buy_once() {
+    let r = paid("twice", 2.5).await;
+    let q = r.quote("SPY.OPT", DAY, DAY).await;
+    let me = Some("me@example.com");
+    let ((a, _), (b, _)) = tokio::join!(
+        r.submit_as(&q, None, Some(APPROVE), me, Some(2.5)),
+        r.submit_as(&q, None, Some(APPROVE), me, Some(2.5))
+    );
+    let mut codes = [a, b];
+    codes.sort();
+    assert_eq!(codes, [StatusCode::OK, StatusCode::CONFLICT]);
+    assert_eq!(r.fake.submits(), 1);
 }

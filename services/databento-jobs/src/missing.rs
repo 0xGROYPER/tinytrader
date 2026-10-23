@@ -150,20 +150,23 @@ impl Hours {
         }
     }
 
-    /// The hours on `day`, in UTC.
     #[must_use]
+    /// The hours on `day`, in UTC, with the offset in force at each end (an
+    /// end in the hour repeated in November is its second occurrence, so
+    /// consecutive days tile).
     pub fn window(&self, day: time::Date) -> crate::had::Window {
-        let at = |s: &str| {
+        let at = |s: &str, later: bool| {
             let (h, m) = hm(s).unwrap_or((0, 0));
-            tinytrader_schedule::ny_to_unix(
+            tinytrader_schedule::ny_local_to_unix(
                 i64::from(day.year()),
                 i64::from(u8::from(day.month())),
                 i64::from(day.day()),
                 h,
                 m,
+                later,
             ) * 1_000_000_000
         };
-        (at(&self.start), at(&self.end))
+        (at(&self.start, false), at(&self.end, true))
     }
 }
 
@@ -334,6 +337,31 @@ mod tests {
                 "2026-11-02T14:30:00.000000000Z",
                 "2026-11-02T21:01:00.000000000Z"
             )
+        );
+        // A whole day, every day: they tile across both changes.
+        let all = Hours {
+            start: "00:00".into(),
+            end: "24:00".into(),
+            tz: new_york(),
+        };
+        for days in [
+            ["2026-03-07", "2026-03-08", "2026-03-09"],
+            ["2026-10-31", "2026-11-01", "2026-11-02"],
+        ] {
+            let w: Vec<_> = days.iter().map(|x| all.window(d(x))).collect();
+            assert_eq!((w[0].1, w[1].1), (w[1].0, w[2].0), "{days:?}");
+        }
+        let hours = |x: &str| {
+            let (a, b) = all.window(d(x));
+            (b - a) / 3_600_000_000_000
+        };
+        assert_eq!(
+            (
+                hours("2026-03-08"),
+                hours("2026-11-01"),
+                hours("2026-11-02")
+            ),
+            (23, 25, 24)
         );
         // 2022: March 13 and November 6.
         assert_eq!(at("2022-03-11").0, "2022-03-11T14:30:00.000000000Z");

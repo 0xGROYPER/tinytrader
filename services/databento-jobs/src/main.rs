@@ -336,6 +336,8 @@ struct Jobs {
     /// How long `/price` waits for a price before answering that it is
     /// still being worked out.
     price_wait: Duration,
+    /// How long a price may take before it is given up as failed.
+    pricing_cap: Duration,
     transfers: Mutex<HashMap<String, Transfer>>,
     /// Jobs submitted here, downloaded once done.
     follow: Mutex<HashSet<String>>,
@@ -355,6 +357,9 @@ struct Jobs {
     calendar: Mutex<tinytrader_schedule::Calendar>,
     events: Events,
     next_quote: AtomicU64,
+    /// Starts every quote ID, different at each start, so an ID is never
+    /// used twice across restarts.
+    boot: String,
 }
 
 impl Jobs {
@@ -387,6 +392,18 @@ impl Jobs {
             one_at_a_time: tokio::sync::Semaphore::new(1),
             events: Events::default(),
             next_quote: AtomicU64::new(1),
+            boot: {
+                use std::hash::{BuildHasher as _, Hasher as _};
+                // A randomly keyed hash: random at each start.
+                let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+                h.write_u128(
+                    time::OffsetDateTime::now_utc()
+                        .unix_timestamp_nanos()
+                        .cast_unsigned(),
+                );
+                format!("{:08x}", h.finish() as u32)
+            },
+            pricing_cap: Duration::from_secs(30 * 60),
             paused_until: AtomicU64::new(0),
             yield_to: Vec::new(),
             capture_hours: None,
@@ -1162,6 +1179,18 @@ fn check_price(
     })
 }
 
+/// A quote's price: the sum of its requests', or NaN (never free, never
+/// bought) when any isn't a number of dollars or is negative.
+fn price_of(parts: &[missing::Part]) -> f64 {
+    if parts
+        .iter()
+        .any(|p| !p.cost_usd.is_finite() || p.cost_usd < 0.0)
+    {
+        return f64::NAN;
+    }
+    parts.iter().map(|p| p.cost_usd).sum()
+}
+
 /// Whether two secrets are equal, without stopping at the first difference.
 fn same_secret(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
@@ -1316,6 +1345,12 @@ async fn plan(
         }
     }
     parts.sort_by_key(|p| (p.day, p.window, !p.whole));
+    if let Some(why) = overlap(&parts) {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the plan would buy something twice ({why}), so nothing is priced"),
+        ));
+    }
     priced.1.store(parts.len(), Ordering::Relaxed);
     let dataset = &dataset;
     let parts = futures_util::stream::iter(parts)
@@ -1332,6 +1367,32 @@ async fn plan(
         .try_collect()
         .await?;
     Ok((parts, notes))
+}
+
+/// Two requests of a plan that would buy the same data twice, if any: they
+/// overlap in time, and both are the whole symbol, or one is and the other
+/// a contract list, or both list a contract.
+fn overlap(parts: &[missing::Part]) -> Option<String> {
+    let mut by_start: Vec<&missing::Part> = parts.iter().collect();
+    by_start.sort_by_key(|p| p.window.0);
+    for (i, p) in by_start.iter().enumerate() {
+        let mine: HashSet<&String> = p.symbols.iter().collect();
+        for q in by_start[i + 1..]
+            .iter()
+            .take_while(|q| q.window.0 < p.window.1)
+        {
+            if p.whole || q.whole || q.symbols.iter().any(|s| mine.contains(s)) {
+                return Some(format!(
+                    "{} and {}, {} and {}",
+                    had::stamp(p.window.0),
+                    had::stamp(p.window.1),
+                    had::stamp(q.window.0),
+                    had::stamp(q.window.1)
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// The store's definition days of `parent`: day → (volume, path).
@@ -1498,7 +1559,11 @@ async fn price(AxState(jobs): AxState<Shared>, Json(r): Json<PriceRequest>) -> R
         Ok(w) => w,
         Err(e) => return refused(StatusCode::BAD_REQUEST, e),
     };
-    let id = format!("q{}", jobs.next_quote.fetch_add(1, Ordering::Relaxed));
+    let id = format!(
+        "q-{}-{}",
+        jobs.boot,
+        jobs.next_quote.fetch_add(1, Ordering::Relaxed)
+    );
     let asked = Arc::new(asked);
     let priced = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
     {
@@ -1519,13 +1584,25 @@ async fn price(AxState(jobs): AxState<Shared>, Json(r): Json<PriceRequest>) -> R
     let task = {
         let (jobs, id) = (jobs.clone(), id.clone());
         async move {
-            let result = plan(&jobs, &asked, &again, false, &priced)
-                .await
-                .map(|(parts, notes)| Priced {
-                    cost_usd: parts.iter().map(|p| p.cost_usd).sum(),
-                    notes: warnings.into_iter().chain(notes).collect(),
-                    parts,
-                });
+            let planned = tokio::time::timeout(
+                jobs.pricing_cap,
+                plan(&jobs, &asked, &again, false, &priced),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err((
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!(
+                        "pricing took longer than {} minutes, so it was given up",
+                        jobs.pricing_cap.as_secs() / 60
+                    ),
+                ))
+            });
+            let result = planned.map(|(parts, notes)| Priced {
+                cost_usd: price_of(&parts),
+                notes: warnings.into_iter().chain(notes).collect(),
+                parts,
+            });
             if let Some(q) = lock(&jobs.quotes).get_mut(&id) {
                 q.result = Some(result);
                 q.at = Instant::now();
@@ -1679,6 +1756,23 @@ async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply
             Some(q) if q.result.is_none() => {
                 return refused(StatusCode::CONFLICT, "that request is still being priced");
             }
+            // A paid one is used up only by an approved, confirmed submission.
+            Some(Quote {
+                result: Some(Ok(p)),
+                ..
+            }) if p.cost_usd != 0.0 => {
+                let quoted = p.cost_usd;
+                if let Some(refusal) = approval {
+                    return refusal;
+                }
+                if !quoted.is_finite() || s.confirm_usd.is_none_or(|c| (c - quoted).abs() > 1e-9) {
+                    return refused(
+                        StatusCode::PRECONDITION_REQUIRED,
+                        format!("this costs ${quoted:.2}; confirm that amount to submit it"),
+                    );
+                }
+                quotes.remove(&s.quote).expect("just found")
+            }
             Some(_) => quotes.remove(&s.quote).expect("just found"),
         }
     };
@@ -1724,7 +1818,7 @@ async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply
             );
         }
     };
-    let now: f64 = parts.iter().map(|p| p.cost_usd).sum();
+    let now = price_of(&parts);
     let same = parts.len() == priced.parts.len()
         && parts.iter().zip(&priced.parts).all(|(x, y)| x.same(y));
     if !same {

@@ -969,7 +969,7 @@ async fn to_jobs(
 ) -> Response {
     let fail =
         |code: StatusCode, e: String| (code, axum::Json(json!({ "error": e }))).into_response();
-    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
         return fail(StatusCode::BAD_REQUEST, "that isn't a quote".into());
     }
     let Some((base, http)) = &app.jobs else {
@@ -2510,7 +2510,7 @@ mod tests {
             gateways::Gateways::for_test(Default::default()),
         )
         .await;
-        let approve = format!("{base}/api/job-quotes/q7/approve");
+        let approve = format!("{base}/api/job-quotes/q-1a2b-7/approve");
         let body = r#"{"confirm_usd": 2.5, "again": ["OPRA-X"]}"#;
         // The order token, as for a live order.
         let (status, _, marked) =
@@ -2541,7 +2541,7 @@ mod tests {
         assert_eq!(status, 200);
         let (status, _, _) = ask_full(
             reqwest::Method::POST,
-            &format!("{base}/api/job-quotes/q7/decline"),
+            &format!("{base}/api/job-quotes/q-1a2b-7/decline"),
             Some(ME),
             &token,
             "{}",
@@ -2550,7 +2550,7 @@ mod tests {
         assert_eq!(status, 200);
         let (status, _, _) = ask_full(
             reqwest::Method::POST,
-            &format!("{base}/api/job-quotes/q-7/approve"),
+            &format!("{base}/api/job-quotes/q.7/approve"),
             Some(ME),
             &token,
             body,
@@ -2562,8 +2562,8 @@ mod tests {
             seen,
             [
                 json!({ "method": "POST", "path": "/submit", "auth": "Bearer approve-test",
-                    "body": { "quote": "q7", "confirm_usd": 2.5, "approved_by": ME, "again": ["OPRA-X"] } }),
-                json!({ "method": "DELETE", "path": "/quotes/q7", "auth": "Bearer approve-test", "body": null }),
+                    "body": { "quote": "q-1a2b-7", "confirm_usd": 2.5, "approved_by": ME, "again": ["OPRA-X"] } }),
+                json!({ "method": "DELETE", "path": "/quotes/q-1a2b-7", "auth": "Bearer approve-test", "body": null }),
             ]
         );
     }

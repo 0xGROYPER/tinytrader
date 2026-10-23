@@ -115,9 +115,27 @@ impl Schedule {
     }
 }
 
-/// New York's offset from
-/// UTC on a day: -4 hours in daylight saving time (second Sunday in March to
-/// first Sunday in November), else -5.
+/// When daylight saving begins and ends in New York in `year`, in Unix
+/// seconds: 02:00 local on the second Sunday in March, and on the first
+/// Sunday in November.
+fn ny_dst(year: i64) -> (i64, i64) {
+    // First Sunday on or after a day; 1970-01-04 was a Sunday.
+    let sunday = |d: i64| d + (7 - (d - 3).rem_euclid(7)) % 7;
+    let start = (sunday(days_from_civil(year, 3, 1)) + 7) * 86_400 + 7 * 3600;
+    let end = sunday(days_from_civil(year, 11, 1)) * 86_400 + 6 * 3600;
+    (start, end)
+}
+
+/// Whether New York keeps daylight saving time at this instant.
+fn ny_in_dst(secs: i64) -> bool {
+    let (y, _, _) = ymd(secs.div_euclid(86_400));
+    let (start, end) = ny_dst(y);
+    (start..end).contains(&secs)
+}
+
+/// New York's offset from UTC on a day, for times of day away from the
+/// 02:00 change: -4 hours in daylight saving time (second Sunday in March
+/// to first Sunday in November), else -5.
 fn ny_offset_secs(day: i64) -> i64 {
     let (y, _, _) = ymd(day);
     let march = days_from_civil(y, 3, 1);
@@ -158,18 +176,53 @@ fn civil(days: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Unix seconds of a New York wall-clock time (month and day from 1).
+/// Unix seconds of a New York wall-clock time (month and day from 1; hour
+/// 24 is the next midnight), with the offset in force at that instant. A
+/// time in the hour skipped in March is taken an hour later; one in the hour
+/// repeated in November is its first occurrence.
 #[must_use]
 pub fn ny_to_unix(year: i64, month: i64, day: i64, hour: i64, minute: i64) -> i64 {
-    let d = days_from_civil(year, month, day);
-    d * 86_400 + hour * 3600 + minute * 60 - ny_offset_secs(d)
+    ny_local_to_unix(year, month, day, hour, minute, false)
+}
+
+/// As [`ny_to_unix`], but a time in the hour repeated in November is its
+/// second occurrence when `later` (the end of a span, so that spans tile).
+#[must_use]
+pub fn ny_local_to_unix(
+    year: i64,
+    month: i64,
+    day: i64,
+    hour: i64,
+    minute: i64,
+    later: bool,
+) -> i64 {
+    let local = days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60;
+    let (edt, est) = (local + 4 * 3600, local + 5 * 3600);
+    match (ny_in_dst(edt), !ny_in_dst(est)) {
+        // Repeated: both readings are real.
+        (true, true) => {
+            if later {
+                est
+            } else {
+                edt
+            }
+        }
+        (true, false) => edt,
+        // Standard time, or the skipped hour (read as standard time, an hour on).
+        (false, _) => est,
+    }
 }
 
 /// A Unix time in New York as its date (`YYYY-MM-DD`), time (`HH:MM`) and
 /// weekday (0 = Sunday).
 #[must_use]
 pub fn ny_date_time(secs: i64) -> (String, String, u8) {
-    let local = secs + ny_offset_secs(secs.div_euclid(86_400));
+    let local = secs
+        + if ny_in_dst(secs) {
+            -4 * 3600
+        } else {
+            -5 * 3600
+        };
     let (day, min) = (local.div_euclid(86_400), local.rem_euclid(86_400) / 60);
     (
         civil(day),
@@ -234,6 +287,33 @@ mod tests {
         );
         assert!("16:20-09:25".parse::<Schedule>().is_err());
         assert!("9-5".parse::<Schedule>().is_err());
+    }
+
+    #[test]
+    fn wall_clock_times_change_offset_at_two_in_the_morning() {
+        let utc =
+            |y, m, d, h: i64, min: i64| days_from_civil(y, m, d) * 86_400 + h * 3600 + min * 60;
+        // 2026-03-08: 01:59 EST, then 03:00 EDT; 02:30 doesn't exist (an hour on).
+        assert_eq!(ny_to_unix(2026, 3, 8, 0, 0), utc(2026, 3, 8, 5, 0));
+        assert_eq!(ny_to_unix(2026, 3, 8, 1, 59), utc(2026, 3, 8, 6, 59));
+        assert_eq!(ny_to_unix(2026, 3, 8, 2, 30), utc(2026, 3, 8, 7, 30));
+        assert_eq!(ny_to_unix(2026, 3, 8, 3, 0), utc(2026, 3, 8, 7, 0));
+        assert_eq!(ny_to_unix(2026, 3, 8, 24, 0), utc(2026, 3, 9, 4, 0));
+        // 2026-11-01: 01:30 happens twice.
+        assert_eq!(ny_to_unix(2026, 11, 1, 0, 0), utc(2026, 11, 1, 4, 0));
+        assert_eq!(
+            ny_local_to_unix(2026, 11, 1, 1, 30, false),
+            utc(2026, 11, 1, 5, 30)
+        );
+        assert_eq!(
+            ny_local_to_unix(2026, 11, 1, 1, 30, true),
+            utc(2026, 11, 1, 6, 30)
+        );
+        assert_eq!(ny_to_unix(2026, 11, 1, 24, 0), utc(2026, 11, 2, 5, 0));
+        assert_eq!(ny_date_time(utc(2026, 11, 1, 6, 30)).1, "01:30");
+        assert_eq!(ny_date_time(utc(2026, 11, 1, 5, 59)).1, "01:59");
+        assert_eq!(ny_date_time(utc(2026, 3, 8, 6, 59)).1, "01:59");
+        assert_eq!(ny_date_time(utc(2026, 3, 8, 7, 0)).1, "03:00");
     }
 
     #[test]

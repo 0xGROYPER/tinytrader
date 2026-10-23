@@ -5,7 +5,9 @@
 // in the store. A free request is submitted from the form; a paid one waits
 // in the approval list, where Approve (confirmed with a second click, and
 // sent with the order token as a live order is) charges exactly the quoted
-// price, and Decline drops the quote. The form is drawn once; only the
+// price, and Decline drops the quote. The approval sends the jobs service's
+// own quoted value, exactly as it came; the page shows it in cents, marked
+// "≈" when rounding to cents changed it. The form is drawn once; only the
 // quote, the approval list and the job list redraw.
 import { defineWidget } from '../lib/widgets.js';
 import { jobsApi, orderFetch, refusedText } from '../lib/api.js';
@@ -27,6 +29,8 @@ const day = t => new Date(t * 1000).toISOString().slice(0, 10);
 /** A request window `[start, end]` as the jobs service stamps it, briefly. @param {string[]} w */
 const span = w => (w || []).map(x => String(x).replace('T', ' ').replace(/:00\.0+Z$|\.0+Z$/, 'Z')).join(' → ');
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+/** A quoted price in cents, marked ≈ when that isn't its exact value (the exact value is what's confirmed). @param {number} n */
+const quoted = n => typeof n !== 'number' ? 'not a price' : (Math.round(n * 100) / 100 === n ? '' : '≈') + usd(n);
 function jobsView(J) {
   const f = J.form, stypes = [['parent', 'parent (SPX.OPT)'], ['raw_symbol', 'raw symbol']];
   return `<div><h1>Jobs</h1><p class="muted" style="margin:0">Request historical data from a provider and download it into the store. Every request is priced first, and only what the store, the provider's jobs and earlier purchases don't already have is bought. Anything that costs money waits for your approval below.</p></div>
@@ -56,14 +60,14 @@ function quoteLine(J) {
   const notes = (q.notes || []).length ? `<span class="msg-warn">⚠ ${q.notes.slice(0, 4).map(esc).join(' · ')}${q.notes.length > 4 ? ` · ${q.notes.length - 4} more` : ''}</span>` : '';
   if (!reqs.length) return `${price}<span class="muted">Nothing to buy: everything asked for is already had.</span>${notes}${msg}`;
   const what = `${plural(reqs.length, 'request', 'requests')} · ${bytes(q.billable_bytes)} billable (uncompressed)`;
-  return `${price}<span class="cost">${usd(q.cost_usd)}</span><span class="muted">${what}</span>
+  return `${price}<span class="cost">${quoted(q.cost_usd)}</span><span class="muted">${what}</span>
     ${paid ? '<span class="muted">Waits for approval below</span>' : `<button type="button" class="btn primary" data-jf-submit${J.busy ? ' disabled' : ''}>${J.busy === 'submit' ? 'Submitting…' : 'Submit (no charge)'}</button>`}${notes}${msg}`;
 }
 /** One request row of a quote. */
 function requestLine(r) {
-  const days = r.first_day === r.last_day ? r.first_day : `${r.first_day} → ${r.last_day}`;
+  const days = esc(r.first_day === r.last_day ? r.first_day : `${r.first_day} → ${r.last_day}`);
   const what = r.kind === 'whole' ? esc(r.symbol) : `${plural(r.contracts, 'contract', 'contracts')}${r.skipped_held || r.skipped_pending ? ` <span class="muted">(skipped ${r.skipped_held} held, ${r.skipped_pending} pending or bought)</span>` : ''}`;
-  return `<tr><td class="mono">${days}</td><td class="mono">${what}</td><td class="mono">${r.hours ? esc(span(r.window)) : 'whole days'}</td><td class="num mono">${usd(r.cost_usd)}</td></tr>`;
+  return `<tr><td class="mono">${days}</td><td class="mono">${what}</td><td class="mono">${r.hours ? esc(span(r.window)) : 'whole days'}</td><td class="num mono">${quoted(r.cost_usd)}</td></tr>`;
 }
 /** The quotes awaiting a person's approval (and any still being priced). */
 function approvals(J) {
@@ -83,10 +87,10 @@ function approvals(J) {
     const notes = (q.notes || []).length ? `<details><summary class="muted">${plural(q.notes.length, 'note', 'notes')}: what was skipped, and why</summary><ul>${q.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul></details>` : '';
     const confirming = a.confirm > Date.now();
     const approve = a.busy ? '<span class="muted">Sending…</span>'
-      : `<button type="button" class="btn primary${confirming ? ' danger' : ''}" data-q-approve="${esc(q.quote)}">${confirming ? `Confirm: charge ${usd(q.cost_usd)}` : `Approve ${usd(q.cost_usd)}`}</button>${confirming ? `<button type="button" class="btn" data-q-unconfirm="${esc(q.quote)}">Not yet</button>` : ''}
+      : `<button type="button" class="btn primary${confirming ? ' danger' : ''}" data-q-approve="${esc(q.quote)}">${confirming ? `Confirm: charge ${quoted(q.cost_usd)}` : `Approve ${quoted(q.cost_usd)}`}</button>${confirming ? `<button type="button" class="btn" data-q-unconfirm="${esc(q.quote)}">Not yet</button>` : ''}
         <button type="button" class="btn" data-q-decline="${esc(q.quote)}">Decline</button>`;
     return `<div class="box" style="margin-bottom:8px">
-      <div style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline">${head}<span class="cost">${usd(q.cost_usd)}</span><span class="muted">${plural(reqs.length, 'request', 'requests')} · ${bytes(q.billable_bytes)} billable · expires in ${Math.max(0, Math.round(q.valid_seconds / 60))} min</span></div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:baseline">${head}<span class="cost" title="${esc(String(q.cost_usd))}">${quoted(q.cost_usd)}</span><span class="muted">${plural(reqs.length, 'request', 'requests')} · ${bytes(q.billable_bytes)} billable · expires in ${Math.max(0, Math.round(q.valid_seconds / 60))} min</span></div>
       <div class="muted" style="font-size:13px">${asked}</div>
       <div class="scroll"><table class="jobs-tbl"><thead><tr><th>Days</th><th>What</th><th>Window (UTC)</th><th style="text-align:right">Cost</th></tr></thead><tbody>${shown}${more}</tbody></table></div>
       ${notes}
