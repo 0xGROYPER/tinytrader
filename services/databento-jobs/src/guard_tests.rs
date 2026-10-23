@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicUsize;
 use axum::extract::RawQuery;
 use databento::historical::batch::{BatchFileDesc, BatchJobShort, ListJobsParams};
 use databento::historical::metadata::{
-    DatasetConditionDetail, DatasetRange, GetDatasetConditionParams,
+    DatasetCondition, DatasetConditionDetail, DatasetRange, GetDatasetConditionParams,
 };
 
 use super::*;
@@ -78,6 +78,9 @@ struct FakeState {
     prices: std::collections::VecDeque<f64>,
     submitted: Vec<SubmitJobParams>,
     listed_with: Vec<ListJobsParams>,
+    /// Day conditions, for every dataset; none: the call fails.
+    conditions: Option<Vec<DatasetConditionDetail>>,
+    conditions_asked: Vec<String>,
 }
 
 #[derive(Default)]
@@ -212,9 +215,16 @@ impl api::Databento for Fake {
     }
     fn conditions<'a>(
         &'a self,
-        _: &'a GetDatasetConditionParams,
+        p: &'a GetDatasetConditionParams,
     ) -> Fut<'a, Vec<DatasetConditionDetail>> {
-        not_faked()
+        Box::pin(async move {
+            let mut s = lock(&self.s);
+            s.conditions_asked.push(p.dataset.clone());
+            match &s.conditions {
+                Some(c) => Ok(c.clone()),
+                None => Err("not faked".to_owned()),
+            }
+        })
     }
 }
 
@@ -226,6 +236,12 @@ struct StoreState {
     catalog_asked: Vec<String>,
     files_asked: Vec<String>,
     definitions: Vec<u8>,
+    /// What `POST /conditions/databento` answers, and what it was sent
+    /// (with its authorization).
+    conditions_reply: (u16, Value),
+    conditions_posted: Vec<(Option<String>, Value)>,
+    /// What `/health` says, as a capture service would.
+    health: &'static str,
 }
 
 /// A definition day (zstd DBN) listing these contracts, all expiring on `DAY`.
@@ -269,6 +285,9 @@ fn ready_store() -> StoreState {
         catalog_asked: Vec::new(),
         files_asked: Vec::new(),
         definitions: definitions(&[C1, C2]),
+        conditions_reply: (200, json!({ "changed": [] })),
+        conditions_posted: Vec::new(),
+        health: "idle",
     }
 }
 
@@ -302,6 +321,21 @@ async fn serve_store(state: StoreHandle) -> String {
                 lock(&s).files_asked.push(q.unwrap_or_default());
                 Json(json!({ "files": [{ "volume": "v1", "path": format!("{DS}/SPY.OPT/definition/{DAY}.dbn.zst") }] }))
             }),
+        )
+        .route(
+            "/conditions/databento",
+            post(
+                |AxState(s): AxState<StoreHandle>, headers: axum::http::HeaderMap, Json(v): Json<Value>| async move {
+                    let auth = headers.get("authorization").and_then(|a| a.to_str().ok()).map(str::to_owned);
+                    let mut s = lock(&s);
+                    s.conditions_posted.push((auth, v));
+                    answer(s.conditions_reply.clone())
+                },
+            ),
+        )
+        .route(
+            "/health",
+            get(|AxState(s): AxState<StoreHandle>| async move { Json(json!({ "state": lock(&s).health })) }),
         )
         .route(
             "/files/v1/{*path}",
@@ -1499,4 +1533,175 @@ async fn two_approvals_of_one_quote_buy_once() {
     codes.sort();
     assert_eq!(codes, [StatusCode::OK, StatusCode::CONFLICT]);
     assert_eq!(r.fake.submits(), 1);
+}
+
+fn condition(day: &str, c: DatasetCondition, modified: Option<&str>) -> DatasetConditionDetail {
+    DatasetConditionDetail {
+        date: date(day),
+        condition: c,
+        last_modified_date: modified.map(date),
+    }
+}
+
+/// A store holding SPY's chain filed on two days, and an Alpaca dataset, as
+/// the store's catalog lists them.
+fn holding() -> Value {
+    json!({ "roots": [{ "name": "v1", "datasets": [
+        { "provider": "databento", "id": DS, "symbol": "SPY.OPT", "filed": true, "sources": ["store: /v1/Databento/OPRA.PILLAR"],
+          "schemas": { SCHEMA: { "days": { "2026-10-01": {}, DAY: {} } } } },
+        { "provider": "alpaca", "id": "ALPACA.IEX", "symbol": "SPY", "schemas": { "bars": { "days": { DAY: {} } } } },
+    ] }], "missing_volumes": [] })
+}
+
+#[tokio::test]
+async fn day_conditions_are_sent_to_the_store_and_changes_told() {
+    let r = rig_with("conditions", |j| j.store_token = Some("store-token".into())).await;
+    lock(&r.store).catalog.1 = holding();
+    lock(&r.fake.s).conditions = Some(vec![
+        condition(
+            "2026-10-01",
+            DatasetCondition::Available,
+            Some("2026-10-02"),
+        ),
+        condition(DAY, DatasetCondition::Available, Some("2026-10-20")),
+        condition("2026-10-03", DatasetCondition::Pending, None),
+    ]);
+    // DAY was filed from a batch whose condition.json said degraded.
+    lock(&r.store).coverage.1 = json!({ "days": [
+        { "day": DAY, "volume": "v1", "kind": "complete", "filed": true, "size": 10,
+          "condition": { "state": "degraded", "last_modified": "2026-10-04", "source": "batch OPRA-1", "checked_at": 1.0 } },
+        { "day": "2026-10-01", "volume": "v1", "kind": "complete", "filed": true, "size": 10,
+          "condition": { "state": "degraded", "last_modified": "2026-10-02", "source": "provider api", "checked_at": 1.0 } },
+    ], "missing_volumes": [] });
+    // As the store answers (PR #49): no last_modified in what changed.
+    let folder = format!("/v1/Databento/{DS}/SPY.OPT/{SCHEMA}");
+    lock(&r.store).conditions_reply.1 = json!({
+        "changed": [
+            { "dataset": DS, "day": DAY, "volume": "v1", "folder": folder, "from": "degraded", "to": "available" },
+            { "dataset": DS, "day": "2026-10-01", "volume": "v1", "folder": folder, "from": "degraded", "to": "available" },
+        ],
+        "unchanged": 0,
+        "not_held": [],
+    });
+    let done = conditions::sync(&r.jobs).await.unwrap();
+    assert_eq!((done.rows, done.failed.len()), (2, 0), "{done:?}");
+    assert_eq!(
+        lock(&r.fake.s).conditions_asked,
+        [DS],
+        "only Databento's datasets"
+    );
+    let (auth, rows) = lock(&r.store).conditions_posted[0].clone();
+    assert_eq!(auth.as_deref(), Some("Bearer store-token"));
+    assert_eq!(
+        rows,
+        json!([
+            { "dataset": DS, "day": "2026-10-01", "state": "available", "last_modified": "2026-10-02" },
+            { "dataset": DS, "day": DAY, "state": "available", "last_modified": "2026-10-20" },
+        ])
+    );
+    let told = &done.changed[0];
+    assert!(
+        told.contains("degraded → available")
+            && told.contains("re-released 2026-10-20")
+            && told.contains("downloading it again"),
+        "{told}"
+    );
+    // A day whose condition didn't come from a batch has no such hint.
+    let other = &done.changed[1];
+    assert!(
+        other.contains("2026-10-01")
+            && other.contains("re-released 2026-10-02")
+            && !other.contains("downloading"),
+        "{other}"
+    );
+    // The condition's source was read from the store before it was replaced.
+    assert!(
+        lock(&r.store)
+            .coverage_asked
+            .iter()
+            .any(|q| q.contains("provider=databento") && q.contains("symbol=SPY.OPT"))
+    );
+    assert_eq!(r.fake.submits(), 0, "nothing is bought");
+}
+
+#[tokio::test]
+async fn a_failed_condition_check_is_reported_not_fatal() {
+    let r = rig("conditions-fail").await;
+    lock(&r.store).catalog.1 = holding();
+    let done = conditions::sync(&r.jobs).await.unwrap();
+    assert_eq!(done.failed.len(), 1, "{done:?}");
+    lock(&r.store).catalog = (503, json!({}));
+    let done = conditions::sync(&r.jobs).await.unwrap();
+    assert!(done.failed[0].contains("503"), "{done:?}");
+    // The store refusing them is reported too.
+    lock(&r.store).catalog.1 = holding();
+    lock(&r.store).catalog.0 = 200;
+    lock(&r.fake.s).conditions = Some(vec![condition(
+        DAY,
+        DatasetCondition::Degraded,
+        Some("2026-10-02"),
+    )]);
+    lock(&r.store).conditions_reply = (401, json!({ "error": "no token" }));
+    let done = conditions::sync(&r.jobs).await.unwrap();
+    assert!(done.failed[0].contains("401"), "{done:?}");
+}
+
+#[tokio::test]
+async fn condition_checks_wait_while_capture_is_live() {
+    let r = rig_with("conditions-yield", |j| {
+        j.yield_to = vec![("relay".into(), j.store.clone())]
+    })
+    .await;
+    lock(&r.store).catalog.1 = holding();
+    lock(&r.fake.s).conditions = Some(vec![condition(DAY, DatasetCondition::Available, None)]);
+    lock(&r.store).health = "ready";
+    assert!(conditions::sync(&r.jobs).await.is_none());
+    assert!(
+        lock(&r.store).conditions_posted.is_empty() && lock(&r.fake.s).conditions_asked.is_empty()
+    );
+    lock(&r.store).health = "idle";
+    assert_eq!(conditions::sync(&r.jobs).await.unwrap().rows, 1);
+}
+
+#[tokio::test]
+async fn a_quote_marks_requests_on_days_that_arent_available() {
+    let r = rig("quote-conditions").await;
+    lock(&r.fake.s).conditions = Some(vec![
+        condition("2026-10-01", DatasetCondition::Degraded, Some("2026-10-02")),
+        condition(DAY, DatasetCondition::Available, Some("2026-10-03")),
+    ]);
+    let rth = json!({ "start": "09:30", "end": "16:01" });
+    let (_, v) = r
+        .price(json!({ "start": "2026-10-01", "end": DAY, "hours": rth }))
+        .await;
+    let rows = rows(&v);
+    assert_eq!(
+        (rows[0]["condition"].as_str(), rows[1].get("condition")),
+        (Some("degraded"), None),
+        "{v}"
+    );
+    assert!(v["notes"].to_string().contains("degraded"), "{v}");
+}
+
+#[tokio::test]
+async fn a_day_with_no_condition_before_is_told_too() {
+    let r = rig("conditions-new").await;
+    lock(&r.store).catalog.1 = holding();
+    lock(&r.fake.s).conditions = Some(vec![condition(
+        DAY,
+        DatasetCondition::Degraded,
+        Some("2026-10-02"),
+    )]);
+    lock(&r.store).conditions_reply.1 = json!({
+        "changed": [{ "dataset": DS, "day": DAY, "volume": "v1", "folder": "/v1", "from": null, "to": "degraded" }],
+        "unchanged": 3,
+        "not_held": [{ "dataset": DS, "day": "2026-10-05" }],
+    });
+    let done = conditions::sync(&r.jobs).await.unwrap();
+    assert_eq!(
+        done.changed,
+        [format!(
+            "{DS} {DAY}: none → degraded (on v1), re-released 2026-10-02"
+        )]
+    );
 }
