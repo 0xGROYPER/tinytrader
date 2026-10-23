@@ -4,26 +4,28 @@
 //! - `GET /jobs`: Databento's jobs (not expired), each with what the store
 //!   already holds of it and any download in progress.
 //! - `GET /datasets`, `GET /schemas?dataset=`: for the request form.
-//! - `POST /price` with `{ dataset, schema, symbols, stype_in, start, end }`
-//!   (dates, `end` inclusive): the cost and billable size, and a quote ID,
-//!   with the requested days the store already holds (`held_days`) and the
-//!   earlier purchases it overlaps (`bought`).
-//! - `POST /submit` with `{ quote, confirm_usd, again? }`: prices the quoted
-//!   request again and submits it only if the price is unchanged and, when it
-//!   costs anything, `confirm_usd` is exactly that price. Never what's had
-//!   already: it's refused if the store holds any of its days (or can't say),
-//!   or if it overlaps a job on Databento's list (queued, processing, or done
-//!   and waiting to download, wherever it was bought), always; or a purchase
-//!   in the ledger no longer on that list, unless `again` is true (an expired
-//!   job never filed, say). A submission is never retried; if its outcome is uncertain the
-//!   jobs list says what happened.
-//! - `POST /price-missing` with `{ dataset, schema, symbol, start, end, rule? }`
-//!   for an option parent (`SPY.OPT`): for each day, the contracts `rule`
-//!   wants (from the store's definitions of that day) less those the store
-//!   holds and those in jobs on Databento's list, priced as one
-//!   contract-list request per day (decision 0018). `POST /submit-missing`
-//!   with `{ quote, confirm_usd }` plans it again and submits it only if
-//!   every day and the price are unchanged.
+//! - `POST /price` with `{ dataset, schema, symbol, stype_in?, start, end,
+//!   rule? | contracts?, hours?, again? }` (dates, `end` inclusive): prices
+//!   only what's missing (see `plan`): the store's holdings, Databento's jobs
+//!   and the ledger's purchases are subtracted per day, contract and window.
+//!   The quote lists each request (the whole symbol over a run of days, or a
+//!   day's missing contracts over the hours they need), what was skipped and
+//!   why. Long prices answer `pricing` (202); `GET /quotes/{id}` follows.
+//! - `GET /quotes`, `GET /quotes/{id}`: quotes still good, in full.
+//!   `DELETE /quotes/{id}` declines one (with the approval token).
+//! - `POST /submit` with `{ quote, confirm_usd, again?, approved_by? }`:
+//!   plans the quote again under the purchase lock (one purchase at a time)
+//!   and submits its requests only if they and the total are unchanged. A
+//!   paid one needs a person's approval: the console's bearer token
+//!   (`JOBS_APPROVE_TOKEN` or `_FILE`), who approved it, and `confirm_usd`
+//!   exactly the price; the ledger records the approval before anything is
+//!   sent. Never what's had already, and nothing while any of that can't be
+//!   read in full. A purchase in the ledger whose job is expired or no longer
+//!   listed is bought again only when the quote's `again` names its job. A
+//!   submission is never retried; if its outcome is uncertain it blocks until
+//!   found on the job list or resolved with `POST /ledger/resolve`.
+//! - `POST /ledger/resolve` with `{ request, at, job, note }`: the operator's
+//!   word on a submission whose outcome isn't known.
 //! - `POST /download/{job}`: streams the job's files into the store, each
 //!   checked against Databento's size and SHA-256, then has the store file
 //!   the batch. Jobs submitted here download by themselves once done.
@@ -34,11 +36,15 @@
 //! `JOBS_STORE_TOKEN` or `JOBS_STORE_TOKEN_FILE`: sent, as a bearer token, on
 //! the uploads and filing only, never to Databento.
 
+mod api;
+#[cfg(test)]
+mod guard_tests;
+mod had;
 mod ledger;
 mod missing;
 
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tinytrader_observe::{lock, secret};
@@ -50,7 +56,7 @@ use axum::{Json, Router};
 use clap::Parser;
 use databento::HistoricalClient;
 use databento::dbn::{SType, Schema};
-use databento::historical::batch::{BatchJob, JobState, ListJobsParams, SubmitJobParams};
+use databento::historical::batch::{BatchJob, JobState, SubmitJobParams};
 use databento::historical::metadata::GetCostParams;
 use futures_util::StreamExt as _;
 use serde::Deserialize;
@@ -95,85 +101,207 @@ struct Args {
     ledger: Option<std::path::PathBuf>,
 }
 
-/// How long a price stays good for submitting.
-const QUOTE_TTL: Duration = Duration::from_secs(15 * 60);
+/// How long a price stays good for submitting: an hour when it costs
+/// anything (it waits for a person's approval), else 15 minutes.
+fn quote_ttl(cost_usd: f64) -> Duration {
+    Duration::from_secs(if cost_usd == 0.0 { 15 * 60 } else { 60 * 60 })
+}
 
-/// A request as the form sends it.
+/// Requests priced at once while planning (pricing is free).
+const PRICING_AT_ONCE: usize = 4;
+
+/// The most days one request may span.
+const MAX_DAYS: i64 = 1_500;
+
+fn parse_day(s: &str) -> Result<time::Date, String> {
+    let fmt = time::macros::format_description!("[year]-[month]-[day]");
+    time::Date::parse(s.trim(), fmt).map_err(|_| format!("{s:?} is not a date (YYYY-MM-DD)"))
+}
+
+/// What to price, and then buy: what's missing of one symbol over some days.
 #[derive(Clone, Debug, Deserialize)]
-struct Request {
+struct PriceRequest {
     dataset: String,
     schema: String,
-    symbols: String,
-    #[serde(default = "raw_symbol")]
-    stype_in: String,
+    /// A parent (`SPY.OPT`: the whole chain) or a raw symbol.
+    #[serde(alias = "symbols")]
+    symbol: String,
+    /// `parent` or `raw_symbol`; by default `parent` for a name with a dot.
+    #[serde(default)]
+    stype_in: Option<String>,
     /// First day, `YYYY-MM-DD`.
     start: String,
     /// Last day, inclusive.
     end: String,
+    /// For an option parent: the contracts wanted each day (decision 0018).
+    #[serde(default)]
+    rule: Option<missing::Rule>,
+    /// For an option parent: exactly these contracts, by day.
+    #[serde(default)]
+    contracts: Option<BTreeMap<String, Vec<String>>>,
+    /// Only these hours of each day.
+    #[serde(default)]
+    hours: Option<missing::Hours>,
+    /// The expired (or no longer listed) jobs bought here whose contracts
+    /// and days this buys again, by ID: `["OPRA-…"]`.
+    #[serde(default)]
+    again: Option<Value>,
 }
 
-fn raw_symbol() -> String {
-    "raw_symbol".into()
-}
-
-/// A request checked and turned into the API's terms.
-struct Checked {
+/// A request checked, in the API's terms.
+struct Asked {
     dataset: String,
     schema: Schema,
-    symbols: Vec<String>,
-    stype_in: SType,
+    symbol: String,
+    stype: SType,
     start: time::Date,
     /// Exclusive.
     end: time::Date,
+    rule: Option<missing::Rule>,
+    contracts: Option<BTreeMap<time::Date, BTreeSet<String>>>,
+    hours: Option<missing::Hours>,
 }
 
-impl Request {
-    fn check(&self) -> Result<Checked, String> {
-        let fmt = time::macros::format_description!("[year]-[month]-[day]");
-        let day = |s: &str| {
-            time::Date::parse(s.trim(), fmt)
-                .map_err(|_| format!("{s:?} is not a date (YYYY-MM-DD)"))
-        };
-        let (start, last) = (day(&self.start)?, day(&self.end)?);
+impl PriceRequest {
+    fn check(&self) -> Result<Asked, String> {
+        let (start, last) = (parse_day(&self.start)?, parse_day(&self.end)?);
         if last < start {
             return Err("the last day is before the first".into());
         }
-        let symbols: Vec<String> = self
-            .symbols
-            .split([',', ' '])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .collect();
-        if symbols.is_empty() {
+        if (last - start).whole_days() >= MAX_DAYS {
+            return Err(format!("at most {MAX_DAYS} days at a time"));
+        }
+        let symbol = self.symbol.trim();
+        if symbol.is_empty() {
             // Never a whole dataset by accident.
             return Err("name a symbol".into());
         }
-        if symbols.len() > 1 {
+        if symbol.contains(',') {
             // The store files one symbol per batch (decision 0002).
             return Err("one symbol per request: the store files each symbol on its own, so request each separately".into());
         }
-        Ok(Checked {
-            dataset: self.dataset.trim().to_owned(),
+        let stype: SType = match &self.stype_in {
+            Some(s) => s.parse().map_err(|_| format!("unknown symbol type {s}"))?,
+            None if symbol.contains('.') => SType::Parent,
+            None => SType::RawSymbol,
+        };
+        // Only these can be checked against what's held (decision 0019).
+        if !matches!(stype, SType::Parent | SType::RawSymbol) {
+            return Err(format!(
+                "a request by {} can't be checked against what's held, so it isn't bought here; use parent or raw_symbol",
+                stype.as_str()
+            ));
+        }
+        let symbol = if stype == SType::Parent {
+            symbol.to_ascii_uppercase()
+        } else {
+            symbol.to_owned()
+        };
+        let option = stype == SType::Parent && symbol.ends_with(".OPT");
+        if !option && (self.rule.is_some() || self.contracts.is_some()) {
+            return Err("a rule or contract lists are only for an option parent (ROOT.OPT)".into());
+        }
+        if self.rule.is_some() && self.contracts.is_some() {
+            return Err("name a rule or contract lists, not both".into());
+        }
+        let contracts = match &self.contracts {
+            None => None,
+            Some(m) => {
+                let mut out = BTreeMap::new();
+                for (k, list) in m {
+                    let d = parse_day(k)?;
+                    if d < start || d > last {
+                        return Err(format!("contracts for {k}, outside {start} to {last}"));
+                    }
+                    out.insert(d, list.iter().map(|c| c.trim().to_owned()).collect());
+                }
+                Some(out)
+            }
+        };
+        if let Some(h) = &self.hours {
+            h.check()?;
+        }
+        Ok(Asked {
+            dataset: self.dataset.trim().to_ascii_uppercase(),
             schema: self
                 .schema
                 .parse()
                 .map_err(|_| format!("unknown schema {}", self.schema))?,
-            stype_in: self
-                .stype_in
-                .parse()
-                .map_err(|_| format!("unknown symbol type {}", self.stype_in))?,
-            symbols,
+            symbol,
+            stype,
             start,
             end: last.next_day().ok_or("bad last day")?,
+            rule: self.rule.clone(),
+            contracts,
+            hours: self.hours.clone(),
         })
     }
 }
 
+/// A price: being worked out, done, or failed.
 struct Quote {
-    request: Request,
-    cost_usd: f64,
+    request: Arc<Asked>,
+    again: HashSet<String>,
+    /// When it was asked for, or, once priced, when that was done.
     at: Instant,
+    /// Requests priced so far, and of how many (0 until known).
+    priced: Arc<(AtomicUsize, AtomicUsize)>,
+    result: Option<Result<Priced, (StatusCode, String)>>,
+}
+
+struct Priced {
+    parts: Vec<missing::Part>,
+    notes: Vec<String>,
+    cost_usd: f64,
+}
+
+impl Quote {
+    fn expired(&self) -> bool {
+        let cost = match &self.result {
+            None => return false,
+            Some(Ok(p)) => p.cost_usd,
+            Some(Err(_)) => 0.0,
+        };
+        self.at.elapsed() >= quote_ttl(cost)
+    }
+
+    /// The quote as `/price` and `/quotes` show it.
+    fn view(&self, id: &str) -> Value {
+        let a = &self.request;
+        let mut again: Vec<&String> = self.again.iter().collect();
+        again.sort();
+        let mut v = json!({
+            "quote": id, "dataset": a.dataset, "schema": a.schema.as_str(), "symbol": a.symbol,
+            "stype_in": a.stype.as_str(), "start": a.start.to_string(),
+            "end": a.end.previous_day().unwrap_or(a.end).to_string(), "hours": a.hours,
+            "rule": a.rule.is_some(), "again": again,
+            "contract_days": a.contracts.as_ref().map(BTreeMap::len),
+            "contracts": a.contracts.as_ref().map(|m| m.values().map(BTreeSet::len).sum::<usize>()),
+            "priced": self.priced.0.load(Ordering::Relaxed), "of": self.priced.1.load(Ordering::Relaxed),
+        });
+        match &self.result {
+            None => v["state"] = json!("pricing"),
+            Some(Err((_, e))) => {
+                v["state"] = json!("failed");
+                v["error"] = json!(e);
+            }
+            Some(Ok(p)) => {
+                let rows: Vec<Value> = p.parts.iter().map(missing::Part::to_json).collect();
+                v["state"] = json!("ready");
+                v["cost_usd"] = json!(p.cost_usd);
+                v["billable_bytes"] = json!(p.parts.iter().map(|r| r.bytes).sum::<u64>());
+                v["requests"] = json!(rows);
+                v["notes"] = json!(p.notes);
+                v["needs_approval"] = json!(p.cost_usd != 0.0);
+                v["valid_seconds"] = json!(
+                    quote_ttl(p.cost_usd)
+                        .saturating_sub(self.at.elapsed())
+                        .as_secs()
+                );
+            }
+        }
+        v
+    }
 }
 
 /// A download into the store.
@@ -187,14 +315,29 @@ struct Transfer {
 }
 
 struct Jobs {
-    db: tokio::sync::Mutex<HistoricalClient>,
+    db: Arc<dyn api::Databento>,
+    /// Held across a whole purchase, from its last check to the ledger's
+    /// last word, by `/submit`.
+    purchase: tokio::sync::Mutex<()>,
+    /// Databento's dataset list, and when it was read.
+    dataset_list: Mutex<Option<(Instant, Vec<String>)>>,
+    /// When the last job-list read that reconcile checked everything against
+    /// (every state, nothing unread) began, in Unix seconds.
+    checked_at: Mutex<Option<f64>>,
     key: String,
     http: reqwest::Client,
     store: String,
     /// The store's write token, if it requires one.
     store_token: Option<String>,
     quotes: Mutex<HashMap<String, Quote>>,
-    missing_quotes: Mutex<HashMap<String, MissingQuote>>,
+    /// The token a paid purchase's approval carries (`JOBS_APPROVE_TOKEN`);
+    /// without one, paid purchases are refused.
+    approve_token: Option<String>,
+    /// How long `/price` waits for a price before answering that it is
+    /// still being worked out.
+    price_wait: Duration,
+    /// How long a price may take before it is given up as failed.
+    pricing_cap: Duration,
     transfers: Mutex<HashMap<String, Transfer>>,
     /// Jobs submitted here, downloaded once done.
     follow: Mutex<HashSet<String>>,
@@ -214,9 +357,60 @@ struct Jobs {
     calendar: Mutex<tinytrader_schedule::Calendar>,
     events: Events,
     next_quote: AtomicU64,
+    /// Starts every quote ID, different at each start, so an ID is never
+    /// used twice across restarts.
+    boot: String,
 }
 
 impl Jobs {
+    fn new(
+        db: Arc<dyn api::Databento>,
+        key: String,
+        store: &str,
+        store_token: Option<String>,
+        ledger: Option<ledger::Ledger>,
+        http: reqwest::Client,
+    ) -> Self {
+        Self {
+            db: Arc::new(api::Timed::new(db)),
+            purchase: tokio::sync::Mutex::new(()),
+            dataset_list: Mutex::default(),
+            checked_at: Mutex::default(),
+            key,
+            http,
+            store: store.trim_end_matches('/').to_owned(),
+            store_token,
+            quotes: Mutex::default(),
+            approve_token: None,
+            price_wait: Duration::from_secs(20),
+            transfers: Mutex::default(),
+            follow: Mutex::default(),
+            ledger: Mutex::new(ledger),
+            details: Mutex::default(),
+            delivered: Mutex::default(),
+            listed: Mutex::new(json!({ "jobs": [], "updated_at": null })),
+            one_at_a_time: tokio::sync::Semaphore::new(1),
+            events: Events::default(),
+            next_quote: AtomicU64::new(1),
+            boot: {
+                use std::hash::{BuildHasher as _, Hasher as _};
+                // A randomly keyed hash: random at each start.
+                let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+                h.write_u128(
+                    time::OffsetDateTime::now_utc()
+                        .unix_timestamp_nanos()
+                        .cast_unsigned(),
+                );
+                format!("{:08x}", h.finish() as u32)
+            },
+            pricing_cap: Duration::from_secs(30 * 60),
+            paused_until: AtomicU64::new(0),
+            yield_to: Vec::new(),
+            capture_hours: None,
+            calendar: Mutex::new(tinytrader_schedule::Calendar::default()),
+        }
+    }
+
     /// A write to the store, with its token when it requires one.
     fn store_write(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.store_token {
@@ -261,51 +455,59 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let jobs = Arc::new(Jobs {
-        db: tokio::sync::Mutex::new(db),
+    let ledger = match &args.ledger {
+        Some(path) => match ledger::Ledger::open(path) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                eprintln!("databento-jobs: cannot open the submissions ledger: {e}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
+    if let Some(l) = &ledger {
+        for e in l.written_off() {
+            eprintln!(
+                "databento-jobs: {} was written off as not submitted by an earlier version without anyone checking; it blocks again until found on Databento's list or resolved (POST /ledger/resolve)",
+                e.request
+            );
+        }
+    }
+    let mut jobs = Jobs::new(
+        Arc::new(api::Live(tokio::sync::Mutex::new(db))),
         key,
-        http: reqwest::Client::builder()
+        &args.store,
+        store_token,
+        ledger,
+        reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .expect("http client"),
-        store: args.store.trim_end_matches('/').to_owned(),
-        store_token,
-        quotes: Mutex::default(),
-        missing_quotes: Mutex::default(),
-        transfers: Mutex::default(),
-        follow: Mutex::default(),
-        ledger: Mutex::new(match &args.ledger {
-            Some(path) => match ledger::Ledger::open(path) {
-                Ok(l) => Some(l),
-                Err(e) => {
-                    eprintln!("databento-jobs: cannot read the submissions ledger: {e}");
-                    std::process::exit(2);
-                }
-            },
-            None => None,
-        }),
-        details: Mutex::default(),
-        delivered: Mutex::default(),
-        listed: Mutex::new(json!({ "jobs": [], "updated_at": null })),
-        one_at_a_time: tokio::sync::Semaphore::new(1),
-        events: Events::default(),
-        next_quote: AtomicU64::new(1),
-        paused_until: AtomicU64::new(0),
-        yield_to: args
-            .yield_to
-            .iter()
-            .filter_map(|y| {
-                y.split_once('=').map(|(n, u)| {
-                    (
-                        n.trim().to_owned(),
-                        u.trim().trim_end_matches('/').to_owned(),
-                    )
-                })
+    );
+    jobs.yield_to = args
+        .yield_to
+        .iter()
+        .filter_map(|y| {
+            y.split_once('=').map(|(n, u)| {
+                (
+                    n.trim().to_owned(),
+                    u.trim().trim_end_matches('/').to_owned(),
+                )
             })
-            .collect(),
-        capture_hours: args.capture_hours,
-        calendar: Mutex::new(tinytrader_schedule::Calendar::default()),
-    });
+        })
+        .collect();
+    jobs.capture_hours = args.capture_hours;
+    jobs.approve_token = match tinytrader_observe::optional_secret("JOBS_APPROVE_TOKEN") {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("databento-jobs: {e}");
+            std::process::exit(2);
+        }
+    };
+    if jobs.approve_token.is_none() {
+        eprintln!("databento-jobs: paid purchases are off: no approval token (JOBS_APPROVE_TOKEN)");
+    }
+    let jobs = Arc::new(jobs);
     let listen = listen_address("JOBS_LISTEN", "127.0.0.1:9121");
     let observer = Observer::new("databento-jobs", env!("CARGO_PKG_VERSION"));
     let mut schedule = vec![
@@ -338,10 +540,15 @@ async fn main() {
         )
         .route("/datasets", get(datasets))
         .route("/schemas", get(schemas))
-        .route("/price", post(price))
+        .route(
+            "/price",
+            // Contract lists for years of days are large.
+            post(price).layer(axum::extract::DefaultBodyLimit::max(64 << 20)),
+        )
         .route("/submit", post(submit))
-        .route("/price-missing", post(price_missing))
-        .route("/submit-missing", post(submit_missing))
+        .route("/quotes", get(quotes_list))
+        .route("/quotes/{id}", get(quote_get).delete(quote_delete))
+        .route("/ledger/resolve", post(resolve))
         .route("/download/{job}", post(download))
         // A web page of another origin can't submit (or pay for) anything.
         .layer(axum::middleware::from_fn(
@@ -413,62 +620,46 @@ async fn main() {
     }
 }
 
-/// Read the jobs list and the store's holdings, and start downloads of
-/// followed jobs that are done.
-/// A job's fingerprint, as its submission was written down.
-fn job_fingerprint(j: &BatchJob) -> String {
-    let symbols: Vec<String> = match &j.symbols {
-        databento::Symbols::All => vec!["ALL_SYMBOLS".into()],
-        databento::Symbols::Ids(ids) => ids.iter().map(u32::to_string).collect(),
-        databento::Symbols::Symbols(s) => s.clone(),
-    };
-    ledger::fingerprint(
-        &j.dataset,
-        j.schema.as_str(),
-        &symbols,
-        &j.start.date().to_string(),
-        &j.end.date().to_string(),
-    )
-}
-
-/// Resolve the ledger's unresolved submissions against the job list, and
-/// follow (download when done) every job submitted here.
-fn reconcile(jobs: &Shared, out: &[BatchJob]) {
+/// Resolve the ledger's unresolved submissions against the job list
+/// (`out`: every job read, expired ones included), and follow (download when
+/// done) every job submitted here. Nothing is resolved while any job couldn't
+/// be read (`complete` false): the unread one may be the match. A submission
+/// not found stays unresolved, blocking what it overlaps, until it shows or
+/// the operator resolves it; never by time alone. Nor while a purchase is
+/// in flight: its job may show before its own answer is written.
+/// `started`: when the job list was read.
+fn reconcile(jobs: &Shared, out: &[BatchJob], complete: bool, started: f64) {
+    let turn = jobs.purchase.try_lock();
     let mut guard = lock(&jobs.ledger);
     let Some(l) = guard.as_mut() else { return };
-    let now = tinytrader_observe::unix_seconds();
-    for e in l.unresolved() {
-        let found = out.iter().find(|j| {
-            job_fingerprint(j) == e.request && j.ts_received.unix_timestamp() as f64 >= e.at - 120.0
-        });
-        let step = match found {
-            Some(j) => Some(ledger::Entry {
-                at: now,
-                request: e.request.clone(),
-                state: "submitted".into(),
-                job: Some(j.id.clone()),
-                cost_usd: e.cost_usd,
-                note: Some("found in Databento's job list".into()),
-            }),
-            None if now - e.at > ledger::SETTLE_SECONDS => Some(ledger::Entry {
-                at: now,
-                request: e.request.clone(),
-                state: "not-submitted".into(),
-                job: None,
-                cost_usd: None,
-                note: Some("no such job appeared in Databento's job list".into()),
-            }),
-            None => None,
+    let checks = complete && turn.is_ok();
+    if checks {
+        *lock(&jobs.checked_at) = Some(started);
+    }
+    for e in l.unresolved().into_iter().filter(|_| checks) {
+        let claimed = l.submitted();
+        // Its job was received after it was sent (with a margin for clocks).
+        let sent = l.attempt_at(&e);
+        let Some(j) = out.iter().find(|j| {
+            !claimed.contains(&j.id)
+                && had::same_request(&e.request, j)
+                && j.ts_received.unix_timestamp() as f64 >= sent - 120.0
+        }) else {
+            continue;
         };
-        if let Some(step) = step {
-            let text = match &step.job {
-                Some(id) => format!("reconciled a submission: {id}"),
-                None => format!("reconciled a submission: not made ({})", e.request),
-            };
-            match l.append(step) {
-                Ok(()) => jobs.events.push(text.clone(), text),
-                Err(err) => eprintln!("databento-jobs: cannot write the ledger: {err}"),
-            }
+        let step = ledger::Entry {
+            at: tinytrader_observe::unix_seconds(),
+            request: e.request.clone(),
+            state: "submitted".into(),
+            job: Some(j.id.clone()),
+            cost_usd: e.cost_usd,
+            note: Some("found in Databento's job list".into()),
+            ..Default::default()
+        };
+        let text = format!("reconciled a submission: {}", j.id);
+        match l.append(step) {
+            Ok(()) => jobs.events.push(text.clone(), text),
+            Err(err) => eprintln!("databento-jobs: cannot write the ledger: {err}"),
         }
     }
     lock(&jobs.follow).extend(l.submitted());
@@ -493,14 +684,23 @@ struct Refreshed {
     unread: Vec<String>,
 }
 
+/// Read the jobs list and the store's holdings, reconcile the ledger, and
+/// start downloads of followed jobs that are done.
 async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
-    let short = {
-        let mut db = jobs.db.lock().await;
-        db.batch()
-            .list_jobs(&ListJobsParams::default())
-            .await
-            .map_err(|e| format!("list jobs: {e}"))?
-    };
+    let started = tinytrader_observe::unix_seconds();
+    let short = jobs
+        .db
+        .list_jobs(&api::every_job())
+        .await
+        .map_err(|e| format!("list jobs: {e}"))?;
+    // Expired jobs are read only to match a submission whose outcome isn't
+    // known: those received since the earliest was sent.
+    let since = lock(&jobs.ledger).as_ref().and_then(|l| {
+        l.unresolved()
+            .iter()
+            .map(|e| l.attempt_at(e))
+            .reduce(f64::min)
+    });
     // What the store already holds, first: only jobs not on disk need
     // their file lists (for the size a download would take).
     let held: Value = match jobs
@@ -516,20 +716,25 @@ async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
             .unwrap_or(Value::Null),
         Err(_) => Value::Null,
     };
-    let mut out = Vec::new();
+    let (mut out, mut expired) = (Vec::new(), Vec::new());
     // A finished job's details never change; others are read again each
     // round. When Databento can't answer for one, its last-known details
     // stand in, so one slow call doesn't blank the list.
     let (mut stale, mut unread) = (Vec::new(), Vec::new());
     for s in &short {
+        if s.state == JobState::Expired
+            && since.is_none_or(|t| (s.ts_received.unix_timestamp() as f64) < t - 120.0)
+        {
+            continue;
+        }
         let known = lock(&jobs.details).get(&s.id).cloned();
         let job = match known {
-            Some(j) if j.state == JobState::Done => j,
+            Some(j) if matches!(j.state, JobState::Done | JobState::Expired) => BatchJob {
+                state: s.state,
+                ..j
+            },
             known => {
-                let fetched = {
-                    let mut db = jobs.db.lock().await;
-                    db.batch().get_job_details(&s.id).await
-                };
+                let fetched = jobs.db.job(&s.id).await;
                 match (fetched, known) {
                     (Ok(j), _) => j,
                     (Err(e), Some(j)) => {
@@ -544,11 +749,15 @@ async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
             }
         };
         lock(&jobs.details).insert(job.id.clone(), job.clone());
+        if job.state == JobState::Expired {
+            expired.push(job);
+            continue;
+        }
         if job.state == JobState::Done
             && held[&job.id].is_null()
             && !lock(&jobs.delivered).contains_key(&job.id)
         {
-            let files = jobs.db.lock().await.batch().list_files(&job.id).await;
+            let files = jobs.db.files(&job.id).await;
             if let Ok(files) = files {
                 lock(&jobs.delivered).insert(job.id.clone(), files.iter().map(|f| f.size).sum());
             }
@@ -563,8 +772,13 @@ async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
     *lock(&jobs.listed) = json!({ "jobs": rows, "store_reachable": !held.is_null(), "updated_at": tinytrader_observe::unix_seconds() });
 
     // Submissions whose outcome was unknown: match each to the job it
-    // created, or, once it would have appeared, record it as never made.
-    reconcile(jobs, &out);
+    // created.
+    reconcile(
+        jobs,
+        &[out.as_slice(), &expired].concat(),
+        unread.is_empty(),
+        started,
+    );
 
     let ready: Vec<String> = out
         .iter()
@@ -649,8 +863,7 @@ fn jobs_view(jobs: &Jobs) -> Value {
 }
 
 async fn datasets(AxState(jobs): AxState<Shared>) -> Reply {
-    let mut db = jobs.db.lock().await;
-    match db.metadata().list_datasets(None).await {
+    match jobs.db.datasets().await {
         Ok(d) => (StatusCode::OK, Json(json!({ "datasets": d }))),
         Err(e) => refused(StatusCode::BAD_GATEWAY, e.to_string()),
     }
@@ -662,8 +875,7 @@ struct DatasetQuery {
 }
 
 async fn schemas(AxState(jobs): AxState<Shared>, Query(q): Query<DatasetQuery>) -> Reply {
-    let mut db = jobs.db.lock().await;
-    match db.metadata().list_schemas(&q.dataset).await {
+    match jobs.db.schemas(&q.dataset).await {
         Ok(s) => (
             StatusCode::OK,
             Json(json!({ "schemas": s.iter().map(Schema::as_str).collect::<Vec<_>>() })),
@@ -672,37 +884,53 @@ async fn schemas(AxState(jobs): AxState<Shared>, Query(q): Query<DatasetQuery>) 
     }
 }
 
-/// The cost of a checked request, in US dollars, and its billable size.
-async fn cost(jobs: &Jobs, c: &Checked) -> Result<(f64, u64), String> {
+/// The cost of a request, in US dollars, and its billable size.
+async fn cost(
+    jobs: &Jobs,
+    dataset: &str,
+    schema: Schema,
+    symbols: &[String],
+    stype_in: SType,
+    w: had::Window,
+) -> Result<(f64, u64), String> {
     let params = GetCostParams::builder()
-        .dataset(&c.dataset)
-        .schema(c.schema)
-        .symbols(c.symbols.clone())
-        .stype_in(c.stype_in)
-        .date_time_range(c.start..c.end)
+        .dataset(dataset)
+        .schema(schema)
+        .symbols(symbols.to_vec())
+        .stype_in(stype_in)
+        .date_time_range((had::at(w.0), had::at(w.1)))
         .build();
-    let mut db = jobs.db.lock().await;
-    let usd = db
-        .metadata()
-        .get_cost(&params)
-        .await
-        .map_err(|e| e.to_string())?;
-    let bytes = db
-        .metadata()
-        .get_billable_size(&params)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok((usd, bytes))
+    // Pricing is free, so a failure that may pass is tried again.
+    for tries in 1.. {
+        match jobs.db.cost(&params).await {
+            Err(e) if tries < 3 && retryable(&e) => {
+                tokio::time::sleep(COST_BACKOFF * tries).await;
+            }
+            r => return r,
+        }
+    }
+    unreachable!()
+}
+
+/// Waits between tries of a price.
+const COST_BACKOFF: Duration = Duration::from_millis(if cfg!(test) { 10 } else { 1000 });
+
+/// Whether a failed call may pass when tried again: no answer, a transport
+/// failure, or a 5xx from Databento.
+fn retryable(e: &str) -> bool {
+    e.contains("no answer from Databento")
+        || e.starts_with("HTTP error")
+        || e.split_whitespace()
+            .any(|w| w.len() == 3 && w.starts_with('5') && w.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Before pricing: refuse a request outside what Databento has for the
 /// schema, and warn about requested days it marks degraded, pending or
 /// missing.
-async fn availability(jobs: &Jobs, c: &Checked) -> Result<Vec<String>, String> {
+async fn availability(jobs: &Jobs, c: &Asked) -> Result<Vec<String>, String> {
     use databento::historical::metadata::{DatasetCondition, GetDatasetConditionParams};
-    let mut db = jobs.db.lock().await;
     let mut warnings = Vec::new();
-    match db.metadata().get_dataset_range(&c.dataset).await {
+    match jobs.db.range(&c.dataset).await {
         Ok(r) => {
             let (from, to) = r
                 .range_by_schema
@@ -728,7 +956,7 @@ async fn availability(jobs: &Jobs, c: &Checked) -> Result<Vec<String>, String> {
         .dataset(&c.dataset)
         .date_range(c.start..c.end)
         .build();
-    match db.metadata().get_dataset_condition(&params).await {
+    match jobs.db.conditions(&params).await {
         Ok(days) => {
             for (cond, label) in [
                 (DatasetCondition::Degraded, "degraded"),
@@ -758,251 +986,433 @@ async fn availability(jobs: &Jobs, c: &Checked) -> Result<Vec<String>, String> {
     Ok(warnings)
 }
 
-/// The request's days, first to last, as `YYYY-MM-DD`.
-fn days(c: &Checked) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut d = c.start;
-    while d < c.end {
-        out.push(d.to_string());
-        let Some(n) = d.next_day() else { break };
-        d = n;
+/// A store answer about what it holds, refused unless it is 200 (the store
+/// answers 503 until its first scan) and every volume the store knows is
+/// present: `missing_volumes` empty, where its absence means a store too old
+/// to say. `fresh`: from a full rescan begun after asking (`fresh=1`), which
+/// the store waits up to 120 s for.
+async fn store_json(
+    jobs: &Jobs,
+    path: &str,
+    query: &[(&str, &str)],
+    fresh: bool,
+) -> Result<Value, String> {
+    let mut query = query.to_vec();
+    if fresh {
+        query.push(("fresh", "1"));
     }
-    out
-}
-
-/// The requested days the store's catalog holds for this dataset, symbol and
-/// schema, on any volume.
-fn held_days(catalog: &Value, c: &Checked) -> Vec<String> {
-    let want: HashSet<String> = days(c).into_iter().collect();
-    let symbol = c.symbols.first().map_or("", String::as_str);
-    let mut held: Vec<String> = catalog["roots"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|r| r["datasets"].as_array().into_iter().flatten())
-        .filter(|d| d["id"] == c.dataset.as_str() && d["symbol"] == symbol)
-        .filter_map(|d| d["schemas"][c.schema.as_str()]["days"].as_object())
-        .flat_map(|days| days.keys().filter(|k| want.contains(*k)).cloned())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    held.sort();
-    held
-}
-
-/// Earlier purchases this request overlaps, each as a line saying which:
-/// jobs on Databento's list that aren't expired (queued, processing, or done
-/// and waiting to be downloaded, wherever they were bought), and purchases in
-/// the ledger that aren't on that list any more (`.1`: only these may be
-/// bought `again`, as they can no longer be downloaded).
-fn bought(purchases: &[ledger::Entry], listed: &Value, c: &Checked) -> (Vec<String>, Vec<String>) {
-    let (from, to) = (c.start.to_string(), c.end.to_string());
-    let symbol = c.symbols.first().map_or("", String::as_str);
-    let on_list: HashSet<&str> = listed["jobs"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|j| j["state"] != "expired")
-        .filter_map(|j| j["id"].as_str())
-        .collect();
-    let mut gone = Vec::new();
-    for e in purchases {
-        if e.job.as_deref().is_some_and(|j| on_list.contains(j)) {
-            continue; // judged below, from the list
-        }
-        // dataset|schema|symbols|start|end (end exclusive), as `ledger::fingerprint`.
-        let f: Vec<&str> = e.request.split('|').collect();
-        if let [d, s, sym, a, b] = f[..]
-            && d == c.dataset
-            && s == c.schema.as_str()
-            && sym == symbol
-            && a < to.as_str()
-            && from.as_str() < b
-        {
-            gone.push(format!(
-                "{} (bought here, {a} to before {b}; no longer on Databento's list)",
-                e.job.as_deref().unwrap_or("a job")
-            ));
-        }
-    }
-    let (lo, hi) = (
-        c.start.midnight().assume_utc().unix_timestamp(),
-        c.end.midnight().assume_utc().unix_timestamp(),
-    );
-    let mut live = Vec::new();
-    for j in listed["jobs"].as_array().into_iter().flatten() {
-        if j["state"] == "expired" {
-            continue;
-        }
-        if j["dataset"] == c.dataset.as_str()
-            && j["schema"] == c.schema.as_str()
-            && j["symbols"] == symbol
-            && j["start"].as_i64().is_some_and(|s| s < hi)
-            && j["end"].as_i64().is_some_and(|e| lo < e)
-        {
-            live.push(format!(
-                "{} ({} on Databento; download it rather than buy it again)",
-                j["id"].as_str().unwrap_or_default(),
-                j["state"].as_str().unwrap_or("listed")
-            ));
-        }
-    }
-    (live, gone)
-}
-
-/// The store's catalog: which days each volume holds.
-async fn catalog(jobs: &Jobs) -> Result<Value, String> {
+    let url = reqwest::Url::parse_with_params(&format!("{}{path}", jobs.store), &query)
+        .map_err(|e| format!("the store's {path}: {e}"))?;
     let r = jobs
         .http
-        .get(format!("{}/catalog", jobs.store))
-        .timeout(Duration::from_secs(30))
+        .get(url)
+        .timeout(Duration::from_secs(if fresh { 660 } else { 120 }))
         .send()
         .await
-        .map_err(|e| format!("the store's catalog: {e}"))?;
+        .map_err(|e| format!("the store's {path}: {e}"))?;
     if !r.status().is_success() {
-        return Err(format!("the store's catalog: HTTP {}", r.status()));
+        return Err(format!("the store's {path}: HTTP {}", r.status()));
     }
-    r.json::<Value>()
+    let v: Value = r
+        .json()
         .await
-        .map_err(|e| format!("the store's catalog: {e}"))
+        .map_err(|e| format!("the store's {path}: {e}"))?;
+    match v["missing_volumes"].as_array() {
+        Some(m) if m.is_empty() => Ok(v),
+        Some(m) => Err(format!(
+            "the store is missing volumes ({}), so what it holds isn't known",
+            m.iter()
+                .map(|x| x.as_str().map_or_else(|| x.to_string(), str::to_owned))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        None => Err(format!(
+            "the store's {path} doesn't say which volumes are missing (an older store), so what it holds isn't known"
+        )),
+    }
 }
 
-/// Databento's jobs that aren't expired, as rows (see `row`), read now.
-async fn live_jobs(jobs: &Jobs) -> Result<Vec<Value>, String> {
-    let short = {
-        let mut db = jobs.db.lock().await;
-        db.batch()
-            .list_jobs(&ListJobsParams::default())
-            .await
-            .map_err(|e| format!("Databento's job list: {e}"))?
-    };
-    // Each job's request (dataset, schema, symbols, days) never changes:
-    // from the details already read, else read now. A job whose request
-    // can't be read fails the check, so nothing is bought blind.
-    let mut rows = Vec::new();
+/// Databento's jobs that aren't expired, in their state as listed now, and
+/// their IDs, from the whole job list read now. Fails unless every one of
+/// them can be read, so nothing is bought blind.
+async fn live_jobs(jobs: &Jobs) -> Result<(Vec<BatchJob>, HashSet<String>), String> {
+    let short = jobs
+        .db
+        .list_jobs(&api::every_job())
+        .await
+        .map_err(|e| format!("Databento's job list: {e}"))?;
+    let mut out = Vec::new();
     for sj in short.iter().filter(|sj| sj.state != JobState::Expired) {
+        // A job's request (dataset, schema, symbols, times) never changes.
         let known = lock(&jobs.details).get(&sj.id).cloned();
         let job = match known {
             Some(j) => j,
             None => {
-                let mut db = jobs.db.lock().await;
-                db.batch()
-                    .get_job_details(&sj.id)
+                let j = jobs
+                    .db
+                    .job(&sj.id)
                     .await
-                    .map_err(|e| format!("Databento's job {}: {e}", sj.id))?
+                    .map_err(|e| format!("Databento's job {}: {e}", sj.id))?;
+                lock(&jobs.details).insert(j.id.clone(), j.clone());
+                j
             }
         };
-        // Its state as listed now (the details may be from earlier).
-        rows.push(row(
-            &BatchJob {
-                state: sj.state,
-                ..job
-            },
-            &Value::Null,
-            None,
-        ));
+        out.push(BatchJob {
+            state: sj.state,
+            ..job
+        });
     }
-    Ok(rows)
+    let ids = out.iter().map(|j| j.id.clone()).collect();
+    Ok((out, ids))
 }
 
-/// What's had already of a request: the days the store holds, and earlier
-/// purchases it overlaps (see `bought`), from the store's catalog and
-/// Databento's job list as they are now.
+/// What's had already of `target` (a parent, or a plain symbol) in this
+/// dataset and schema from `start` to `end` (exclusive): the store's
+/// holdings, Databento's jobs that aren't expired, and every purchase in the
+/// ledger, read now (see `had`). Fails when any of it can't be read in full.
+/// `fresh`: the store's answers from a rescan begun now (for a purchase),
+/// not its last scan (for a price).
 async fn had(
     jobs: &Jobs,
-    c: &Checked,
-) -> Result<(Vec<String>, (Vec<String>, Vec<String>)), String> {
-    let held = held_days(&catalog(jobs).await?, c);
-    let listed = json!({ "jobs": live_jobs(jobs).await? });
-    let purchases: Vec<ledger::Entry> = lock(&jobs.ledger)
+    dataset: &str,
+    schema: Schema,
+    target: &str,
+    (start, end): (time::Date, time::Date),
+    fresh: bool,
+) -> Result<Vec<had::Piece>, String> {
+    let last = end.previous_day().unwrap_or(end).to_string();
+    let catalog = store_json(jobs, "/catalog", &[], fresh).await?;
+    let coverage = store_json(
+        jobs,
+        "/coverage",
+        &[
+            ("provider", "databento"),
+            ("dataset", dataset),
+            ("symbol", target),
+            ("schema", schema.as_str()),
+            ("start", &start.to_string()),
+            ("end", &last),
+        ],
+        fresh,
+    )
+    .await?;
+    let (live, ids) = live_jobs(jobs).await?;
+    let purchases = lock(&jobs.ledger)
         .as_ref()
-        .map(|l| l.purchases().into_iter().cloned().collect())
+        .map(ledger::Ledger::purchases)
         .unwrap_or_default();
-    Ok((held, bought(&purchases, &listed, c)))
+    let range = (had::day_window(start).0, had::day_window(end).0);
+    let schema = schema.as_str();
+    let mut pieces = had::store_pieces(&catalog, &coverage, dataset, schema, target, range);
+    pieces.extend(had::job_pieces(&live, dataset, schema, target));
+    pieces.extend(had::ledger_pieces(
+        &purchases, dataset, schema, target, &ids,
+    ));
+    Ok(pieces)
 }
 
-/// A request for what's missing of an option parent (decision 0018).
-#[derive(Clone, Debug, Deserialize)]
-struct MissingRequest {
-    dataset: String,
-    schema: String,
-    /// The parent, such as `SPY.OPT`.
-    symbol: String,
-    /// First day, `YYYY-MM-DD`.
-    start: String,
-    /// Last day, inclusive.
-    end: String,
-    #[serde(default)]
-    rule: missing::Rule,
-}
-
-struct MissingQuote {
-    request: MissingRequest,
-    days: Vec<missing::Day>,
-    cost_usd: f64,
-    at: Instant,
-}
-
-/// Plan a request for what's missing: for each day the store has the
-/// parent's definitions for, the contracts wanted less those held and those
-/// pending on Databento, priced per day. Returns the days to buy and notes
-/// (days with nothing to buy, days without definitions).
-async fn plan(jobs: &Jobs, r: &MissingRequest) -> Result<(Vec<missing::Day>, Vec<String>), String> {
-    let fmt = time::macros::format_description!("[year]-[month]-[day]");
-    let parse = |s: &str| {
-        time::Date::parse(s.trim(), fmt).map_err(|_| format!("{s:?} is not a date (YYYY-MM-DD)"))
-    };
-    let (start, last) = (parse(&r.start)?, parse(&r.end)?);
-    if last < start {
-        return Err("the last day is before the first".into());
-    }
-    if (last - start).whole_days() > 366 {
-        return Err("at most a year at a time".into());
-    }
-    if !r.symbol.ends_with(".OPT") {
-        return Err("only option parents (ROOT.OPT) are bought by contract".into());
-    }
-    let schema: Schema = r
-        .schema
-        .parse()
-        .map_err(|_| format!("unknown schema {}", r.schema))?;
-    let get = |url: String| async move {
-        let resp = jobs
-            .http
-            .get(&url)
-            .timeout(Duration::from_secs(120))
-            .send()
-            .await
-            .map_err(|e| format!("store: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("store: HTTP {} for {url}", resp.status()));
+/// The dataset in Databento's spelling, refused unless it is on Databento's
+/// dataset list (read at most hourly).
+async fn known_dataset(jobs: &Jobs, d: &str) -> Result<String, (StatusCode, String)> {
+    let d = d.trim().to_ascii_uppercase();
+    let cached = lock(&jobs.dataset_list)
+        .as_ref()
+        .filter(|(at, _)| at.elapsed() < Duration::from_secs(3600))
+        .map(|(_, l)| l.clone());
+    let list = match cached {
+        Some(l) => l,
+        None => {
+            let l = jobs.db.datasets().await.map_err(|e| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("couldn't read Databento's dataset list: {e}"),
+                )
+            })?;
+            *lock(&jobs.dataset_list) = Some((Instant::now(), l.clone()));
+            l
         }
-        Ok::<_, String>(resp)
     };
-    // What the store holds of each day, and where its definitions are.
-    let coverage: Value = get(format!(
-        "{}/coverage?dataset={}&symbol={}&schema={}&start={start}&end={last}",
-        jobs.store, r.dataset, r.symbol, r.schema
-    ))
-    .await?
-    .json()
-    .await
-    .map_err(|e| format!("store: {e}"))?;
-    let held: HashMap<String, Value> = coverage["days"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|d| Some((d["day"].as_str()?.to_owned(), d.clone())))
+    if list.contains(&d) {
+        Ok(d)
+    } else {
+        Err((
+            StatusCode::BAD_REQUEST,
+            format!("{d} isn't one of Databento's datasets"),
+        ))
+    }
+}
+
+/// Refuses a price that isn't a number of dollars or that changed since the
+/// quote; and, when it costs anything (only an exact $0 is free), one
+/// without a person's approval (`approval`, see [`approval`]) or not
+/// confirmed exactly.
+fn check_price(
+    now: f64,
+    quoted: f64,
+    confirm: Option<f64>,
+    approval: Option<Reply>,
+) -> Option<Reply> {
+    let same = |a: f64, b: f64| (a - b).abs() <= 1e-9;
+    if !now.is_finite() || now < 0.0 {
+        return Some(refused(
+            StatusCode::BAD_GATEWAY,
+            format!("Databento priced this at {now}, which isn't a price; nothing is submitted"),
+        ));
+    }
+    if !same(now, quoted) {
+        return Some(refused(
+            StatusCode::CONFLICT,
+            format!("the price changed from ${quoted:.2} to ${now:.2}; price the request again"),
+        ));
+    }
+    if now == 0.0 {
+        return None;
+    }
+    if approval.is_some() {
+        return approval;
+    }
+    confirm.is_none_or(|c| !same(c, now)).then(|| {
+        refused(
+            StatusCode::PRECONDITION_REQUIRED,
+            format!("this costs ${now:.2}; confirm that amount to submit it"),
+        )
+    })
+}
+
+/// A quote's price: the sum of its requests', or NaN (never free, never
+/// bought) when any isn't a number of dollars or is negative.
+fn price_of(parts: &[missing::Part]) -> f64 {
+    if parts
+        .iter()
+        .any(|p| !p.cost_usd.is_finite() || p.cost_usd < 0.0)
+    {
+        return f64::NAN;
+    }
+    parts.iter().map(|p| p.cost_usd).sum()
+}
+
+/// Whether two secrets are equal, without stopping at the first difference.
+fn same_secret(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+/// Whether the request carries the approval token as its bearer token.
+fn approved_by_console(jobs: &Jobs, headers: &axum::http::HeaderMap) -> Result<(), Reply> {
+    let Some(want) = &jobs.approve_token else {
+        return Err(refused(
+            StatusCode::FORBIDDEN,
+            "paid purchases need a person's approval in the console, and this service has no approval token (JOBS_APPROVE_TOKEN), so they are off",
+        ));
+    };
+    let sent = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if sent.is_some_and(|t| same_secret(t.trim(), want)) {
+        Ok(())
+    } else {
+        Err(refused(
+            StatusCode::FORBIDDEN,
+            "a paid purchase needs a person's approval in the console",
+        ))
+    }
+}
+
+/// Why a paid purchase may not go ahead, if it may not: it needs the
+/// console's approval (the approval token) and who gave it.
+fn approval(jobs: &Jobs, headers: &axum::http::HeaderMap, by: Option<&str>) -> Option<Reply> {
+    if let Err(r) = approved_by_console(jobs, headers) {
+        return Some(r);
+    }
+    by.is_none_or(|b| b.trim().is_empty()).then(|| {
+        refused(
+            StatusCode::FORBIDDEN,
+            "a paid purchase names who approved it (approved_by)",
+        )
+    })
+}
+
+/// Plan a request: what's missing of it, priced. Each day's wanted window
+/// is the whole UTC day, or its `hours`. A day with nothing of the symbol
+/// had in that window is bought whole (runs of such whole days as one
+/// request). Of an option parent, a day partly had (or any day, with a rule
+/// or contract lists) is bought as its missing contracts, from the store's
+/// definitions of that day, over the hours each still needs. Of any other
+/// symbol, a day partly had isn't bought at all. Purchases here that are
+/// gone stay had unless `again` names their jobs. Returns the requests, in
+/// order, and notes (what was skipped, and why). `priced` counts the
+/// requests priced, of how many.
+async fn plan(
+    jobs: &Jobs,
+    a: &Asked,
+    again: &HashSet<String>,
+    fresh: bool,
+    priced: &(AtomicUsize, AtomicUsize),
+) -> Result<(Vec<missing::Part>, Vec<String>), (StatusCode, String)> {
+    use futures_util::TryStreamExt as _;
+    let bad = |e: String| (StatusCode::BAD_REQUEST, e);
+    let down = |e: String| (StatusCode::SERVICE_UNAVAILABLE, e);
+    let dataset = known_dataset(jobs, &a.dataset).await?;
+    let mut pieces = had(jobs, &dataset, a.schema, &a.symbol, (a.start, a.end), fresh)
+        .await
+        .map_err(down)?;
+    let gone: BTreeSet<String> = pieces
+        .iter()
+        .filter_map(|p| match &p.kind {
+            had::Kind::Gone(j) => Some(j.clone()),
+            _ => None,
+        })
         .collect();
-    let listing: Value = get(format!(
-        "{}/files?pattern=*/{}/{}/definition/*",
-        jobs.store, r.dataset, r.symbol
-    ))
+    let mut extra: Vec<&String> = again.iter().filter(|j| !gone.contains(*j)).collect();
+    extra.sort();
+    if !extra.is_empty() {
+        return Err(bad(format!(
+            "\"again\" names {}, which this request doesn't buy again",
+            json!(extra)
+        )));
+    }
+    pieces.retain(|p| !matches!(&p.kind, had::Kind::Gone(j) if again.contains(j)));
+    let mut notes: Vec<String> = gone
+        .iter()
+        .filter(|j| !again.contains(*j))
+        .map(|j| format!("{j}: bought here, expired or no longer on Databento's list; what it bought stays subtracted unless named in \"again\""))
+        .collect();
+
+    let option = a.stype == SType::Parent && a.symbol.ends_with(".OPT");
+    let by_contract = a.rule.is_some() || a.contracts.is_some();
+    let (mut whole, mut by_day) = (Vec::new(), Vec::new());
+    let mut d = a.start;
+    while d < a.end {
+        let next = d.next_day().ok_or_else(|| bad("bad day".into()))?;
+        let window = a
+            .hours
+            .as_ref()
+            .map_or_else(|| had::day_window(d), |h| h.window(d));
+        if a.contracts.as_ref().is_some_and(|m| !m.contains_key(&d)) {
+            d = next;
+            continue;
+        }
+        let touching: Vec<&had::Piece> = pieces
+            .iter()
+            .filter(|p| p.window.0 < window.1 && window.0 < p.window.1)
+            .collect();
+        if !by_contract && touching.is_empty() {
+            whole.push((d, window));
+        } else if option {
+            by_day.push((d, window));
+        } else {
+            let what: Vec<&str> = touching.iter().take(3).map(|p| p.what.as_str()).collect();
+            notes.push(format!("{d}: not bought, it overlaps {}", what.join("; ")));
+        }
+        d = next;
+    }
+
+    // Whole days, consecutive ones as one request (whole UTC days only).
+    let mut parts: Vec<missing::Part> = Vec::new();
+    for (d, window) in whole {
+        if let Some(p) = parts.last_mut()
+            && a.hours.is_none()
+            && p.last.next_day() == Some(d)
+        {
+            p.last = d;
+            p.window.1 = window.1;
+            continue;
+        }
+        parts.push(missing::Part {
+            day: d,
+            last: d,
+            window,
+            whole: true,
+            symbols: vec![a.symbol.clone()],
+            stype: a.stype,
+            cost_usd: 0.0,
+            bytes: 0,
+            skipped_held: 0,
+            skipped_pending: 0,
+        });
+    }
+    if !by_day.is_empty() {
+        let defs = definitions(jobs, &dataset, &a.symbol).await?;
+        let (pieces, defs) = (&pieces, &defs);
+        let days: Vec<(Vec<missing::Part>, Option<String>)> = futures_util::stream::iter(by_day)
+            .map(|(d, window)| contract_day(jobs, a, pieces, defs, d, window))
+            .buffered(PRICING_AT_ONCE)
+            .try_collect()
+            .await?;
+        for (p, note) in days {
+            parts.extend(p);
+            notes.extend(note);
+        }
+    }
+    parts.sort_by_key(|p| (p.day, p.window, !p.whole));
+    if let Some(why) = overlap(&parts) {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the plan would buy something twice ({why}), so nothing is priced"),
+        ));
+    }
+    priced.1.store(parts.len(), Ordering::Relaxed);
+    let dataset = &dataset;
+    let parts = futures_util::stream::iter(parts)
+        .map(|mut p| async move {
+            let (usd, bytes) = cost(jobs, dataset, a.schema, &p.symbols, p.stype, p.window)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+            p.cost_usd = usd;
+            p.bytes = bytes;
+            priced.0.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, (StatusCode, String)>(p)
+        })
+        .buffered(PRICING_AT_ONCE)
+        .try_collect()
+        .await?;
+    Ok((parts, notes))
+}
+
+/// Two requests of a plan that would buy the same data twice, if any: they
+/// overlap in time, and both are the whole symbol, or one is and the other
+/// a contract list, or both list a contract.
+fn overlap(parts: &[missing::Part]) -> Option<String> {
+    let mut by_start: Vec<&missing::Part> = parts.iter().collect();
+    by_start.sort_by_key(|p| p.window.0);
+    for (i, p) in by_start.iter().enumerate() {
+        let mine: HashSet<&String> = p.symbols.iter().collect();
+        for q in by_start[i + 1..]
+            .iter()
+            .take_while(|q| q.window.0 < p.window.1)
+        {
+            if p.whole || q.whole || q.symbols.iter().any(|s| mine.contains(s)) {
+                return Some(format!(
+                    "{} and {}, {} and {}",
+                    had::stamp(p.window.0),
+                    had::stamp(p.window.1),
+                    had::stamp(q.window.0),
+                    had::stamp(q.window.1)
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// The store's definition days of `parent`: day → (volume, path).
+async fn definitions(
+    jobs: &Jobs,
+    dataset: &str,
+    parent: &str,
+) -> Result<HashMap<String, (String, String)>, (StatusCode, String)> {
+    let listing: Value = store_get(
+        jobs,
+        &format!(
+            "{}/files?provider=databento&pattern=*/{dataset}/{parent}/definition/*",
+            jobs.store
+        ),
+    )
     .await?
     .json()
     .await
-    .map_err(|e| format!("store: {e}"))?;
-    let defs: HashMap<String, (String, String)> = listing["files"]
+    .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")))?;
+    Ok(listing["files"]
         .as_array()
         .into_iter()
         .flatten()
@@ -1014,537 +1424,629 @@ async fn plan(jobs: &Jobs, r: &MissingRequest) -> Result<(Vec<missing::Day>, Vec
                 (f["volume"].as_str()?.to_owned(), path.to_owned()),
             ))
         })
-        .collect();
-    let live: Vec<Value> = live_jobs(jobs)
-        .await?
-        .into_iter()
-        .filter(|j| j["dataset"] == r.dataset.as_str() && j["schema"] == schema.as_str())
-        .collect();
-
-    let mut days = Vec::new();
-    let mut notes = Vec::new();
-    let mut d = start;
-    while d <= last {
-        let key = d.to_string();
-        let next = d.next_day().ok_or("bad day")?;
-        let Some((volume, path)) = defs.get(&key) else {
-            if !matches!(d.weekday(), time::Weekday::Saturday | time::Weekday::Sunday) {
-                notes.push(format!(
-                    "{key}: the store has no {} definitions for this day; buy those first",
-                    r.symbol
-                ));
-            }
-            d = next;
-            continue;
-        };
-        let bytes = get(format!("{}/files/{volume}/{path}", jobs.store))
-            .await?
-            .bytes()
-            .await
-            .map_err(|e| format!("store: {e}"))?;
-        let wanted = missing::wanted(&missing::contracts(&bytes)?, d, &r.rule);
-        let (lo, hi) = (
-            d.midnight().assume_utc().unix_timestamp(),
-            next.midnight().assume_utc().unix_timestamp(),
-        );
-        let pending: Vec<Option<std::collections::BTreeSet<String>>> = live
-            .iter()
-            .filter(|j| {
-                j["start"].as_i64().is_some_and(|s| s < hi)
-                    && j["end"].as_i64().is_some_and(|e| lo < e)
-            })
-            .map(|j| {
-                let syms = j["symbols"].as_str().unwrap_or_default();
-                (syms != r.symbol).then(|| syms.split(',').map(|s| s.trim().to_owned()).collect())
-            })
-            .collect();
-        let (rest, skipped_held, skipped_pending) =
-            missing::to_buy(&wanted, held.get(&key), &pending);
-        if rest.is_empty() {
-            notes.push(format!(
-                "{key}: nothing to buy ({} wanted, {skipped_held} held, {skipped_pending} pending)",
-                wanted.len()
-            ));
-            d = next;
-            continue;
-        }
-        let rest: Vec<String> = rest.into_iter().collect();
-        for chunk in rest.chunks(missing::MAX_SYMBOLS) {
-            let c = Checked {
-                dataset: r.dataset.clone(),
-                schema,
-                symbols: chunk.to_vec(),
-                stype_in: SType::RawSymbol,
-                start: d,
-                end: next,
-            };
-            let (usd, bytes) = cost(jobs, &c).await?;
-            days.push(missing::Day {
-                day: d,
-                symbols: chunk.to_vec(),
-                cost_usd: usd,
-                bytes,
-                skipped_held,
-                skipped_pending,
-            });
-        }
-        d = next;
-    }
-    Ok((days, notes))
+        .collect())
 }
 
-async fn price_missing(AxState(jobs): AxState<Shared>, Json(r): Json<MissingRequest>) -> Reply {
-    let (days, notes) = match plan(&jobs, &r).await {
-        Ok(p) => p,
+/// A read of the store (120 s at most).
+async fn store_get(jobs: &Jobs, url: &str) -> Result<reqwest::Response, (StatusCode, String)> {
+    let down = |e: String| (StatusCode::SERVICE_UNAVAILABLE, e);
+    let resp = jobs
+        .http
+        .get(url)
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| down(format!("store: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(down(format!("store: HTTP {} for {url}", resp.status())));
+    }
+    Ok(resp)
+}
+
+/// One day of an option parent bought by contract: the contracts wanted
+/// (listed, or by the rule, or the whole chain) less what's had, as
+/// requests over the hours each still needs, unpriced; or a note why
+/// nothing.
+async fn contract_day(
+    jobs: &Jobs,
+    a: &Asked,
+    pieces: &[had::Piece],
+    defs: &HashMap<String, (String, String)>,
+    d: time::Date,
+    window: had::Window,
+) -> Result<(Vec<missing::Part>, Option<String>), (StatusCode, String)> {
+    let key = d.to_string();
+    let Some((volume, path)) = defs.get(&key) else {
+        let why = format!(
+            "{key}: the store has no {} definitions for this day; buy those first",
+            a.symbol
+        );
+        if a.contracts.is_some() {
+            return Err((StatusCode::BAD_REQUEST, why));
+        }
+        let weekend = matches!(d.weekday(), time::Weekday::Saturday | time::Weekday::Sunday);
+        return Ok((Vec::new(), (!weekend).then_some(why)));
+    };
+    let bytes = store_get(jobs, &format!("{}/files/{volume}/{path}", jobs.store))
+        .await?
+        .bytes()
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")))?;
+    let all = missing::contracts(&bytes).map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let wanted = match a.contracts.as_ref().and_then(|m| m.get(&d)) {
+        Some(list) => {
+            let known: HashSet<&str> = all.iter().map(|c| c.symbol.as_str()).collect();
+            let unknown: Vec<&str> = list
+                .iter()
+                .map(String::as_str)
+                .filter(|s| !known.contains(s))
+                .collect();
+            if !unknown.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "{key}: {} of these contracts aren't in the store's definitions for the day: {}",
+                        unknown.len(),
+                        unknown
+                            .iter()
+                            .take(5)
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+            list.clone()
+        }
+        None => missing::wanted(
+            &all,
+            d,
+            a.rule.as_ref().unwrap_or(&missing::Rule::default()),
+        ),
+    };
+    let need = had::need(&wanted, pieces, window);
+    let mut asks: Vec<(had::Window, Vec<String>)> = Vec::new();
+    if !need.whole.is_empty() {
+        asks.push((window, need.whole));
+    }
+    for (windows, contracts) in need.hours {
+        asks.extend(windows.into_iter().map(|w| (w, contracts.clone())));
+    }
+    let note = asks.is_empty().then(|| {
+        format!(
+            "{key}: nothing to buy ({} wanted, {} held, {} pending or bought)",
+            wanted.len(),
+            need.skipped_held,
+            need.skipped_pending
+        )
+    });
+    let mut parts = Vec::new();
+    for (w, contracts) in asks {
+        for chunk in contracts.chunks(missing::MAX_SYMBOLS) {
+            parts.push(missing::Part {
+                day: d,
+                last: d,
+                window: w,
+                whole: false,
+                symbols: chunk.to_vec(),
+                stype: SType::RawSymbol,
+                cost_usd: 0.0,
+                bytes: 0,
+                skipped_held: need.skipped_held,
+                skipped_pending: need.skipped_pending,
+            });
+        }
+    }
+    Ok((parts, note))
+}
+
+/// Price a request (see `plan`). Answers with the quote once priced, or,
+/// when that takes longer than `price_wait`, with the quote still
+/// `pricing` (202): `GET /quotes/{id}` says when it's ready.
+async fn price(AxState(jobs): AxState<Shared>, Json(r): Json<PriceRequest>) -> Reply {
+    let asked = match r.check() {
+        Ok(a) => a,
         Err(e) => return refused(StatusCode::BAD_REQUEST, e),
     };
-    let total: f64 = days.iter().map(|d| d.cost_usd).sum();
-    let bytes: u64 = days.iter().map(|d| d.bytes).sum();
-    let id = format!("m{}", jobs.next_quote.fetch_add(1, Ordering::Relaxed));
-    let rows: Vec<Value> = days.iter().map(missing::Day::to_json).collect();
+    let again = match again_ids(r.again.as_ref()) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    if let Err((code, e)) = known_dataset(&jobs, &asked.dataset).await {
+        return refused(code, e);
+    }
+    let warnings = match availability(&jobs, &asked).await {
+        Ok(w) => w,
+        Err(e) => return refused(StatusCode::BAD_REQUEST, e),
+    };
+    let id = format!(
+        "q-{}-{}",
+        jobs.boot,
+        jobs.next_quote.fetch_add(1, Ordering::Relaxed)
+    );
+    let asked = Arc::new(asked);
+    let priced = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
     {
-        let mut q = lock(&jobs.missing_quotes);
-        q.retain(|_, x| x.at.elapsed() < QUOTE_TTL);
+        let mut q = lock(&jobs.quotes);
+        q.retain(|_, x| !x.expired());
         q.insert(
             id.clone(),
-            MissingQuote {
-                request: r,
-                days,
-                cost_usd: total,
+            Quote {
+                request: asked.clone(),
+                again: again.clone(),
                 at: Instant::now(),
+                priced: priced.clone(),
+                result: None,
             },
         );
     }
-    reply_ok(
-        json!({ "quote": id, "cost_usd": total, "billable_bytes": bytes, "requests": rows.len(), "days": rows, "notes": notes, "valid_seconds": QUOTE_TTL.as_secs() }),
-    )
+    let (done, finished) = tokio::sync::oneshot::channel();
+    let task = {
+        let (jobs, id) = (jobs.clone(), id.clone());
+        async move {
+            let planned = tokio::time::timeout(
+                jobs.pricing_cap,
+                plan(&jobs, &asked, &again, false, &priced),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err((
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!(
+                        "pricing took longer than {} minutes, so it was given up",
+                        jobs.pricing_cap.as_secs() / 60
+                    ),
+                ))
+            });
+            let result = planned.map(|(parts, notes)| Priced {
+                cost_usd: price_of(&parts),
+                notes: warnings.into_iter().chain(notes).collect(),
+                parts,
+            });
+            if let Some(q) = lock(&jobs.quotes).get_mut(&id) {
+                q.result = Some(result);
+                q.at = Instant::now();
+            }
+            let _ = done.send(());
+        }
+    };
+    tokio::spawn(task);
+    let _ = tokio::time::timeout(jobs.price_wait, finished).await;
+    let mut quotes = lock(&jobs.quotes);
+    let Some(q) = quotes.get(&id) else {
+        return refused(StatusCode::CONFLICT, "that price was declined");
+    };
+    match &q.result {
+        None => (StatusCode::ACCEPTED, Json(q.view(&id))),
+        Some(Err((code, e))) => {
+            let r = refused(*code, e.clone());
+            quotes.remove(&id);
+            r
+        }
+        Some(Ok(_)) => reply_ok(q.view(&id)),
+    }
+}
+
+/// Every quote that is still good, or still being priced.
+async fn quotes_list(AxState(jobs): AxState<Shared>) -> Reply {
+    let mut q = lock(&jobs.quotes);
+    q.retain(|_, x| !x.expired());
+    let mut ids: Vec<&String> = q.keys().collect();
+    ids.sort_by_key(|i| (i.len(), i.as_str()));
+    reply_ok(json!({ "quotes": ids.iter().map(|i| q[*i].view(i)).collect::<Vec<_>>() }))
+}
+
+async fn quote_get(AxState(jobs): AxState<Shared>, UrlPath(id): UrlPath<String>) -> Reply {
+    match lock(&jobs.quotes).get(&id).filter(|q| !q.expired()) {
+        Some(q) => reply_ok(q.view(&id)),
+        None => refused(StatusCode::NOT_FOUND, "no such quote; it may have expired"),
+    }
+}
+
+/// Decline a quote: it can't be submitted after this. Needs the approval
+/// token, as approving does.
+async fn quote_delete(
+    AxState(jobs): AxState<Shared>,
+    headers: axum::http::HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> Reply {
+    if let Err(r) = approved_by_console(&jobs, &headers) {
+        return r;
+    }
+    match lock(&jobs.quotes).remove(&id) {
+        Some(_) => reply_ok(json!({ "declined": id })),
+        None => refused(StatusCode::NOT_FOUND, "no such quote; it may have expired"),
+    }
 }
 
 fn reply_ok(v: Value) -> Reply {
     (StatusCode::OK, Json(v))
 }
 
-#[derive(Deserialize)]
-struct SubmitMissing {
-    quote: String,
-    confirm_usd: Option<f64>,
-}
+const NO_LEDGER: &str =
+    "no submissions ledger is configured (JOBS_LEDGER), so nothing is submitted";
 
-/// Paid purchases are paused until the guards of decision 0019 are built:
-/// anything not priced at exactly $0 is refused (a NaN or negative price
-/// too); free requests go through.
-fn paused(cost_usd: f64) -> Option<Reply> {
-    let free = cost_usd == 0.0;
-    (!free).then(|| {
-        refused(
-            StatusCode::FORBIDDEN,
-            format!("this costs ${cost_usd:.2}, and paid purchases are paused (decision 0019)"),
-        )
-    })
-}
-
-async fn submit_missing(AxState(jobs): AxState<Shared>, Json(s): Json<SubmitMissing>) -> Reply {
-    let Some(quote) = lock(&jobs.missing_quotes).remove(&s.quote) else {
-        return refused(
-            StatusCode::CONFLICT,
-            "that price has expired or was already used; price the request again",
-        );
-    };
-    if quote.at.elapsed() >= QUOTE_TTL {
-        return refused(
-            StatusCode::CONFLICT,
-            "that price has expired; price the request again",
-        );
-    }
-    // Plan again: what's held, pending and priced may have changed.
-    let (days, _) = match plan(&jobs, &quote.request).await {
-        Ok(p) => p,
-        Err(e) => {
-            return refused(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("couldn't plan it again, so nothing is submitted: {e}"),
-            );
-        }
-    };
-    let now: f64 = days.iter().map(|d| d.cost_usd).sum();
-    let same = days.len() == quote.days.len()
-        && days
-            .iter()
-            .zip(&quote.days)
-            .all(|(a, b)| a.day == b.day && a.symbols == b.symbols)
-        && (now - quote.cost_usd).abs() < 1e-9;
-    if !same {
-        return refused(
-            StatusCode::CONFLICT,
-            format!(
-                "what's missing or its price changed (now ${now:.2} for {} requests); price it again",
-                days.len()
-            ),
-        );
-    }
-    if let Some(r) = paused(now) {
-        return r;
-    }
-    if now > 0.0 && s.confirm_usd.is_none_or(|c| (c - now).abs() > 1e-9) {
-        return refused(
-            StatusCode::PRECONDITION_REQUIRED,
-            format!("this costs ${now:.2}; confirm that amount to submit it"),
-        );
-    }
-    let r = &quote.request;
-    let Ok(schema) = r.schema.parse::<Schema>() else {
-        return refused(StatusCode::BAD_REQUEST, "unknown schema");
-    };
-    let mut submitted = Vec::new();
-    for d in &days {
-        let next = d.day.next_day().unwrap_or(d.day);
-        let request = ledger::fingerprint(
-            &r.dataset,
-            schema.as_str(),
-            &d.symbols,
-            &d.day.to_string(),
-            &next.to_string(),
-        );
-        {
-            let mut guard = lock(&jobs.ledger);
-            let Some(l) = guard.as_mut() else {
-                return refused(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "no submissions ledger is configured (JOBS_LEDGER), so nothing is submitted",
-                );
-            };
-            if l.blocking(&request).is_some() {
-                return refused(StatusCode::CONFLICT, json!({ "error": format!("{}: an earlier submission of it isn't reconciled yet", d.day), "submitted": submitted }).to_string());
-            }
-            if let Err(e) = l.append(ledger::Entry {
-                at: tinytrader_observe::unix_seconds(),
-                request: request.clone(),
-                state: "sending".into(),
-                job: None,
-                cost_usd: Some(d.cost_usd),
-                note: None,
-            }) {
-                return refused(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!(
-                        "could not write the submissions ledger, so {} wasn't submitted: {e}",
-                        d.day
-                    ),
-                );
-            }
-        }
-        let params = SubmitJobParams::builder()
-            .dataset(&r.dataset)
-            .schema(schema)
-            .symbols(d.symbols.clone())
-            .stype_in(SType::RawSymbol)
-            .date_time_range(d.day..next)
-            .build();
-        let result = {
-            let mut db = jobs.db.lock().await;
-            db.batch().submit_job(&params).await
-        };
-        let (state, job, note) = match &result {
-            Ok(job) => ("submitted", Some(job.id.clone()), None),
-            Err(e) => ("uncertain", None, Some(brief(&e.to_string()))),
-        };
-        if let Some(l) = lock(&jobs.ledger).as_mut()
-            && let Err(e) = l.append(ledger::Entry {
-                at: tinytrader_observe::unix_seconds(),
-                request,
-                state: state.into(),
-                job: job.clone(),
-                cost_usd: Some(d.cost_usd),
-                note,
-            })
-        {
-            eprintln!("databento-jobs: cannot write the ledger: {e}");
-        }
-        match result {
-            Ok(job) => {
-                lock(&jobs.follow).insert(job.id.clone());
-                jobs.events.push(
-                    format!(
-                        "submitted {} ({} {} {} contracts of {} on {}, ${:.2})",
-                        job.id,
-                        r.dataset,
-                        schema.as_str(),
-                        d.symbols.len(),
-                        r.symbol,
-                        d.day,
-                        d.cost_usd
-                    ),
-                    json!({ "job": job.id, "cost_usd": d.cost_usd }).to_string(),
-                );
-                submitted.push(json!({ "day": d.day.to_string(), "job": job.id, "contracts": d.symbols.len(), "cost_usd": d.cost_usd }));
-            }
-            Err(e) => {
-                return refused(StatusCode::BAD_GATEWAY, json!({ "error": format!("{}: submission failed or its outcome is unknown ({e}); nothing after it was submitted; check the jobs list", d.day), "submitted": submitted }).to_string());
-            }
-        }
-    }
-    reply_ok(json!({ "submitted": submitted, "cost_usd": now }))
-}
-
-async fn price(AxState(jobs): AxState<Shared>, Json(request): Json<Request>) -> Reply {
-    let checked = match request.check() {
-        Ok(c) => c,
-        Err(e) => return refused(StatusCode::BAD_REQUEST, e),
-    };
-    let mut warnings = match availability(&jobs, &checked).await {
-        Ok(w) => w,
-        Err(e) => return refused(StatusCode::BAD_REQUEST, e),
-    };
-    // What's had already; submitting refuses it, so say so now.
-    let (held, prior) = match had(&jobs, &checked).await {
-        Ok((h, (live, gone))) => (h, [live, gone].concat()),
-        Err(e) => {
-            warnings.push(format!(
-                "couldn't check what's held already ({e}); submitting will refuse until it can"
-            ));
-            (Vec::new(), Vec::new())
-        }
-    };
-    if !held.is_empty() {
-        warnings.push(format!(
-            "the store already holds {} of these days ({}); request only the others (for an option parent, /price-missing buys only the contracts not held)",
-            held.len(),
-            held.join(", ")
-        ));
-    }
-    if !prior.is_empty() {
-        warnings.push(format!("overlaps earlier purchases: {}", prior.join("; ")));
-    }
-    let (usd, bytes) = match cost(&jobs, &checked).await {
-        Ok(c) => c,
-        Err(e) => return refused(StatusCode::BAD_GATEWAY, e),
-    };
-    let id = format!("q{}", jobs.next_quote.fetch_add(1, Ordering::Relaxed));
-    let mut quotes = lock(&jobs.quotes);
-    quotes.retain(|_, q| q.at.elapsed() < QUOTE_TTL);
-    quotes.insert(
-        id.clone(),
-        Quote {
-            request,
-            cost_usd: usd,
-            at: Instant::now(),
-        },
-    );
-    (
-        StatusCode::OK,
-        Json(
-            json!({ "quote": id, "warnings": warnings, "cost_usd": usd, "billable_bytes": bytes, "valid_seconds": QUOTE_TTL.as_secs(), "held_days": held, "bought": prior }),
-        ),
-    )
+/// Write a step of `request` to the ledger.
+fn write_step(
+    jobs: &Jobs,
+    request: &str,
+    state: &str,
+    job: Option<String>,
+    cost_usd: f64,
+    note: Option<String>,
+) -> Result<(), String> {
+    lock(&jobs.ledger)
+        .as_mut()
+        .ok_or_else(|| NO_LEDGER.to_owned())?
+        .append(ledger::Entry {
+            at: tinytrader_observe::unix_seconds(),
+            request: request.to_owned(),
+            state: state.into(),
+            job,
+            cost_usd: Some(cost_usd),
+            note,
+            ..ledger::Entry::default()
+        })
 }
 
 #[derive(Deserialize)]
 struct Submit {
     quote: String,
     confirm_usd: Option<f64>,
-    /// Buy again what overlaps an earlier purchase (one never filed, such as
-    /// an expired job). Days the store holds are never bought again.
+    /// When given, exactly the jobs the quote named in `again`.
     #[serde(default)]
-    again: bool,
+    again: Option<Value>,
+    /// Who approved a paid purchase (the console's login).
+    #[serde(default)]
+    approved_by: Option<String>,
 }
 
-async fn submit(AxState(jobs): AxState<Shared>, Json(s): Json<Submit>) -> Reply {
+/// The job IDs `again` names; a blanket `true` is refused.
+fn again_ids(v: Option<&Value>) -> Result<HashSet<String>, Reply> {
+    let refuse = || {
+        refused(
+            StatusCode::BAD_REQUEST,
+            "\"again\" names the expired jobs this buys again, as [\"OPRA-…\"]; a blanket true is no longer accepted (decision 0019)",
+        )
+    };
+    match v {
+        None | Some(Value::Null | Value::Bool(false)) => Ok(HashSet::new()),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|x| x.as_str().map(str::to_owned).ok_or_else(refuse))
+            .collect(),
+        Some(_) => Err(refuse()),
+    }
+}
+
+/// Submit a quote's requests. It runs to its end even if the caller goes
+/// away, so a purchase is never left half-written.
+async fn submit(
+    AxState(jobs): AxState<Shared>,
+    headers: axum::http::HeaderMap,
+    Json(s): Json<Submit>,
+) -> Reply {
+    let approval = approval(&jobs, &headers, s.approved_by.as_deref());
+    tokio::spawn(submit_quote(jobs, s, approval))
+        .await
+        .unwrap_or_else(|e| refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply {
+    let again = match s
+        .again
+        .as_ref()
+        .filter(|a| !a.is_null())
+        .map(|a| again_ids(Some(a)))
+        .transpose()
+    {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
     // A quote is used once, whatever happens next.
-    let Some(quote) = lock(&jobs.quotes).remove(&s.quote) else {
-        return refused(
-            StatusCode::CONFLICT,
-            "that price has expired or was already used; price the request again",
-        );
-    };
-    if quote.at.elapsed() >= QUOTE_TTL {
-        return refused(
-            StatusCode::CONFLICT,
-            "that price has expired; price the request again",
-        );
-    }
-    let Ok(checked) = quote.request.check() else {
-        return refused(StatusCode::BAD_REQUEST, "the request is no longer valid");
-    };
-    // Never buy what's had already, and never when that can't be checked.
-    match had(&jobs, &checked).await {
-        Err(e) => {
-            return refused(
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("couldn't check what's held already, so nothing is submitted: {e}"),
-            );
-        }
-        Ok((held, _)) if !held.is_empty() => {
-            return refused(
-                StatusCode::CONFLICT,
-                format!(
-                    "the store already holds {} of these days ({}); request only the others (for an option parent, /price-missing buys only the contracts not held)",
-                    held.len(),
-                    held.join(", ")
-                ),
-            );
-        }
-        Ok((_, (live, _))) if !live.is_empty() => {
-            return refused(
-                StatusCode::CONFLICT,
-                format!(
-                    "already bought and on Databento's servers: {}",
-                    live.join("; ")
-                ),
-            );
-        }
-        Ok((_, (_, gone))) if !gone.is_empty() && !s.again => {
-            return refused(
-                StatusCode::CONFLICT,
-                format!(
-                    "this overlaps earlier purchases that are no longer on Databento's list: {}. If they were never filed, submit with \"again\": true to buy them again",
-                    gone.join("; ")
-                ),
-            );
-        }
-        Ok(_) => {}
-    }
-    let (now, _) = match cost(&jobs, &checked).await {
-        Ok(c) => c,
-        Err(e) => {
-            return refused(
-                StatusCode::BAD_GATEWAY,
-                format!("could not price it again: {e}"),
-            );
+    let quote = {
+        let mut quotes = lock(&jobs.quotes);
+        match quotes.get(&s.quote) {
+            None => {
+                return refused(
+                    StatusCode::CONFLICT,
+                    "that price has expired, was declined or was already used; price the request again",
+                );
+            }
+            Some(q) if q.result.is_none() => {
+                return refused(StatusCode::CONFLICT, "that request is still being priced");
+            }
+            // A paid one is used up only by an approved, confirmed submission.
+            Some(Quote {
+                result: Some(Ok(p)),
+                ..
+            }) if p.cost_usd != 0.0 => {
+                let quoted = p.cost_usd;
+                if let Some(refusal) = approval {
+                    return refusal;
+                }
+                if !quoted.is_finite() || s.confirm_usd.is_none_or(|c| (c - quoted).abs() > 1e-9) {
+                    return refused(
+                        StatusCode::PRECONDITION_REQUIRED,
+                        format!("this costs ${quoted:.2}; confirm that amount to submit it"),
+                    );
+                }
+                quotes.remove(&s.quote).expect("just found")
+            }
+            Some(_) => quotes.remove(&s.quote).expect("just found"),
         }
     };
-    if (now - quote.cost_usd).abs() > 1e-9 {
+    let priced = match quote.result {
+        _ if quote.expired() => {
+            return refused(
+                StatusCode::CONFLICT,
+                "that price has expired; price the request again",
+            );
+        }
+        Some(Ok(ref p)) => p,
+        _ => return refused(StatusCode::CONFLICT, "that request couldn't be priced"),
+    };
+    if again.is_some_and(|a| a != quote.again) {
         return refused(
             StatusCode::CONFLICT,
             format!(
-                "the price changed from ${:.2} to ${now:.2}; price the request again",
-                quote.cost_usd
+                "\"again\" must name exactly the jobs the quote named ({}); price it again",
+                json!(quote.again)
             ),
         );
     }
-    if let Some(r) = paused(now) {
-        return r;
-    }
-    if now > 0.0 && s.confirm_usd.is_none_or(|c| (c - now).abs() > 1e-9) {
+    if priced.parts.is_empty() {
         return refused(
-            StatusCode::PRECONDITION_REQUIRED,
-            format!("this request costs ${now:.2}; confirm that amount to submit it"),
+            StatusCode::CONFLICT,
+            format!("nothing to buy: {}", priced.notes.join("; ")),
         );
     }
-    // Written down before it is sent; refused if the same request may
-    // already have gone through and isn't reconciled yet.
-    let request = ledger::fingerprint(
-        &checked.dataset,
-        checked.schema.as_str(),
-        &checked.symbols,
-        &checked.start.to_string(),
-        &checked.end.to_string(),
-    );
-    {
-        let mut guard = lock(&jobs.ledger);
-        let Some(l) = guard.as_mut() else {
+    // One purchase at a time, from the last check to the ledger's last word.
+    let _turn = jobs.purchase.lock().await;
+    if lock(&jobs.ledger).is_none() {
+        return refused(StatusCode::SERVICE_UNAVAILABLE, NO_LEDGER);
+    }
+    // Plan again: what's held, pending, bought and priced may have changed.
+    let a = &quote.request;
+    let counts = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let parts = match plan(&jobs, a, &quote.again, true, &counts).await {
+        Ok((parts, _)) => parts,
+        Err((_, e)) => {
             return refused(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "no submissions ledger is configured (JOBS_LEDGER), so nothing is submitted",
+                format!("couldn't plan it again, so nothing is submitted: {e}"),
             );
+        }
+    };
+    let now = price_of(&parts);
+    let same = parts.len() == priced.parts.len()
+        && parts.iter().zip(&priced.parts).all(|(x, y)| x.same(y));
+    if !same {
+        return refused(
+            StatusCode::CONFLICT,
+            format!(
+                "what's missing or its price changed (now ${now:.2} for {} requests); price it again",
+                parts.len()
+            ),
+        );
+    }
+    if let Some(r) = check_price(now, priced.cost_usd, s.confirm_usd, approval) {
+        return r;
+    }
+    let by = s.approved_by.as_deref().map(str::trim);
+    let mut submitted = Vec::new();
+    for p in &parts {
+        let request = ledger::fingerprint(
+            &a.dataset,
+            a.schema.as_str(),
+            &p.symbols,
+            &had::stamp(p.window.0),
+            &had::stamp(p.window.1),
+        );
+        // A paid purchase: who approved it, before anything is sent.
+        let written = if now == 0.0 {
+            Ok(())
+        } else {
+            lock(&jobs.ledger)
+                .as_mut()
+                .ok_or_else(|| NO_LEDGER.to_owned())
+                .and_then(|l| {
+                    l.append(ledger::Entry {
+                        at: tinytrader_observe::unix_seconds(),
+                        request: request.clone(),
+                        state: "approved".into(),
+                        cost_usd: Some(p.cost_usd),
+                        by: by.map(str::to_owned),
+                        quote: Some(s.quote.clone()),
+                        ..ledger::Entry::default()
+                    })
+                })
+        }
+        .and_then(|()| write_step(&jobs, &request, "sending", None, p.cost_usd, None));
+        if let Err(e) = written {
+            return refused(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("could not write the submissions ledger, so the request for {} wasn't submitted: {e}", p.day), "submitted": submitted }).to_string());
+        }
+        let params = SubmitJobParams::builder()
+            .dataset(&a.dataset)
+            .schema(a.schema)
+            .symbols(p.symbols.clone())
+            .stype_in(p.stype)
+            .date_time_range((had::at(p.window.0), had::at(p.window.1)))
+            .build();
+        let result = jobs.db.submit(&params).await;
+        let (state, job, note) = match &result {
+            Ok(job) => ("submitted", Some(job.id.clone()), None),
+            Err(e) => ("uncertain", None, Some(brief(e))),
         };
-        if let Some(b) = l.blocking(&request) {
+        if let Err(e) = write_step(&jobs, &request, state, job, p.cost_usd, note) {
+            // Unwritten, the "sending" step still blocks what it overlaps.
+            eprintln!("databento-jobs: cannot write the ledger: {e}");
+        }
+        let what = if p.whole {
+            a.symbol.clone()
+        } else {
+            format!("{} contracts of {}", p.symbols.len(), a.symbol)
+        };
+        match result {
+            Ok(job) => {
+                lock(&jobs.follow).insert(job.id.clone());
+                jobs.events.push(
+                    format!(
+                        "submitted {} ({} {} {what}, {} to {}, ${:.2})",
+                        job.id,
+                        a.dataset,
+                        a.schema.as_str(),
+                        p.day,
+                        p.last,
+                        p.cost_usd
+                    ),
+                    json!({ "job": job.id, "cost_usd": p.cost_usd }).to_string(),
+                );
+                let mut row = p.to_json();
+                row["job"] = json!(job.id);
+                submitted.push(row);
+            }
+            Err(e) => {
+                return refused(StatusCode::BAD_GATEWAY, json!({ "error": format!("{what} from {}: submission failed or its outcome is unknown ({e}); it blocks what it overlaps until it shows on Databento's job list or is resolved (POST /ledger/resolve); nothing after it was submitted", p.day), "submitted": submitted }).to_string());
+            }
+        }
+    }
+    reply_ok(json!({ "submitted": submitted, "cost_usd": now }))
+}
+
+#[derive(Deserialize)]
+struct Resolve {
+    /// The request's fingerprint, as in the ledger.
+    request: String,
+    /// When its unresolved step was written, as in the ledger.
+    at: f64,
+    /// The job it made, or `null` for none.
+    job: Option<String>,
+    note: String,
+}
+
+/// How long after a submission was sent the operator may say it was never
+/// made, and then only once a full read of the job list since hasn't found
+/// it.
+const WRITE_OFF_AFTER: f64 = 30.0 * 60.0;
+
+/// The operator's word on a submission whose outcome isn't known: the job it
+/// made (`submitted`), or none (`not-submitted`). Only a request's latest
+/// step, if unresolved, can be resolved. A job must be on Databento's list,
+/// for the same dataset and schema, and not another submission's. None only
+/// once the submission is [`WRITE_OFF_AFTER`] old and a complete read of the
+/// job list begun after that didn't find it.
+async fn resolve(AxState(jobs): AxState<Shared>, Json(r): Json<Resolve>) -> Reply {
+    if r.note.trim().is_empty() {
+        return refused(StatusCode::BAD_REQUEST, "say how you know, in note");
+    }
+    let _turn = jobs.purchase.lock().await;
+    let Some((dataset, schema, _, _)) = had::parse_fingerprint(&r.request) else {
+        return refused(StatusCode::BAD_REQUEST, "that isn't a request fingerprint");
+    };
+    if let Some(id) = &r.job {
+        let listed = match jobs.db.list_jobs(&api::every_job()).await {
+            Ok(l) => l,
+            Err(e) => {
+                return refused(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Databento's job list: {e}"),
+                );
+            }
+        };
+        if !listed.iter().any(|j| &j.id == id) {
+            return refused(
+                StatusCode::CONFLICT,
+                format!("{id} isn't on Databento's job list"),
+            );
+        }
+        let known = lock(&jobs.details).get(id).cloned();
+        let job = match known {
+            Some(j) => j,
+            None => match jobs.db.job(id).await {
+                Ok(j) => j,
+                Err(e) => {
+                    return refused(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        format!("Databento's job {id}: {e}"),
+                    );
+                }
+            },
+        };
+        if !job.dataset.eq_ignore_ascii_case(&dataset) || job.schema.as_str() != schema {
             return refused(
                 StatusCode::CONFLICT,
                 format!(
-                    "this exact request was submitted at {} and its outcome isn't known yet; it is being checked against Databento's job list (up to 10 minutes), so it isn't submitted again",
-                    tinytrader_schedule::describe((b.at * 1e9) as u64)
+                    "{id} is {} {}, not this request's dataset and schema",
+                    job.dataset,
+                    job.schema.as_str()
                 ),
             );
         }
-        if let Err(e) = l.append(ledger::Entry {
-            at: tinytrader_observe::unix_seconds(),
-            request: request.clone(),
-            state: "sending".into(),
-            job: None,
-            cost_usd: Some(now),
-            note: None,
-        }) {
+    }
+    let mut guard = lock(&jobs.ledger);
+    let Some(l) = guard.as_mut() else {
+        return refused(StatusCode::SERVICE_UNAVAILABLE, NO_LEDGER);
+    };
+    let Some(e) = l
+        .unresolved_step(&r.request)
+        .filter(|e| (e.at - r.at).abs() < 1e-6)
+        .cloned()
+    else {
+        return refused(
+            StatusCode::NOT_FOUND,
+            "no unresolved submission of that request at that time",
+        );
+    };
+    match &r.job {
+        Some(id) if l.submitted().contains(id) => {
             return refused(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("could not write the submissions ledger, so nothing was submitted: {e}"),
+                StatusCode::CONFLICT,
+                format!("{id} is already another submission's job"),
             );
         }
-    }
-    let params = SubmitJobParams::builder()
-        .dataset(&checked.dataset)
-        .schema(checked.schema)
-        .symbols(checked.symbols.clone())
-        .stype_in(checked.stype_in)
-        .date_time_range(checked.start..checked.end)
-        .build();
-    let submitted = {
-        let mut db = jobs.db.lock().await;
-        db.batch().submit_job(&params).await
-    };
-    match submitted {
-        Ok(job) => {
-            if let Some(l) = lock(&jobs.ledger).as_mut()
-                && let Err(e) = l.append(ledger::Entry {
-                    at: tinytrader_observe::unix_seconds(),
-                    request: request.clone(),
-                    state: "submitted".into(),
-                    job: Some(job.id.clone()),
-                    cost_usd: Some(now),
-                    note: None,
-                })
-            {
-                // The job exists; reconciliation will record it from the job list.
-                eprintln!(
-                    "databento-jobs: cannot write the ledger after submitting {}: {e}",
-                    job.id
+        Some(_) => {}
+        None => {
+            let after = l.attempt_at(&e) + WRITE_OFF_AFTER;
+            let now = tinytrader_observe::unix_seconds();
+            let checked = lock(&jobs.checked_at).is_some_and(|t| t >= after);
+            if now < after || !checked {
+                return refused(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "it can be written off as never made only after {} and a complete read of Databento's job list begun after then (every 30 s or so) that doesn't find it",
+                        tinytrader_schedule::describe((after * 1e9) as u64)
+                    ),
                 );
             }
-            lock(&jobs.follow).insert(job.id.clone());
-            let text = format!(
-                "submitted {} ({} {} {}, ${now:.2})",
-                job.id,
-                checked.dataset,
-                checked.schema.as_str(),
-                checked.symbols.join(",")
-            );
-            jobs.events
-                .push(text, json!({ "job": job.id, "cost_usd": now }).to_string());
-            (
-                StatusCode::OK,
-                Json(json!({ "job": job.id, "cost_usd": now })),
-            )
-        }
-        Err(e) => {
-            if let Some(l) = lock(&jobs.ledger).as_mut() {
-                // Unwritten, the "sending" step still blocks a resubmission.
-                if let Err(w) = l.append(ledger::Entry {
-                    at: tinytrader_observe::unix_seconds(),
-                    request: request.clone(),
-                    state: "uncertain".into(),
-                    job: None,
-                    cost_usd: Some(now),
-                    note: Some(brief(&e.to_string())),
-                }) {
-                    eprintln!("databento-jobs: cannot write the ledger: {w}");
-                }
-            }
-            jobs.events
-                .push(format!("submission failed: {e}"), e.to_string());
-            refused(
-                StatusCode::BAD_GATEWAY,
-                format!(
-                    "submission failed or its outcome is unknown ({e}); check the jobs list before submitting again"
-                ),
-            )
         }
     }
+    let state = if r.job.is_some() {
+        "submitted"
+    } else {
+        "not-submitted"
+    };
+    if let Err(err) = l.append(ledger::Entry {
+        at: tinytrader_observe::unix_seconds(),
+        request: e.request.clone(),
+        state: state.into(),
+        job: r.job.clone(),
+        cost_usd: e.cost_usd,
+        note: Some(format!("resolved by the operator: {}", r.note.trim())),
+        ..Default::default()
+    }) {
+        return refused(StatusCode::INTERNAL_SERVER_ERROR, err);
+    }
+    if let Some(j) = &r.job {
+        lock(&jobs.follow).insert(j.clone());
+    }
+    let text = format!("resolved a submission: {state} ({})", e.request);
+    jobs.events.push(text.clone(), text);
+    reply_ok(json!({ "request": e.request, "state": state, "job": r.job }))
 }
 
 async fn download(AxState(jobs): AxState<Shared>, UrlPath(job): UrlPath<String>) -> Reply {
-    let details = {
-        let mut db = jobs.db.lock().await;
-        db.batch().get_job_details(&job).await
-    };
+    let details = jobs.db.job(&job).await;
     match details {
         Ok(j) if j.state != JobState::Done => {
             return refused(StatusCode::CONFLICT, "the job isn't done yet");
@@ -1609,13 +2111,11 @@ fn start_download(jobs: &Shared, job: String) {
 
 /// Stream every file of a done job into the store, then have it filed.
 async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
-    let files = {
-        let mut db = jobs.db.lock().await;
-        db.batch()
-            .list_files(job)
-            .await
-            .map_err(|e| format!("list files: {e}"))?
-    };
+    let files = jobs
+        .db
+        .files(job)
+        .await
+        .map_err(|e| format!("list files: {e}"))?;
     // What the store already has of this batch (verified on arrival).
     let incoming: Value = jobs
         .http
@@ -1767,15 +2267,17 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
 /// What the store can take before its writable volumes reach the critical
 /// threshold, in bytes: across them all, and on the roomiest one.
 async fn room(jobs: &Jobs) -> Result<(u64, u64), String> {
-    let c: Value = jobs
+    let r = jobs
         .http
         .get(format!("{}/catalog", jobs.store))
+        .timeout(Duration::from_secs(120))
         .send()
         .await
-        .map_err(|e| format!("store: {e}"))?
-        .json()
-        .await
         .map_err(|e| format!("store: {e}"))?;
+    if !r.status().is_success() {
+        return Err(format!("the store's catalog: HTTP {}", r.status()));
+    }
+    let c: Value = r.json().await.map_err(|e| format!("store: {e}"))?;
     let critical = c["thresholds"]["critical"].as_f64().unwrap_or(90.0) / 100.0;
     Ok(c["roots"]
         .as_array()
@@ -1892,85 +2394,11 @@ async fn copy(
 mod tests {
     use super::*;
 
-    #[test]
-    fn finds_the_days_the_store_holds_for_the_same_dataset_symbol_and_schema() {
-        let catalog = json!({ "roots": [
-            { "datasets": [
-                { "id": "OPRA.PILLAR", "symbol": "SPY.OPT", "schemas": { "cmbp-1": { "days": { "2025-10-01": 1, "2025-10-03": 1 } } } },
-                { "id": "OPRA.PILLAR", "symbol": "QQQ.OPT", "schemas": { "cmbp-1": { "days": { "2025-10-02": 1 } } } },
-            ] },
-            { "datasets": [
-                { "id": "OPRA.PILLAR", "symbol": "SPY.OPT", "schemas": { "definition": { "days": { "2025-10-02": 1 } }, "cmbp-1": { "days": { "2025-10-03": 1, "2025-10-09": 1 } } } },
-            ] },
-        ] });
-        let c = req("SPY.OPT", "2025-10-01", "2025-10-05").check().unwrap();
-        assert_eq!(held_days(&catalog, &c), vec!["2025-10-01", "2025-10-03"]);
-        let none = req("SPY.OPT", "2025-10-04", "2025-10-05").check().unwrap();
-        assert!(held_days(&catalog, &none).is_empty());
-    }
-
-    #[test]
-    fn finds_overlapping_purchases_in_the_ledger_and_on_databentos_list() {
-        let entry = |start: &str, end: &str| ledger::Entry {
-            at: 1.0,
-            request: ledger::fingerprint("OPRA.PILLAR", "cmbp-1", &["SPY.OPT".into()], start, end),
-            state: "submitted".into(),
-            job: Some(format!("OPRA-{start}")),
-            cost_usd: Some(1.0),
-            note: None,
-        };
-        // End exclusive, as submitted: Oct 1-2 and Oct 10.
-        let purchases = vec![
-            entry("2025-10-01", "2025-10-03"),
-            entry("2025-10-10", "2025-10-11"),
-        ];
-        let at = |d: &str| {
-            time::Date::parse(d, time::macros::format_description!("[year]-[month]-[day]"))
-                .unwrap()
-                .midnight()
-                .assume_utc()
-                .unix_timestamp()
-        };
-        let listed = json!({ "jobs": [
-            { "id": "OPRA-X", "state": "done", "dataset": "OPRA.PILLAR", "schema": "cmbp-1", "symbols": "SPY.OPT", "start": at("2025-10-05"), "end": at("2025-10-06") },
-            { "id": "OPRA-OLD", "state": "expired", "dataset": "OPRA.PILLAR", "schema": "cmbp-1", "symbols": "SPY.OPT", "start": at("2025-10-04"), "end": at("2025-10-05") },
-            { "id": "OPRA-Q", "state": "done", "dataset": "OPRA.PILLAR", "schema": "cmbp-1", "symbols": "QQQ.OPT", "start": at("2025-10-04"), "end": at("2025-10-05") },
-        ] });
-        let ids = |c: &Checked| {
-            let (live, gone) = bought(&purchases, &listed, c);
-            [live, gone]
-                .concat()
-                .iter()
-                .map(|l| l.split(' ').next().unwrap().to_owned())
-                .collect::<Vec<_>>()
-        };
-        // On Databento's servers (here done, waiting to download): always
-        // refused. In the ledger only (its job gone from the list): may be
-        // bought again.
-        let (live, gone) = bought(
-            &purchases,
-            &listed,
-            &req("SPY.OPT", "2025-10-02", "2025-10-05").check().unwrap(),
-        );
-        assert_eq!((live.len(), gone.len()), (1, 1));
-        assert!(live[0].starts_with("OPRA-X") && gone[0].starts_with("OPRA-2025-10-01"));
-        // The day after a purchase ends doesn't overlap it; nor do expired jobs or other symbols.
-        assert!(ids(&req("SPY.OPT", "2025-10-03", "2025-10-04").check().unwrap()).is_empty());
-        assert_eq!(
-            ids(&req("SPY.OPT", "2025-10-10", "2025-10-10").check().unwrap()),
-            vec!["OPRA-2025-10-10"]
-        );
-    }
-
-    fn req(symbols: &str, start: &str, end: &str) -> Request {
-        Request {
-            dataset: "OPRA.PILLAR".into(),
-            schema: "cmbp-1".into(),
-            symbols: symbols.into(),
-            stype_in: "parent".into(),
-            start: start.into(),
-            end: end.into(),
-        }
+    fn req(symbol: &str, start: &str, end: &str) -> PriceRequest {
+        serde_json::from_value(json!({
+            "dataset": "OPRA.PILLAR", "schema": "cmbp-1", "symbol": symbol, "start": start, "end": end,
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -1980,11 +2408,19 @@ mod tests {
             (c.start.to_string(), c.end.to_string()),
             ("2025-10-01".into(), "2025-10-02".into())
         );
+        assert_eq!((c.stype, c.symbol.as_str()), (SType::Parent, "SPX.OPT"));
+        assert_eq!(
+            req("TSLA", "2025-10-01", "2025-10-01")
+                .check()
+                .unwrap()
+                .stype,
+            SType::RawSymbol
+        );
     }
 
     #[test]
     fn refuses_requests_without_symbols_or_backwards() {
-        assert!(req(" , ", "2025-10-01", "2025-10-01").check().is_err());
+        assert!(req(" ", "2025-10-01", "2025-10-01").check().is_err());
         assert!(req("SPX.OPT", "2025-10-02", "2025-10-01").check().is_err());
         assert!(
             req("SPY.OPT,QQQ.OPT", "2025-10-01", "2025-10-01")
@@ -1992,24 +2428,83 @@ mod tests {
                 .is_err()
         );
         assert!(
-            Request {
-                schema: "nope".into(),
-                ..req("SPX.OPT", "2025-10-01", "2025-10-01")
-            }
-            .check()
-            .is_err()
+            req("SPX.OPT", "2020-01-01", "2025-10-01").check().is_err(),
+            "too long"
         );
+        let with = |extra: Value| -> PriceRequest {
+            let mut v = serde_json::to_value(json!({ "dataset": "OPRA.PILLAR", "schema": "cmbp-1", "symbol": "SPY.OPT", "start": "2025-10-01", "end": "2025-10-03" })).unwrap();
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            serde_json::from_value(v).unwrap()
+        };
+        assert!(with(json!({ "schema": "nope" })).check().is_err());
+        assert!(
+            with(json!({ "contracts": { "2025-10-04": [] } }))
+                .check()
+                .is_err(),
+            "a day outside"
+        );
+        assert!(
+            with(json!({ "contracts": {}, "rule": {} }))
+                .check()
+                .is_err(),
+            "both"
+        );
+        assert!(
+            with(json!({ "symbol": "TSLA", "rule": {} }))
+                .check()
+                .is_err(),
+            "not an option parent"
+        );
+        assert!(
+            with(json!({ "hours": { "start": "16:00", "end": "09:30" } }))
+                .check()
+                .is_err()
+        );
+        assert!(with(json!({ "contracts": { "2025-10-02": [] }, "hours": { "start": "09:30", "end": "16:01" } })).check().is_ok());
+    }
+
+    #[test]
+    fn only_server_failures_are_priced_again() {
+        assert!(retryable("API error: 503 Service Unavailable busy"));
+        assert!(retryable("no answer from Databento in 60 s"));
+        assert!(retryable("HTTP error: reqwest::Error { kind: Request }"));
+        assert!(!retryable("API error: 400 Bad Request symbols"));
+        assert!(!retryable("API error: 422 Unprocessable Entity"));
     }
 }
 
 #[cfg(test)]
-mod paused_tests {
+mod price_check_tests {
+    use super::*;
+
     #[test]
     fn only_an_exact_zero_is_free() {
-        assert!(super::paused(0.0).is_none());
-        assert!(super::paused(-0.0).is_none());
-        for c in [0.01, 1e-12, -1.0, f64::NAN, f64::INFINITY] {
-            assert!(super::paused(c).is_some(), "{c} must be refused");
+        let no = || Some(refused(StatusCode::FORBIDDEN, "not approved"));
+        assert!(check_price(0.0, 0.0, None, no()).is_none());
+        assert!(check_price(-0.0, 0.0, None, no()).is_none());
+        for c in [0.01, 1e-12] {
+            assert_eq!(
+                check_price(c, c, Some(c), no()).unwrap().0,
+                StatusCode::FORBIDDEN,
+                "{c}"
+            );
+            assert!(
+                check_price(c, c, Some(c), None).is_none(),
+                "{c} approved and confirmed"
+            );
+            assert_eq!(
+                check_price(c, c, None, None).unwrap().0,
+                StatusCode::PRECONDITION_REQUIRED
+            );
+        }
+        for c in [-1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                check_price(c, c, Some(c), None).unwrap().0,
+                StatusCode::BAD_GATEWAY,
+                "{c}"
+            );
         }
     }
 }

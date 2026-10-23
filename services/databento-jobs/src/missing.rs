@@ -1,12 +1,12 @@
 //! Buying only what's missing (decision 0018, section 5): for each day of a
 //! request on an option parent (`SPY.OPT`), the contracts wanted (that day's
-//! definitions, filtered by a rule) less those the store holds and those in
-//! jobs on Databento's list, bought as one contract-list request per day.
+//! definitions, filtered by a rule) less what's had already (`had`), bought
+//! as contract-list requests per day.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use dbn::decode::{DbnMetadata as _, DecodeRecordRef as _};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Databento's limit on the symbols in one request.
@@ -95,47 +95,6 @@ pub fn wanted(defs: &[Contract], day: time::Date, rule: &Rule) -> BTreeSet<Strin
         .collect()
 }
 
-/// What a day needs, given what's wanted, the store's coverage of that day
-/// (from `GET /coverage`: none, complete, or partial with contracts), and
-/// the contract lists of jobs on Databento's list for that day (`None` in the
-/// list: a job for the whole parent).
-#[must_use]
-pub fn to_buy(
-    wanted: &BTreeSet<String>,
-    held: Option<&Value>,
-    pending: &[Option<BTreeSet<String>>],
-) -> (BTreeSet<String>, usize, usize) {
-    let all = wanted.len();
-    if held.is_some_and(|h| h["kind"] == "complete") {
-        return (BTreeSet::new(), all, 0);
-    }
-    let held: BTreeSet<&str> = held
-        .map(|h| {
-            h["coverage"]["symbols"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut rest: BTreeSet<String> = wanted
-        .iter()
-        .filter(|s| !held.contains(s.as_str()))
-        .cloned()
-        .collect();
-    let after_held = rest.len();
-    if pending.iter().any(Option::is_none) {
-        rest.clear();
-    }
-    for p in pending.iter().flatten() {
-        rest.retain(|s| !p.contains(s));
-    }
-    let skipped_held = all - after_held;
-    let skipped_pending = after_held - rest.len();
-    (rest, skipped_held, skipped_pending)
-}
-
 /// The option parent (`SPY.OPT`) whose contracts these all are, if they are
 /// all OCC symbols of one root.
 #[must_use]
@@ -148,24 +107,114 @@ pub fn parent_of(symbols: &[String]) -> Option<String> {
         .then(|| format!("{first}.OPT"))
 }
 
-/// A day's line in a quote.
+/// Wanted hours of each day, in a named time zone's wall clock. Only
+/// `America/New_York` (daylight saving from the second Sunday in March to the
+/// first Sunday in November).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Hours {
+    /// `HH:MM`.
+    pub start: String,
+    /// `HH:MM`, exclusive.
+    pub end: String,
+    #[serde(default = "new_york")]
+    pub tz: String,
+}
+
+fn new_york() -> String {
+    "America/New_York".into()
+}
+
+fn hm(s: &str) -> Option<(i64, i64)> {
+    let (h, m) = s.trim().split_once(':')?;
+    let (h, m) = (h.parse().ok()?, m.parse().ok()?);
+    ((0..=24).contains(&h) && (0..60).contains(&m) && (h, m) <= (24, 0)).then_some((h, m))
+}
+
+impl Hours {
+    /// # Errors
+    /// If the zone isn't New York's, or the times aren't `HH:MM`, start
+    /// before end.
+    pub fn check(&self) -> Result<(), String> {
+        if self.tz != "America/New_York" {
+            return Err(format!(
+                "hours in {} aren't supported; use America/New_York",
+                self.tz
+            ));
+        }
+        match (hm(&self.start), hm(&self.end)) {
+            (Some(a), Some(b)) if a < b => Ok(()),
+            _ => Err(format!(
+                "hours {}..{} aren't HH:MM with the start before the end",
+                self.start, self.end
+            )),
+        }
+    }
+
+    #[must_use]
+    /// The hours on `day`, in UTC, with the offset in force at each end (an
+    /// end in the hour repeated in November is its second occurrence, so
+    /// consecutive days tile).
+    pub fn window(&self, day: time::Date) -> crate::had::Window {
+        let at = |s: &str, later: bool| {
+            let (h, m) = hm(s).unwrap_or((0, 0));
+            tinytrader_schedule::ny_local_to_unix(
+                i64::from(day.year()),
+                i64::from(u8::from(day.month())),
+                i64::from(day.day()),
+                h,
+                m,
+                later,
+            ) * 1_000_000_000
+        };
+        (at(&self.start, false), at(&self.end, true))
+    }
+}
+
+/// A request in a quote: the whole symbol over a run of days (or one day's
+/// hours), or one day's missing contracts over the hours they still need.
 #[derive(Clone, Debug)]
-pub struct Day {
+pub struct Part {
     pub day: time::Date,
+    /// The last day, inclusive.
+    pub last: time::Date,
+    pub window: crate::had::Window,
+    /// The whole symbol (a parent, or a raw symbol), not a contract list.
+    pub whole: bool,
     pub symbols: Vec<String>,
+    pub stype: dbn::SType,
     pub cost_usd: f64,
     pub bytes: u64,
     pub skipped_held: usize,
     pub skipped_pending: usize,
 }
 
-impl Day {
+impl Part {
+    /// The same request (its price aside).
+    #[must_use]
+    pub fn same(&self, o: &Self) -> bool {
+        (self.day, self.last, self.window, self.whole, self.stype)
+            == (o.day, o.last, o.window, o.whole, o.stype)
+            && self.symbols == o.symbols
+    }
+
     #[must_use]
     pub fn to_json(&self) -> Value {
-        json!({
-            "day": self.day.to_string(), "contracts": self.symbols.len(), "cost_usd": self.cost_usd,
-            "billable_bytes": self.bytes, "skipped_held": self.skipped_held, "skipped_pending": self.skipped_pending,
-        })
+        use crate::had::{day_window, stamp};
+        let mut v = json!({
+            "kind": if self.whole { "whole" } else { "contracts" },
+            "first_day": self.day.to_string(), "last_day": self.last.to_string(),
+            "window": [stamp(self.window.0), stamp(self.window.1)],
+            "hours": self.window != (day_window(self.day).0, day_window(self.last).1),
+            "cost_usd": self.cost_usd, "billable_bytes": self.bytes,
+        });
+        if self.whole {
+            v["symbol"] = json!(self.symbols.first());
+        } else {
+            v["contracts"] = json!(self.symbols.len());
+            v["skipped_held"] = json!(self.skipped_held);
+            v["skipped_pending"] = json!(self.skipped_pending);
+        }
+        v
     }
 }
 
@@ -232,24 +281,105 @@ mod tests {
     }
 
     #[test]
-    fn subtracts_held_and_pending_contracts() {
-        let w: BTreeSet<String> = ["A", "B", "C", "D"].map(String::from).into();
-        let partial = json!({ "kind": "partial", "coverage": { "symbols": ["A", "B"] } });
-        let (rest, h, p) = to_buy(&w, Some(&partial), &[Some(["C".to_owned()].into())]);
-        assert_eq!((rest, h, p), (["D".to_owned()].into(), 2, 1));
-        let complete = json!({ "kind": "complete" });
-        assert!(to_buy(&w, Some(&complete), &[]).0.is_empty());
+    fn hours_follow_new_york_daylight_saving() {
+        let rth = Hours {
+            start: "09:30".into(),
+            end: "16:01".into(),
+            tz: new_york(),
+        };
+        assert!(rth.check().is_ok());
+        let at = |day: &str| {
+            let (a, b) = rth.window(d(day));
+            let t = |ns: i64| crate::had::stamp(ns);
+            (t(a), t(b))
+        };
+        let utc = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        // Daylight saving starts on the second Sunday of March (2026-03-08).
         assert_eq!(
-            to_buy(&w, None, &[None]),
-            (BTreeSet::new(), 0, 4),
-            "a whole-parent job pending covers the day, counted as pending"
+            at("2026-03-06"),
+            utc(
+                "2026-03-06T14:30:00.000000000Z",
+                "2026-03-06T21:01:00.000000000Z"
+            )
         );
         assert_eq!(
-            to_buy(&w, Some(&partial), &[None]),
-            (BTreeSet::new(), 2, 2),
-            "held contracts count as held, the rest as pending"
+            at("2026-03-08"),
+            utc(
+                "2026-03-08T13:30:00.000000000Z",
+                "2026-03-08T20:01:00.000000000Z"
+            )
         );
-        assert_eq!(to_buy(&w, None, &[]).0.len(), 4);
+        assert_eq!(
+            at("2026-03-09"),
+            utc(
+                "2026-03-09T13:30:00.000000000Z",
+                "2026-03-09T20:01:00.000000000Z"
+            )
+        );
+        // And ends on the first Sunday of November (2026-11-01).
+        assert_eq!(
+            at("2026-10-30"),
+            utc(
+                "2026-10-30T13:30:00.000000000Z",
+                "2026-10-30T20:01:00.000000000Z"
+            )
+        );
+        assert_eq!(
+            at("2026-11-01"),
+            utc(
+                "2026-11-01T14:30:00.000000000Z",
+                "2026-11-01T21:01:00.000000000Z"
+            )
+        );
+        assert_eq!(
+            at("2026-11-02"),
+            utc(
+                "2026-11-02T14:30:00.000000000Z",
+                "2026-11-02T21:01:00.000000000Z"
+            )
+        );
+        // A whole day, every day: they tile across both changes.
+        let all = Hours {
+            start: "00:00".into(),
+            end: "24:00".into(),
+            tz: new_york(),
+        };
+        for days in [
+            ["2026-03-07", "2026-03-08", "2026-03-09"],
+            ["2026-10-31", "2026-11-01", "2026-11-02"],
+        ] {
+            let w: Vec<_> = days.iter().map(|x| all.window(d(x))).collect();
+            assert_eq!((w[0].1, w[1].1), (w[1].0, w[2].0), "{days:?}");
+        }
+        let hours = |x: &str| {
+            let (a, b) = all.window(d(x));
+            (b - a) / 3_600_000_000_000
+        };
+        assert_eq!(
+            (
+                hours("2026-03-08"),
+                hours("2026-11-01"),
+                hours("2026-11-02")
+            ),
+            (23, 25, 24)
+        );
+        // 2022: March 13 and November 6.
+        assert_eq!(at("2022-03-11").0, "2022-03-11T14:30:00.000000000Z");
+        assert_eq!(at("2022-03-14").0, "2022-03-14T13:30:00.000000000Z");
+        assert_eq!(at("2022-11-04").0, "2022-11-04T13:30:00.000000000Z");
+        assert_eq!(at("2022-11-07").0, "2022-11-07T14:30:00.000000000Z");
+        for (s, e, tz) in [
+            ("16:00", "09:30", "America/New_York"),
+            ("9h", "10:00", "America/New_York"),
+            ("09:30", "16:00", "Europe/London"),
+        ] {
+            let h = Hours {
+                start: s.into(),
+                end: e.into(),
+                tz: tz.into(),
+            };
+            assert!(h.check().is_err(), "{s} {e} {tz}");
+        }
     }
 
     #[test]

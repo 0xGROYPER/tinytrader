@@ -55,8 +55,11 @@
 //!   store's write token, when the store requires one, sent with it.
 //! - `CONSOLE_JOBS`: the Databento jobs service, e.g. `http://databento-jobs:9121`
 //!   (optional). The one exception to read-only: `/api/jobs/...` is passed to
-//!   it, so the Data page can price, submit and download jobs. The jobs
-//!   service itself insists on an exact confirmation before any charge.
+//!   it, so the Data page can price, submit and download jobs. A paid
+//!   purchase needs a person's approval: `POST /api/job-quotes/{id}/approve`
+//!   (and `/decline`), behind the write gate and the order token as for a
+//!   live order, carry it with `CONSOLE_JOBS_APPROVE_TOKEN` (or `_FILE`),
+//!   the login and the quoted price.
 //! - `CONSOLE_QUEUE`: the job queue, e.g. `http://queue:9123` (optional;
 //!   decision 0012). `/api/queue/...` is passed to it, so the Queue widget
 //!   can add, edit and cancel jobs; the queue runs only its templates.
@@ -101,7 +104,7 @@
 //!   `GET /api/write-gate` says whether writes are on for the viewer.
 //!   The write routes are the order routes (those, and an account's flatten
 //!   and resume), the jobs service's and the queue's POST (and the queue's
-//!   PATCH) routes, drive approval, POST `/api/reminders` and `/api/profiles`,
+//!   PATCH) routes, a quote's approve and decline, drive approval, POST `/api/reminders` and `/api/profiles`,
 //!   PUT `/api/prefs/{key}`, and the journal's POST, PUT and DELETE. Their GET
 //!   routes stay open.
 //! - `CONSOLE_PAGE`: serve the page from this file, and its modules and
@@ -155,6 +158,9 @@ struct App {
     poller: Poller,
     /// The jobs service's base URL, and a client to reach it.
     jobs: Option<(String, reqwest::Client)>,
+    /// The token that carries a person's approval of a paid purchase to the
+    /// jobs service (`CONSOLE_JOBS_APPROVE_TOKEN` or `_FILE`).
+    jobs_approve_token: Option<String>,
     /// The job queue's base URL, and a client to reach it.
     queue: Option<(String, reqwest::Client)>,
     /// The store's base URL, for approving drives.
@@ -264,6 +270,12 @@ async fn main() {
             .ok()
             .filter(|s| !s.is_empty())
             .map(|u| (u.trim_end_matches('/').to_owned(), reqwest::Client::new())),
+        // Unreadable, approving purchases is off; the console still starts.
+        jobs_approve_token: tinytrader_observe::optional_secret("CONSOLE_JOBS_APPROVE_TOKEN")
+            .unwrap_or_else(|e| {
+                eprintln!("console: {e}");
+                None
+            }),
         queue: std::env::var("CONSOLE_QUEUE")
             .ok()
             .filter(|s| !s.is_empty())
@@ -878,6 +890,114 @@ async fn pass(
     }
 }
 
+/// Approve a paid Databento purchase: a person's yes, carried to the jobs
+/// service's `/submit` with the console's approval token, the login as
+/// `approved_by`, and the price the page showed (`confirm_usd`, which the
+/// jobs service must find exact) and its `again`. Behind the write gate, and
+/// the order token as for a live order (unless `CONSOLE_LIVE_NEEDS_TOKEN` is
+/// `false`).
+async fn job_quote_approve(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if app.jobs.is_none() {
+        return no_jobs();
+    }
+    if let Some(refusal) = refused_for(&app, &headers, app.gate.live_token) {
+        return refusal;
+    }
+    let (login, _) = app.gate.login_and_token(&headers);
+    let ask: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    let Some(usd) = ask["confirm_usd"].as_f64() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": "confirm the quoted price (confirm_usd)" })),
+        )
+            .into_response();
+    };
+    let mut submit = json!({ "quote": id, "confirm_usd": usd, "approved_by": login });
+    if let Some(again) = ask.get("again").filter(|a| !a.is_null()) {
+        submit["again"] = again.clone();
+    }
+    // A purchase of many requests takes a while; the jobs service finishes
+    // it even if this answer is given up on.
+    to_jobs(
+        &app,
+        &id,
+        axum::http::Method::POST,
+        "submit",
+        Some(submit),
+        1800,
+    )
+    .await
+}
+
+/// Decline a quote: the jobs service drops it, so it can't be bought.
+async fn job_quote_decline(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if app.jobs.is_none() {
+        return no_jobs();
+    }
+    if let Some(refusal) = refused_for(&app, &headers, app.gate.live_token) {
+        return refusal;
+    }
+    let path = format!("quotes/{id}");
+    to_jobs(&app, &id, axum::http::Method::DELETE, &path, None, 30).await
+}
+
+fn no_jobs() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        axum::Json(json!({ "error": "no jobs service configured" })),
+    )
+        .into_response()
+}
+
+/// A call to the jobs service carrying the approval token, its answer passed back.
+async fn to_jobs(
+    app: &App,
+    id: &str,
+    method: axum::http::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    wait: u64,
+) -> Response {
+    let fail =
+        |code: StatusCode, e: String| (code, axum::Json(json!({ "error": e }))).into_response();
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return fail(StatusCode::BAD_REQUEST, "that isn't a quote".into());
+    }
+    let Some((base, http)) = &app.jobs else {
+        return no_jobs();
+    };
+    let Some(token) = &app.jobs_approve_token else {
+        return fail(
+            StatusCode::FORBIDDEN,
+            "approving purchases is off: the console has no approval token for the jobs service (CONSOLE_JOBS_APPROVE_TOKEN)".into(),
+        );
+    };
+    let mut req = http
+        .request(method, format!("{base}/{path}"))
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(wait));
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    match req.send().await {
+        Ok(r) => {
+            let code = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let bytes = r.bytes().await.unwrap_or_default();
+            no_store((code, [(header::CONTENT_TYPE, "application/json")], bytes))
+        }
+        Err(e) => fail(StatusCode::BAD_GATEWAY, format!("jobs service: {e}")),
+    }
+}
+
 /// Approve a drive for the store: the one store call the console passes on.
 async fn store_approve(AxumState(app): AxumState<Arc<App>>, body: axum::body::Bytes) -> Response {
     let Some(base) = &app.store else {
@@ -1458,7 +1578,19 @@ fn write_routes(gate: WriteGate) -> Router<Arc<App>> {
             "/api/accounts/{account}/resume",
             axum::routing::post(account_resume),
         )
-        .route("/api/jobs/{*rest}", axum::routing::post(jobs_proxy))
+        .route(
+            "/api/jobs/{*rest}",
+            // A price may carry years of contract lists.
+            axum::routing::post(jobs_proxy).layer(axum::extract::DefaultBodyLimit::max(64 << 20)),
+        )
+        .route(
+            "/api/job-quotes/{id}/approve",
+            axum::routing::post(job_quote_approve),
+        )
+        .route(
+            "/api/job-quotes/{id}/decline",
+            axum::routing::post(job_quote_decline),
+        )
         .route(
             "/api/queue/{*rest}",
             axum::routing::post(queue_proxy).patch(queue_proxy),
@@ -1935,6 +2067,7 @@ mod tests {
                 project: None,
             }),
             jobs: to(&upstream),
+            jobs_approve_token: APPROVE.with(|a| a.borrow().clone()),
             queue: to(&upstream),
             store: None,
             store_token: None,
@@ -1998,6 +2131,8 @@ mod tests {
         ("/api/accounts/paper-1/flatten", &["POST"]),
         ("/api/accounts/paper-1/resume", &["POST"]),
         ("/api/jobs/submit", &["POST"]),
+        ("/api/job-quotes/q1/approve", &["POST"]),
+        ("/api/job-quotes/q1/decline", &["POST"]),
         ("/api/queue/jobs", &["POST", "PATCH"]),
         ("/api/store/volumes/approve", &["POST"]),
         ("/api/reminders", &["POST"]),
@@ -2333,6 +2468,131 @@ mod tests {
             r,
             json!({ "writes": true, "hosts": false, "allowed": false, "live_orders": false, "live_token": true, "read_only": false })
         );
+    }
+
+    thread_local! {
+        /// The approval token of the consoles this thread serves.
+        static APPROVE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// A stand-in for the jobs service that records each request (method,
+    /// path, authorization, body) and answers 200.
+    async fn recorder() -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let router = Router::new().fallback(
+            move |method: axum::http::Method,
+                  uri: axum::http::Uri,
+                  headers: axum::http::HeaderMap,
+                  body: axum::body::Bytes| async move {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                log.lock().unwrap().push(json!({ "method": method.as_str(), "path": uri.path(), "auth": auth, "body": body }));
+                axum::Json(json!({ "ok": true }))
+            },
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{addr}"), seen)
+    }
+
+    #[tokio::test]
+    async fn approving_a_purchase_carries_the_token_the_login_and_the_price() {
+        APPROVE.with(|a| *a.borrow_mut() = Some("approve-test".into()));
+        let (up, seen) = recorder().await;
+        let base = serve_with(
+            gate(Some("order-token")),
+            Some(up),
+            gateways::Gateways::for_test(Default::default()),
+        )
+        .await;
+        let approve = format!("{base}/api/job-quotes/q-1a2b-7/approve");
+        let body = r#"{"confirm_usd": 2.5, "again": ["OPRA-X"]}"#;
+        // The order token, as for a live order.
+        let (status, _, marked) =
+            ask_full(reqwest::Method::POST, &approve, Some(ME), &[], body).await;
+        assert_eq!((status, marked), (401, true));
+        let (status, _, marked) = ask_full(
+            reqwest::Method::POST,
+            &approve,
+            Some("other@example.net"),
+            &[("x-order-token", "order-token")],
+            body,
+        )
+        .await;
+        assert_eq!((status, marked), (403, true));
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "nothing is sent before the gate passes"
+        );
+        let token = [("x-order-token", "order-token")];
+        let (status, error, _) =
+            ask_full(reqwest::Method::POST, &approve, Some(ME), &token, "{}").await;
+        assert_eq!(
+            (status, error.as_deref()),
+            (400, Some("confirm the quoted price (confirm_usd)"))
+        );
+        let (status, _, _) =
+            ask_full(reqwest::Method::POST, &approve, Some(ME), &token, body).await;
+        assert_eq!(status, 200);
+        let (status, _, _) = ask_full(
+            reqwest::Method::POST,
+            &format!("{base}/api/job-quotes/q-1a2b-7/decline"),
+            Some(ME),
+            &token,
+            "{}",
+        )
+        .await;
+        assert_eq!(status, 200);
+        let (status, _, _) = ask_full(
+            reqwest::Method::POST,
+            &format!("{base}/api/job-quotes/q.7/approve"),
+            Some(ME),
+            &token,
+            body,
+        )
+        .await;
+        assert_eq!(status, 400, "not a quote id");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            [
+                json!({ "method": "POST", "path": "/submit", "auth": "Bearer approve-test",
+                    "body": { "quote": "q-1a2b-7", "confirm_usd": 2.5, "approved_by": ME, "again": ["OPRA-X"] } }),
+                json!({ "method": "DELETE", "path": "/quotes/q-1a2b-7", "auth": "Bearer approve-test", "body": null }),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn without_an_approval_token_nothing_is_approved() {
+        APPROVE.with(|a| *a.borrow_mut() = None);
+        let (up, seen) = recorder().await;
+        // No order token needed here (CONSOLE_LIVE_NEEDS_TOKEN false): the login is enough to ask.
+        let base = serve_with(
+            WriteGate {
+                live_token: false,
+                ..gate(None)
+            },
+            Some(up),
+            gateways::Gateways::for_test(Default::default()),
+        )
+        .await;
+        let (status, error, marked) = ask_full(
+            reqwest::Method::POST,
+            &format!("{base}/api/job-quotes/q7/approve"),
+            Some(ME),
+            &[],
+            r#"{"confirm_usd": 2.5}"#,
+        )
+        .await;
+        assert_eq!((status, marked), (403, false));
+        assert!(error.unwrap().contains("CONSOLE_JOBS_APPROVE_TOKEN"));
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     /// A stand-in for the jobs service and the queue: a GET answers with its

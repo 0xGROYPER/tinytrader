@@ -39,7 +39,7 @@ Every refusal by the gate carries the header `X-Write-Gate: refused` and `"gate"
 
 An account is live unless both the accounts service's `environment` for it and its gateway's welcome say `paper`; an account the accounts service doesn't report (or reports differently from two services) counts as live. A live account's flatten and resume also need `confirm` naming the account.
 
-The write routes: `POST /api/orders/{account}`, `POST /api/orders/{account}/{id}/cancel`, `POST /api/accounts/{account}/flatten` and `/resume`, `POST /api/jobs/...`, `POST` and `PATCH /api/queue/...`, `POST /api/store/volumes/approve`, `POST /api/reminders`, `PUT /api/prefs/{key}`, `POST /api/journal`, `PUT` and `DELETE /api/journal/{id}`, and `POST /api/profiles`.
+The write routes: `POST /api/orders/{account}`, `POST /api/orders/{account}/{id}/cancel`, `POST /api/accounts/{account}/flatten` and `/resume`, `POST /api/jobs/...`, `POST /api/job-quotes/{id}/approve` and `/decline`, `POST` and `PATCH /api/queue/...`, `POST /api/store/volumes/approve`, `POST /api/reminders`, `PUT /api/prefs/{key}`, `POST /api/journal`, `PUT` and `DELETE /api/journal/{id}`, and `POST /api/profiles`.
 
 | Endpoint | |
 |---|---|
@@ -109,7 +109,9 @@ All four are behind the [write gate](#the-write-gate). `404` when the account ha
 
 | Endpoint | |
 |---|---|
-| `GET\|POST /api/jobs/{path}` | Passed to `CONSOLE_JOBS` ([databento-jobs](databento-jobs.md)). |
+| `GET\|POST /api/jobs/{path}` | Passed to `CONSOLE_JOBS` ([databento-jobs](databento-jobs.md)), without any approval: a paid `/submit` sent this way is refused. |
+| `POST /api/job-quotes/{id}/approve` | `{"confirm_usd": <the quoted price>, "again"?: [...]}`: a person's approval of a paid purchase, sent to the jobs service's `/submit` with `CONSOLE_JOBS_APPROVE_TOKEN` (or `_FILE`) as its bearer token and the login as `approved_by`. The Jobs widget sends the jobs service's quoted value exactly as listed, and shows it in cents, marked ≈ when rounding changed it. Behind the write gate, and needs the order token as a live order does (unless `CONSOLE_LIVE_NEEDS_TOKEN` is `false`). The jobs service's answer is passed back. `403` when no approval token is configured. |
+| `POST /api/job-quotes/{id}/decline` | `{}`: drops the quote (the jobs service's `DELETE /quotes/{id}`), with the same token and gate. |
 | `GET\|POST\|PATCH /api/queue/{path}` | Passed to `CONSOLE_QUEUE` ([queue](queue.md)). |
 | `POST /api/store/volumes/approve` | `{path, name}`, passed to `CONSOLE_STORE` with `CONSOLE_STORE_TOKEN` ([store](store.md)). |
 

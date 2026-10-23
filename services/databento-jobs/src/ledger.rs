@@ -3,15 +3,24 @@
 //!
 //! One JSON line per step, appended, never rewritten:
 //!
-//! - `sending`: about to submit this exact request (written first);
+//! - `approved`: a person approved this paid request (who, and the quote),
+//!   written before it is sent;
+//! - `sending`: about to submit this exact request;
 //! - `submitted`: Databento answered with this job ID;
 //! - `uncertain`: the submission failed or its outcome is unknown;
-//! - `not-submitted`: reconciliation found no job for an uncertain one.
+//! - `not-submitted`: the operator found it was never made
+//!   (`POST /ledger/resolve`); nothing writes this on its own.
 //!
 //! A request whose latest step is `sending` or `uncertain` may already have
-//! been bought, so it can't be submitted again until reconciled against
-//! Databento's job list: matched to the job it created, or, after
-//! [`SETTLE_SECONDS`] with no such job, recorded as not submitted.
+//! been bought, so it blocks every purchase it overlaps until it is found on
+//! Databento's job list (then `submitted`, with its job) or resolved by the
+//! operator. Never by time alone: a job that doesn't show yet may still be
+//! one (decision 0019). A `not-submitted` that an earlier version wrote on
+//! its own, after a timeout, counts as unresolved again.
+//!
+//! One process at a time: the ledger's `.lock` file is held exclusively for
+//! as long as it is open, so a second service on the same ledger can't
+//! start.
 
 use std::collections::HashSet;
 use std::fs;
@@ -20,11 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// How long a submission may take to appear in Databento's job list before
-/// an uncertain one is taken as never created.
-pub const SETTLE_SECONDS: f64 = 600.0;
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     /// Unix seconds.
     pub at: f64,
@@ -37,6 +42,12 @@ pub struct Entry {
     pub cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Who approved a paid purchase (an `approved` step).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// The quote it was approved from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
 }
 
 /// What identifies a request across a submission and Databento's job list:
@@ -54,17 +65,58 @@ pub fn fingerprint(
     format!("{dataset}|{schema}|{}|{start}|{end}", s.join(","))
 }
 
+/// The note an earlier version wrote with a `not-submitted` it decided on
+/// its own.
+const WRITTEN_OFF: &str = "no such job appeared in Databento's job list";
+
+/// Whether a step leaves its request unresolved.
+fn open_step(e: &Entry) -> bool {
+    e.state == "sending"
+        || e.state == "uncertain"
+        || (e.state == "not-submitted" && e.note.as_deref() == Some(WRITTEN_OFF))
+}
+
+/// Why the ledger's lock couldn't be taken.
+fn lock_error(e: &fs::TryLockError, path: &Path, lock: &Path) -> String {
+    match e {
+        fs::TryLockError::WouldBlock => format!(
+            "another process holds the submissions ledger {} (lock {}); only one databento-jobs may use it",
+            path.display(),
+            lock.display()
+        ),
+        fs::TryLockError::Error(e) => format!(
+            "{}: {e}; this filesystem doesn't support file locking, so the submissions ledger must be on a local disk",
+            lock.display()
+        ),
+    }
+}
+
 pub struct Ledger {
     path: PathBuf,
     entries: Vec<Entry>,
+    /// Held exclusively while open.
+    _lock: fs::File,
 }
 
 impl Ledger {
     /// Open (or start) the ledger at `path`.
     ///
     /// # Errors
-    /// If the file exists but can't be read, or a line isn't an entry.
+    /// If another process has it open, or the file exists but can't be
+    /// read, or a line isn't an entry.
     pub fn open(path: &Path) -> Result<Self, String> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+        lock.try_lock()
+            .map_err(|e| lock_error(&e, path, &lock_path))?;
         let entries = match fs::read_to_string(path) {
             Ok(text) => text
                 .lines()
@@ -77,6 +129,7 @@ impl Ledger {
         Ok(Self {
             path: path.to_owned(),
             entries,
+            _lock: lock,
         })
     }
 
@@ -85,9 +138,7 @@ impl Ledger {
     /// # Errors
     /// If it can't be written; the caller must then not submit.
     pub fn append(&mut self, e: Entry) -> Result<(), String> {
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        }
+        let new = !self.path.exists();
         let mut f = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -97,6 +148,12 @@ impl Ledger {
         writeln!(f, "{line}").map_err(|e| format!("{}: {e}", self.path.display()))?;
         f.sync_all()
             .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        // A new file's name is durable only once its folder is.
+        if new && let Some(dir) = self.path.parent() {
+            fs::File::open(dir)
+                .and_then(|d| d.sync_all())
+                .map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
         self.entries.push(e);
         Ok(())
     }
@@ -105,11 +162,38 @@ impl Ledger {
         self.entries.iter().rev().find(|e| e.request == request)
     }
 
-    /// The step that blocks submitting `request` again, if any.
+    /// The latest step of `request`, if it is unresolved.
     #[must_use]
-    pub fn blocking(&self, request: &str) -> Option<&Entry> {
-        self.latest(request)
-            .filter(|e| e.state == "sending" || e.state == "uncertain")
+    pub fn unresolved_step(&self, request: &str) -> Option<&Entry> {
+        self.latest(request).filter(|e| open_step(e))
+    }
+
+    /// When the latest attempt at `request` was sent (its last `sending`
+    /// step): a job it made was received after this.
+    #[must_use]
+    pub fn sent_at(&self, request: &str) -> Option<f64> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| e.request == request && e.state == "sending")
+            .map(|e| e.at)
+    }
+
+    /// When the attempt `e` (an unresolved step) was sent: its `sending`
+    /// step, or `e` itself when earlier.
+    #[must_use]
+    pub fn attempt_at(&self, e: &Entry) -> f64 {
+        self.sent_at(&e.request).unwrap_or(e.at).min(e.at)
+    }
+
+    /// Requests an earlier version wrote off as not submitted on its own,
+    /// now unresolved again.
+    #[must_use]
+    pub fn written_off(&self) -> Vec<Entry> {
+        self.unresolved()
+            .into_iter()
+            .filter(|e| e.state == "not-submitted")
+            .collect()
     }
 
     /// Every request whose latest step is unresolved.
@@ -120,18 +204,24 @@ impl Ledger {
             .iter()
             .rev()
             .filter(|e| seen.insert(e.request.clone()))
-            .filter(|e| e.state == "sending" || e.state == "uncertain")
+            .filter(|e| open_step(e))
             .cloned()
             .collect()
     }
 
-    /// Every submission here that Databento accepted (a job, so a purchase).
+    /// Every purchase made here, or that may have been: each step with a job
+    /// (whatever its state), and each request whose latest step is
+    /// unresolved.
     #[must_use]
-    pub fn purchases(&self) -> Vec<&Entry> {
-        self.entries
+    pub fn purchases(&self) -> Vec<Entry> {
+        let mut out: Vec<Entry> = self
+            .entries
             .iter()
-            .filter(|e| e.state == "submitted" && e.job.is_some())
-            .collect()
+            .filter(|e| e.job.is_some())
+            .cloned()
+            .collect();
+        out.extend(self.unresolved());
+        out
     }
 
     /// Every job ID submitted here.
@@ -153,6 +243,7 @@ mod tests {
             job: job.map(Into::into),
             cost_usd: None,
             note: None,
+            ..Default::default()
         }
     }
 
@@ -171,20 +262,24 @@ mod tests {
         {
             let mut l = Ledger::open(&path).unwrap();
             l.append(entry(&r, "sending", None)).unwrap();
-            assert!(l.blocking(&r).is_some());
+            assert!(l.unresolved_step(&r).is_some());
             l.append(entry(&r, "uncertain", None)).unwrap();
         }
-        // Reopened (a restart): still blocked, and listed for reconciliation.
+        // Reopened (a restart): still a purchase, and listed for reconciliation.
         let mut l = Ledger::open(&path).unwrap();
-        assert_eq!(l.blocking(&r).map(|e| e.state.as_str()), Some("uncertain"));
-        assert_eq!(l.unresolved().len(), 1);
+        assert_eq!(
+            l.unresolved_step(&r).map(|e| e.state.as_str()),
+            Some("uncertain")
+        );
+        assert_eq!((l.unresolved().len(), l.purchases().len()), (1, 1));
         l.append(entry(&r, "submitted", Some("OPRA-1"))).unwrap();
-        assert!(l.blocking(&r).is_none());
+        assert!(l.unresolved_step(&r).is_none());
         assert!(l.unresolved().is_empty());
         assert!(l.submitted().contains("OPRA-1"));
-        // A different request is never blocked by this one.
+        // Still a purchase once found, and after its job is gone.
+        assert_eq!(l.purchases().len(), 1);
         assert!(
-            l.blocking(&fingerprint(
+            l.unresolved_step(&fingerprint(
                 "OPRA.PILLAR",
                 "cmbp-1",
                 &["QQQ.OPT".into()],
@@ -193,6 +288,53 @@ mod tests {
             ))
             .is_none()
         );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("tinytrader-ledger-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn only_one_process_may_hold_the_ledger() {
+        let d = scratch("lock");
+        let path = d.join("submissions.jsonl");
+        let first = Ledger::open(&path).unwrap();
+        let second = Ledger::open(&path).err().unwrap();
+        assert!(second.contains("another process"), "{second}");
+        drop(first);
+        assert!(Ledger::open(&path).is_ok());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_filesystem_without_locks_is_named() {
+        let e = fs::TryLockError::Error(std::io::Error::from(std::io::ErrorKind::Unsupported));
+        let why = lock_error(&e, Path::new("l"), Path::new("l.lock"));
+        assert!(why.contains("must be on a local disk"), "{why}");
+    }
+
+    #[test]
+    fn an_old_automatic_write_off_is_unresolved_again() {
+        let d = scratch("written-off");
+        let mut l = Ledger::open(&d.join("submissions.jsonl")).unwrap();
+        let mut off = entry("R", "not-submitted", None);
+        off.note = Some(WRITTEN_OFF.into());
+        l.append(entry("R", "sending", None)).unwrap();
+        l.append(entry("R", "uncertain", None)).unwrap();
+        l.append(off).unwrap();
+        assert_eq!(l.unresolved().len(), 1);
+        assert_eq!(l.purchases().len(), 1);
+        assert_eq!(l.written_off().len(), 1);
+        assert!(l.unresolved_step("R").is_some());
+        // The operator's word resolves it.
+        let mut by_hand = entry("R", "not-submitted", None);
+        by_hand.note = Some("resolved by the operator: not in the portal".into());
+        l.append(by_hand).unwrap();
+        assert!(l.unresolved().is_empty() && l.purchases().is_empty());
         let _ = fs::remove_dir_all(&d);
     }
 
