@@ -60,9 +60,6 @@
 //!   (and `/decline`), behind the write gate and the order token as for a
 //!   live order, carry it with `CONSOLE_JOBS_APPROVE_TOKEN` (or `_FILE`),
 //!   the login and the quoted price.
-//! - `CONSOLE_QUEUE`: the job queue, e.g. `http://queue:9123` (optional;
-//!   decision 0012). `/api/queue/...` is passed to it, so the Queue widget
-//!   can add, edit and cancel jobs; the queue runs only its templates.
 //! - `CONSOLE_GATEWAYS`: order gateways by account, e.g.
 //!   `paper=gateway-paper:7701;live=gateway-live:7710`, and
 //!   `CONSOLE_GATEWAY_TOKEN` (or `_FILE`), the operator's admin token for them
@@ -103,8 +100,7 @@
 //!   it (`alpaca-account`) and its gateway's welcome say `paper`.
 //!   `GET /api/write-gate` says whether writes are on for the viewer.
 //!   The write routes are the order routes (those, and an account's flatten
-//!   and resume), the jobs service's and the queue's POST (and the queue's
-//!   PATCH) routes, a quote's approve and decline, drive approval, POST `/api/reminders` and `/api/profiles`,
+//!   and resume), the jobs service's POST routes, a quote's approve and decline, drive approval, POST `/api/reminders` and `/api/profiles`,
 //!   PUT `/api/prefs/{key}`, and the journal's POST, PUT and DELETE. Their GET
 //!   routes stay open.
 //! - `CONSOLE_PAGE`: serve the page from this file, and its modules and
@@ -161,8 +157,6 @@ struct App {
     /// The token that carries a person's approval of a paid purchase to the
     /// jobs service (`CONSOLE_JOBS_APPROVE_TOKEN` or `_FILE`).
     jobs_approve_token: Option<String>,
-    /// The job queue's base URL, and a client to reach it.
-    queue: Option<(String, reqwest::Client)>,
     /// The store's base URL, for approving drives.
     store: Option<String>,
     /// The store's write token, if it requires one.
@@ -276,10 +270,6 @@ async fn main() {
                 eprintln!("console: {e}");
                 None
             }),
-        queue: std::env::var("CONSOLE_QUEUE")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(|u| (u.trim_end_matches('/').to_owned(), reqwest::Client::new())),
         gateways: gateways::Gateways::from_env(),
         gate: write_gate.clone(),
         // Beside the reminders unless named.
@@ -839,17 +829,6 @@ async fn jobs_proxy(
     .await
 }
 
-/// Pass a request to the job queue and its answer back.
-async fn queue_proxy(
-    AxumState(app): AxumState<Arc<App>>,
-    method: axum::http::Method,
-    axum::extract::Path(rest): axum::extract::Path<String>,
-    axum::extract::RawQuery(query): axum::extract::RawQuery,
-    body: axum::body::Bytes,
-) -> Response {
-    pass(app.queue.as_ref(), "job queue", method, &rest, query, body).await
-}
-
 async fn pass(
     to: Option<&(String, reqwest::Client)>,
     what: &str,
@@ -1103,7 +1082,6 @@ fn routes(write_gate: WriteGate) -> Router<Arc<App>> {
         .route("/api/collections", get(list_collections))
         .route("/api/collections/{id}/{index}", get(collection_doc))
         .route("/api/jobs/{*rest}", get(jobs_proxy))
-        .route("/api/queue/{*rest}", get(queue_proxy))
         .route("/api/reminders", get(reminders_get))
         .route("/api/prefs", get(prefs_get))
         .route("/api/journal", get(journal_get))
@@ -1114,7 +1092,7 @@ fn routes(write_gate: WriteGate) -> Router<Arc<App>> {
         .route("/api/write-gate", get(write_gate_get))
         // Every write, including the orders, behind WriteGate.
         .merge(write_routes(write_gate))
-        // The console's writes (jobs, the queue, drive approval, reminders, flatten) can't be
+        // The console's writes (jobs, drive approval, reminders, flatten) can't be
         // forged by another page open in the browser.
         .layer(axum::middleware::from_fn(
             tinytrader_observe::guard::json_writes,
@@ -1561,8 +1539,8 @@ async fn write_gate(
 }
 
 /// The write routes, each behind the [`WriteGate`]: orders (submit, cancel,
-/// flatten, resume), the jobs service and the queue (POST, and PATCH for the
-/// queue), drive approval, reminders, profile recordings and settings (PUT).
+/// flatten, resume), the jobs service (POST), drive approval, reminders,
+/// profile recordings and settings (PUT).
 /// Their GET routes are merged in separately and stay open.
 fn write_routes(gate: WriteGate) -> Router<Arc<App>> {
     Router::new()
@@ -1591,10 +1569,6 @@ fn write_routes(gate: WriteGate) -> Router<Arc<App>> {
         .route(
             "/api/job-quotes/{id}/decline",
             axum::routing::post(job_quote_decline),
-        )
-        .route(
-            "/api/queue/{*rest}",
-            axum::routing::post(queue_proxy).patch(queue_proxy),
         )
         .route(
             "/api/store/volumes/approve",
@@ -2042,8 +2016,8 @@ mod tests {
         serve_with(gate, None, gateways::Gateways::for_test(Default::default())).await
     }
 
-    /// The console's routes on a free port, with `upstream` as both the jobs
-    /// service and the queue (if given), and these gateways.
+    /// The console's routes on a free port, with `upstream` as the jobs
+    /// service (if given), and these gateways.
     async fn serve_with(
         gate: WriteGate,
         upstream: Option<String>,
@@ -2069,7 +2043,6 @@ mod tests {
             }),
             jobs: to(&upstream),
             jobs_approve_token: APPROVE.with(|a| a.borrow().clone()),
-            queue: to(&upstream),
             store: None,
             store_token: None,
             prefs: None,
@@ -2134,7 +2107,6 @@ mod tests {
         ("/api/jobs/submit", &["POST"]),
         ("/api/job-quotes/q1/approve", &["POST"]),
         ("/api/job-quotes/q1/decline", &["POST"]),
-        ("/api/queue/jobs", &["POST", "PATCH"]),
         ("/api/store/volumes/approve", &["POST"]),
         ("/api/reminders", &["POST"]),
         ("/api/prefs/tinytrader-theme", &["PUT"]),
@@ -2596,7 +2568,7 @@ mod tests {
         assert!(seen.lock().unwrap().is_empty());
     }
 
-    /// A stand-in for the jobs service and the queue: a GET answers with its
+    /// A stand-in for the jobs service: a GET answers with its
     /// path; any write is refused with the upstream's own 401.
     async fn upstream() -> String {
         let router = Router::new().fallback(
@@ -2619,7 +2591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn job_and_queue_reads_reach_their_proxies_and_upstream_refusals_are_not_the_gates() {
+    async fn job_reads_reach_their_proxy_and_upstream_refusals_are_not_the_gates() {
         let up = upstream().await;
         let base = serve_with(
             gate(None),
@@ -2627,7 +2599,7 @@ mod tests {
             gateways::Gateways::for_test(Default::default()),
         )
         .await;
-        for path in ["jobs/list", "queue/jobs"] {
+        for path in ["jobs/list"] {
             // No login: reads are open.
             let r = reqwest::get(format!("{base}/api/{path}")).await.unwrap();
             assert_eq!(r.status().as_u16(), 200, "GET /api/{path}");
@@ -2859,7 +2831,6 @@ mod tests {
             "/api/topology",
             "/api/state",
             "/api/jobs/list",
-            "/api/queue/jobs",
             "/api/prefs",
             "/api/reminders",
             "/api/accounts/gateways",

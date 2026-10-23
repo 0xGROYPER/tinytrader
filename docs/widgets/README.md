@@ -36,7 +36,6 @@ A workspace is a set of panels, each showing one widget. A widget can be added m
 - [System graph](graph.md): What runs where and how data flows.
 - [Services](services.md): Every service with its container state, health, uptime, restarts and resources.
 - [Schedule](schedule.md): One line per bundle of services sharing hours, then one per other service: its state and a strip of today in New York time (active hours, pauses, always running).
-- [Queue](queue.md): Work that runs later, or when the machine can spare it, from the deployment's job templates.
 - [Shell](shell.md): A terminal for read-only commands over this deployment's state (`help` lists them).
 
 ## Workspace tools

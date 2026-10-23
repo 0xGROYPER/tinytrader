@@ -27,7 +27,6 @@
         "econ-calendar"
         "relay"
         "order-gateway"
-        "queue"
       ];
       image =
         name:

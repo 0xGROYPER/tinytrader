@@ -17,7 +17,7 @@
 | `DATABENTO_API_KEY` (or `_FILE`) | Required. |
 | `JOBS_STORE` | The store (default `http://127.0.0.1:9120`). |
 | `JOBS_LEDGER` | The submissions ledger file (JSON lines, appended); without it nothing can be submitted. The service holds an exclusive lock on `<ledger>.lock` while it runs and refuses to start if another process holds it. Keep it on a local disk, never on a network filesystem shared between hosts: the lock only guards one host. |
-| `JOBS_YIELD_TO`, `JOBS_CAPTURE_HOURS`, `JOBS_CALENDAR` | Hold downloads while capture is live (as the [queue](queue.md) does). |
+| `JOBS_YIELD_TO`, `JOBS_CAPTURE_HOURS`, `JOBS_CALENDAR` | Hold downloads while capture is live ([decision 0011](../decisions/0011-bundles-and-work-classes.md)). |
 | `JOBS_REFRESH_SECONDS` | How often Databento's job list is read (default 30). |
 | `JOBS_APPROVE_TOKEN` (or `_FILE`) | The token a paid purchase's approval carries, shared with the console (`CONSOLE_JOBS_APPROVE_TOKEN`). Unset, paid purchases are refused (`403`); free ones still go through. |
 

@@ -23,7 +23,6 @@ import '../widgets/news.js';
 import '../widgets/calendar.js';
 import '../widgets/data.js';
 import '../widgets/jobs.js';
-import '../widgets/queue.js';
 import '../widgets/storage.js';
 import '../widgets/reminders.js';
 import { bindSearch } from '../widgets/search.js';

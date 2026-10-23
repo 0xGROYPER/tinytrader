@@ -1,6 +1,6 @@
 # 0012: A job queue, shaped like Kubernetes Jobs
 
-- **Status:** Accepted
+- **Status:** Superseded by [0020](0020-batch-scheduling-left-to-the-deployment.md) (2026-10-23): the queue was removed; batch scheduling is the deployment's
 - **Date:** 2026-10-08
 - **Builds on:** [0011](0011-bundles-and-work-classes.md) (work classes)
 
