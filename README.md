@@ -13,7 +13,7 @@ flake input. See [decision 0001](docs/decisions/0001-platform-and-deployment.md)
 
 > **Status:** early, in daily use by one deployment: live market data relays,
 > a data store, provider batch jobs and history downloads, accounts, news, an
-> economic calendar, an order gateway, a job queue, a host monitor, a console
+> economic calendar, an order gateway, a host monitor, a console
 > and a terminal view. The trading runtime ([decision 0009](docs/decisions/0009-trading-runtime.md))
 > is proposed.
 
@@ -62,7 +62,6 @@ Cargo or Nix, see [Building and testing](#building-and-testing).
 | `services/alpaca-history` | Alpaca's historical trades and quotes, a day at a time, into the store ([decision 0014](docs/decisions/0014-history-feeds.md)) |
 | `services/econ-calendar` | Scheduled US economic releases and FOMC decisions, from the agencies' own schedules |
 | `services/order-gateway` | The order gateway (`tinytrader.gateway/1`): the only holder of a broker account's keys; validation, caps, a kill switch and a hash-chained journal ([its README](services/order-gateway/README.md)) |
-| `services/queue` | The job queue: work that runs later or when the machine can spare it, from templates the deployment defines ([decision 0012](docs/decisions/0012-job-queue.md)) |
 | `nix/watch.nix` | `watch`: a host's own monitor (Docker, containers, health, native services, disks), pushed to an ntfy-style URL, with a heartbeat ping after each run ([decision 0015](docs/decisions/0015-host-watch.md)) |
 | `infra/modules` | `tinytrader.services.<name>`: NixOS modules (systemd units) and the same definitions as nix-darwin launchd agents or boot-time daemons |
 | `nix/` | Flake modules: Rust builds, images, checks |
@@ -97,6 +96,18 @@ A service started any other way joins a deployment by being listed by address:
 ```json
 { "services": [{ "id": "ticker", "observe": "http://127.0.0.1:9105" }] }
 ```
+
+### Batch work
+
+tinytrader has no job scheduler of its own: research scripts, collectors,
+builds and other batch work are scheduled by the deployment, with the
+scheduler it already runs, such as HashiCorp Nomad, Kubernetes Jobs and
+CronJobs, systemd timers, or cron and `docker run`
+([decision 0020](docs/decisions/0020-batch-scheduling-left-to-the-deployment.md)).
+A job is a container (or a host command) with limits. Its conditions are
+plain HTTP checks it runs first: wait for today's close on a market calendar
+(alpaca-account's `/calendar`), or until the services it yields to report
+`idle` on `/health` ([decision 0011](docs/decisions/0011-bundles-and-work-classes.md)).
 
 ## Terminal view
 

@@ -27,7 +27,7 @@ Implemented once, in [`libs/observe`](../../libs/observe/src/lib.rs). Every serv
 | `started_at`, `last_error_at` | Unix seconds (float). |
 | `last_error` | The most recent error, kept after the service recovers. |
 
-The status is `200` only when `state` is `ready`, and `503` otherwise, including `idle`. A client that wants to tell "off on purpose" from "broken" reads `state`, not the status code (the console and the queue's yield rule do).
+The status is `200` only when `state` is `ready`, and `503` otherwise, including `idle`. A client that wants to tell "off on purpose" from "broken" reads `state`, not the status code (the console and a deployment's yield-to-capture checks do).
 
 ## `GET /metrics`
 
@@ -70,7 +70,6 @@ A front end or client finds a service by the capability it declares, never by it
 | `clients` | relays | [`/clients`](relay.md#get-clients) |
 | `econ`, `earnings`, `earnings_history`, `tickers` | econ-calendar | [calendar endpoints](econ-calendar.md) |
 | `jobs` | databento-jobs | [`/jobs`](databento-jobs.md) |
-| `queue`, `templates` | queue | [`/jobs`, `/templates`](queue.md) |
 | `runs` | alpaca-history | [`/runs`](alpaca-history.md) |
 
 A new capability is a new name; an existing name keeps its response shape.

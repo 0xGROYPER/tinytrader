@@ -62,7 +62,7 @@ Docker discovery is a convenience, not a requirement: anything listed by address
 | `edges` | Added: `{from, to, kind, label}`, `kind` `flow` or `read`. |
 | `panels` | Replace the panels `/describe` suggested for the services they name. |
 | `bundles` | Groups of services with shared hours and a work class ([decision 0011](../decisions/0011-bundles-and-work-classes.md)). |
-| `links` | Tools run beside tinytrader, by name: `notebook`, `terminal`. |
+| `links` | Tools run beside tinytrader, by name: `notebook` and `terminal` are framed by their widgets; every `http(s)` link is listed in the [Services widget](../widgets/services.md), such as a batch scheduler's UI. |
 | `hide` | Ids to leave out, with their edges and panels. |
 
 ## `/api/topology`

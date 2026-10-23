@@ -35,7 +35,6 @@
           ../services/alpaca-data
           ../services/relay
           ../services/order-gateway
-          ../services/queue
           (lib.fileset.fileFilter (f: f.hasExt "rs" || f.name == "Cargo.toml") ../services/console)
           ../services/console/web
         ];
@@ -75,7 +74,6 @@
       alpaca-data = service "alpaca-data" "Market data for any symbol on request: stock snapshots, bars and option chains from Alpaca";
       alpaca-account = service "alpaca-account" "Example service serving an Alpaca account's balances and positions";
       relay = service "relay" "Market data relay: one provider connection served to local clients (tinytrader.relay/1)";
-      queue = service "queue" "The job queue: deployment-defined job templates run when their conditions hold (decision 0012)";
       order-gateway = service "order-gateway" "Order gateway: one broker account behind a loopback protocol (tinytrader.gateway/1)";
       alpaca-history = service "alpaca-history" "Alpaca's historical trades and quotes, a day at a time, into the store (decision 0014)";
 
@@ -94,7 +92,6 @@
           alpaca-data
           relay
           order-gateway
-          queue
           alpaca-history
           ;
       };

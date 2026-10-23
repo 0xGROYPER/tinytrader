@@ -19,7 +19,6 @@ tinytrader is the boundary layer between markets and your code: relays stream li
 | [alpaca-news](alpaca-news.md) | (unversioned) | HTTP JSON | none (reads) | experimental |
 | [alpaca-history](alpaca-history.md) | receipts `tinytrader.alpaca-history.receipts/1` | HTTP JSON | same-origin writes | experimental |
 | [databento-jobs](databento-jobs.md) | (unversioned) | HTTP JSON | same-origin writes, price confirmation | experimental |
-| [Job queue](queue.md) | templates `tinytrader/v1` `JobTemplate` | HTTP JSON, YAML | same-origin writes | experimental |
 | [econ-calendar](econ-calendar.md) | (unversioned) | HTTP JSON | none (reads) | `/events`, `/earnings` stable |
 | Trade conditions records ([datasets](../datasets.md)) | `tinytrader.trade-conditions/1` | DBN records | — | stable |
 
@@ -63,7 +62,7 @@ A field in another unit says so in its name (`_ms`, `_ns`, `_seconds`, `_bytes`)
 
 ### Naming
 
-- Fields are `snake_case` (the queue's Kubernetes-style job documents are the exception, in `camelCase`).
+- Fields are `snake_case`.
 - Option contracts are compact OCC symbols (`SPY261016C00775000`); stocks are their tickers.
 - Account, client, service and relay names are the deployment's own. Nothing in tinytrader expects particular names: front ends find services by the capabilities they declare.
 
@@ -83,7 +82,6 @@ The [observe endpoints](observe.md): `GET /health` (`200` when ready, `503` othe
 | 9120 | store |
 | 9121 | databento-jobs |
 | 9122 | econ-calendar |
-| 9123 | queue |
 | 9124 | alpaca-history |
 | 9125 | alpaca-data |
 
@@ -99,4 +97,4 @@ Where a deployment customises tinytrader without changing it:
 | Choose what a gateway may trade | `--underlyings`, `--equities`, caps ([gateway](order-gateway.md#8-rate-budget-and-caps)) |
 | Name the console's gateway clients | `CONSOLE_GATEWAY_CLIENT`, `CONSOLE_TRADE_CLIENT`, `CONSOLE_TRADE_PREFIX` ([console](console.md#orders-and-accounts-experimental)) |
 | Curate the console's views and watchlists | `CONSOLE_PREFS_DEFAULTS` (optional module) |
-| Run research and batch work | Queue templates ([queue](queue.md)) |
+| Run research and batch work | The deployment's own scheduler: containers with limits, waiting on `/health` and the calendar ([decision 0020](../decisions/0020-batch-scheduling-left-to-the-deployment.md)) |

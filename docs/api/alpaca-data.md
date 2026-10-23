@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Purpose** | Market data for any symbol, on request: stock snapshots and bars, daily closes, option chains with IV and greeks computed locally, option bars and contracts, index bars (Cboe, delayed), a screener and news search. |
-| **Transport** | HTTP/1.1, JSON, on `ALPACA_DATA_LISTEN` (default `127.0.0.1:9125`; it was `9123`, which the queue also uses). |
+| **Transport** | HTTP/1.1, JSON, on `ALPACA_DATA_LISTEN` (default `127.0.0.1:9125`). |
 | **Versioning** | Unversioned paths; additive changes only. |
 | **Auth** | None (all reads). Bind to loopback or a private network. |
 | **Errors** | `{"error": "..."}`: `400` for a bad parameter, `429` when its Alpaca budget for the minute is spent, `502` when an upstream fails. A **missing or non-numeric** parameter is refused by the framework with a plain-text `400` ([decision 0017](../decisions/0017-client-contracts.md)). |

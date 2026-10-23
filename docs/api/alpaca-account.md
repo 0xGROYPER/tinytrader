@@ -41,7 +41,7 @@ A key starting `PK` is a paper key; others are live. Account names are the deplo
 
 ## `GET /calendar`
 
-The market calendar: `{"updated_at", "clock": {"is_open", "timestamp", "next_open", "next_close"}, "days": [{"date": "YYYY-MM-DD", "open": "HH:MM", "close": "HH:MM"}]}`, New York times, from a week ago onward. `null` before the first read. Other services take it as their `*_CALENDAR` URL (queue, databento-jobs, relays).
+The market calendar: `{"updated_at", "clock": {"is_open", "timestamp", "next_open", "next_close"}, "days": [{"date": "YYYY-MM-DD", "open": "HH:MM", "close": "HH:MM"}]}`, New York times, from a week ago onward. `null` before the first read. Other services take it as their `*_CALENDAR` URL (databento-jobs, relays, a deployment's batch jobs).
 
 ## `GET /performance?account=NAME`
 

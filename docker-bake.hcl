@@ -39,7 +39,6 @@ variable "SERVICES" {
     "alpaca-history",
     "econ-calendar",
     "order-gateway",
-    "queue",
   ]
 }
 

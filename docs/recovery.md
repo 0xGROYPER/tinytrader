@@ -63,8 +63,8 @@ Each gap names what's missing and where the fix belongs.
 **Scheduling and alerts**
 
 - *Nothing runs backups.* No timer or launcher is part of the platform.
-  **Platform:** a job template for backups (the queue's templates can carry
-  it). **Deployment:** the schedule.
+  **Platform:** nothing more: a backup is a job for the deployment's
+  scheduler (decision 0020). **Deployment:** the job and its schedule.
 - *No freshness signal.* A stale backup looks the same as a current one.
   **Platform:** a backup-age metric in the observe contract, and a notice when
   it exceeds a threshold.

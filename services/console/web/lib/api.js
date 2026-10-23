@@ -16,7 +16,7 @@ export async function jobsApi(path, body) {
 // paper account's flatten or resume unless CONSOLE_TOKEN_FOR_PAPER_FLATTEN is
 // off; the server refuses those without it (401). The gate marks its own
 // refusals (X-Write-Gate: refused, and "gate": true in the body), so they can
-// be told from a 401 or 403 that the jobs service, the queue or the store
+// be told from a 401 or 403 that the jobs service or the store
 // sends back through the console. The token is asked for at the first write
 // that needs it in a tab and kept for that tab only (sessionStorage, or memory
 // when storage is unavailable). Only one prompt is open at a time: writes sent
@@ -57,7 +57,7 @@ function forget(sent) { if (sent && getToken() === sent) setToken(null); }
 let tokenNeeded = null;
 /** Whether the console's write gate itself refused this request (nothing was sent on). @param {Response} r */
 const gateRefused = r => r.headers.get('x-write-gate') === 'refused';
-/** A write request (`/api/orders/...`, flatten, resume, jobs, the queue, settings, the journal, ...): the response, as fetch gives it. `null` is sent as `null`; `extra` adds headers. `live` marks a write that needs the order token (a live account's), which sends it.
+/** A write request (`/api/orders/...`, flatten, resume, jobs, settings, the journal, ...): the response, as fetch gives it. `null` is sent as `null`; `extra` adds headers. `live` marks a write that needs the order token (a live account's), which sends it.
  * @param {string} path @param {any} body @param {string} [method] @param {Record<string, string>} [extra] @param {boolean} [live] @returns {Promise<Response>} */
 export async function orderFetch(path, body, method = 'POST', extra = {}, live = false) {
   const go = t => fetch(path, { method, cache: 'no-store', headers: { 'content-type': 'application/json', ...extra, ...(t ? { 'x-order-token': t } : {}) }, body: JSON.stringify(body === undefined ? {} : body) });
@@ -91,12 +91,4 @@ export async function writeGate() {
   try { const r = await fetch('/api/write-gate', { cache: 'no-store' }); g = r.ok ? await r.json() : null; } catch (_) {}
   tokenNeeded = g ? g.live_token !== false : null;
   return g;
-}
-// The job queue (decision 0012), through the console's /api/queue proxy.
-export async function queueApi(path, body, method) {
-  const r = body === undefined && !method ? await fetch('/api/queue/' + path, { cache: 'no-store' })
-    : await orderFetch('/api/queue/' + path, body, method || 'POST');
-  let v = null; try { v = await r.json(); } catch (_) {}
-  if (!r.ok) throw new Error(v?.error || (r.status === 404 ? 'No job queue is configured.' : `${r.status} ${r.statusText}`));
-  return v;
 }

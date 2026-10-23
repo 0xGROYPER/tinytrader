@@ -8,7 +8,7 @@
 | **Auth** | Reads are open: anyone who can reach the port can read, so bind to loopback or a private network. Every write goes through the [write gate](#the-write-gate): a `Host` and a login (set by an authenticating reverse proxy) on allowlists, and for a live account's orders (and any flatten or resume) also the order token, unless `CONSOLE_LIVE_NEEDS_TOKEN` is `false`. With either allowlist unconfigured, every write is refused. Writes must also be JSON and same-origin (a page on another site gets `403`). Tokens for the services behind it (gateways, store) stay in the console and are never returned. |
 | **Errors** | `{"error": "..."}` with a 4xx or 5xx status. Passed-through answers keep the upstream's status and body. |
 | **Health** | The console's own [observe](observe.md) endpoints. |
-| **Stability** | `/api/topology`, `/api/state`, `/api/events`, `/api/stream` are **stable**. The order, account, jobs and queue routes are **experimental**. Prefs, reminders and profiles are optional modules, **experimental**. |
+| **Stability** | `/api/topology`, `/api/state`, `/api/events`, `/api/stream` are **stable**. The order, account and jobs routes are **experimental**. Prefs, reminders and profiles are optional modules, **experimental**. |
 
 ## The deployment
 
@@ -35,11 +35,11 @@ Reads (`GET`) are open. Every write route is behind the write gate, checked befo
 2. **Login.** The request's login header (the one `CONSOLE_LOGIN_HEADER` names, default `Tailscale-User-Login`) must be one of `CONSOLE_WRITE_LOGINS` (comma-separated, exact match). The authenticating reverse proxy in front of the console sets that header to the signed-in user (see [The login header](#the-login-header)). Refused with `403`. With `CONSOLE_WRITE_LOGINS` empty or unset, **every write is refused** (`403`, saying the console has no allowed logins configured), and the page shows a banner saying changes are off.
 3. **Order token.** An order, cancel, flatten or resume on a live account also needs `X-Order-Token` equal to the console's order token, read from the file `CONSOLE_ORDER_TOKEN_FILE` names, or else from `CONSOLE_ORDER_TOKEN`. So does a flatten or resume on a paper account, unless `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` is `false` (default `true`). It is compared in constant time and never logged. A missing or wrong token gets `401`. With no token configured, those writes are refused (`403`, saying so) and everything else still works. Paper orders and cancels need only the login. With `CONSOLE_LIVE_NEEDS_TOKEN` set to `false` (default `true`), none of these needs the token, on a live account or a paper one: an allowed login (and the typed confirmation, where one is asked for) is enough, and the page doesn't ask for a token. Do that only with the deployment described in [Behind a proxy in the console's namespace](#behind-a-proxy-in-the-consoles-namespace); the console logs a warning at startup when it is set. It refuses to start that way off loopback unless `CONSOLE_TRUST_NETWORK` is `true`.
 
-Every refusal by the gate carries the header `X-Write-Gate: refused` and `"gate": true` in its JSON body, next to `error`. A `401` or `403` without them came from the service behind the console (the jobs service, the queue or the store), not from the gate.
+Every refusal by the gate carries the header `X-Write-Gate: refused` and `"gate": true` in its JSON body, next to `error`. A `401` or `403` without them came from the service behind the console (the jobs service or the store), not from the gate.
 
 An account is live unless both the accounts service's `environment` for it and its gateway's welcome say `paper`; an account the accounts service doesn't report (or reports differently from two services) counts as live. A live account's flatten and resume also need `confirm` naming the account.
 
-The write routes: `POST /api/orders/{account}`, `POST /api/orders/{account}/{id}/cancel`, `POST /api/accounts/{account}/flatten` and `/resume`, `POST /api/jobs/...`, `POST /api/job-quotes/{id}/approve` and `/decline`, `POST` and `PATCH /api/queue/...`, `POST /api/store/volumes/approve`, `POST /api/reminders`, `PUT /api/prefs/{key}`, `POST /api/journal`, `PUT` and `DELETE /api/journal/{id}`, and `POST /api/profiles`.
+The write routes: `POST /api/orders/{account}`, `POST /api/orders/{account}/{id}/cancel`, `POST /api/accounts/{account}/flatten` and `/resume`, `POST /api/jobs/...`, `POST /api/job-quotes/{id}/approve` and `/decline`, `POST /api/store/volumes/approve`, `POST /api/reminders`, `PUT /api/prefs/{key}`, `POST /api/journal`, `PUT` and `DELETE /api/journal/{id}`, and `POST /api/profiles`.
 
 | Endpoint | |
 |---|---|
@@ -105,14 +105,13 @@ Names and prefix must match the gateway's `--client` options. Without the trade 
 
 All four are behind the [write gate](#the-write-gate). `404` when the account has no gateway; `400` for a bad or unconfirmed order; `401` or `403` when the write gate refuses; `502` when the gateway fails or can't be reached.
 
-## Jobs, queue and storage (experimental)
+## Jobs and storage (experimental)
 
 | Endpoint | |
 |---|---|
 | `GET\|POST /api/jobs/{path}` | Passed to `CONSOLE_JOBS` ([databento-jobs](databento-jobs.md)), without any approval: a paid `/submit` sent this way is refused. |
 | `POST /api/job-quotes/{id}/approve` | `{"confirm_usd": <the quoted price>, "again"?: [...]}`: a person's approval of a paid purchase, sent to the jobs service's `/submit` with `CONSOLE_JOBS_APPROVE_TOKEN` (or `_FILE`) as its bearer token and the login as `approved_by`. The Jobs widget sends the jobs service's quoted value exactly as listed, and shows it in cents, marked ≈ when rounding changed it. Behind the write gate, and needs the order token as a live order does (unless `CONSOLE_LIVE_NEEDS_TOKEN` is `false`). The jobs service's answer is passed back. `403` when no approval token is configured. |
 | `POST /api/job-quotes/{id}/decline` | `{}`: drops the quote (the jobs service's `DELETE /quotes/{id}`), with the same token and gate. |
-| `GET\|POST\|PATCH /api/queue/{path}` | Passed to `CONSOLE_QUEUE` ([queue](queue.md)). |
 | `POST /api/store/volumes/approve` | `{path, name}`, passed to `CONSOLE_STORE` with `CONSOLE_STORE_TOKEN` ([store](store.md)). |
 
 `404` when the service isn't configured.
