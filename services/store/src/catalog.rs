@@ -73,6 +73,7 @@ pub fn scan_volume(
 
     let mut scan = Scan {
         skip: ignored.iter().cloned().collect(),
+        root: path.to_path_buf(),
         ..Scan::default()
     };
     let mut unrecognised = Vec::new();
@@ -93,8 +94,22 @@ pub fn scan_volume(
         errors,
         pending,
         places,
+        foreign,
         ..
     } = scan;
+    // Counted as space used, never as data held (once: a top-level folder
+    // holding nothing else is already counted whole).
+    for ((folder, id), u) in foreign {
+        let top = Path::new(&folder).components().next();
+        if top.is_some_and(|t| {
+            unrecognised
+                .iter()
+                .any(|u| Path::new(u).as_os_str() == t.as_os_str())
+        }) {
+            continue;
+        }
+        other.push(json!({ "name": folder, "dataset": id, "bytes": u.bytes, "files": u.files, "modified": u.modified }));
+    }
     let errors = described(errors, name);
     let other_bytes: u64 = other.iter().filter_map(|o| o["bytes"].as_u64()).sum();
     let dataset_bytes: u64 = datasets
@@ -194,6 +209,7 @@ pub fn places(root: &Path) -> Result<Vec<Place>, String> {
 /// Look for datasets in a top-level entry of a volume: the layouts first,
 /// then every DBN file they didn't claim. Returns whether any were found.
 fn top(entry: &Path, scan: &mut Scan) -> bool {
+    scan.top = entry.to_path_buf();
     let provider = provider_name(&file_name(entry));
     // The store's own records in a provider's folder hold no data.
     if provider.is_some() {
@@ -279,6 +295,12 @@ struct Scan {
     claimed: HashSet<PathBuf>,
     /// DBN files still being written, read again on the next scan.
     pending: Vec<String>,
+    /// The volume, and the top-level entry being read.
+    root: PathBuf,
+    top: PathBuf,
+    /// DBN files that hold no dataset (another program's recordings, an
+    /// index), by folder and the id their header gives.
+    foreign: BTreeMap<(String, String), Usage>,
 }
 
 /// Folders the store writes in a provider's folder: receipts and its
@@ -395,9 +417,34 @@ fn loose(path: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
             return false;
         }
     };
+    if !holds_data(&name, &h) {
+        let folder = path.parent().unwrap_or(path);
+        let folder = folder
+            .strip_prefix(&scan.root)
+            .unwrap_or(folder)
+            .display()
+            .to_string();
+        let u = scan.foreign.entry((folder, h.dataset)).or_default();
+        u.files += 1;
+        u.bytes += meta.len();
+        if let Some(t) = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        {
+            u.modified = u.modified.max(t.as_secs_f64());
+        }
+        return false;
+    }
     let raw = h.stype_in.as_deref() == Some("raw_symbol");
     let k = match h.symbols.as_slice() {
         [one] if !raw => key(provider, &h.dataset, Some(one)),
+        // A header naming no symbol: listed under the one its folder names.
+        [] => key(
+            provider,
+            &h.dataset,
+            folder_symbol(path, &h.dataset, scan).as_deref(),
+        ),
         _ => key(provider, &h.dataset, None),
     };
     let d = scan.datasets.entry(k).or_default();
@@ -545,13 +592,30 @@ pub fn header(path: &Path) -> Result<Header, String> {
     let last_change = changed
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |t| u64::try_from(t.as_nanos()).unwrap_or(u64::MAX));
+    // A header without its start (0) or end takes the day its file is
+    // named for (`2026-05-29.spot.trades.dbn.zst`), not every day from 1970
+    // or until its last change.
+    const DAY: u64 = 86_400_000_000_000;
+    let named = file_name(path)
+        .get(..10)
+        .filter(|d| is_iso_date(d))
+        .and_then(crate::ingest::day_ns);
+    let start = match named {
+        Some(day) if m.start == 0 => day,
+        _ => m.start,
+    };
+    let end = match (m.end, named) {
+        (Some(end), _) => end.get(),
+        (None, Some(day)) if day + DAY > start => day + DAY,
+        (None, _) => last_change,
+    };
     let h = Header {
         dataset: m.dataset.clone(),
         schema: m.schema.map(|s| s.as_str().to_owned()),
         stype_in: m.stype_in.map(|s| s.as_str().to_owned()),
         symbols: m.symbols.clone(),
-        start: m.start,
-        end: m.end.map_or(last_change, std::num::NonZeroU64::get),
+        start,
+        end,
     };
     tinytrader_observe::lock(headers())
         .insert(path.to_path_buf(), (meta.len(), changed, h.clone()));
@@ -926,6 +990,33 @@ fn is_dataset_name(n: &str) -> bool {
         };
         ok(a) && ok(b)
     })
+}
+
+/// Whether a DBN file that no layout claims holds a dataset: its header
+/// names a dataset id (`VENUE.FEED` in either case, as every vendor's is;
+/// not, say, `bandit-chain`), and its name doesn't mark it an index
+/// (`2026-07-01.poll.idx.dbn`). Other files are another program's: counted
+/// as space used, never as data held. No vendor's id can be spelled so a
+/// file of it is taken for one of these.
+fn holds_data(name: &str, h: &Header) -> bool {
+    is_dataset_name(&h.dataset.to_ascii_uppercase()) && !name.split('.').any(|part| part == "idx")
+}
+
+/// The symbol the folder holding `path` names (`Alpaca/UVXY/…`), for a file
+/// whose header names none: a folder below the top-level one, named as a
+/// symbol is (`UVXY`, `SPY.OPT`, `BRK.B`), not a date or the dataset's id.
+fn folder_symbol(path: &Path, dataset: &str, scan: &Scan) -> Option<String> {
+    let dir = path.parent()?;
+    if dir == scan.top || dir == scan.root || !dir.starts_with(&scan.top) {
+        return None;
+    }
+    let n = file_name(dir);
+    let symbolic = n.len() <= 24
+        && n.bytes().next().is_some_and(|c| c.is_ascii_uppercase())
+        && n.bytes().all(|c| {
+            c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, b'.' | b'_' | b'-')
+        });
+    (symbolic && n != dataset).then_some(n)
 }
 
 fn is_iso_date(d: &str) -> bool {

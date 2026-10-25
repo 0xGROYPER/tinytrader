@@ -1,7 +1,8 @@
 // Data: what the store holds, as a tree (dataset, symbol, schema), merged
 // across drives. Each level shows its size and which drives hold it, and
 // where on each drive. Search narrows the tree; picking a schema shows its
-// days as a coverage grid, shaded by size and coloured by drive.
+// days as a coverage grid, shaded by size and coloured by drive. A drive that
+// isn't there shows what it held when last read, as away.
 import { defineWidget } from '../lib/widgets.js';
 import { catalogRoots, catalogStamp } from '../lib/fleet.js';
 import { esc, bytes } from '../lib/format.js';
@@ -11,18 +12,33 @@ import { esc, bytes } from '../lib/format.js';
 function tree() {
   const ds = new Map();
   const roots = catalogRoots();
+  const symOf = (id, symbol) => {
+    const set = ds.get(id) || ds.set(id, { id, syms: new Map() }).get(id);
+    const key = symbol || '';
+    return set.syms.get(key) || set.syms.set(key, { symbol, schemas: {}, paths: [] }).get(key);
+  };
+  const schemaOf = (sym, name) => sym.schemas[name] || (sym.schemas[name] = { bytes: 0, days: {}, where: {}, byDrive: {}, away: [] });
+  for (const r of roots) for (const [k, schemas] of Object.entries(r.present ? {} : r.held || {})) {
+    // `provider/id/symbol`, `-` for none.
+    const [, id, ...rest] = k.split('/'), symbol = rest.join('/');
+    const sym = symOf(id, symbol === '-' ? undefined : symbol);
+    for (const [name, h] of Object.entries(schemas)) {
+      const t = schemaOf(sym, name);
+      t.bytes += h.bytes || 0; t.byDrive[r.name] = (t.byDrive[r.name] || 0) + (h.bytes || 0);
+      t.away.push({ drive: r.name, ...h });
+    }
+  }
   for (const r of roots) for (const d of r.datasets || []) {
-    const set = ds.get(d.id) || ds.set(d.id, { id: d.id, syms: new Map() }).get(d.id);
-    const key = d.symbol || '';
-    const sym = set.syms.get(key) || set.syms.set(key, { symbol: d.symbol, schemas: {}, paths: [] }).get(key);
+    const sym = symOf(d.id, d.symbol);
     for (const src of d.sources || []) {
-      const path = src.replace(/^[^:]*:\s*/, '');
+      // `store: <path>`, `files in <path>`, or `databento batch <job>`.
+      const path = src.replace(/^(store:|files in)\s*/, '');
       let rel = path.startsWith(r.path) ? path.slice(r.path.length).replace(/^\//, '') : path;
       if (d.symbol && !rel.split('/').includes(d.symbol)) rel += '/' + d.symbol;
       sym.paths.push({ drive: r.name, path: rel });
     }
     for (const [name, s] of Object.entries(d.schemas)) {
-      const t = sym.schemas[name] || (sym.schemas[name] = { bytes: 0, days: {}, where: {}, byDrive: {} });
+      const t = schemaOf(sym, name);
       t.bytes += s.bytes; t.byDrive[r.name] = (t.byDrive[r.name] || 0) + s.bytes;
       for (const [day, b] of Object.entries(s.days || {})) { t.days[day] = (t.days[day] || 0) + b; (t.where[day] ||= []).push(r.name); }
     }
@@ -38,10 +54,17 @@ function tree() {
   });
 }
 
-const drivesOf = o => Object.entries(o).sort((a, b) => b[1] - a[1]).map(([n, b]) => `<span class="dv-drive" title="${esc(bytes(b))} on ${esc(n)}">${esc(n)}</span>`).join('');
+// Drives not there now: what they held shows as away.
+const awayDrives = () => new Set(catalogRoots().filter(r => !r.present).map(r => r.name));
+const drivesOf = o => { const away = awayDrives(); return Object.entries(o).sort((a, b) => b[1] - a[1]).map(([n, b]) => `<span class="dv-drive${away.has(n) ? ' away' : ''}" title="${esc(bytes(b))} on ${esc(n)}${away.has(n) ? ' (not mounted)' : ''}">${esc(n)}${away.has(n) ? ' · away' : ''}</span>`).join(''); };
+// Days held: those seen, or, on a drive that's away, as many as it held.
+const dayCount = s => Math.max(Object.keys(s.days).length, ...s.away.map(a => a.days || 0));
 
 function coverage(name, sym, s, drives) {
+  const awayNote = s.away.map(a => `<p class="muted" style="margin:0;font-size:13px">On <b>${esc(a.drive)}</b>, which is not mounted: ${(a.days || 0).toLocaleString()} days, ${esc(a.first || '?')} → ${esc(a.last || '?')}, ${bytes(a.bytes)} when last read.</p>`).join('');
   const keys = Object.keys(s.days).sort(), first = keys[0], last = keys[keys.length - 1];
+  if (!keys.length) return `<section class="panel dv-cov">
+    <div class="d-head"><b class="mono">${esc(sym.symbol || '')} ${esc(name)}</b><span class="muted">${bytes(s.bytes)}</span></div>${awayNote}</section>`;
   const missing = [];
   for (let t = Date.parse(first + 'T12:00:00Z'); t <= Date.parse(last + 'T12:00:00Z'); t += 864e5) {
     const d = new Date(t), k = d.toISOString().slice(0, 10), wd = d.getUTCDay();
@@ -67,7 +90,7 @@ function coverage(name, sym, s, drives) {
     <div class="cal-legend"><span>smaller</span>${[1, 2, 3, 4].map(l => `<i class="has l${l}"></i>`).join('')}<span>larger</span>
       ${multi ? drives.map((d, i) => `<span><i class="has l4${i === 1 ? ' d2' : ''}"></i>${esc(d)}</span>`).join('') : ''}
       ${missing.length ? `<span title="${esc(missing.join(', '))}">${missing.length} weekday${missing.length === 1 ? '' : 's'} without data (holidays included)</span>` : ''}</div>
-    <div class="dv-paths">${paths}</div>
+    <div class="dv-paths">${paths}</div>${awayNote}
   </section>`;
 }
 
@@ -91,8 +114,8 @@ function dataView(my) {
       if (!open1 && sym.symbol) continue;
       for (const [name, s] of list) {
         const key = `${set.id}|${sym.symbol || ''}|${name}`, sel = my.pick === key;
-        if (sel) pick = { name, sym, s, drives: Object.keys(s.byDrive) };
-        rows += `<div class="dv-row dv-l2${sel ? ' sel' : ''}" data-pick="${esc(key)}"><span class="dv-tw"></span><span class="dv-name">${esc(name)}</span><span class="dv-size">${bytes(s.bytes)} · ${Object.keys(s.days).length}d</span><span class="dv-drives">${drivesOf(s.byDrive)}</span></div>`;
+        if (sel) { const away = awayDrives(); pick = { name, sym, s, drives: Object.keys(s.byDrive).filter(d => !away.has(d)) }; }
+        rows += `<div class="dv-row dv-l2${sel ? ' sel' : ''}" data-pick="${esc(key)}"><span class="dv-tw"></span><span class="dv-name">${esc(name)}</span><span class="dv-size">${bytes(s.bytes)} · ${dayCount(s)}d</span><span class="dv-drives">${drivesOf(s.byDrive)}</span></div>`;
       }
     }
   }

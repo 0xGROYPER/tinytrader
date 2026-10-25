@@ -191,11 +191,23 @@ interface CatalogRoot {
   volume?: Volume;
   datasets?: CatalogDataset[];
   dataset_bytes?: number;
-  other?: { name: string; bytes: number; files?: number; modified?: number }[];
+  /** Folders that aren't datasets; `dataset` is set for DBN files of another
+   * program's (an id that isn't a dataset's, or an index), counted by folder. */
+  other?: { name: string; bytes: number; files?: number; modified?: number; dataset?: string }[];
+  /** For a drive that isn't there: what it held when last read in full, by
+   * `provider/id/symbol` (`-` for none). */
+  held?: Record<string, Record<string, HeldSchema>>;
   other_bytes?: number;
   unrecognised?: string[];
   thresholds?: Thresholds;
   service?: string;
+}
+
+interface HeldSchema {
+  days: number;
+  first?: string | null;
+  last?: string | null;
+  bytes: number;
 }
 
 interface Thresholds {

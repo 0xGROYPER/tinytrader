@@ -107,11 +107,24 @@ bought again), so they say what the store holds or say they can't
   symbols, start and end), under the provider folder it is in, if any, as not
   filed. A file of a list of contracts (`stype_in
   raw_symbol`) holds those contracts, partially; otherwise the header's
-  symbols, whole. Hidden folders, such as a provider's `.incoming`, are
+  symbols, whole. A header that names no symbols holds every symbol in
+  `/coverage`; the catalog lists it under the symbol its folder names
+  (`Alpaca/UVXY/2026-05-29.spot.trades.dbn.zst` under `UVXY`), when that
+  folder is below the top-level one and named as a symbol is. A header
+  without its start or its end takes the day its file is named for
+  (`2026-05-29.…`); without such a name, its start to its last change.
+  Hidden folders, such as a provider's `.incoming`, are
   skipped. Headers are read once and kept while a file's size and last change
   stay the same. A file whose header can't be read yet and that changed in
   the last two minutes is taken as still being written: it is listed in its
   root's `pending_files` and read again on the next scan.
+- A DBN file that holds no dataset, as another program writes them, is
+  counted as space used, never as data held: one whose header's dataset
+  isn't a dataset id (`VENUE.FEED`, in either case; such as `bandit-chain`),
+  or whose name marks it an index (`2026-07-01.poll.idx.dbn`). Each root
+  lists them in `other` by folder, with the id in `dataset`:
+  `{ "name": "Alpaca/UVXY", "dataset": "bandit-chain", "files": 43, "bytes": …, "modified": … }`.
+  No vendor's id can be taken for one of them.
 - A download folder with `metadata.json` but no `manifest.json` (one
   extracted by hand) counts by its files' headers, or, when it has no DBN
   files or has data in other encodings, by every day of its query. A folder
@@ -140,6 +153,12 @@ bought again), so they say what the store holds or say they can't
     "volume": { "…": "…" }, "dataset_bytes": 1234, "other": [], "other_bytes": 0, "unrecognised": [] }],
   "thresholds": { "…": "…" }, "candidates": [], "discover": "/Volumes" }
 ```
+
+A remembered volume that isn't there (`"present": false`) has no
+`datasets`; its root carries `held`, what it held when last read in full
+(`{ "databento/OPRA.PILLAR/XSP.OPT": { "cbbo-1m": { "days": 518, "first": "2022-09-01", "last": "2026-10-01", "bytes": … } } }`,
+keyed `provider/id/symbol` with `-` for none), so what it holds shows as
+away rather than gone.
 
 ### Remembered volumes
 
