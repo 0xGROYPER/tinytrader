@@ -386,13 +386,13 @@ async fn scan(store: &Shared, observer: &Observer) {
     // Rescans asked for until now are covered by this one.
     let target = store.requested.load(Ordering::SeqCst);
     let (volumes, limits) = (store.volumes(), store.limits);
-    let (held, ignored): (Vec<String>, Vec<Value>) = {
+    let (held, ignored): (BTreeMap<String, Value>, Vec<Value>) = {
         let r = lock(&store.remembered);
         let held = r
             .volumes
             .iter()
             .filter(|(_, k)| state::held_any(k))
-            .map(|(n, _)| n.clone())
+            .map(|(n, k)| (n.clone(), k.held.clone()))
             .collect();
         (held, r.ignored.clone())
     };
@@ -405,7 +405,10 @@ async fn scan(store: &Shared, observer: &Observer) {
                 let (mut root, places) = match volumes::present(v) {
                     Ok(()) => catalog::scan_volume(&v.name, &v.path, limits, &skip),
                     Err(e) => {
-                        let root = json!({ "name": v.name, "path": v.path, "present": false, "datasets": [], "unrecognised": [], "errors": [e], "pending_files": [] });
+                        // What it held when last read in full, so its data
+                        // shows as away rather than gone.
+                        let was = held.get(&v.name).cloned().unwrap_or_else(|| json!({}));
+                        let root = json!({ "name": v.name, "path": v.path, "present": false, "datasets": [], "held": was, "unrecognised": [], "errors": [e], "pending_files": [] });
                         (root, Vec::new())
                     }
                 };
@@ -417,7 +420,7 @@ async fn scan(store: &Shared, observer: &Observer) {
                 root["ignored"] = json!(mine);
                 // Data that was there and is gone is unknown, not absent.
                 if root["present"] == true
-                    && held.contains(&v.name)
+                    && held.contains_key(&v.name)
                     && root["datasets"].as_array().is_none_or(Vec::is_empty)
                     && let Some(errors) = root["errors"].as_array_mut()
                 {
@@ -1882,6 +1885,18 @@ mod tests {
         let addr = serve_store(s, WriteToken::open()).await;
         let (_, cat) = get(&addr, "/catalog").await;
         assert_eq!(cat["missing_volumes"], json!(["b"]));
+        // What it held shows as away, not gone.
+        let away = cat["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "b")
+            .unwrap();
+        assert_eq!(away["present"], false);
+        assert_eq!(
+            away["held"]["databento/OPRA.PILLAR/SPY.OPT"]["cbbo-1m"]["first"],
+            "2026-10-01"
+        );
         let (code, cov) = get(&addr, COVERAGE).await;
         assert_eq!((code, cov["missing_volumes"].clone()), (200, json!(["b"])));
 

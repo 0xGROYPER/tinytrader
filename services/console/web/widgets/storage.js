@@ -10,12 +10,15 @@ import { orderFetch } from '../lib/api.js';
 // other folder, largest first.
 function contents(r) {
   const items = (r.datasets || []).map(d => {
-    const src = (d.sources || [])[0]?.replace(/^[^:]*:\s*/, '') || '';
+    const src = (d.sources || [])[0]?.replace(/^(store:|files in)\s*/, '') || '';
     let path = src.startsWith(r.path) ? src.slice(r.path.length).replace(/^\//, '') : (src || d.id);
-    if (d.symbol && !path.endsWith(d.symbol)) path += '/' + d.symbol;
-    return { path, bytes: Object.values(d.schemas).reduce((a, x) => a + x.bytes, 0), kind: 'data', note: Object.keys(d.schemas).join(', ') };
+    if (d.symbol && !path.split('/').includes(d.symbol)) path += '/' + d.symbol;
+    // Loose files are listed by their folder, which doesn't name the dataset.
+    const schemas = Object.keys(d.schemas).join(', ');
+    return { path, bytes: Object.values(d.schemas).reduce((a, x) => a + x.bytes, 0), kind: 'data', note: path.split('/').includes(d.id) ? schemas : `${d.id}: ${schemas}` };
   });
-  for (const o of r.other || []) items.push({ path: o.name, bytes: o.bytes, kind: 'other', note: `${(o.files || 0).toLocaleString()} files` });
+  // Other folders, and DBN files of another program's (not a dataset).
+  for (const o of r.other || []) items.push({ path: o.name, bytes: o.bytes, kind: 'other', note: o.dataset ? `${(o.files || 0).toLocaleString()} ${o.dataset} files, not a dataset` : `${(o.files || 0).toLocaleString()} files` });
   return items.sort((a, b) => b.bytes - a.bytes);
 }
 
@@ -31,6 +34,20 @@ function fill(r) {
   const rows = items.map(x => `<tr><td class="mono" style="color:var(--fg)"><i class="sw ${x.kind}"></i>${esc(x.path)}</td><td class="muted">${esc(x.note)}</td><td class="mono num">${bytes(x.bytes)}</td></tr>`).join('');
   return `<div class="fillbar">${bar}</div>
     <div class="scroll"><table class="fill-tbl"><tbody>${rows}</tbody></table></div>`;
+}
+
+// What a drive that isn't there held when last read in full.
+function away(r) {
+  const held = Object.entries(r.held || {});
+  if (!held.length) return '';
+  const rows = held.map(([k, schemas]) => {
+    const [, id, ...rest] = k.split('/'), sym = rest.join('/');
+    const list = Object.values(schemas), b = list.reduce((a, x) => a + (x.bytes || 0), 0);
+    return { path: sym === '-' ? id : `${id}/${sym}`, b, note: Object.keys(schemas).join(', ') };
+  }).sort((a, b) => b.b - a.b);
+  const total = rows.reduce((a, x) => a + x.b, 0);
+  return `<p class="muted" style="margin:0;font-size:13px">When last read it held ${rows.length} dataset${rows.length === 1 ? '' : 's'}, ${bytes(total)}:</p>
+    <div class="scroll"><table class="fill-tbl"><tbody>${rows.map(x => `<tr><td class="mono" style="color:var(--fg)"><i class="sw data"></i>${esc(x.path)}</td><td class="muted">${esc(x.note)}</td><td class="mono num">${bytes(x.b)}</td></tr>`).join('')}</tbody></table></div>`;
 }
 
 const statusPill = { ok: ['OK', 'p-ok'], warning: ['Warning', 'p-warn'], critical: ['Critical', 'p-crit'], floor: ['Full', 'p-crit'], unknown: ['Space unknown', 'p-idle'] };
@@ -58,7 +75,7 @@ function storageView(my) {
         <div><div class="k">In datasets</div><div class="v">${bytes(r.dataset_bytes)} · ${(r.datasets || []).length} datasets</div></div>
       </div>
       ${fill(r)}`
-      : '<p class="muted" style="margin:0">This drive is not available: it may be unplugged. Its files are listed as unavailable until it returns.</p>'}
+      : `<p class="muted" style="margin:0">This drive is not available: it may be unplugged. Its files are listed as unavailable until it returns.</p>${away(r)}`}
     </article>`;
   }).join('');
   const found = candidates();

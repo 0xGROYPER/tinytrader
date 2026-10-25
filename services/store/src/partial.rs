@@ -1906,6 +1906,171 @@ mod tests {
         out
     }
 
+    /// A DBN file of no records as another program records them: no
+    /// symbols, no end, and a start of 0 when `start` is `None`.
+    fn recording(
+        dataset: &str,
+        schema: Option<Schema>,
+        start: Option<&str>,
+        zstd: bool,
+    ) -> Vec<u8> {
+        let m = Metadata::builder()
+            .dataset(dataset)
+            .schema(schema)
+            .start(start.map_or(0, |d| ingest::day_ns(d).unwrap() + 13 * 3_600_000_000_000))
+            .stype_in(Some(SType::RawSymbol))
+            .stype_out(SType::InstrumentId)
+            .build();
+        let mut out = Vec::new();
+        if zstd {
+            drop(dbn::encode::dbn::Encoder::with_zstd(&mut out, &m).unwrap());
+        } else {
+            dbn::encode::dbn::Encoder::new(&mut out, &m).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn another_programs_recordings_are_listed_by_folder_and_named_day() {
+        let vol = scratch("recordings");
+        for sym in ["UVXY", "VXZ"] {
+            let dir = vol.join("Alpaca").join(sym);
+            put(
+                &dir.join("2026-05-29.spot.trades.dbn.zst"),
+                &recording(
+                    "ALPACA.SPOT",
+                    Some(Schema::Trades),
+                    Some("2026-05-29"),
+                    true,
+                ),
+            );
+            put(
+                &dir.join("2026-05-29.definitions.dbn.zst"),
+                &recording("ALPACA.OPT", Some(Schema::Definition), None, true),
+            );
+            // Not datasets: another program's own ids, and an index.
+            put(
+                &dir.join("2026-05-11.dbn"),
+                &recording("bandit-chain", None, None, false),
+            );
+            put(
+                &dir.join("2026-05-11.spot.dbn"),
+                &recording("bandit-spot", None, None, false),
+            );
+            put(
+                &dir.join("2026-07-01.poll.idx.dbn"),
+                &recording("ALPACA.POLLIDX", None, None, false),
+            );
+        }
+        // Loose at the top of the provider's folder: no folder to name a symbol.
+        put(
+            &vol.join("Alpaca/2026-05-30.trades.dbn.zst"),
+            &recording(
+                "ALPACA.SPOT",
+                Some(Schema::Trades),
+                Some("2026-05-30"),
+                true,
+            ),
+        );
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        assert_eq!(cat["errors"], json!([]), "{cat}");
+        let listed: Vec<(String, String)> = cat["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| {
+                (
+                    d["id"].as_str().unwrap().to_owned(),
+                    d["symbol"].as_str().unwrap_or("-").to_owned(),
+                )
+            })
+            .collect();
+        let pairs: Vec<(&str, &str)> = listed
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("ALPACA.OPT", "UVXY"),
+                ("ALPACA.OPT", "VXZ"),
+                ("ALPACA.SPOT", "-"),
+                ("ALPACA.SPOT", "UVXY"),
+                ("ALPACA.SPOT", "VXZ")
+            ]
+        );
+        let uvxy = cat["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "ALPACA.SPOT" && d["symbol"] == "UVXY")
+            .unwrap();
+        assert_eq!(uvxy["provider"], "alpaca");
+        // No end in the header: the day the file is named for, not until its last change.
+        assert_eq!(
+            uvxy["schemas"]["trades"]["days"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["2026-05-29"]
+        );
+        let opt = cat["datasets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "ALPACA.OPT")
+            .unwrap();
+        // No start either: not every day since 1970.
+        assert_eq!(
+            opt["schemas"]["definition"]["days"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["2026-05-29"]
+        );
+        // The rest count as space used, by folder and id.
+        let other: Vec<(&str, &str, u64)> = cat["other"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| {
+                (
+                    o["name"].as_str().unwrap(),
+                    o["dataset"].as_str().unwrap(),
+                    o["files"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            other,
+            [
+                ("Alpaca/UVXY", "ALPACA.POLLIDX", 1),
+                ("Alpaca/UVXY", "bandit-chain", 1),
+                ("Alpaca/UVXY", "bandit-spot", 1),
+                ("Alpaca/VXZ", "ALPACA.POLLIDX", 1),
+                ("Alpaca/VXZ", "bandit-chain", 1),
+                ("Alpaca/VXZ", "bandit-spot", 1),
+            ]
+        );
+        assert!(cat["other_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(cat["unrecognised"], json!([]));
+        // Never held: a Databento purchase isn't blocked by them.
+        put(
+            &vol.join("backup/SPY.OPT/2026-10-02.dbn"),
+            &recording("bandit-chain", Some(Schema::Cbbo1M), None, false),
+        );
+        assert_eq!(spy_coverage(&vol), Vec::<Value>::new());
+        let cat = crate::catalog::scan_root("v", &vol, T);
+        assert_eq!(cat["unrecognised"], json!(["backup"]));
+        assert_eq!(
+            cat["other"].as_array().unwrap().len(),
+            7,
+            "the backup once, as a folder"
+        );
+    }
+
     #[test]
     fn counts_every_dbn_file_the_layouts_do_not_claim() {
         let vol = scratch("loose");
