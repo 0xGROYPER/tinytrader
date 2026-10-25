@@ -318,9 +318,34 @@ days, and running work beside the data are later steps.
 
 A day file holding a list of contracts (`stype_in = raw_symbol`), for part
 of a day, is a **partial day** ([decision 0018](../decisions/0018-partial-coverage.md)).
-Its coverage is in the schema folder's `manifest.json`; a day whose entry has
-no `coverage` (only its [condition](#day-conditions)), or that has no entry,
-is complete.
+Its coverage is in the schema folder's manifest; a day whose entry has no
+`coverage` (only its [condition](#day-conditions)), or that has no entry, is
+complete.
+
+**Coverage is pieces:** each a list of contracts over its own window (ns,
+end excluded), one per file that went into the day, those with the same
+window combined:
+
+```json
+{ "kind": "contracts", "stype": "raw_symbol",
+  "pieces": [ { "symbols": ["SPY   261002C00728000", "…"], "window": [1790946000000000000, 1790985600000000000] },
+              { "symbols": ["SPY   261002P00650000", "…"], "window": [1790948400000000000, 1790971860000000000] } ],
+  "symbols": ["…every contract…"], "window": [1790946000000000000, 1790985600000000000] }
+```
+
+`symbols` and `window` are there for readers from before pieces: every
+contract over the span of all the windows. They are an approximation, and
+claim hours some contracts don't have; read `pieces`. Coverage written before
+pieces (`symbols` and `window` only) is read as one piece.
+
+**The manifest** is `manifest.json`, a small index of the folder's days, and
+`manifest.d/<day>.json`, each partial day's full entry (its file's size,
+SHA-256 and records, its coverage, its source and condition). The index
+keeps a stub for a partial day (`{ "sidecar", "partial": true, "condition"
+}`) and a complete day's entry whole. A merge writes only its day's file, and
+the index at most once per filing. An index from before, with partial days
+inline, is read as it is, and moves them to their own files the first time
+it is written.
 
 ### `POST /import/{provider}/{id}`
 
@@ -341,11 +366,49 @@ Each file is checked against its size and SHA-256 and against its own header
 
 - **Not held:** filed as a partial day.
 - **Held, byte-identical:** the upload is dropped as a duplicate.
-- **Held partly, with other contracts:** the two are merged in timestamp
-  order, checked record for record, and swapped in. The day's coverage is the
-  union.
-- **Held complete, or held partly with any of the same contracts:** `409`.
-  Nothing is filed.
+- **Held partly, with other contracts, or the same contracts over other
+  hours:** the two are merged, and the file's piece is added to the day's
+  coverage. The merge streams: it reads both files a record at a time, in
+  timestamp order (ties: the day held first, each in its own order), and
+  writes as it goes, so memory doesn't grow with the files. The merged file is
+  read back, each record sorted to its input (by its instrument, and, for a
+  contract in both, by whose hours hold its time), and each input's records
+  must all be there, in order (by count and a running SHA-256). It is
+  recorded as pending in `manifest.d/<day>.pending.json`, swapped in by
+  rename, and the pending entry renamed over the day's.
+- **Held complete, or held partly with any of the same contracts over the
+  same hours:** `409`. Nothing is filed.
+- **The day held isn't its record:** its size or SHA-256 differs from its
+  manifest entry: `409`, nothing is merged into it.
+- **One instrument ID, two contracts:** the day held and the file map the
+  same instrument ID to different contracts, so their records couldn't be
+  told apart: `409`.
+
+A partial day that then holds every contract of the day's definitions (the
+`definition` day file of the same parent, when the store holds it), each
+over the whole day, becomes **complete**: its entry drops its coverage and
+records `completed: { by, pieces, at }`.
+
+Each file's coverage is recorded in its import's ledger (`verified`), so what
+went into a merged day can be rebuilt.
+
+### `POST /coverage/rebuild`
+
+Once, for days merged before pieces, whose coverage claims every contract
+over the span of all their files' hours. For each merged partial day it
+finds what went into it from the import ledgers in `migrations/` (each file
+moved to or merged into the day) and what each held: from the ledger, or
+from a provider batch's receipt in `provenance/<id>/` (its contracts, and its
+query's time range in the day). It answers:
+
+```json
+{ "changed": [{ "folder": "/Volumes/Data/Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m", "day": "2024-06-03", "pieces_before": 1, "pieces": 2 }],
+  "unchanged": 12,
+  "not_rebuilt": [{ "folder": "…", "day": "2023-01-04", "why": "what research-2023 held isn't on record (no coverage in its ledger, no receipt)" }] }
+```
+
+A day whose inputs can't all be found, or whose inputs' contracts aren't the
+contracts it holds, is left as it is, and listed.
 
 As with batches, every check runs before anything moves, `import.json` is
 kept in `provenance/{id}/`, and each step is recorded in `migrations/`.
@@ -383,8 +446,11 @@ windows, with no single `size`, `sha256` or `records`. `conflict` is true
 when the copies differ. `filed` is true when any copy is in the store
 layout.
 
-`pending` is true while a merge into that day is unfinished. It is settled
-the next time that day is filed.
+`pending` is true while a merge into that day is unfinished. Each scan (and
+so the store's start) settles it: if the day's file is the merged one (by its
+SHA-256), the pending entry becomes current; if it is still the recorded
+one, the merge is dropped; if it is neither, it is an error of the volume.
+The catalog root lists unsettled merges in `pending_merges`.
 
 An unreadable folder, a malformed manifest or a batch's unreadable
 `metadata.json` is a `500`, never an answer with days left out.
@@ -392,7 +458,10 @@ An unreadable folder, a malformed manifest or a batch's unreadable
 `/coverage` answers from what the last scan found (`scanned_at`, seconds
 since the epoch), and reads the manifests of the matching schema folders as
 they are now, so a merge into a partial day shows at once. A filing, an
-import, a merge, or a change of what is ignored asks for a rescan; until it
-is done `/coverage` waits (at most 60 seconds, then `503`), so a day just
-filed is never missed. With `fresh=1` it waits for a scan started after the
+import, a merge or a day's condition updates the scan's answer for the
+schema folders it wrote, in place, before it returns (`updated_at`, also on
+`/catalog`): `/catalog` and `/coverage` show it at once, without scanning
+every volume again. A scan that was running meanwhile reads those folders
+again before it answers. A change of what is ignored asks for a full rescan;
+until it is done `/coverage` waits (at most 60 seconds, then `503`). With `fresh=1` it waits for a scan started after the
 request ([above](#what-the-store-holds)).

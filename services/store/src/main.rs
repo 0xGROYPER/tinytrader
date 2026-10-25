@@ -50,8 +50,10 @@
 mod catalog;
 mod conditions;
 mod ingest;
+mod manifest;
 mod partial;
 mod read;
+mod rebuild;
 mod state;
 mod volumes;
 
@@ -126,6 +128,9 @@ struct Store {
     state_path: PathBuf,
     /// What the last scan found on each volume: `/coverage` answers from it.
     index: Mutex<Arc<Index>>,
+    /// Schema folders updated in place (after a filing) since the scan in
+    /// progress started: it reads them again before it answers.
+    refreshed: Mutex<Vec<PathBuf>>,
     /// Rescans asked for (after a filing), and how many of them finished
     /// scans have covered: `/coverage` waits for those asked for.
     requested: AtomicU64,
@@ -144,10 +149,12 @@ struct Store {
 
 type Shared = Arc<Store>;
 
-/// The places the last scan found, by volume, and when.
-#[derive(Default)]
+/// The places the last scan found, by volume, and when; and when a filing
+/// last updated them.
+#[derive(Default, Clone)]
 struct Index {
     scanned_at: f64,
+    updated_at: f64,
     volumes: Vec<(String, Vec<catalog::Place>)>,
     /// What the scan couldn't read, on volumes that are there.
     errors: Vec<String>,
@@ -331,6 +338,7 @@ fn router(store: Shared, token: WriteToken) -> Router {
         .route("/volumes/{name}/accept-empty", post(accept_empty))
         .route("/volumes/{name}/ignore", post(ignore).delete(unignore))
         .route("/conditions/backfill", post(backfill_conditions))
+        .route("/coverage/rebuild", post(rebuild_coverage))
         .route("/conditions/{provider}", post(post_conditions))
         .route("/files", get(list_files))
         .route("/files/{volume}/{*path}", get(send_file))
@@ -383,8 +391,10 @@ async fn scan(store: &Shared, observer: &Observer) {
                 .collect();
         }
     }
-    // Rescans asked for until now are covered by this one.
+    // Rescans asked for until now are covered by this one, and folders
+    // updated in place until now are read by it.
     let target = store.requested.load(Ordering::SeqCst);
+    lock(&store.refreshed).clear();
     let (volumes, limits) = (store.volumes(), store.limits);
     let (held, ignored): (BTreeMap<String, Value>, Vec<Value>) = {
         let r = lock(&store.remembered);
@@ -402,7 +412,7 @@ async fn scan(store: &Shared, observer: &Observer) {
             .map(|v| {
                 let mine: Vec<&Value> = ignored.iter().filter(|i| i["volume"] == v.name.as_str()).collect();
                 let skip: Vec<PathBuf> = mine.iter().filter_map(|i| i["path"].as_str()).map(PathBuf::from).collect();
-                let (mut root, places) = match volumes::present(v) {
+                let (mut root, mut places) = match volumes::present(v) {
                     Ok(()) => catalog::scan_volume(&v.name, &v.path, limits, &skip),
                     Err(e) => {
                         // What it held when last read in full, so its data
@@ -412,6 +422,7 @@ async fn scan(store: &Shared, observer: &Observer) {
                         (root, Vec::new())
                     }
                 };
+                settle_merges(v, &mut root, &mut places);
                 let errors: Vec<String> = if root["present"] == true {
                     root["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(str::to_owned)).collect()
                 } else {
@@ -452,10 +463,10 @@ async fn scan(store: &Shared, observer: &Observer) {
         .to_owned();
     // A volume that isn't there, or whose datasets couldn't all be read, is
     // missing: what it holds is unknown.
-    let missing: Vec<&str> = scanned
+    let missing: Vec<String> = scanned
         .iter()
         .filter(|r| r["present"] != true || r["errors"].as_array().is_some_and(|e| !e.is_empty()))
-        .filter_map(|r| r["name"].as_str())
+        .filter_map(|r| r["name"].as_str().map(str::to_owned))
         .collect();
     let mut detail = if missing.is_empty() {
         format!("{} volumes; fullest {worst}", scanned.len())
@@ -467,6 +478,13 @@ async fn scan(store: &Shared, observer: &Observer) {
         detail = format!("{detail}; cannot keep the list of volumes: {e}");
     }
     let degraded = !missing.is_empty() || catalog::severity(&worst) >= 2;
+    // Folders a filing updated while this scan ran are read again, so the
+    // filing isn't lost when this scan's answer replaces the last.
+    let mut redo = lock(&store.refreshed);
+    let volumes = store.volumes();
+    for dir in redo.drain(..) {
+        reapply(&volumes, &dir, &mut scanned, &mut index.volumes);
+    }
     *lock(&store.index) = Arc::new(index);
     *lock(&store.catalog) = json!({
         "generated_at": scanned_at,
@@ -476,6 +494,7 @@ async fn scan(store: &Shared, observer: &Observer) {
         "candidates": candidates,
         "discover": store.discover,
     });
+    drop(redo);
     observer.set_state(
         if degraded {
             State::Degraded
@@ -487,7 +506,103 @@ async fn scan(store: &Shared, observer: &Observer) {
     store.completed.fetch_max(target, Ordering::SeqCst);
 }
 
+/// Settle the merges a volume's scan found left pending (decision 0018): the
+/// day file's hash says whether its merged file is in place. Each folder
+/// settled is read again into the scan's answer.
+fn settle_merges(v: &Volume, root: &mut Value, places: &mut Vec<catalog::Place>) {
+    let merges = root["pending_merges"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut folders: Vec<PathBuf> = Vec::new();
+    for m in &merges {
+        let (Some(folder), Some(day)) = (m["folder"].as_str(), m["day"].as_str()) else {
+            continue;
+        };
+        let folder = PathBuf::from(folder);
+        match manifest::settle(&folder, day) {
+            Ok(_) => eprintln!(
+                "store: settled the merge into {day} in {}",
+                folder.display()
+            ),
+            Err(e) => {
+                if let Some(errors) = root["errors"].as_array_mut() {
+                    errors.push(json!(e));
+                }
+            }
+        }
+        if !folders.contains(&folder) {
+            folders.push(folder);
+        }
+    }
+    for folder in folders {
+        if let Some(f) = catalog::Folder::read(&v.path, &folder) {
+            f.apply_root(root, &v.name);
+            f.apply_places(places);
+        }
+    }
+}
+
+/// Read the schema folder `dir` again into a scan's answer: the root and
+/// places of the volume holding it.
+fn reapply(
+    volumes: &[Volume],
+    dir: &Path,
+    roots: &mut [Value],
+    places: &mut [(String, Vec<catalog::Place>)],
+) {
+    let Some(v) = volumes.iter().find(|v| dir.starts_with(&v.path)) else {
+        return;
+    };
+    let Some(folder) = catalog::Folder::read(&v.path, dir) else {
+        return;
+    };
+    if let Some(root) = roots.iter_mut().find(|r| r["name"] == v.name.as_str()) {
+        folder.apply_root(root, &v.name);
+    }
+    if let Some((_, p)) = places.iter_mut().find(|(n, _)| *n == v.name) {
+        folder.apply_places(p);
+    }
+}
+
 impl Store {
+    /// Update the catalog and the index for schema folders just written (a
+    /// filing, an import, a merge, a day's condition), in place: answers
+    /// reflect it at once, without scanning every volume again.
+    fn refresh(&self, dirs: &[PathBuf]) {
+        let volumes = self.volumes();
+        let mut redo = lock(&self.refreshed);
+        let mut catalog = lock(&self.catalog);
+        let mut index = lock(&self.index);
+        let index = Arc::make_mut(&mut index);
+        for dir in dirs {
+            if !redo.contains(dir) {
+                redo.push(dir.clone());
+            }
+            if let Some(roots) = catalog["roots"].as_array_mut() {
+                reapply(&volumes, dir, roots, &mut index.volumes);
+            }
+        }
+        let now = unix_seconds();
+        index.updated_at = now;
+        if !catalog.is_null() {
+            catalog["updated_at"] = json!(now);
+        }
+    }
+
+    /// The schema folders of the day files a filing's summary names.
+    fn filed_folders(summary: &Value) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = ["files", "days"]
+            .iter()
+            .flat_map(|k| summary[k].as_array().into_iter().flatten())
+            .filter_map(|f| f["path"].as_str())
+            .filter_map(|p| Path::new(p).parent().map(Path::to_path_buf))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Ask for a rescan (after a filing, an import or a merge, or a change of
     /// what is ignored); `/coverage` waits for it.
     /// The paths an operator has said to skip on the volume `name`.
@@ -559,6 +674,7 @@ impl Store {
             limits,
             catalog: Mutex::new(Value::Null),
             index: Mutex::default(),
+            refreshed: Mutex::default(),
             requested: AtomicU64::new(0),
             completed: AtomicU64::new(0),
             wait: Duration::from_secs(60),
@@ -805,7 +921,7 @@ async fn incorporate(
                 format!("incorporated {pdir}/{batch}: {n} files"),
                 summary.to_string(),
             );
-            store.request_rescan();
+            tokio::task::block_in_place(|| store.refresh(&Store::filed_folders(&summary)));
             reply(StatusCode::OK, summary)
         }
         Ok(Err(e)) => {
@@ -855,7 +971,7 @@ async fn import(
                 format!("imported {pdir}/{id}: {n} days"),
                 summary.to_string(),
             );
-            store.request_rescan();
+            tokio::task::block_in_place(|| store.refresh(&Store::filed_folders(&summary)));
             reply(StatusCode::OK, summary)
         }
         Ok(Err(e)) => {
@@ -971,7 +1087,7 @@ async fn coverage(AxState(store): AxState<Shared>, Query(q): Query<CoverageQuery
     let missing = json!(missing);
     // Only volumes there now.
     let names: Vec<String> = roots.into_iter().map(|v| v.name).collect();
-    let scanned_at = index.scanned_at;
+    let (scanned_at, updated_at) = (index.scanned_at, index.updated_at);
     let result = tokio::task::spawn_blocking(move || {
         let found: Vec<(&str, &[catalog::Place])> = index
             .volumes
@@ -993,7 +1109,7 @@ async fn coverage(AxState(store): AxState<Shared>, Query(q): Query<CoverageQuery
     match result {
         Ok(Ok(days)) => reply(
             StatusCode::OK,
-            json!({ "days": days, "missing_volumes": missing, "scanned_at": scanned_at }),
+            json!({ "days": days, "missing_volumes": missing, "scanned_at": scanned_at, "updated_at": updated_at }),
         ),
         Ok(Err(e)) => refused(StatusCode::INTERNAL_SERVER_ERROR, e),
         Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
@@ -1133,7 +1249,7 @@ async fn adopt(
                 format!("filed {} in place: {n} files", dir.display()),
                 summary.to_string(),
             );
-            store.request_rescan();
+            tokio::task::block_in_place(|| store.refresh(&Store::filed_folders(&summary)));
             reply(StatusCode::OK, summary)
         }
         Ok(Err(e)) => {
@@ -1578,12 +1694,74 @@ async fn apply_conditions(
             format!("recorded {} day conditions", out.changed.len()),
             json!(out.changed).to_string(),
         );
-        store.request_rescan();
+        let mut dirs: Vec<PathBuf> = out
+            .changed
+            .iter()
+            .filter_map(|c| c["folder"].as_str().map(PathBuf::from))
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        tokio::task::block_in_place(|| store.refresh(&dirs));
     }
     reply(
         StatusCode::OK,
         json!({ "changed": out.changed, "unchanged": out.unchanged, "not_held": out.not_held }),
     )
+}
+
+/// Rebuild, once, the coverage of days merged before coverage was kept in
+/// pieces (decision 0018), from the ledgers and receipts of what went into
+/// each; a day whose inputs aren't all on record is left as it is, and
+/// listed.
+async fn rebuild_coverage(AxState(store): AxState<Shared>) -> Reply {
+    if lock(&store.catalog).is_null() {
+        return refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the store is still scanning",
+        );
+    }
+    if let Err(r) = store.settled(false).await {
+        return r;
+    }
+    let _one_at_a_time = store.filing.lock().await;
+    let volumes: Vec<Volume> = store
+        .volumes()
+        .into_iter()
+        .filter(|v| volumes::present(v).is_ok())
+        .collect();
+    let roots: Vec<PathBuf> = volumes
+        .iter()
+        .flat_map(|v| catalog::read_entries(&v.path).unwrap_or_default())
+        .filter(|p| p.is_dir() && catalog::provider_name(&catalog_name(p)).is_some())
+        .collect();
+    let index = lock(&store.index).clone();
+    let folders: Vec<PathBuf> = index
+        .volumes
+        .iter()
+        .flat_map(|(_, places)| places)
+        .filter_map(|p| match p {
+            catalog::Place::Days { dir, .. } => Some(dir.clone()),
+            _ => None,
+        })
+        .collect();
+    match tokio::task::spawn_blocking(move || rebuild::rebuild(&roots, &folders)).await {
+        Ok(Ok(report)) => {
+            let dirs = rebuild::folders(&report);
+            if !dirs.is_empty() {
+                store.events.push(
+                    format!(
+                        "rebuilt the coverage of {} days",
+                        report["changed"].as_array().map_or(0, Vec::len)
+                    ),
+                    report.to_string(),
+                );
+                tokio::task::block_in_place(|| store.refresh(&dirs));
+            }
+            reply(StatusCode::OK, report)
+        }
+        Ok(Err(e)) => refused(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 
 /// Forget a remembered volume that is away for good (decision 0019): it no
@@ -2237,6 +2415,110 @@ mod tests {
         assert_eq!(
             cat["roots"][0]["datasets"][0]["schemas"]["cbbo-1m"]["missing"],
             json!(["2026-10-03"])
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Serve a store with no rescan loop: answers change only as asked.
+    async fn serve_plain(s: &Shared) -> String {
+        let app = router(s.clone(), WriteToken::open());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_filing_shows_at_once_without_scanning_again() {
+        use crate::partial::tests::{C1, C2, DAY, day_bytes, name, stage};
+        let dir = scratch("in-place");
+        let vol = dir.join("v");
+        std::fs::create_dir_all(&vol).unwrap();
+        let s = store(&[("v", &vol)], &dir.join("state.json"));
+        scanned(&s).await;
+        let addr = serve_plain(&s).await;
+        stage(
+            &vol.join("Databento"),
+            "I1",
+            &[(&name(), day_bytes(&[(C1, 11)], &[(11, 0)]))],
+        );
+        let (code, body) = call(&addr, "POST", "/import/databento/I1", None, "").await;
+        assert_eq!(code, 200, "{body}");
+        let (_, cov) = get(&addr, COVERAGE).await;
+        assert_eq!(
+            (
+                cov["days"][0]["day"].clone(),
+                cov["days"][0]["kind"].clone()
+            ),
+            (json!(DAY), json!("partial"))
+        );
+        let (_, cat) = get(&addr, "/catalog").await;
+        let schema = &cat["roots"][0]["datasets"][0]["schemas"]["cbbo-1m"];
+        assert_eq!(schema["partial"], json!([DAY]), "{cat}");
+        assert!(cat["updated_at"].is_number());
+        // A merge into it, the same way.
+        stage(
+            &vol.join("Databento"),
+            "I2",
+            &[(&name(), day_bytes(&[(C2, 12)], &[(12, 1)]))],
+        );
+        assert_eq!(
+            call(&addr, "POST", "/import/databento/I2", None, "")
+                .await
+                .0,
+            200
+        );
+        let (_, cov) = get(&addr, COVERAGE).await;
+        assert_eq!(cov["days"][0]["coverage"]["symbols"], json!([C1, C2]));
+        assert_eq!(s.requested.load(Ordering::SeqCst), 0, "no scan asked for");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_scan_settles_merges_left_pending() {
+        use crate::partial::tests::{C1, C2, DAY, day_bytes, name, stage};
+        let dir = scratch("settle-scan");
+        let vol = dir.join("v");
+        std::fs::create_dir_all(&vol).unwrap();
+        let s = store(&[("v", &vol)], &dir.join("state.json"));
+        scanned(&s).await;
+        let addr = serve_plain(&s).await;
+        stage(
+            &vol.join("Databento"),
+            "I1",
+            &[(&name(), day_bytes(&[(C1, 11)], &[(11, 0)]))],
+        );
+        assert_eq!(
+            call(&addr, "POST", "/import/databento/I1", None, "")
+                .await
+                .0,
+            200
+        );
+        let folder = vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+        let day_file = folder.join(name());
+        let pending = folder
+            .join("manifest.d")
+            .join(format!("{DAY}.pending.json"));
+        // Stopped after the swap: the merged file is in place.
+        std::fs::write(
+            &day_file,
+            day_bytes(&[(C1, 11), (C2, 12)], &[(11, 0), (12, 1)]),
+        )
+        .unwrap();
+        let sha = ingest::hash_file(&day_file).unwrap();
+        let next = json!({ "file": name(), "sha256": sha, "records": 2, "coverage": { "kind": "contracts", "symbols": [C1, C2], "window": [0, 1] } });
+        manifest::write_pending(&folder, DAY, &next).unwrap();
+        scanned(&s).await;
+        assert!(!pending.exists());
+        let (_, cov) = get(&addr, COVERAGE).await;
+        assert_eq!(cov["days"][0]["coverage"]["symbols"], json!([C1, C2]));
+        // Stopped before it: dropped.
+        manifest::write_pending(&folder, DAY, &json!({ "sha256": "f00d" })).unwrap();
+        scanned(&s).await;
+        assert!(!pending.exists());
+        assert_eq!(
+            manifest::read_day(&folder, DAY).unwrap().unwrap()["sha256"],
+            sha.as_str()
         );
         let _ = std::fs::remove_dir_all(dir);
     }

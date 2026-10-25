@@ -95,6 +95,7 @@ pub fn scan_volume(
         pending,
         places,
         foreign,
+        unsettled,
         ..
     } = scan;
     // Counted as space used, never as data held (once: a top-level folder
@@ -129,8 +130,202 @@ pub fn scan_volume(
         "unrecognised": unrecognised,
         "errors": errors,
         "pending_files": pending,
+        "pending_merges": merges_json(&unsettled),
     });
     (root, places)
+}
+
+fn merges_json(unsettled: &[(PathBuf, String)]) -> Value {
+    json!(
+        unsettled
+            .iter()
+            .map(|(dir, day)| json!({ "folder": dir, "day": day }))
+            .collect::<Vec<_>>()
+    )
+}
+
+/// One schema folder in the store layout, read again after the store wrote to
+/// it: what a full scan would find there, to update a scan's answer in place
+/// (a filing, an import, a merge or a settled one) without scanning the
+/// volume again.
+pub struct Folder {
+    dir: PathBuf,
+    dataset_dir: PathBuf,
+    key: Key,
+    schema: String,
+    stats: Option<Schema>,
+    place: Option<Place>,
+    errors: Vec<(PathBuf, String)>,
+    unsettled: Vec<(PathBuf, String)>,
+}
+
+impl Folder {
+    /// Read the schema folder `dir` (`<Provider>/<DATASET>/[<symbol>/]<schema>`)
+    /// of the volume at `volume`; `None` if it isn't one.
+    #[must_use]
+    pub fn read(volume: &Path, dir: &Path) -> Option<Self> {
+        let rel = dir.strip_prefix(volume).ok()?;
+        let parts: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let at = parts
+            .iter()
+            .position(|p| is_dataset_name(p))
+            .filter(|&i| i <= 1)?;
+        let provider = if at == 1 {
+            provider_name(&parts[0])
+        } else {
+            None
+        };
+        let (symbol, schema) = match &parts[at + 1..] {
+            [schema] => (None, schema.clone()),
+            [symbol, schema] => (Some(symbol.as_str()), schema.clone()),
+            _ => return None,
+        };
+        let key = key(provider.as_deref(), &parts[at], symbol);
+        let mut scan = Scan::default();
+        add_days(dir, &key, &schema, &mut scan);
+        let stats = scan
+            .datasets
+            .remove(&key)
+            .and_then(|mut d| d.schemas.remove(&schema));
+        Some(Self {
+            dir: dir.to_path_buf(),
+            dataset_dir: volume.join(parts[..=at].iter().collect::<PathBuf>()),
+            key,
+            schema,
+            stats,
+            place: scan.places.pop(),
+            errors: scan.errors,
+            unsettled: scan.unsettled,
+        })
+    }
+
+    /// Put what the folder holds now in a scan's places of its volume.
+    pub fn apply_places(&self, places: &mut Vec<Place>) {
+        places.retain(|p| !matches!(p, Place::Days { dir, .. } if *dir == self.dir));
+        places.extend(self.place.clone());
+    }
+
+    /// Put what the folder holds now in a scan's root of its volume: its days
+    /// in its dataset's schema, beside what other sources give it.
+    pub fn apply_root(&self, root: &mut Value, volume: &str) {
+        let pending = root["pending_merges"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let mut merges: Vec<Value> = pending
+            .into_iter()
+            .filter(|m| m["folder"] != json!(self.dir))
+            .collect();
+        merges.extend(
+            merges_json(&self.unsettled)
+                .as_array()
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
+        root["pending_merges"] = json!(merges);
+        if let Some(errors) = root["errors"].as_array_mut() {
+            for e in described(self.errors.clone(), volume) {
+                if !errors.contains(&json!(e)) {
+                    errors.push(json!(e));
+                }
+            }
+        }
+        let Some(stats) = &self.stats else {
+            return;
+        };
+        let (provider, id, symbol) = &self.key;
+        let Some(datasets) = root["datasets"].as_array_mut() else {
+            return;
+        };
+        let at = datasets.iter().position(|d| {
+            d["provider"] == json!(provider)
+                && d["id"] == id.as_str()
+                && d["symbol"] == json!(symbol)
+        });
+        let dataset = match at {
+            Some(i) => &mut datasets[i],
+            None => {
+                datasets.push(
+                    json!({ "provider": provider, "id": id, "symbol": symbol, "filed": true,
+                    "sources": [format!("store: {}", self.dataset_dir.display())], "schemas": {} }),
+                );
+                datasets.last_mut().expect("just pushed")
+            }
+        };
+        let folder = stats.to_json();
+        let bytes_delta = match dataset["schemas"].get_mut(&self.schema) {
+            None => {
+                dataset["schemas"][&self.schema] = folder;
+                i64::try_from(stats.bytes).unwrap_or(i64::MAX)
+            }
+            Some(old) => merge_schema(old, stats),
+        };
+        let filed = dataset["schemas"].as_object().is_none_or(|o| {
+            o.values()
+                .all(|s| s["unfiled"].as_array().is_none_or(Vec::is_empty))
+        });
+        dataset["filed"] = json!(filed);
+        root["dataset_bytes"] = json!(
+            root["dataset_bytes"]
+                .as_i64()
+                .unwrap_or(0)
+                .saturating_add(bytes_delta)
+                .max(0)
+        );
+    }
+}
+
+/// Merge a folder's days into a schema's: the folder's are as it holds them
+/// now, the other days (from other sources) as they were. Returns the bytes
+/// added (less, if a day shrank).
+fn merge_schema(old: &mut Value, f: &Schema) -> i64 {
+    let mut added = 0i64;
+    let mut new_days = 0u64;
+    for (day, size) in &f.days {
+        let was = old["days"][day].as_i64();
+        if was.is_none() {
+            new_days += 1;
+        }
+        added += i64::try_from(*size).unwrap_or(i64::MAX) - was.unwrap_or(0);
+        old["days"][day] = json!(size);
+    }
+    let ours = |d: &Value| d.as_str().is_some_and(|d| f.days.contains_key(d));
+    for (list, now) in [
+        ("partial", &f.partial),
+        ("degraded", &f.degraded),
+        ("missing", &f.missing),
+        ("unfiled", &f.unfiled),
+    ] {
+        let mut kept: Vec<Value> = old[list]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| !ours(d))
+            .collect();
+        kept.extend(now.iter().map(|d| json!(d)));
+        old[list] = json!(kept);
+    }
+    for e in &f.encodings {
+        if let Some(list) = old["encodings"].as_array_mut()
+            && !list.contains(&json!(e))
+        {
+            list.push(json!(e));
+        }
+    }
+    old["files"] = json!(old["files"].as_u64().unwrap_or(0) + new_days);
+    old["bytes"] = json!(
+        old["bytes"]
+            .as_i64()
+            .unwrap_or(0)
+            .saturating_add(added)
+            .max(0)
+    );
+    added
 }
 
 /// Each error, once, with how to skip its path if it should be: an operator
@@ -160,6 +355,7 @@ pub fn provider_name(folder: &str) -> Option<String> {
 /// dataset in the store layout, a provider's batch download (or a download
 /// folder without its manifest, by its query), or any other DBN file, by its
 /// header.
+#[derive(Clone)]
 pub enum Place {
     /// A schema folder in the store layout, with its day files (or older
     /// day folders, not filed) and their sizes.
@@ -301,6 +497,8 @@ struct Scan {
     /// DBN files that hold no dataset (another program's recordings, an
     /// index), by folder and the id their header gives.
     foreign: BTreeMap<(String, String), Usage>,
+    /// Days with a merge left pending (folder, day), for the store to settle.
+    unsettled: Vec<(PathBuf, String)>,
 }
 
 /// Folders the store writes in a provider's folder: receipts and its
@@ -333,12 +531,18 @@ struct Schema {
     missing: Vec<String>,
 }
 
+impl Schema {
+    fn to_json(&self) -> Value {
+        json!({ "files": self.files, "bytes": self.bytes, "symbols": self.symbols, "encodings": self.encodings, "days": self.days, "partial": self.partial, "unfiled": self.unfiled, "degraded": self.degraded, "missing": self.missing })
+    }
+}
+
 impl Dataset {
     fn to_json(&self, (provider, id, symbol): &Key) -> Value {
         let schemas: serde_json::Map<String, Value> = self
             .schemas
             .iter()
-            .map(|(k, s)| (k.clone(), json!({ "files": s.files, "bytes": s.bytes, "symbols": s.symbols, "encodings": s.encodings, "days": s.days, "partial": s.partial, "unfiled": s.unfiled, "degraded": s.degraded, "missing": s.missing })))
+            .map(|(k, s)| (k.clone(), s.to_json()))
             .collect();
         let filed = self.schemas.values().all(|s| s.unfiled.is_empty());
         json!({ "provider": provider, "id": id, "symbol": symbol, "filed": filed, "sources": self.sources, "schemas": schemas })
@@ -662,10 +866,20 @@ fn add_days(dir: &Path, k: &Key, schema: &str, scan: &mut Scan) -> bool {
     let mut any = false;
     // Partial days are those the folder's manifest lists (its coverage); an
     // unreadable manifest is an error of the volume.
-    let partial = crate::partial::read_manifest(dir).unwrap_or_else(|e| {
+    // The index only: a partial day's sidecar isn't read to catalog it.
+    let partial = crate::manifest::read_index(dir).unwrap_or_else(|e| {
         scan.fail(dir, e);
         BTreeMap::new()
     });
+    // Merges left pending, for the store to settle.
+    for day in crate::manifest::pending_days(dir) {
+        scan.unsettled.push((dir.to_path_buf(), day));
+    }
+    for (day, e) in &partial {
+        if e.get("pending").is_some() {
+            scan.unsettled.push((dir.to_path_buf(), day.clone()));
+        }
+    }
     let mut held = Vec::new();
     for f in listing(dir, true, scan) {
         let n = file_name(&f);

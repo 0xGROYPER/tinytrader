@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::partial::{read_manifest, write_manifest};
+use crate::manifest::{read_day, write_days, write_pending};
 
 /// The states Databento reports.
 const STATES: [&str; 3] = ["available", "degraded", "missing"];
@@ -66,24 +66,48 @@ pub fn parse(v: &Value) -> Result<BTreeMap<String, Row>, String> {
 ///
 /// # Errors
 /// If the manifest can't be read or written.
+#[cfg(test)]
 pub fn record(dir: &Path, day: &str, row: &Row, source: &str) -> Result<Option<Value>, String> {
-    let mut days = read_manifest(dir)?;
-    let entry = days.entry(day.to_owned()).or_insert_with(|| json!({}));
-    let old = entry.get("condition").cloned().unwrap_or(Value::Null);
-    if old["state"] == row.state.as_str() && old["last_modified"] == json!(row.last_modified) {
-        return Ok(None);
+    Ok(record_many(dir, &[(day, row)], source)?
+        .pop()
+        .map(|(_, old)| old))
+}
+
+/// As [`record`], for several days of one folder, with one write of its
+/// index at most. Returns each day changed, with the state it replaced.
+///
+/// # Errors
+/// As [`record`].
+pub fn record_many(
+    dir: &Path,
+    rows: &[(&str, &Row)],
+    source: &str,
+) -> Result<Vec<(String, Value)>, String> {
+    let mut writes = Vec::new();
+    let mut changed = Vec::new();
+    for &(day, row) in rows {
+        let mut entry = read_day(dir, day)?.unwrap_or_else(|| json!({}));
+        let old = entry.get("condition").cloned().unwrap_or(Value::Null);
+        if old["state"] == row.state.as_str() && old["last_modified"] == json!(row.last_modified) {
+            continue;
+        }
+        let condition = json!({
+            "state": row.state, "last_modified": row.last_modified, "source": source,
+            "checked_at": tinytrader_observe::unix_seconds(),
+        });
+        entry["condition"] = condition.clone();
+        // A merge in progress keeps it when it becomes the entry.
+        if let Some(mut p) = entry.as_object_mut().and_then(|o| o.remove("pending")) {
+            p["condition"] = condition;
+            write_pending(dir, day, &p)?;
+        }
+        changed.push((day.to_owned(), old["state"].clone()));
+        writes.push((day, Some(entry)));
     }
-    entry["condition"] = json!({
-        "state": row.state, "last_modified": row.last_modified, "source": source,
-        "checked_at": tinytrader_observe::unix_seconds(),
-    });
-    // A merge in progress keeps it when it becomes the entry.
-    let condition = entry["condition"].clone();
-    if let Some(p) = entry.get_mut("pending").and_then(Value::as_object_mut) {
-        p.insert("condition".into(), condition);
+    if !writes.is_empty() {
+        write_days(dir, &writes)?;
     }
-    write_manifest(dir, &days)?;
-    Ok(Some(old["state"].clone()))
+    Ok(changed)
 }
 
 /// Record the condition of each day file in `filed` (paths of
@@ -96,7 +120,7 @@ pub fn record_filed<'a>(
     rows: &BTreeMap<String, Row>,
     source: &str,
 ) -> Result<usize, String> {
-    let mut n = 0;
+    let mut by_dir: BTreeMap<&Path, Vec<(&str, &Row)>> = BTreeMap::new();
     for path in filed {
         let Some(day) = path
             .file_name()
@@ -105,10 +129,14 @@ pub fn record_filed<'a>(
         else {
             continue;
         };
-        if let (Some(row), Some(dir)) = (rows.get(day), path.parent()) {
-            record(dir, day, row, source)?;
-            n += 1;
+        if let (Some((day, row)), Some(dir)) = (rows.get_key_value(day), path.parent()) {
+            by_dir.entry(dir).or_default().push((day.as_str(), row));
         }
+    }
+    let mut n = 0;
+    for (dir, rows) in by_dir {
+        n += rows.len();
+        record_many(dir, &rows, source)?;
     }
     Ok(n)
 }
@@ -163,6 +191,9 @@ pub struct Applied {
     pub not_held: Vec<Value>,
 }
 
+/// A day's condition to record: its dataset, day and row.
+type Day<'a> = (&'a str, &'a str, &'a Row);
+
 /// Record each dataset's day conditions (`rows`, by dataset) for every
 /// schema and symbol of that dataset `provider` holds on that day, on any
 /// volume of `index` (the places the last scan found): a provider's
@@ -177,6 +208,8 @@ pub fn apply(
     source: &str,
     out: &mut Applied,
 ) -> Result<(), String> {
+    // Each folder's days, so each folder's index is written once.
+    let mut by_dir: BTreeMap<(&str, &Path), Vec<Day<'_>>> = BTreeMap::new();
     for (dataset, days) in rows {
         for (day, row) in days {
             let mut held = false;
@@ -192,25 +225,33 @@ pub fn apply(
                     else {
                         continue;
                     };
-                    if !crate::partial::ours(p.as_deref(), provider)
-                        || !d.eq_ignore_ascii_case(dataset)
-                        || !filed.iter().any(|(f, _, file)| f == day && *file)
+                    if crate::partial::ours(p.as_deref(), provider)
+                        && d.eq_ignore_ascii_case(dataset)
+                        && filed.iter().any(|(f, _, file)| f == day && *file)
                     {
-                        continue;
-                    }
-                    held = true;
-                    match record(dir, day, row, source)? {
-                        Some(from) => out.changed.push(json!({
-                            "dataset": dataset, "day": day, "volume": volume, "folder": dir,
-                            "from": from, "to": row.state,
-                        })),
-                        None => out.unchanged += 1,
+                        held = true;
+                        by_dir
+                            .entry((volume.as_str(), dir.as_path()))
+                            .or_default()
+                            .push((dataset.as_str(), day.as_str(), row));
                     }
                 }
             }
             if !held {
                 out.not_held.push(json!({ "dataset": dataset, "day": day }));
             }
+        }
+    }
+    for ((volume, dir), list) in by_dir {
+        let days: Vec<(&str, &Row)> = list.iter().map(|&(_, d, r)| (d, r)).collect();
+        let changed = record_many(dir, &days, source)?;
+        out.unchanged += list.len() - changed.len();
+        for (day, from) in changed {
+            let &(dataset, _, row) = list.iter().find(|x| x.1 == day).ok_or("lost a day")?;
+            out.changed.push(json!({
+                "dataset": dataset, "day": day, "volume": volume, "folder": dir,
+                "from": from, "to": row.state,
+            }));
         }
     }
     Ok(())
