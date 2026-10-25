@@ -331,6 +331,39 @@ impl Quote {
     }
 }
 
+/// A quote's submission: its requests sent so far, of how many, and how it
+/// ended.
+struct Submitting {
+    quote: Value,
+    state: &'static str,
+    submitted: usize,
+    of: usize,
+    error: Option<String>,
+    at: Instant,
+}
+
+impl Submitting {
+    fn view(&self) -> Value {
+        let mut v = self.quote.clone();
+        v["state"] = json!(self.state);
+        v["submitted"] = json!(self.submitted);
+        v["of"] = json!(self.of);
+        if let Some(e) = &self.error {
+            v["error"] = json!(e);
+        }
+        v
+    }
+}
+
+/// How long a submission's progress is kept.
+const SUBMITS_KEPT: Duration = Duration::from_secs(24 * 3600);
+
+/// Tries of a job's download and filing before it is left failed.
+const MAX_TRIES: u32 = 5;
+
+/// The wait before a failed job is tried again, doubling each time.
+const RETRY_AFTER: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 60_000 });
+
 /// A download into the store.
 #[derive(Clone, Default)]
 struct Transfer {
@@ -368,6 +401,15 @@ struct Jobs {
     transfers: Mutex<HashMap<String, Transfer>>,
     /// Jobs submitted here, downloaded once done.
     follow: Mutex<HashSet<String>>,
+    /// Jobs whose download is queued or running: never a second.
+    in_flight: Mutex<HashSet<String>>,
+    /// Failed downloads or filings of each job: how many, and when it may
+    /// be tried again.
+    tries: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Quotes being submitted, or submitted (kept a day): their progress.
+    submits: Mutex<HashMap<String, Submitting>>,
+    /// How long a download waits for the store to answer while it rescans.
+    store_wait: Duration,
     /// Submissions, written down before they are sent (see `ledger`).
     ledger: Mutex<Option<ledger::Ledger>>,
     /// Full job details, kept once a job is done (they no longer change).
@@ -412,6 +454,10 @@ impl Jobs {
             price_wait: Duration::from_secs(20),
             transfers: Mutex::default(),
             follow: Mutex::default(),
+            in_flight: Mutex::default(),
+            tries: Mutex::default(),
+            submits: Mutex::default(),
+            store_wait: Duration::from_secs(600),
             ledger: Mutex::new(ledger),
             details: Mutex::default(),
             delivered: Mutex::default(),
@@ -813,18 +859,25 @@ async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
         started,
     );
 
+    // Followed jobs that are done and not filed: not yet in the store, or
+    // left in its incoming folder by a filing that failed. Each once at a
+    // time, and a failed one again only after a wait, a few times.
     let ready: Vec<String> = out
         .iter()
         .filter(|j| {
+            let how = &held[&j.id];
             j.state == JobState::Done
                 && lock(&jobs.follow).contains(&j.id)
-                && held[&j.id].is_null()
+                && (how.is_null() || how["how"] == "incoming")
                 && unfileable(j).is_none()
+                && !lock(&jobs.in_flight).contains(&j.id)
+                && lock(&jobs.tries)
+                    .get(&j.id)
+                    .is_none_or(|(n, at)| *n < MAX_TRIES && Instant::now() >= *at)
         })
         .map(|j| j.id.clone())
         .collect();
     for id in ready {
-        lock(&jobs.follow).remove(&id);
         start_download(jobs, id);
     }
     Ok(Refreshed {
@@ -849,7 +902,27 @@ fn unfileable(j: &BatchJob) -> Option<String> {
         );
     }
     let n = j.symbols.to_api_string().split(',').count();
-    (n > 1).then(|| format!("requests {n} symbols; the store files one symbol per batch"))
+    (n > 1 && contract_parent(j).is_none()).then(|| {
+        format!(
+            "requests {n} symbols, not all contracts of one option parent; the store files one symbol per batch"
+        )
+    })
+}
+
+/// The option parent (`SPY.OPT`) of a job that lists contracts of one
+/// root, by raw symbol, each a strict OCC symbol: it is filed as partial
+/// days of that parent (decision 0018).
+fn contract_parent(j: &BatchJob) -> Option<String> {
+    if j.stype_in != SType::RawSymbol {
+        return None;
+    }
+    let symbols: Vec<String> = j
+        .symbols
+        .to_api_string()
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .collect();
+    missing::parent_of(&symbols)
 }
 
 fn row(j: &BatchJob, held: &Value, delivered: Option<u64>) -> Value {
@@ -1670,17 +1743,32 @@ async fn price(AxState(jobs): AxState<Shared>, Json(r): Json<PriceRequest>) -> R
 }
 
 /// Every quote that is still good, or still being priced.
+/// Every quote that is still good, or still being priced, and every
+/// submission of one (for a day).
 async fn quotes_list(AxState(jobs): AxState<Shared>) -> Reply {
-    let mut q = lock(&jobs.quotes);
-    q.retain(|_, x| !x.expired());
-    let mut ids: Vec<&String> = q.keys().collect();
-    ids.sort_by_key(|i| (i.len(), i.as_str()));
-    reply_ok(json!({ "quotes": ids.iter().map(|i| q[*i].view(i)).collect::<Vec<_>>() }))
+    let mut list: Vec<(String, Value)> = {
+        let mut q = lock(&jobs.quotes);
+        q.retain(|_, x| !x.expired());
+        q.iter().map(|(i, x)| (i.clone(), x.view(i))).collect()
+    };
+    {
+        let mut s = lock(&jobs.submits);
+        s.retain(|_, x| x.at.elapsed() < SUBMITS_KEPT);
+        list.extend(s.iter().map(|(i, x)| (i.clone(), x.view())));
+    }
+    list.sort_by(|a, b| (a.0.len(), &a.0).cmp(&(b.0.len(), &b.0)));
+    reply_ok(json!({ "quotes": list.into_iter().map(|(_, v)| v).collect::<Vec<_>>() }))
 }
 
 async fn quote_get(AxState(jobs): AxState<Shared>, UrlPath(id): UrlPath<String>) -> Reply {
-    match lock(&jobs.quotes).get(&id).filter(|q| !q.expired()) {
-        Some(q) => reply_ok(q.view(&id)),
+    if let Some(q) = lock(&jobs.quotes).get(&id).filter(|q| !q.expired()) {
+        return reply_ok(q.view(&id));
+    }
+    match lock(&jobs.submits)
+        .get(&id)
+        .filter(|x| x.at.elapsed() < SUBMITS_KEPT)
+    {
+        Some(x) => reply_ok(x.view()),
         None => refused(StatusCode::NOT_FOUND, "no such quote; it may have expired"),
     }
 }
@@ -1769,9 +1857,21 @@ async fn submit(
     Json(s): Json<Submit>,
 ) -> Reply {
     let approval = approval(&jobs, &headers, s.approved_by.as_deref());
-    tokio::spawn(submit_quote(jobs, s, approval))
+    let id = s.quote.clone();
+    let reply = tokio::spawn(submit_quote(jobs.clone(), s, approval))
         .await
-        .unwrap_or_else(|e| refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .unwrap_or_else(|e| refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+    let (code, Json(v)) = &reply;
+    if !code.is_success() {
+        // A refusal or a failure is said, with why, whatever the caller does.
+        let why = v["error"].as_str().unwrap_or("no reason given");
+        let at = v["progress"]
+            .as_str()
+            .map_or_else(String::new, |p| format!(" after {p} requests"));
+        let text = format!("submission of {id} stopped ({}){at}: {why}", code.as_u16());
+        jobs.events.push(text.clone(), text);
+    }
+    reply
 }
 
 async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply {
@@ -1818,6 +1918,30 @@ async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply
             Some(_) => quotes.remove(&s.quote).expect("just found"),
         }
     };
+    // From here the quote is used: its progress is kept, to its end.
+    let (code, Json(mut v)) = send_quote(&jobs, &s, &quote, again, approval).await;
+    let mut submits = lock(&jobs.submits);
+    if let Some(x) = submits.get_mut(&s.quote) {
+        x.at = Instant::now();
+        if code.is_success() {
+            x.state = "submitted";
+        } else {
+            x.state = "failed";
+            x.error = v["error"].as_str().map(str::to_owned);
+            v["progress"] = json!(format!("{} of {}", x.submitted, x.of));
+        }
+    }
+    (code, Json(v))
+}
+
+/// Submit a quote taken for it (see `submit_quote`).
+async fn send_quote(
+    jobs: &Shared,
+    s: &Submit,
+    quote: &Quote,
+    again: Option<HashSet<String>>,
+    approval: Option<Reply>,
+) -> Reply {
     let priced = match quote.result {
         _ if quote.expired() => {
             return refused(
@@ -1843,6 +1967,17 @@ async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply
             format!("nothing to buy: {}", priced.notes.join("; ")),
         );
     }
+    lock(&jobs.submits).insert(
+        s.quote.clone(),
+        Submitting {
+            quote: quote.view(&s.quote),
+            state: "submitting",
+            submitted: 0,
+            of: priced.parts.len(),
+            error: None,
+            at: Instant::now(),
+        },
+    );
     // One purchase at a time, from the last check to the ledger's last word.
     let _turn = jobs.purchase.lock().await;
     if lock(&jobs.ledger).is_none() {
@@ -1851,7 +1986,7 @@ async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply
     // Plan again: what's held, pending, bought and priced may have changed.
     let a = &quote.request;
     let counts = (AtomicUsize::new(0), AtomicUsize::new(0));
-    let parts = match plan(&jobs, a, &quote.again, true, &counts).await {
+    let parts = match plan(jobs, a, &quote.again, true, &counts).await {
         Ok((parts, _)) => parts,
         Err((_, e)) => {
             return refused(
@@ -1908,7 +2043,7 @@ async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply
                     })
                 })
         }
-        .and_then(|()| write_step(&jobs, &request, "sending", None, p.cost_usd, None));
+        .and_then(|()| write_step(jobs, &request, "sending", None, p.cost_usd, None));
         if let Err(e) = written {
             return refused(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": format!("could not write the submissions ledger, so the request for {} wasn't submitted: {e}", p.day), "submitted": submitted }).to_string());
         }
@@ -1924,7 +2059,7 @@ async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply
             Ok(job) => ("submitted", Some(job.id.clone()), None),
             Err(e) => ("uncertain", None, Some(brief(e))),
         };
-        if let Err(e) = write_step(&jobs, &request, state, job, p.cost_usd, note) {
+        if let Err(e) = write_step(jobs, &request, state, job, p.cost_usd, note) {
             // Unwritten, the "sending" step still blocks what it overlaps.
             eprintln!("databento-jobs: cannot write the ledger: {e}");
         }
@@ -1951,6 +2086,9 @@ async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply
                 let mut row = p.to_json();
                 row["job"] = json!(job.id);
                 submitted.push(row);
+                if let Some(x) = lock(&jobs.submits).get_mut(&s.quote) {
+                    x.submitted += 1;
+                }
             }
             Err(e) => {
                 return refused(StatusCode::BAD_GATEWAY, json!({ "error": format!("{what} from {}: submission failed or its outcome is unknown ({e}); it blocks what it overlaps until it shows on Databento's job list or is resolved (POST /ledger/resolve); nothing after it was submitted", p.day), "submitted": submitted }).to_string());
@@ -2121,7 +2259,11 @@ fn set(jobs: &Jobs, job: &str, f: impl FnOnce(&mut Transfer)) {
     f(lock(&jobs.transfers).entry(job.to_owned()).or_default());
 }
 
+/// Download and file a job, unless one for it is queued or running.
 fn start_download(jobs: &Shared, job: String) {
+    if !lock(&jobs.in_flight).insert(job.clone()) {
+        return;
+    }
     set(jobs, &job, |t| {
         *t = Transfer {
             state: "waiting".into(),
@@ -2139,24 +2281,64 @@ fn start_download(jobs: &Shared, job: String) {
         let result = fetch_and_file(&jobs, &job).await;
         match result {
             Ok(n) => {
+                lock(&jobs.tries).remove(&job);
                 set(&jobs, &job, |t| t.state = "filed".into());
-                jobs.events
-                    .push(format!("filed {job} in the store ({n} files)"), job.clone());
+                let text = if n == 0 {
+                    format!("{job} is already filed in the store")
+                } else {
+                    format!("filed {job} in the store ({n} files)")
+                };
+                jobs.events.push(text, job.clone());
             }
             Err(e) => {
+                // Tried again later, a few times, waiting longer each time.
+                let n = {
+                    let mut tries = lock(&jobs.tries);
+                    let t = tries.entry(job.clone()).or_insert((0, Instant::now()));
+                    t.0 += 1;
+                    t.1 = Instant::now() + RETRY_AFTER * 2u32.pow(t.0 - 1);
+                    t.0
+                };
                 set(&jobs, &job, |t| {
                     t.state = "failed".into();
                     t.error = Some(e.clone());
                 });
+                let then = if n < MAX_TRIES {
+                    format!("; tried again later ({n} of {MAX_TRIES})")
+                } else {
+                    format!("; left failed after {MAX_TRIES} tries")
+                };
                 jobs.events
-                    .push(format!("download of {job} failed: {e}"), e);
+                    .push(format!("download or filing of {job} failed: {e}{then}"), e);
             }
         }
+        lock(&jobs.in_flight).remove(&job);
     });
 }
 
-/// Stream every file of a done job into the store, then have it filed.
+/// Whether the store has already filed this batch.
+async fn filed(jobs: &Jobs, job: &str) -> bool {
+    let r = jobs
+        .http
+        .get(format!("{}/batches/databento", jobs.store))
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await;
+    match r {
+        Ok(r) if r.status().is_success() => r
+            .json::<Value>()
+            .await
+            .is_ok_and(|v| v["batches"][job]["how"] == "filed"),
+        _ => false,
+    }
+}
+
+/// Stream every file of a done job into the store, then have it filed
+/// (none, `Ok(0)`, when the store already has).
 async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
+    if filed(jobs, job).await {
+        return Ok(0);
+    }
     let files = jobs
         .db
         .files(job)
@@ -2280,17 +2462,10 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
     });
     // A job bought as a list of one option parent's contracts is filed as
     // partial days of that parent (decision 0018).
-    let parent = lock(&jobs.details).get(job).and_then(|j| {
-        let symbols: Vec<String> = j
-            .symbols
-            .to_api_string()
-            .split(',')
-            .map(|s| s.trim().to_owned())
-            .collect();
-        (j.stype_in == SType::RawSymbol)
-            .then(|| missing::parent_of(&symbols))
-            .flatten()
-    });
+    if filed(jobs, job).await {
+        return Ok(0);
+    }
+    let parent = lock(&jobs.details).get(job).and_then(contract_parent);
     let url = match &parent {
         Some(p) => format!("{}/incorporate/databento/{job}?parent={p}", jobs.store),
         None => format!("{}/incorporate/databento/{job}", jobs.store),
@@ -2312,14 +2487,25 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
 
 /// What the store can take before its writable volumes reach the critical
 /// threshold, in bytes: across them all, and on the roomiest one.
+/// While the store rescans (its catalog answers 503), it waits, longer each
+/// time, up to `store_wait`.
 async fn room(jobs: &Jobs) -> Result<(u64, u64), String> {
-    let r = jobs
-        .http
-        .get(format!("{}/catalog", jobs.store))
-        .timeout(Duration::from_secs(120))
-        .send()
-        .await
-        .map_err(|e| format!("store: {e}"))?;
+    let until = Instant::now() + jobs.store_wait;
+    let mut wait = Duration::from_millis(if cfg!(test) { 10 } else { 5_000 });
+    let r = loop {
+        let r = jobs
+            .http
+            .get(format!("{}/catalog", jobs.store))
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| format!("store: {e}"))?;
+        if r.status() != StatusCode::SERVICE_UNAVAILABLE || Instant::now() + wait > until {
+            break r;
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(Duration::from_secs(60));
+    };
     if !r.status().is_success() {
         return Err(format!("the store's catalog: HTTP {}", r.status()));
     }

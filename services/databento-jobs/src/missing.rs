@@ -99,7 +99,7 @@ pub fn wanted(defs: &[Contract], day: time::Date, rule: &Rule) -> BTreeSet<Strin
 /// all OCC symbols of one root.
 #[must_use]
 pub fn parent_of(symbols: &[String]) -> Option<String> {
-    let root = |s: &str| (s.len() == 21).then(|| s[..6].trim_end().to_owned());
+    let root = |s: &str| crate::had::occ_root(s).map(str::to_owned);
     let first = root(symbols.first()?)?;
     symbols
         .iter()

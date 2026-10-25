@@ -71,6 +71,10 @@ struct FakeState {
     submit_lost: bool,
     /// Databento doesn't answer a submission naming this symbol at all.
     hang_on: Option<String>,
+    /// The submission (counting from 0) that hangs (`true`) or is refused.
+    stop_at: Option<(usize, bool)>,
+    /// Each job's files, as Databento lists them.
+    files: HashMap<String, Vec<BatchFileDesc>>,
     costed: Vec<(Vec<String>, had::Window)>,
     /// Errors the next prices answer with, in turn.
     cost_errors: std::collections::VecDeque<String>,
@@ -139,14 +143,31 @@ impl api::Databento for Fake {
                 .ok_or_else(|| "no such job".into())
         })
     }
-    fn files<'a>(&'a self, _: &'a str) -> Fut<'a, Vec<BatchFileDesc>> {
-        not_faked()
+    fn files<'a>(&'a self, id: &'a str) -> Fut<'a, Vec<BatchFileDesc>> {
+        Box::pin(async move {
+            lock(&self.s)
+                .files
+                .get(id)
+                .cloned()
+                .ok_or_else(|| "no such job".to_owned())
+        })
     }
     fn submit<'a>(&'a self, p: &'a SubmitJobParams) -> Fut<'a, BatchJob> {
         Box::pin(async move {
             let hang = lock(&self.s).hang_on.clone();
             if hang.is_some_and(|h| p.symbols.to_api_string().contains(&h)) {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+            let (n, stop) = {
+                let s = lock(&self.s);
+                (s.submitted.len(), s.stop_at)
+            };
+            match stop {
+                Some((at, true)) if at == n => tokio::time::sleep(Duration::from_secs(3600)).await,
+                Some((at, false)) if at == n => {
+                    return Err("API error: 429 Too Many Requests: at most 20 a minute".into());
+                }
+                _ => {}
             }
             let id = format!("OPRA-NEW{}", self.next.fetch_add(1, Ordering::Relaxed));
             let mut j = job(
@@ -242,6 +263,16 @@ struct StoreState {
     conditions_posted: Vec<(Option<String>, Value)>,
     /// What `/health` says, as a capture service would.
     health: &'static str,
+    /// `/batches/databento`'s batches.
+    batches: Value,
+    /// Answers 503 to this many `/catalog` reads first (a rescan).
+    catalog_503s: u32,
+    /// Files uploaded to incoming, and each filing asked for (path and query).
+    uploaded: Vec<String>,
+    incorporated: Vec<String>,
+    /// Filing fails with this, when set.
+    incorporate_error: Option<String>,
+    incorporate_delay_ms: u64,
 }
 
 /// A definition day (zstd DBN) listing these contracts, all expiring on `DAY`.
@@ -288,6 +319,12 @@ fn ready_store() -> StoreState {
         conditions_reply: (200, json!({ "changed": [] })),
         conditions_posted: Vec::new(),
         health: "idle",
+        batches: json!({}),
+        catalog_503s: 0,
+        uploaded: Vec::new(),
+        incorporated: Vec::new(),
+        incorporate_error: None,
+        incorporate_delay_ms: 0,
     }
 }
 
@@ -304,6 +341,10 @@ async fn serve_store(state: StoreHandle) -> String {
             get(|AxState(s): AxState<StoreHandle>, RawQuery(q): RawQuery| async move {
                 let mut s = lock(&s);
                 s.catalog_asked.push(q.unwrap_or_default());
+                if s.catalog_503s > 0 {
+                    s.catalog_503s -= 1;
+                    return answer((503, json!({ "error": "rescanning" })));
+                }
                 answer(s.catalog.clone())
             }),
         )
@@ -333,6 +374,38 @@ async fn serve_store(state: StoreHandle) -> String {
                 },
             ),
         )
+        .route(
+            "/batches/databento",
+            get(|AxState(s): AxState<StoreHandle>| async move {
+                Json(json!({ "provider": "databento", "batches": lock(&s).batches.clone() }))
+            }),
+        )
+        .route("/incoming", get(|| async { Json(json!({ "batches": [] })) }))
+        .route(
+            "/incoming/databento/{job}/{file}",
+            axum::routing::put(
+                |AxState(s): AxState<StoreHandle>, UrlPath((job, file)): UrlPath<(String, String)>| async move {
+                    lock(&s).uploaded.push(format!("{job}/{file}"));
+                    Json(json!({ "ok": true }))
+                },
+            ),
+        )
+        .route(
+            "/incorporate/databento/{job}",
+            post(
+                |AxState(s): AxState<StoreHandle>, UrlPath(job): UrlPath<String>, RawQuery(q): RawQuery| async move {
+                    let delay = lock(&s).incorporate_delay_ms;
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    let mut s = lock(&s);
+                    s.incorporated.push(format!("{job}?{}", q.unwrap_or_default()));
+                    match s.incorporate_error.clone() {
+                        Some(e) => answer((500, json!({ "error": e }))),
+                        None => answer((200, json!({ "filed": job }))),
+                    }
+                },
+            ),
+        )
+        .route("/dl/{file}", get(|| async { "dbn bytes" }))
         .route(
             "/health",
             get(|AxState(s): AxState<StoreHandle>| async move { Json(json!({ "state": lock(&s).health })) }),
@@ -1704,4 +1777,255 @@ async fn a_day_with_no_condition_before_is_told_too() {
             "{DS} {DAY}: none → degraded (on v1), re-released 2026-10-02"
         )]
     );
+}
+
+/// A done job of SPY contracts, followed (bought here), with one file at
+/// the fake store, which has room.
+fn contract_job(r: &Rig, id: &str) {
+    r.fake.add(job(
+        id,
+        json!(format!("{C1},{C2}")),
+        "raw_symbol",
+        whole_day(),
+        "done",
+    ));
+    let url = r.jobs.store.clone();
+    lock(&r.fake.s).files.insert(
+        id.into(),
+        vec![BatchFileDesc {
+            filename: format!("opra-pillar-{}.cmbp-1.dbn.zst", DAY.replace('-', "")),
+            size: 9,
+            hash: "sha256:00".into(),
+            urls: [("https".to_owned(), format!("{url}/dl/x"))].into(),
+        }],
+    );
+    lock(&r.store).catalog.1 = json!({ "roots": [{ "name": "v1", "writable": true,
+        "volume": { "total_bytes": 1e12, "available_bytes": 5e11 }, "datasets": [] }],
+        "thresholds": { "critical": 90 }, "missing_volumes": [] });
+    lock(&r.jobs.follow).insert(id.into());
+}
+
+/// Until no download is queued or running.
+async fn settled(r: &Rig) {
+    for _ in 0..200 {
+        if lock(&r.jobs.in_flight).is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("a download never finished");
+}
+
+#[test]
+fn contract_lists_of_one_root_are_fileable() {
+    let raw = |s: &str| job("OPRA-1", json!(s), "raw_symbol", whole_day(), "done");
+    assert_eq!(unfileable(&raw(&format!("{C1},{C2}"))), None);
+    assert_eq!(
+        contract_parent(&raw(&format!("{C1},{C2}"))).as_deref(),
+        Some("SPY.OPT")
+    );
+    for refused in [
+        raw(&format!("{C1},QQQ   261002C00500000")),
+        raw(&format!("{C1},SPY261002C00728000")),
+        job(
+            "OPRA-2",
+            json!("SPY.OPT,QQQ.OPT"),
+            "parent",
+            whole_day(),
+            "done",
+        ),
+    ] {
+        assert!(unfileable(&refused).is_some(), "{:?}", refused.symbols);
+    }
+}
+
+#[tokio::test]
+async fn a_contract_list_job_is_filed_as_partial_days_of_its_parent() {
+    let r = rig("file-contracts").await;
+    contract_job(&r, "OPRA-C1");
+    refresh(&r.jobs).await.unwrap();
+    settled(&r).await;
+    let s = lock(&r.store);
+    assert_eq!(
+        s.incorporated,
+        ["OPRA-C1?parent=SPY.OPT"],
+        "{:?}",
+        lock(&r.jobs.transfers)
+            .get("OPRA-C1")
+            .map(|t| t.error.clone())
+    );
+    assert_eq!(
+        s.uploaded.len(),
+        2,
+        "the file and the manifest: {:?}",
+        s.uploaded
+    );
+}
+
+#[tokio::test]
+async fn a_job_is_downloaded_once_however_often_refreshed() {
+    let r = rig("once").await;
+    contract_job(&r, "OPRA-C1");
+    lock(&r.store).incorporate_delay_ms = 150;
+    for _ in 0..3 {
+        refresh(&r.jobs).await.unwrap();
+    }
+    settled(&r).await;
+    assert_eq!(lock(&r.store).incorporated.len(), 1);
+    // Already filed (the store says so): nothing is fetched or filed again.
+    lock(&r.store).batches = json!({ "OPRA-C1": { "volume": "v1", "how": "filed" } });
+    let (code, _) = download(AxState(r.jobs.clone()), UrlPath("OPRA-C1".into())).await;
+    assert_eq!(code, StatusCode::ACCEPTED);
+    settled(&r).await;
+    let s = lock(&r.store);
+    assert_eq!((s.incorporated.len(), s.uploaded.len()), (1, 2));
+}
+
+#[tokio::test]
+async fn a_download_waits_while_the_store_rescans() {
+    let r = rig("rescan").await;
+    contract_job(&r, "OPRA-C1");
+    lock(&r.store).catalog_503s = 3;
+    refresh(&r.jobs).await.unwrap();
+    settled(&r).await;
+    assert_eq!(lock(&r.store).incorporated.len(), 1);
+    // Not forever.
+    let r = rig_with("rescan-long", |j| j.store_wait = Duration::from_millis(30)).await;
+    contract_job(&r, "OPRA-C2");
+    lock(&r.store).catalog_503s = 1000;
+    refresh(&r.jobs).await.unwrap();
+    settled(&r).await;
+    let t = lock(&r.jobs.transfers).get("OPRA-C2").cloned().unwrap();
+    assert!(t.error.unwrap().contains("503"));
+}
+
+#[tokio::test]
+async fn a_failed_filing_is_tried_again_a_few_times() {
+    let r = rig("retry-filing").await;
+    contract_job(&r, "OPRA-C1");
+    lock(&r.store).incorporate_error = Some("a day's file is missing".into());
+    for _ in 0..8 {
+        refresh(&r.jobs).await.unwrap();
+        settled(&r).await;
+        // Left in the store's incoming folder by the failed filing.
+        lock(&r.store).batches = json!({ "OPRA-C1": { "volume": "v1", "how": "incoming" } });
+    }
+    assert_eq!(lock(&r.store).incorporated.len(), MAX_TRIES as usize);
+    let view = jobs_view(&r.jobs);
+    let row = view["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["id"] == "OPRA-C1")
+        .unwrap()
+        .clone();
+    assert_eq!(row["transfer"]["state"], "failed");
+    assert!(
+        row["transfer"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("a day's file is missing"),
+        "{row}"
+    );
+}
+
+#[tokio::test]
+async fn a_submission_shows_its_progress_and_why_it_stopped() {
+    let r = rig("progress").await;
+    let days = json!({ "start": "2026-10-01", "end": "2026-10-05", "hours": { "start": "09:30", "end": "16:01" } });
+    let (_, v) = r.price(days.clone()).await;
+    let quote = v["quote"].as_str().unwrap().to_owned();
+    assert_eq!(rows(&v).len(), 5);
+    // The third hangs a while: meanwhile, it shows as submitting.
+    lock(&r.fake.s).stop_at = Some((2, true));
+    let sent = tokio::spawn({
+        let jobs = r.jobs.clone();
+        let quote = quote.clone();
+        async move {
+            submit(
+                AxState(jobs),
+                axum::http::HeaderMap::new(),
+                Json(Submit {
+                    quote,
+                    confirm_usd: None,
+                    again: None,
+                    approved_by: None,
+                }),
+            )
+            .await
+        }
+    });
+    let mut seen = Value::Null;
+    for _ in 0..200 {
+        let (_, Json(v)) = quote_get(AxState(r.jobs.clone()), UrlPath(quote.clone())).await;
+        seen = v;
+        if seen["submitted"] == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(seen["submitted"], 2, "{seen}");
+    assert_eq!(
+        (seen["state"].as_str(), seen["of"].as_u64()),
+        (Some("submitting"), Some(5))
+    );
+    let (code, _) = sent.await.unwrap();
+    assert_eq!(code, StatusCode::BAD_GATEWAY);
+    let (_, Json(v)) = quote_get(AxState(r.jobs.clone()), UrlPath(quote.clone())).await;
+    assert_eq!(
+        (
+            v["state"].as_str(),
+            v["submitted"].as_u64(),
+            v["of"].as_u64()
+        ),
+        (Some("failed"), Some(2), Some(5)),
+        "{v}"
+    );
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("no answer from Databento"),
+        "{v}"
+    );
+    let told = r.jobs.events.since(0, 500).to_string();
+    assert!(
+        told.contains(&format!(
+            "submission of {quote} stopped (502) after 2 of 5 requests"
+        )),
+        "{told}"
+    );
+    // The rest: the same request priced again quotes exactly what wasn't sent
+    // (the third, its outcome unknown, is never bought again).
+    lock(&r.fake.s).stop_at = None;
+    let (_, v) = r.price(days).await;
+    let left: Vec<String> = rows(&v)
+        .iter()
+        .map(|x| x["first_day"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(left, ["2026-10-04", "2026-10-05"], "{v}");
+}
+
+#[tokio::test]
+async fn a_refused_submission_is_told() {
+    let r = paid("told", 2.5).await;
+    let quote = r.quote("SPY.OPT", DAY, DAY).await;
+    assert_eq!(r.submit(&quote, None).await.0, StatusCode::FORBIDDEN);
+    let told = r.jobs.events.since(0, 500).to_string();
+    assert!(
+        told.contains(&format!("submission of {quote} stopped (403)")) && told.contains("approval"),
+        "{told}"
+    );
+    // A refusal from Databento midway (a 429) is told with how far it got.
+    let r = rig("told-429").await;
+    let (_, v) = r.price(json!({ "start": "2026-10-01", "end": "2026-10-02", "hours": { "start": "09:30", "end": "16:01" } })).await;
+    lock(&r.fake.s).stop_at = Some((1, false));
+    let quote = v["quote"].as_str().unwrap().to_owned();
+    assert_eq!(r.submit(&quote, None).await.0, StatusCode::BAD_GATEWAY);
+    let (_, Json(v)) = quote_get(AxState(r.jobs.clone()), UrlPath(quote)).await;
+    assert_eq!(
+        (v["state"].as_str(), v["submitted"].as_u64()),
+        (Some("failed"), Some(1))
+    );
+    assert!(v["error"].as_str().unwrap().contains("429"), "{v}");
 }
