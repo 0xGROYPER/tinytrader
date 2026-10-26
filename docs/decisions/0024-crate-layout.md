@@ -189,5 +189,10 @@ any time; R11 before 0021's store producer; R12 last.
 - The relay gains catch-up for every source, from its own recording.
 - The work is large but each step stands alone; nothing is a rewrite, and
   each PR reports its lines removed.
-- How services are deployed (Compose and launchd today, Nomad for batch)
-  is a separate decision; this one changes code, not placement.
+- How services are deployed (Compose and launchd today, Nomad for batch:
+  tinytrader-deploy's 0014) is a separate decision; this one changes code,
+  not placement. One overlap is used now: finite work that waits for the
+  close or for capture to go idle (`alpaca-history`'s backfills,
+  `databento-jobs`' daily conditions) can be a batch job behind Nomad's
+  start gate, and `CaptureGate` is then only for what a running service
+  must hold off on.
