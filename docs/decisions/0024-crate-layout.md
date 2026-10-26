@@ -146,7 +146,42 @@ What stays in the page: the workspace, charts and layout, forms, per-device
 settings, formatting and fetching. About 1,200 to 1,500 lines of
 JavaScript go.
 
-### 6. Not taken
+### 6. `sync`: topping off, as sugar over `fetch`
+
+Hyphae's `feed sync` kept a dataset current: a finite, bounded `fetch` of
+only what the store doesn't hold yet. tinytrader does this in pieces today
+(`alpaca-history`'s `HISTORY_TOPOFF` evening run; `databento-jobs`' "buy
+only what's missing"). It becomes one verb, the same for every provider:
+
+```sh
+tt sync alpaca --feed sip --schema cmbp-1 --symbols SPY,QQQ --from 2026-09-28 --write store
+tt sync databento --dataset OPRA.PILLAR --schema statistics --symbols SPY.OPT --from 2025-10-01 --write store
+```
+
+- **What it fetches:** every session day from `--from` through the latest
+  complete day (its close plus 15 minutes, by the market calendar) that the
+  store doesn't hold in full, oldest first, with `--max-days` and the
+  provider's request budget bounding one run. Days held are skipped by
+  the store's coverage, not by a local record.
+- **One operation:** it plans the days and calls `fetch` for them, with the
+  same paging, pacing, retries and output. A paid provider prices the
+  missing days and asks as `fetch` does (0019): a scheduled `sync` of a
+  paid source leaves a quote and notifies.
+- **Run anywhere:** by hand, or nightly as a batch job behind the
+  deployment's start gate (after the close, capture idle). The evening
+  top-off inside `alpaca-history` becomes that job.
+
+### 7. Tinytrader is Cargo and Docker; deployment is elsewhere
+
+tinytrader builds and runs with Cargo, and packages with its `Dockerfile`
+and `docker buildx bake`. It carries no Nix: the `tinytrader.services`
+NixOS and nix-darwin modules, the Nix packages and the image building in
+`nix/` move to tinytrader-deploy, which runs the stack (Compose for one
+machine, Nomad for a network, Nix as the advanced path). The leak check
+(`generic`) becomes a plain script CI runs. A deployment's own repository is
+the site.
+
+### 8. Not taken
 
 Hyphae's slot transactions, page evidence and framed transport; Reactor's
 envelope and topic machinery and its DBN crate; the store as a library
@@ -173,11 +208,14 @@ report before going 30% over.
 | **R10.** `libs/fleet` typed views for both front ends | 250 / 150 | ~150 JS, ~200 Rust | |
 | **R11.** DBN header reading and the merge into `libs/dbn` | moves ~500 | ~250 | the store producer (0021 step 5) needs the merge |
 | **R12.** `order-gateway` onto the shared crates; `session.rs` split by phase | moves ~2,000 | ~400 | under the trading hold, after a close |
+| **R13.** `venues/coinbase` and a Coinbase relay source, ported from Hyphae's venue and live driver (public feed, no account); `ticker` retired | ~1,800 / ~900 | ~430 (`ticker`) | the README's first live example |
+| **R14.** `tt sync` (section 6); the evening top-off as a batch job | 250 / 200 | ~60 | after 0021 step 3 and R6 |
+| **R15.** Nix out of tinytrader (section 7): modules, packages and image building to tinytrader-deploy; `generic` as a script; CI without Nix | moves ~1,500 | – | with a tinytrader-deploy PR, same day |
 
 0021's steps 1 (`libs/net`) and 2 (`libs/store-client`) come before R3, R5
 and R6; R5 and R6 are 0021's 9c and 9b. Order: R0, R1, R2 any time; then
 R3; R4 and R5 any order; R6 after R3; R7 after R3; R8 after R7; R9 and R10
-any time; R11 before 0021's store producer; R12 last.
+any time; R11 before 0021's store producer; R12 last; R13 after R3 and R7 (it uses `libs/service`'s supervised loop and the fan-out), and early among them; R14 after R6; R15 any time, with its deploy-repo PR.
 
 ## Consequences
 
