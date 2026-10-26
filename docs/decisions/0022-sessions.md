@@ -52,14 +52,23 @@ session; only the session's mode says what's behind the addresses.
 | `live` | the relays | live accounts | the wall |
 
 A session announces itself the way every Hyphae-style command does: one
-line, `READY session=<id> mode=<m> data=<addr>[,<addr>…] orders=<name>=<addr>[,…]`,
-and the same as JSON at `GET /sessions/{id}`. A strategy reads its addresses
+line, `READY session=<id> mode=<m> control=<addr> data=<addr>[,<addr>…] orders=<name>=<addr>[,…]`,
+and the same as JSON on its control connection. A strategy reads its addresses
 from there (or from `TT_SESSION`), never from its own configuration, so
 nothing in it names a mode.
 
-`backtest` is the new part, served by a **session service**; `paper` and
-`live` are a manifest pointing at the relays and gateways that already run,
-plus the run record (section 6).
+**A session is a process per run, not a service.** `tt session run`
+starts one: a local process for a single run, a batch job in the
+deployment's scheduler (0020) for a sweep. It prints `READY`, serves the run
+and exits with the run's outcome. It is not part of the relay: the relay is
+the live, latency-sensitive path on the feed host, and a backtest reading
+tens of gigabytes from sleeping drives shouldn't share its process or host.
+What the two share is libraries (0021 section 6): the store producer, the
+merge and the cut are used by the relay (for warm-up) and by sessions.
+
+`paper` and `live` sessions start no new service either: the process is a
+manifest over the relays and gateways that already run, and the writer of
+the run record (section 6).
 
 ### 2. One clock, and lockstep
 
@@ -74,11 +83,21 @@ The strategy says how it keeps up:
 - **`lockstep`** (the default; deterministic). The session sends the
   records of one timestamp (or one batch the strategy chose: per record,
   per timestamp, per N ms of market time) and waits for the strategy's
-  `ready{as_of}` on the orders connection before sending more. Orders sent
-  before `ready` are stamped at `as_of` plus the strategy's declared
-  latency (a constant per session, 0 by default), so a slow strategy is
-  modelled, not timed. The simulator's existing `advance{to_ts}` becomes
-  this: the session advances every venue together.
+  `ready` before sending more.
+  - **`ready` goes on the session's control connection, the only clock
+    signal**, never on an orders connection: a strategy trading several
+    venues has one orders connection per gateway, and an order on one sent
+    just before `ready` on another could arrive after it, stamped at a
+    different time from run to run. `ready{as_of, sent: {venue: last_seq}}`
+    names, per venue, the last order message the strategy sent; the session
+    advances only once every gateway has received up to that sequence. The
+    gateways' protocol is unchanged, and the data connections stay as they
+    are: the session just doesn't release the next batch until `ready`.
+  - Orders a gateway receives before that `ready` are stamped at `as_of`
+    plus the strategy's declared latency (a constant per session, 0 by
+    default), so a slow strategy is modelled, not timed.
+  - The simulator's `advance{to_ts}` becomes this: the session advances
+    every venue together.
 - **`paced`** (`speed=1` market time as wall time, or `speed=N`). The
   session doesn't wait; a strategy's real latency counts. Not reproducible,
   and the run says so.
@@ -142,14 +161,26 @@ venues:
 
 ### 5. The simulator grows for multi-day options
 
-- **Expiry, settlement and assignment.** At each expiry: cash-settled
-  options (SPX, XSP) settle at the settlement value (the AM special
-  opening quotation, or the PM close) from a source the session names; a
-  missing value fails that settlement loudly rather than guessing;
-  physically settled (SPY) in-the-money long options exercise and short
-  ones are assigned into the underlying, by the OCC's threshold unless the
-  profile says otherwise. These are broker events on the account, as they
-  would be live.
+- **Expiry, settlement and assignment.** At each expiry, as broker events
+  on the account, as they would be live:
+  - **Cash-settled index options** settle at the settlement value: Cboe's
+    special opening quotation (SET) for AM-settled SPX and XSP, the 16:00
+    index close for PM-settled SPXW and XSP. OPRA carries option quotes, not
+    index levels, so these come from a **`settlement` dataset** in the store
+    (per root and expiry date: the value, AM or PM, and its source), filed
+    daily from Cboe's published settlement values, with a backfill.
+  - **Physically settled options (SPY)**: in-the-money longs exercise and
+    shorts are assigned into the underlying, at the OCC's $0.01 threshold
+    unless the profile says otherwise, against the official close (the
+    primary listing's closing auction print, from SIP with its conditions).
+  - **A missing settlement value fails that settlement loudly**, never a
+    guess, and the run is marked incomplete.
+  - **Not modelled, and said so in every run:** early exercise and
+    assignment (short SPY calls before an ex-dividend date), and pin risk
+    near the threshold (a holder's choice not to exercise).
+- **Positions carry across days** in a multi-day backtest: each day's
+  definitions are re-keyed by `raw_symbol`, so a position opened Monday is
+  the same contract on Tuesday under its new instrument id.
 - **Reads the store**, through the session (one or more sources), not only
   a file or a stream.
 - **Limits stated in the run.** Fills are at the touch, with optional
@@ -180,10 +211,19 @@ tt session run --manifest RUN      # the same inputs and pins again
 - **Warm-up.** `--warmup` starts the data before `--trade-from`; the venues
   refuse orders until then (`rejected{code:"warmup"}`), so a lookback fills
   without trading on it.
-- **The manifest** pins every input day by the store's SHA-256, the
-  universe, the venues' profiles and the simulator's model version, the
-  strategy's declared identity (a revision it sends in `hello`), the
-  lockstep batch and latency, and the seed.
+- **The manifest** pins every input day by the store's SHA-256, and each
+  day's definitions by their source and hash; the universe; the merge's tie
+  rule (0021 section 8: the order of sources, then each file's order); the
+  venues' profiles and the simulator's model version; the strategy's
+  declared identity (a revision it sends in `hello`); the lockstep batch
+  and latency; and the seed.
+- **The seed drives only declared randomness:** a randomised fill or latency
+  model, where a venue's profile chooses one. The first models are
+  deterministic and use none; the manifest still records it, so a later
+  model can't change old runs.
+- **The audit hash covers** every record delivered (by source and position,
+  not the bytes, which the pins fix), every order message each gateway
+  received with its stamped time, every venue report, and every `ready`.
 - **The record** of a run is the gateways' journals (hash-chained already),
   the session's audit hash over what it delivered and what it was sent, and
   whatever the strategy reports through the session (named series, opaque
@@ -207,8 +247,8 @@ kept beside it, with the same tests:
   lockstep `ready`.
 - **Rust**: the same, on `libs/dbn` and the layered libraries (0021).
 
-The session's own HTTP endpoints are in the generated contract (0021
-section 5). The in-process runtime of 0009 uses the same session
+The session's control protocol is in the generated contract (0021
+section 5) with the others. The in-process runtime of 0009 uses the same session
 libraries (the merge, the clock, the simulated venues), so an actor in the
 runtime and a client over TCP see the same order and the same fills.
 
@@ -220,16 +260,20 @@ and report before going 30% over. Steps 1 and 2 need 0021's store producer
 
 | Step | Prod | Tests |
 |---|---|---|
-| 1. The session service: one source, one simulated venue, lockstep, `READY`; the simulator reads through it | 700 | 600 |
-| 2. Many sources (the merge, per-source latency offsets) and many venues (profiles, one gateway each) | 500 | 450 |
-| 3. Universe filters on the store producer; daily definitions; coverage refusal and accepted holes | 400 | 350 |
+| 1. The session process: one source, one simulated venue, the control connection, lockstep, `READY`; the simulator reads through it | 700 | 600 |
+| 2. Many sources (the merge, per-source latency offsets) and many venues (profiles, one gateway each, `ready{sent}` across them) | 500 | 450 |
+| 3. Universe filters on the store producer; daily definitions; positions across days; coverage refusal and accepted holes | 400 | 350 |
 | 4. The run: `tt session plan/run`, `tt runs`, the manifest, the audit hash, filing the record; warm-up and `trade-from` | 600 | 400 |
-| 5. Option expiry, settlement and assignment in the simulator | 450 | 450 |
-| 6. Python and Rust client libraries, with the strategy tutorial on them | 600 | 400 |
+| 5a. The `settlement` dataset: Cboe's daily values filed through the store, and a backfill | 200 | 150 |
+| 5b. Option expiry, settlement and assignment in the simulator | 450 | 450 |
+| 6a. The Python client library, with the strategy tutorial on it | 500 | 300 |
+| 6b. The Rust client library | 300 | 200 |
 | 7. `paper` and `live` sessions: manifests over the running relays and gateways, the run record | 250 | 200 |
-| **Total** | **3,500** | **2,850** |
+| **Total** | **3,900** | **3,100** |
 
-Order: 1 → 2 → 3 → 4; 5 and 6 after 1; 7 after 4.
+Order: 1 → 2 → 3 → 4; 5a before 5b, both after 1; 6a and 6b after 1;
+7 after 4. Sweeps read heavily, so they run in the scheduler's pool under
+the market-hours rule for heavy reads (0011).
 
 ## Consequences
 
@@ -240,7 +284,8 @@ Order: 1 → 2 → 3 → 4; 5 and 6 after 1; 7 after 4.
   future while trading another.
 - A result can be reproduced from its manifest, and says which fill model
   and which inputs it assumed.
-- The session service is new, and a stable interface once step 1 lands.
+- The session process and its control protocol are new, and a stable
+  interface once step 1 lands. No new long-lived service is added.
   The simulator's `advance{to_ts}` stays for clients that use it directly.
 - Not doing now: queue-position or impact fill models, margin across
   venues, futures expiry (a later simulator step), and a strategy framework
