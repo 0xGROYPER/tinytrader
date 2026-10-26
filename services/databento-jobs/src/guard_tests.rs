@@ -486,6 +486,11 @@ async fn rig_with(name: &str, setup: impl FnOnce(&mut Jobs)) -> Rig {
     }
 }
 
+/// Fail unless an answer fits this service's committed OpenAPI document.
+fn fits(method: &str, path: &str, code: StatusCode, v: &Value) {
+    tinytrader_openapi::assert_conforms("databento-jobs", method, path, code.as_str(), v);
+}
+
 /// The approval token of the rigs that take paid purchases.
 const APPROVE: &str = "approve-test";
 
@@ -502,6 +507,7 @@ impl Rig {
             Json(serde_json::from_value(v).unwrap()),
         )
         .await;
+        fits("post", "/price", code, &v);
         (code, v)
     }
 
@@ -546,6 +552,7 @@ impl Rig {
             }),
         )
         .await;
+        fits("post", "/submit", code, &v);
         (code, v)
     }
 
@@ -1304,7 +1311,8 @@ async fn quotes_are_listed_in_full_and_declined_with_the_token() {
     let r = rig_with("quotes", |j| j.approve_token = Some(APPROVE.into())).await;
     lock(&r.fake.s).price = 1.25;
     let quote = r.quote("SPY.OPT", DAY, DAY).await;
-    let (_, Json(list)) = quotes_list(AxState(r.jobs.clone())).await;
+    let (c, Json(list)) = quotes_list(AxState(r.jobs.clone())).await;
+    fits("get", "/quotes", c, &list);
     let q = &list["quotes"][0];
     assert_eq!(
         (
@@ -1603,7 +1611,8 @@ async fn a_price_that_takes_too_long_fails() {
     assert_eq!(code, StatusCode::ACCEPTED, "{v}");
     let quote = v["quote"].as_str().unwrap().to_owned();
     tokio::time::sleep(Duration::from_millis(400)).await;
-    let (_, Json(v)) = quote_get(AxState(r.jobs.clone()), UrlPath(quote)).await;
+    let (c, Json(v)) = quote_get(AxState(r.jobs.clone()), UrlPath(quote)).await;
+    fits("get", "/quotes/{id}", c, &v);
     assert_eq!(v["state"], "failed", "{v}");
     assert!(v["error"].as_str().unwrap().contains("longer than"), "{v}");
 }
@@ -2037,7 +2046,8 @@ async fn a_refused_submission_is_told() {
     lock(&r.fake.s).stop_at = Some((1, false));
     let quote = v["quote"].as_str().unwrap().to_owned();
     assert_eq!(r.submit(&quote, None).await.0, StatusCode::BAD_GATEWAY);
-    let (_, Json(v)) = quote_get(AxState(r.jobs.clone()), UrlPath(quote)).await;
+    let (c, Json(v)) = quote_get(AxState(r.jobs.clone()), UrlPath(quote)).await;
+    fits("get", "/quotes/{id}", c, &v);
     assert_eq!(
         (v["state"].as_str(), v["submitted"].as_u64()),
         (Some("failed"), Some(1))

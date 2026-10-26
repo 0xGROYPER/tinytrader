@@ -89,6 +89,14 @@ struct Quotes {
     quotes: Vec<Quote>,
 }
 
+/// A refused or failed submission: why, and for a quote whose submission
+/// had begun, how far it got (`"3 of 10"`).
+#[derive(JsonSchema)]
+struct SubmitRefused {
+    error: String,
+    progress: Option<String>,
+}
+
 #[derive(JsonSchema)]
 struct Submitted {
     submitted: Vec<Request>,
@@ -128,12 +136,13 @@ fn openapi() {
         &[priced],
     );
     let (submit, done) = (s.schema::<Submit>(), s.schema::<Submitted>());
+    let refused = ("default", "refused or failed", s.schema::<SubmitRefused>());
     s.op(
         ("post", "/submit"),
         "Buy a quote",
         vec![],
         Some(submit),
-        &[("200", "submitted", done)],
+        &[("200", "submitted", done), refused],
     );
     let doc = s.document("databento-jobs", "See docs/api/databento-jobs.md.");
     tinytrader_openapi::check("databento-jobs", &doc);

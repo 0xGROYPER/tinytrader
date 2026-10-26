@@ -467,6 +467,24 @@
         ],
         "type": "object"
       },
+      "SubmitRefused": {
+        "description": "A refused or failed submission: why, and for a quote whose submission\nhad begun, how far it got (`\"3 of 10\"`).",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "progress": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
       "Submitted": {
         "properties": {
           "cost_usd": {
@@ -636,7 +654,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/SubmitRefused"
                 }
               }
             },

@@ -2162,7 +2162,13 @@ mod tests {
     /// A GET: its status code and JSON body.
     async fn get(addr: &str, path: &str) -> (u16, Value) {
         let (code, body) = call(addr, "GET", path, None, "").await;
-        (code, serde_json::from_str(&body).unwrap_or(Value::Null))
+        let v = serde_json::from_str(&body).unwrap_or(Value::Null);
+        // Every answer of the documented reads fits the OpenAPI document.
+        let p = path.split('?').next().unwrap_or(path);
+        if ["/catalog", "/coverage", "/files"].contains(&p) && !v.is_null() {
+            tinytrader_openapi::assert_conforms("store", "get", p, &code.to_string(), &v);
+        }
+        (code, v)
     }
 
     const COVERAGE: &str = "/coverage?provider=databento&dataset=OPRA.PILLAR&symbol=SPY.OPT&schema=cbbo-1m&start=2026-10-01&end=2026-10-09";

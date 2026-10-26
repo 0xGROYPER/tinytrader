@@ -178,6 +178,7 @@ mod tests {
         fs::write(d.join("loose.dbn"), b"zz").unwrap();
 
         let all = list_of(&v, "*", None, MAX_LISTED);
+        tinytrader_openapi::assert_conforms("store", "get", "/files", "200", &all);
         let names: Vec<&str> = all["files"]
             .as_array()
             .unwrap()
