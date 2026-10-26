@@ -156,7 +156,10 @@ pub fn write_days(dir: &Path, days: &[(&str, Option<Value>)]) -> Result<(), Stri
     for (day, e) in &mut index {
         if e.get("coverage").is_some() {
             let mut full = e.clone();
-            full.as_object_mut().map(|o| o.remove("pending"));
+            // A merge left pending inline stays pending, in its own file.
+            if let Some(p) = full.as_object_mut().and_then(|o| o.remove("pending")) {
+                write_pending(dir, day, &p)?;
+            }
             write_json(&sidecar(dir, day), &full)?;
             *e = stub(day, &full);
         }
@@ -255,11 +258,11 @@ pub fn settle(dir: &Path, day: &str) -> Result<Option<Value>, String> {
     }
     if entry["sha256"] == got.as_str() {
         entry.as_object_mut().map(|o| o.remove("pending"));
-        if as_sidecar {
-            fs::remove_file(pending_path(dir, day)).map_err(|e| e.to_string())?;
-        } else {
+        if !as_sidecar {
+            // Recorded inline, before sidecars (writing moves it to its file).
             set_entry(dir, day, Some(entry.clone()))?;
         }
+        fs::remove_file(pending_path(dir, day)).map_err(|e| e.to_string())?;
         return Ok(Some(entry));
     }
     Err(format!(

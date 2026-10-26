@@ -406,6 +406,7 @@ async fn scan(store: &Shared, observer: &Observer) {
             .collect();
         (held, r.ignored.clone())
     };
+    let s = store.clone();
     let found = tokio::task::spawn_blocking(move || {
         volumes
             .iter()
@@ -422,7 +423,12 @@ async fn scan(store: &Shared, observer: &Observer) {
                         (root, Vec::new())
                     }
                 };
-                settle_merges(v, &mut root, &mut places);
+                // Settling writes manifests: only while no filing runs (one
+                // may be between recording its merge and swapping it in).
+                // Otherwise the merge stays listed, for the next scan.
+                if let Ok(_one_at_a_time) = s.filing.try_lock() {
+                    settle_merges(v, &mut root, &mut places);
+                }
                 let errors: Vec<String> = if root["present"] == true {
                     root["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(str::to_owned)).collect()
                 } else {
@@ -506,6 +512,66 @@ async fn scan(store: &Shared, observer: &Observer) {
     store.completed.fetch_max(target, Ordering::SeqCst);
 }
 
+/// The schema folders a filing waiting in `parts` would write, on any of its
+/// volumes, from its receipt (`import.json`, or a batch's `metadata.json`,
+/// filed under `parent` if given): read again after it, whether it
+/// succeeded or stopped partway.
+fn target_folders(
+    parts: &[ingest::Part],
+    elsewhere: &[PathBuf],
+    parent: Option<&str>,
+) -> Vec<PathBuf> {
+    let read = |name: &str| -> Option<Value> {
+        parts
+            .iter()
+            .find_map(|p| std::fs::read_to_string(p.inc.join(name)).ok())
+            .and_then(|t| serde_json::from_str(&t).ok())
+    };
+    let level: Option<PathBuf> = if let Some(r) = read(partial::IMPORT) {
+        match (
+            r["dataset"].as_str(),
+            r["symbol"].as_str(),
+            r["schema"].as_str(),
+        ) {
+            (Some(d), Some(s), Some(k)) => Some([d, s, k].iter().collect()),
+            _ => None,
+        }
+    } else if let Some(m) = read("metadata.json") {
+        let q = &m["query"];
+        let symbols: Vec<&str> = q["symbols"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        match (
+            q["dataset"].as_str(),
+            q["schema"].as_str(),
+            parent,
+            symbols.as_slice(),
+        ) {
+            (Some(d), Some(k), Some(p), _) => Some([d, p, k].iter().collect()),
+            (Some(d), Some(k), None, ["ALL_SYMBOLS"]) => Some([d, k].iter().collect()),
+            (Some(d), Some(k), None, [one]) => Some([d, one, k].iter().collect()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let Some(level) = level.filter(|l| {
+        l.components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    }) else {
+        return Vec::new();
+    };
+    parts
+        .iter()
+        .map(|p| &p.root)
+        .chain(elsewhere)
+        .map(|r| r.join(&level))
+        .collect()
+}
+
 /// Settle the merges a volume's scan found left pending (decision 0018): the
 /// day file's hash says whether its merged file is in place. Each folder
 /// settled is read again into the scan's answer.
@@ -575,7 +641,7 @@ impl Store {
         let mut catalog = lock(&self.catalog);
         let mut index = lock(&self.index);
         let index = Arc::make_mut(&mut index);
-        for dir in dirs {
+        for dir in dirs.iter().filter(|d| d.is_dir()) {
             if !redo.contains(dir) {
                 redo.push(dir.clone());
             }
@@ -903,6 +969,7 @@ async fn incorporate(
         .filter(|p| !parts.iter().any(|x| x.root == *p))
         .collect();
     let _one_at_a_time = store.filing.lock().await;
+    let targets = target_folders(&parts, &elsewhere, q.parent.as_deref());
     let today = today();
     let b = batch.clone();
     let result = tokio::task::spawn_blocking(move || match q.parent {
@@ -921,10 +988,14 @@ async fn incorporate(
                 format!("incorporated {pdir}/{batch}: {n} files"),
                 summary.to_string(),
             );
-            tokio::task::block_in_place(|| store.refresh(&Store::filed_folders(&summary)));
+            let mut dirs = Store::filed_folders(&summary);
+            dirs.extend(targets);
+            tokio::task::block_in_place(|| store.refresh(&dirs));
             reply(StatusCode::OK, summary)
         }
         Ok(Err(e)) => {
+            // What it filed before it stopped, if anything.
+            tokio::task::block_in_place(|| store.refresh(&targets));
             store
                 .events
                 .push(format!("refused {pdir}/{batch}: {e}"), e.clone());
@@ -960,6 +1031,7 @@ async fn import(
         .filter(|p| !parts.iter().any(|x| x.root == *p))
         .collect();
     let _one_at_a_time = store.filing.lock().await;
+    let targets = target_folders(&parts, &elsewhere, None);
     let today = today();
     let i = id.clone();
     let result =
@@ -971,10 +1043,13 @@ async fn import(
                 format!("imported {pdir}/{id}: {n} days"),
                 summary.to_string(),
             );
-            tokio::task::block_in_place(|| store.refresh(&Store::filed_folders(&summary)));
+            let mut dirs = Store::filed_folders(&summary);
+            dirs.extend(targets);
+            tokio::task::block_in_place(|| store.refresh(&dirs));
             reply(StatusCode::OK, summary)
         }
         Ok(Err(e)) => {
+            tokio::task::block_in_place(|| store.refresh(&targets));
             store
                 .events
                 .push(format!("refused import {pdir}/{id}: {e}"), e.clone());
@@ -1239,6 +1314,11 @@ async fn adopt(
         .filter(|p| *p != root)
         .collect();
     let _one_at_a_time = store.filing.lock().await;
+    let part = ingest::Part {
+        inc: dir.clone(),
+        root: root.clone(),
+    };
+    let targets = target_folders(std::slice::from_ref(&part), &elsewhere, None);
     let today = today();
     let d = dir.clone();
     match tokio::task::spawn_blocking(move || ingest::adopt(&d, &root, &elsewhere, &today)).await {
@@ -1249,10 +1329,13 @@ async fn adopt(
                 format!("filed {} in place: {n} files", dir.display()),
                 summary.to_string(),
             );
-            tokio::task::block_in_place(|| store.refresh(&Store::filed_folders(&summary)));
+            let mut dirs = Store::filed_folders(&summary);
+            dirs.extend(targets);
+            tokio::task::block_in_place(|| store.refresh(&dirs));
             reply(StatusCode::OK, summary)
         }
         Ok(Err(e)) => {
+            tokio::task::block_in_place(|| store.refresh(&targets));
             store
                 .events
                 .push(format!("refused {}: {e}", dir.display()), e.clone());
@@ -2520,6 +2603,89 @@ mod tests {
             manifest::read_day(&folder, DAY).unwrap().unwrap()["sha256"],
             sha.as_str()
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_scan_leaves_merges_alone_while_a_filing_runs() {
+        use crate::partial::tests::{C1, DAY, day_bytes, name, stage};
+        let dir = scratch("settle-lock");
+        let vol = dir.join("v");
+        std::fs::create_dir_all(&vol).unwrap();
+        let s = store(&[("v", &vol)], &dir.join("state.json"));
+        scanned(&s).await;
+        let addr = serve_plain(&s).await;
+        stage(
+            &vol.join("Databento"),
+            "I1",
+            &[(&name(), day_bytes(&[(C1, 11)], &[(11, 0)]))],
+        );
+        assert_eq!(
+            call(&addr, "POST", "/import/databento/I1", None, "")
+                .await
+                .0,
+            200
+        );
+        let folder = vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+        let pending = folder
+            .join("manifest.d")
+            .join(format!("{DAY}.pending.json"));
+        // A merge recorded, its file not yet swapped in, while it is filed.
+        manifest::write_pending(&folder, DAY, &json!({ "sha256": "the merged file" })).unwrap();
+        let filing = s.filing.lock().await;
+        scanned(&s).await;
+        assert!(pending.exists(), "not settled while a filing runs");
+        drop(filing);
+        scanned(&s).await;
+        assert!(!pending.exists(), "settled once it is done");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_filing_reads_its_folder_again() {
+        use crate::partial::tests::{C1, C2, day_bytes, name, stage};
+        let dir = scratch("failed-filing");
+        let vol = dir.join("v");
+        std::fs::create_dir_all(&vol).unwrap();
+        let s = store(&[("v", &vol)], &dir.join("state.json"));
+        scanned(&s).await;
+        let addr = serve_plain(&s).await;
+        stage(
+            &vol.join("Databento"),
+            "I1",
+            &[(&name(), day_bytes(&[(C1, 11)], &[(11, 0)]))],
+        );
+        assert_eq!(
+            call(&addr, "POST", "/import/databento/I1", None, "")
+                .await
+                .0,
+            200
+        );
+        // A day there that the store hasn't read (as a filing that stopped
+        // partway would leave).
+        let folder = vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+        std::fs::write(folder.join("2026-10-03.dbn.zst"), b"x").unwrap();
+        // An import that is refused: its file isn't the one its receipt names.
+        let part = stage(
+            &vol.join("Databento"),
+            "I2",
+            &[(&name(), day_bytes(&[(C2, 12)], &[(12, 1)]))],
+        );
+        std::fs::write(part.inc.join(name()), day_bytes(&[(C2, 12)], &[(12, 2)])).unwrap();
+        assert_eq!(
+            call(&addr, "POST", "/import/databento/I2", None, "")
+                .await
+                .0,
+            409
+        );
+        let (_, cov) = get(&addr, COVERAGE).await;
+        let days: Vec<&str> = cov["days"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["day"].as_str().unwrap())
+            .collect();
+        assert_eq!(days, ["2026-10-02", "2026-10-03"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

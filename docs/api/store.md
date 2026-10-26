@@ -345,7 +345,11 @@ keeps a stub for a partial day (`{ "sidecar", "partial": true, "condition"
 }`) and a complete day's entry whole. A merge writes only its day's file, and
 the index at most once per filing. An index from before, with partial days
 inline, is read as it is, and moves them to their own files the first time
-it is written.
+it is written (a merge left pending moves to its own file too).
+
+**This is one-way.** After the first filing into a folder, a store from
+before this layout reads that folder's index as complete days with no
+coverage: don't roll the store back past it.
 
 ### `POST /import/{provider}/{id}`
 
@@ -373,9 +377,11 @@ Each file is checked against its size and SHA-256 and against its own header
   writes as it goes, so memory doesn't grow with the files. The merged file is
   read back, each record sorted to its input (by its instrument, and, for a
   contract in both, by whose hours hold its time), and each input's records
-  must all be there, in order (by count and a running SHA-256). It is
-  recorded as pending in `manifest.d/<day>.pending.json`, swapped in by
-  rename, and the pending entry renamed over the day's.
+  must all be there, in order (by count and a running SHA-256), the merged
+  file's times must never go back, and its records must be the day's
+  recorded count plus the file's. It is recorded as pending in
+  `manifest.d/<day>.pending.json`, swapped in by rename, and the pending
+  entry renamed over the day's.
 - **Held complete, or held partly with any of the same contracts over the
   same hours:** `409`. Nothing is filed.
 - **The day held isn't its record:** its size or SHA-256 differs from its
@@ -447,7 +453,8 @@ when the copies differ. `filed` is true when any copy is in the store
 layout.
 
 `pending` is true while a merge into that day is unfinished. Each scan (and
-so the store's start) settles it: if the day's file is the merged one (by its
+so the store's start) settles it, unless a filing is running (it may be
+between recording its merge and swapping it in; the next scan does): if the day's file is the merged one (by its
 SHA-256), the pending entry becomes current; if it is still the recorded
 one, the merge is dropped; if it is neither, it is an error of the volume.
 The catalog root lists unsettled merges in `pending_merges`.
@@ -461,7 +468,8 @@ they are now, so a merge into a partial day shows at once. A filing, an
 import, a merge or a day's condition updates the scan's answer for the
 schema folders it wrote, in place, before it returns (`updated_at`, also on
 `/catalog`): `/catalog` and `/coverage` show it at once, without scanning
-every volume again. A scan that was running meanwhile reads those folders
+every volume again. A filing that is refused, or stops partway, reads the
+folders it would have written again too. A scan that was running meanwhile reads those folders
 again before it answers. A change of what is ignored asks for a full rescan;
 until it is done `/coverage` waits (at most 60 seconds, then `503`). With `fresh=1` it waits for a scan started after the
 request ([above](#what-the-store-holds)).

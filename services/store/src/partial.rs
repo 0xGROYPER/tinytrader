@@ -406,8 +406,15 @@ pub fn merge(
         return Err("the merged file's contracts differ from its inputs'".into());
     }
     let mut seen = [Tally::default(), Tally::default()];
+    let mut last = 0;
     while let Some(r) = back.decode_record_ref().map_err(|e| e.to_string())? {
         let (id, t) = (r.header().instrument_id, r.raw_index_ts());
+        if t < last {
+            return Err(format!(
+                "the merged file goes back in time, to {t} after {last}"
+            ));
+        }
+        last = t;
         let input = match (ids_a.get(&id), ids_b.get(&id)) {
             (Some(_), None) => 0,
             (None, Some(_)) => 1,
@@ -511,6 +518,8 @@ enum Step {
         existing: PathBuf,
         held: Coverage,
         new: Coverage,
+        /// The records of each, as recorded and as read.
+        counts: (Option<u64>, u64),
     },
 }
 
@@ -641,18 +650,21 @@ pub fn import(
         let rel = level.join(format!("{day}.dbn.zst"));
         // The day where it's held, settled if a merge was interrupted.
         let mut held = None;
+        let mut held_source = Value::Null;
         for r in &everywhere {
             let p = r.join(&rel);
             if p.exists() {
-                let entry = settle(&r.join(&level), &day)?.filter(is_partial);
-                held = Some((p, entry));
+                let entry = settle(&r.join(&level), &day)?;
+                held_source = entry.as_ref().map_or(Value::Null, |e| e["source"].clone());
+                held = Some((p, entry.filter(is_partial)));
                 break;
             }
         }
         let Ok(meta) = fs::metadata(&path) else {
-            // Filed by an earlier, interrupted run?
+            // Filed, or merged, by an earlier run of this import that stopped
+            // after its incoming copy was gone?
             if let Some((p, _)) = &held
-                && hash_file(p)? == want
+                && (held_source == format!("import/{id}").as_str() || hash_file(p)? == want)
             {
                 return Ok(());
             }
@@ -750,6 +762,7 @@ pub fn import(
                         existing,
                         held: held_cov,
                         new: cov,
+                        counts: (e["records"].as_u64(), records),
                     },
                 ));
             }
@@ -798,6 +811,7 @@ pub fn import(
                 existing,
                 held,
                 new,
+                counts,
             } => {
                 let dir = existing.parent().ok_or("no folder")?.to_path_buf();
                 // Written beside the day's file, on its volume, so the swap is a rename.
@@ -813,6 +827,16 @@ pub fn import(
                 // swap below touches only this day's.
                 crate::manifest::write_days(&dir, &[])?;
                 let records = merge(&existing, &from, &out, &held, &new)?;
+                // Every record of both, and nothing else.
+                if let (Some(h), n) = counts
+                    && h + n != records
+                {
+                    let _ = fs::remove_file(&out);
+                    return Err(format!(
+                        "{}: the merge holds {records} records, but the day held {h} and the file {n}; nothing was swapped in",
+                        existing.display()
+                    ));
+                }
                 let sha = hash_file(&out)?;
                 let size = fs::metadata(&out).map_err(|e| e.to_string())?.len();
                 let entry = read_day(&dir, &day)?.ok_or("the held day's entry vanished")?;
@@ -1851,6 +1875,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_retry_after_its_file_was_gone_is_a_duplicate() {
+        let root = scratch("retry").join("Databento");
+        file_one(&root, "A", day_bytes(&[(C1, 11)], &[(11, 0)])).unwrap();
+        file_one(&root, "B", day_bytes(&[(C2, 12)], &[(12, 1)])).unwrap();
+        // Stopped after the merge removed its incoming file, before its
+        // receipt: filed again, it is already there.
+        let part = stage(&root, "B", &[(&name(), day_bytes(&[(C2, 12)], &[(12, 1)]))]);
+        fs::remove_file(part.inc.join(name())).unwrap();
+        import(&[part], &[], "B", "2026-10-19").unwrap();
+        assert_eq!(coverage_of(&root).symbols().len(), 2);
+    }
+
+    #[test]
+    fn refuses_a_merge_that_isnt_both_days_records_in_order() {
+        let root = scratch("merge-checks").join("Databento");
+        file_one(&root, "A", day_bytes(&[(C1, 11)], &[(11, 0)])).unwrap();
+        let dir = file(&root).parent().unwrap().to_path_buf();
+        // The file's records out of time order.
+        let e = file_one(&root, "B", day_bytes(&[(C2, 12)], &[(12, 5), (12, 1)])).unwrap_err();
+        assert!(e.contains("back in time"), "{e}");
+        // Its entry records a different count.
+        let mut entry = read_manifest(&dir).unwrap()[DAY].clone();
+        entry["records"] = json!(99);
+        set_entry(&dir, DAY, Some(entry)).unwrap();
+        let e = file_one(&root, "C", day_bytes(&[(C3, 13)], &[(13, 1)])).unwrap_err();
+        assert!(e.contains("the merge holds 2 records"), "{e}");
+        assert_eq!(inspect(&file(&root)).unwrap().1, 1, "nothing swapped in");
+    }
+
+    #[test]
     fn refuses_two_contracts_on_one_instrument() {
         let root = scratch("one-id").join("Databento");
         file_one(&root, "A", day_bytes(&[(C1, 11)], &[(11, 0)])).unwrap();
@@ -1936,7 +1990,8 @@ pub(crate) mod tests {
         assert_eq!(side["coverage"]["symbols"], json!([C1, C2]));
         // An index from before sidecars, partial days inline, is read, and
         // moves them out the first time it is written.
-        let inline = json!({ "days": { DAY: side, "2026-10-01": { "coverage": { "kind": "contracts", "symbols": [C3], "window": [0, 1] } } } });
+        let inline = json!({ "days": { DAY: side, "2026-10-01": { "coverage": { "kind": "contracts", "symbols": [C3], "window": [0, 1] },
+            "pending": { "sha256": "f00d" } } } });
         fs::write(dir.join(MANIFEST), inline.to_string()).unwrap();
         fs::remove_dir_all(dir.join("manifest.d")).unwrap();
         assert_eq!(
@@ -1949,6 +2004,8 @@ pub(crate) mod tests {
             !index.contains(C3) && dir.join("manifest.d/2026-10-01.json").exists(),
             "{index}"
         );
+        // Its merge left pending stays pending.
+        assert_eq!(crate::manifest::pending_days(&dir), ["2026-10-01"]);
         assert_eq!(
             read_manifest(&dir).unwrap()["2026-10-01"]["coverage"]["symbols"],
             json!([C3])
