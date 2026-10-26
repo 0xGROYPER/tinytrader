@@ -1,23 +1,26 @@
 //! Partial days (decision 0018): a day file that holds a list of contracts
 //! for part of the day, not a provider's whole parent symbol.
 //!
-//! - **Coverage.** A partial day's contracts and time window come from its own
-//!   DBN header (`stype_in = raw_symbol`, its symbols, start and end), checked
+//! - **Coverage.** A file's contracts and time window come from its own DBN
+//!   header (`stype_in = raw_symbol`, its symbols, start and end), checked
 //!   against every record: each must map to a listed contract and fall inside
-//!   the window. It is recorded in the schema folder's `manifest.json`, beside
-//!   the file's size and SHA-256. A day with no entry there is complete (every
-//!   contract of the parent, as a parent-symbol batch delivers it).
+//!   the window. A partial day's coverage is pieces, one per file that went
+//!   into it (pieces of the same window combined), recorded in its manifest
+//!   entry (see the manifest module) beside the file's size and SHA-256. A day
+//!   with no coverage there is complete (every contract of the parent, as a
+//!   parent-symbol batch delivers it), and so is one that comes to hold every
+//!   contract of the day's definitions over the whole day.
 //! - **Import.** DBN that didn't come from a provider batch (a timeseries
 //!   request) is uploaded to `.incoming/<id>/` with an `import.json` naming
 //!   the dataset, schema, parent symbol, where it came from, and each file's
 //!   size and SHA-256. Filing is as for a batch: every check before any move,
 //!   moves by link, a ledger in `migrations/`, receipts in `provenance/<id>/`.
-//! - **Merge.** A partial day already held, given contracts it doesn't hold,
-//!   is replaced by the two merged in timestamp order: written beside it,
-//!   checked record for record against its inputs, recorded in the manifest
-//!   as pending, swapped in by rename, then made current. An interrupted swap
-//!   is settled from the file's hash on the next filing of that day.
-//!   Contracts already held are never filed twice.
+//! - **Merge.** A partial day already held, given contracts (or hours of
+//!   contracts) it doesn't hold, is replaced by the two merged in timestamp
+//!   order, a record at a time: written beside it, read back and checked
+//!   input by input, recorded as pending, swapped in by rename, then made
+//!   current. An interrupted swap is settled from the file's hash by the next
+//!   scan. Contracts are never filed twice for the same hours.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
@@ -32,48 +35,160 @@ use crate::ingest::{
     self, INCOMING, Ledger, Part, check_header, hash_file, place_new, safe, sync_dir, write_new,
 };
 
-/// A schema folder's record of its partial days.
-pub const MANIFEST: &str = "manifest.json";
-const MANIFEST_SCHEMA: &str = "tinytrader.store-manifest/1";
+pub use crate::manifest::is_partial;
+#[cfg(test)]
+pub use crate::manifest::{MANIFEST, read_manifest};
+use crate::manifest::{read_day, set_entry, settle};
 /// An import's receipt: what was uploaded, and where it came from.
 pub const IMPORT: &str = "import.json";
 
-/// What a partial day holds: its contracts and time window (ns, end exclusive).
+/// Contracts held over one time window (ns, end exclusive).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Coverage {
+pub struct Piece {
     pub symbols: BTreeSet<String>,
     pub start: u64,
     pub end: u64,
 }
 
+/// What a partial day holds: pieces, each a list of contracts over its own
+/// window. A merge adds the incoming file's piece; pieces with the same
+/// window are one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Coverage {
+    pub pieces: Vec<Piece>,
+}
+
 impl Coverage {
+    /// One list of contracts over one window, as one file's header gives.
     #[must_use]
-    pub fn to_json(&self) -> Value {
-        json!({ "kind": "contracts", "stype": "raw_symbol", "symbols": self.symbols, "window": [self.start, self.end] })
+    pub fn one(symbols: BTreeSet<String>, start: u64, end: u64) -> Self {
+        Self {
+            pieces: vec![Piece {
+                symbols,
+                start,
+                end,
+            }],
+        }
     }
 
+    /// Every contract held, in any piece.
+    #[must_use]
+    pub fn symbols(&self) -> BTreeSet<String> {
+        self.pieces
+            .iter()
+            .flat_map(|p| p.symbols.iter().cloned())
+            .collect()
+    }
+
+    /// The span of the pieces' windows.
+    #[must_use]
+    pub fn hull(&self) -> (u64, u64) {
+        (
+            self.pieces.iter().map(|p| p.start).min().unwrap_or(0),
+            self.pieces.iter().map(|p| p.end).max().unwrap_or(0),
+        )
+    }
+
+    /// `{ kind, stype, pieces: [{ symbols, window }] }`, with `symbols` (all
+    /// of them) and `window` (the span of the pieces) for readers from
+    /// before pieces: an approximation, true of no piece's hours.
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let pieces: Vec<Value> = self
+            .pieces
+            .iter()
+            .map(|p| json!({ "symbols": p.symbols, "window": [p.start, p.end] }))
+            .collect();
+        let (start, end) = self.hull();
+        json!({ "kind": "contracts", "stype": "raw_symbol", "pieces": pieces, "symbols": self.symbols(), "window": [start, end] })
+    }
+
+    /// Read `to_json`'s form, or the single `symbols` and `window` written
+    /// before pieces, as one piece.
     #[must_use]
     pub fn from_json(v: &Value) -> Option<Self> {
         if v["kind"] != "contracts" {
             return None;
         }
-        Some(Self {
-            symbols: v["symbols"]
-                .as_array()?
-                .iter()
-                .filter_map(|s| s.as_str().map(str::to_owned))
-                .collect(),
-            start: v["window"][0].as_u64()?,
-            end: v["window"][1].as_u64()?,
-        })
+        let piece = |p: &Value| {
+            Some(Piece {
+                symbols: p["symbols"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|s| s.as_str().map(str::to_owned))
+                    .collect(),
+                start: p["window"][0].as_u64()?,
+                end: p["window"][1].as_u64()?,
+            })
+        };
+        let pieces = match v["pieces"].as_array() {
+            Some(list) => list.iter().map(piece).collect::<Option<Vec<_>>>()?,
+            None => vec![piece(v)?],
+        };
+        Some(Self::of(pieces))
     }
 
-    fn union(&self, other: &Self) -> Self {
-        Self {
-            symbols: self.symbols.union(&other.symbols).cloned().collect(),
-            start: self.start.min(other.start),
-            end: self.end.max(other.end),
+    /// These pieces, those with the same window combined, in window order.
+    fn of(pieces: Vec<Piece>) -> Self {
+        let mut by_window: BTreeMap<(u64, u64), BTreeSet<String>> = BTreeMap::new();
+        for p in pieces {
+            by_window
+                .entry((p.start, p.end))
+                .or_default()
+                .extend(p.symbols);
         }
+        Self {
+            pieces: by_window
+                .into_iter()
+                .map(|((start, end), symbols)| Piece {
+                    symbols,
+                    start,
+                    end,
+                })
+                .collect(),
+        }
+    }
+
+    /// Both coverages' pieces.
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        Self::of(self.pieces.iter().chain(&other.pieces).cloned().collect())
+    }
+
+    /// The contracts held in both, over hours that overlap.
+    #[must_use]
+    pub fn overlap(&self, other: &Self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for a in &self.pieces {
+            for b in other
+                .pieces
+                .iter()
+                .filter(|b| a.start < b.end && b.start < a.end)
+            {
+                out.extend(a.symbols.intersection(&b.symbols).cloned());
+            }
+        }
+        out
+    }
+
+    /// Is `symbol` held over all of `[start, end)`?
+    #[must_use]
+    pub fn covers(&self, symbol: &str, start: u64, end: u64) -> bool {
+        let mut windows: Vec<(u64, u64)> = self
+            .pieces
+            .iter()
+            .filter(|p| p.symbols.contains(symbol))
+            .map(|p| (p.start, p.end))
+            .collect();
+        windows.sort_unstable();
+        let mut reached = start;
+        for (s, e) in windows {
+            if s > reached {
+                break;
+            }
+            reached = reached.max(e);
+        }
+        reached >= end
     }
 }
 
@@ -138,17 +253,11 @@ pub fn inspect(path: &Path) -> Result<(Coverage, u64), String> {
         }
         n += 1;
     }
-    Ok((
-        Coverage {
-            symbols,
-            start: m.start,
-            end,
-        },
-        n,
-    ))
+    Ok((Coverage::one(symbols, m.start, end), n))
 }
 
 /// Every record of a day file, in order, and its header.
+#[cfg(test)]
 fn read_all(path: &Path) -> Result<(Metadata, Vec<RecordBuf>), String> {
     let mut d = open(path)?;
     let m = d.metadata().clone();
@@ -159,46 +268,131 @@ fn read_all(path: &Path) -> Result<(Metadata, Vec<RecordBuf>), String> {
     Ok((m, out))
 }
 
-/// The records of `a` and `b` interleaved by their index timestamp (ties: `a`
-/// first, then each file's own order), and their headers merged.
-fn interleave(a: &Path, b: &Path) -> Result<(Metadata, Vec<RecordBuf>), String> {
-    let (ma, ra) = read_all(a)?;
-    let (mb, rb) = read_all(b)?;
-    let m = ma
-        .merge([mb])
-        .map_err(|e| format!("the two headers can't be merged: {e}"))?;
-    let mut all: Vec<(u64, u8, usize, RecordBuf)> = ra
-        .into_iter()
-        .enumerate()
-        .map(|(i, r)| (r.raw_index_ts(), 0, i, r))
-        .chain(
-            rb.into_iter()
-                .enumerate()
-                .map(|(i, r)| (r.raw_index_ts(), 1, i, r)),
-        )
-        .collect();
-    all.sort_by_key(|(t, w, i, _)| (*t, *w, *i));
-    Ok((m, all.into_iter().map(|(.., r)| r).collect()))
-}
+/// Instrument IDs, each to its contract.
+type Ids = BTreeMap<u32, String>;
 
-/// Merge two partial days into a new file `out`, then read it back and check
-/// it holds exactly their records, in order. Returns its record count.
+/// Each instrument ID a header maps, to its contract.
 ///
 /// # Errors
-/// If the headers can't be merged, `out` exists, or the file read back
-/// differs from what was written.
-pub fn merge(a: &Path, b: &Path, out: &Path) -> Result<u64, String> {
-    let (m, records) = interleave(a, b)?;
+/// If a mapping isn't to an instrument ID, or two contracts share one.
+fn ids(m: &Metadata) -> Result<Ids, String> {
+    let mut out = BTreeMap::new();
+    for sm in &m.mappings {
+        for iv in &sm.intervals {
+            let id = iv.symbol.parse::<u32>().map_err(|_| {
+                format!(
+                    "{}: mapped to {:?}, not an instrument ID",
+                    sm.raw_symbol, iv.symbol
+                )
+            })?;
+            if let Some(other) = out.insert(id, sm.raw_symbol.clone())
+                && other != sm.raw_symbol
+            {
+                return Err(format!(
+                    "instrument {id} is both {other} and {}",
+                    sm.raw_symbol
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The instrument IDs of two day files' headers, refused if one ID is two
+/// different contracts across them (their records couldn't be told apart).
+///
+/// # Errors
+/// If so, or a header can't be read.
+fn same_ids(a: &Path, b: &Path) -> Result<(Ids, Ids), String> {
+    let (ia, ib) = (ids(open(a)?.metadata())?, ids(open(b)?.metadata())?);
+    for (id, s) in &ib {
+        if let Some(t) = ia.get(id)
+            && t != s
+        {
+            return Err(format!(
+                "instrument {id} is {t} in the day held and {s} in this file; the two can't be merged"
+            ));
+        }
+    }
+    Ok((ia, ib))
+}
+
+/// A count and running SHA-256 of records, in order.
+#[derive(Default)]
+struct Tally {
+    records: u64,
+    hash: sha2::Sha256,
+}
+
+impl Tally {
+    fn add(&mut self, bytes: &[u8]) {
+        use sha2::Digest as _;
+        self.records += 1;
+        self.hash.update(bytes);
+    }
+
+    fn finish(self) -> (u64, Vec<u8>) {
+        use sha2::Digest as _;
+        (self.records, self.hash.finalize().to_vec())
+    }
+}
+
+/// Merge two partial days into a new file `out`, record by record, in order
+/// of their index timestamps (ties: `a`'s first, each in its own order),
+/// never holding more than one record of each. Then read it back, sorting
+/// each record to the input it came from (by its instrument, and, for a
+/// contract in both, which input's coverage holds its time), and check each
+/// input's records are there, all of them, in order: by count and a running
+/// hash. Returns its record count.
+///
+/// # Errors
+/// If the headers can't be merged, an instrument ID is two contracts, `out`
+/// exists, or the file read back differs from what was written.
+pub fn merge(
+    a: &Path,
+    b: &Path,
+    out: &Path,
+    held: &Coverage,
+    new: &Coverage,
+) -> Result<u64, String> {
+    let (ids_a, ids_b) = same_ids(a, b)?;
+    let (mut da, mut db) = (open(a)?, open(b)?);
+    let m = da
+        .metadata()
+        .clone()
+        .merge([db.metadata().clone()])
+        .map_err(|e| format!("the two headers can't be merged: {e}"))?;
     let file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(out)
         .map_err(|e| format!("{}: {e}", out.display()))?;
+    let mut written = [Tally::default(), Tally::default()];
     {
-        let mut enc = dbn::encode::dbn::Encoder::with_zstd(&file, &m).map_err(|e| e.to_string())?;
-        for r in &records {
+        let mut enc = dbn::encode::dbn::Encoder::with_zstd(std::io::BufWriter::new(&file), &m)
+            .map_err(|e| e.to_string())?;
+        let next = |d: &mut dbn::decode::dbn::Decoder<_>| -> Result<Option<RecordBuf>, String> {
+            Ok(d.decode_record_ref()
+                .map_err(|e| e.to_string())?
+                .map(|r| r.to_owned()))
+        };
+        let mut heads = [next(&mut da)?, next(&mut db)?];
+        loop {
+            let pick = match (&heads[0], &heads[1]) {
+                (None, None) => break,
+                (Some(_), None) => 0,
+                (None, Some(_)) => 1,
+                (Some(x), Some(y)) => usize::from(y.raw_index_ts() < x.raw_index_ts()),
+            };
+            let r = heads[pick].take().ok_or("lost a record")?;
             enc.encode_record_ref(r.as_rec_ref())
                 .map_err(|e| e.to_string())?;
+            written[pick].add(r.as_ref());
+            heads[pick] = if pick == 0 {
+                next(&mut da)?
+            } else {
+                next(&mut db)?
+            };
         }
         enc.flush().map_err(|e| e.to_string())?;
     }
@@ -206,97 +400,85 @@ pub fn merge(a: &Path, b: &Path, out: &Path) -> Result<u64, String> {
     if let Some(dir) = out.parent() {
         sync_dir(dir).map_err(|e| e.to_string())?;
     }
-    // Read back: the same records, in the same order, and nothing else.
-    let (back_m, back) = read_all(out)?;
-    if back.len() != records.len() {
-        return Err(format!(
-            "the merged file read back {} records, not {}",
-            back.len(),
-            records.len()
-        ));
-    }
-    if let Some(i) = back.iter().zip(&records).position(|(x, y)| x != y) {
-        return Err(format!("the merged file differs at record {i}"));
-    }
-    if back_m.symbols != m.symbols {
+    // Read back, each record sorted to its input.
+    let mut back = open(out)?;
+    if back.metadata().symbols != m.symbols {
         return Err("the merged file's contracts differ from its inputs'".into());
     }
-    Ok(records.len() as u64)
-}
-
-/// Is this manifest entry a partial day? Only an entry with its coverage is;
-/// one holding only the day's condition is a complete day.
-#[must_use]
-pub fn is_partial(entry: &Value) -> bool {
-    entry.get("coverage").is_some()
-}
-
-/// A schema folder's manifest: day → entry. A missing file is an empty one.
-pub fn read_manifest(dir: &Path) -> Result<BTreeMap<String, Value>, String> {
-    let path = dir.join(MANIFEST);
-    match fs::read_to_string(&path) {
-        Ok(text) => {
-            let v: Value =
-                serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-            Ok(v["days"]
-                .as_object()
-                .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-                .unwrap_or_default())
+    let mut seen = [Tally::default(), Tally::default()];
+    let mut last = 0;
+    while let Some(r) = back.decode_record_ref().map_err(|e| e.to_string())? {
+        let (id, t) = (r.header().instrument_id, r.raw_index_ts());
+        if t < last {
+            return Err(format!(
+                "the merged file goes back in time, to {t} after {last}"
+            ));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
-        Err(e) => Err(format!("{}: {e}", path.display())),
+        last = t;
+        let input = match (ids_a.get(&id), ids_b.get(&id)) {
+            (Some(_), None) => 0,
+            (None, Some(_)) => 1,
+            (Some(s), Some(_)) => match (held.covers(s, t, t + 1), new.covers(s, t, t + 1)) {
+                (true, false) => 0,
+                (false, true) => 1,
+                _ => {
+                    return Err(format!(
+                        "the merged file's record at {t} of {s} can't be told to one input"
+                    ));
+                }
+            },
+            (None, None) => {
+                return Err(format!(
+                    "the merged file has instrument {id}, of neither input"
+                ));
+            }
+        };
+        seen[input].add(r.as_ref());
     }
+    let total = written[0].records + written[1].records;
+    for (i, (w, s)) in written.into_iter().zip(seen).enumerate() {
+        let (w, s) = (w.finish(), s.finish());
+        if w != s {
+            return Err(format!(
+                "the merged file holds {} records of input {i} that read back differently ({} written)",
+                s.0, w.0
+            ));
+        }
+    }
+    Ok(total)
 }
 
-/// Replace a schema folder's manifest: written beside it, flushed, renamed
-/// over it, and the folder flushed, so it is always one whole version.
-pub(crate) fn write_manifest(dir: &Path, days: &BTreeMap<String, Value>) -> Result<(), String> {
-    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let text = serde_json::to_string_pretty(&json!({ "schema": MANIFEST_SCHEMA, "days": days }))
-        .map_err(|e| e.to_string())?;
-    let tmp = dir.join(format!(".{MANIFEST}.new"));
-    let _ = fs::remove_file(&tmp);
-    write_new(&tmp, text.as_bytes()).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    fs::rename(&tmp, dir.join(MANIFEST)).map_err(|e| format!("{}: {e}", dir.display()))?;
-    sync_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))
-}
-
-/// Set (or with `None`, remove) one day's entry.
-fn set_entry(dir: &Path, day: &str, entry: Option<Value>) -> Result<(), String> {
-    let mut days = read_manifest(dir)?;
-    match entry {
-        Some(e) => days.insert(day.to_owned(), e),
-        None => days.remove(day),
-    };
-    write_manifest(dir, &days)
-}
-
-/// Settle a day whose merge was interrupted: the file's hash says whether the
-/// swap happened (the pending entry becomes current) or not (it's dropped).
-/// Returns the day's entry as it now stands.
-fn settle(dir: &Path, day: &str) -> Result<Option<Value>, String> {
-    let days = read_manifest(dir)?;
-    let Some(mut entry) = days.get(day).cloned() else {
+/// Is this partial day now complete: does it hold every contract of the
+/// day's definitions (the `definition` day file of the same parent, on any of
+/// `roots`), each over the whole day? Returns that definition file if so.
+///
+/// # Errors
+/// If the definitions can't be read.
+fn complete_by(
+    roots: &[PathBuf],
+    rel: &Path,
+    day: &str,
+    cov: &Coverage,
+) -> Result<Option<PathBuf>, String> {
+    let Some(def) = roots.iter().map(|r| r.join(rel)).find(|p| p.is_file()) else {
         return Ok(None);
     };
-    let Some(pending) = entry.get("pending").cloned() else {
-        return Ok(Some(entry));
-    };
-    let file = dir.join(format!("{day}.dbn.zst"));
-    let got = hash_file(&file)?;
-    entry = if pending["sha256"] == got.as_str() {
-        pending
-    } else if entry["sha256"] == got.as_str() {
-        entry.as_object_mut().map(|o| o.remove("pending"));
-        entry
-    } else {
-        return Err(format!(
-            "{}: SHA-256 {got} is neither its recorded file nor its pending merge",
-            file.display()
-        ));
-    };
-    set_entry(dir, day, Some(entry.clone()))?;
-    Ok(Some(entry))
+    let from = ingest::day_ns(day).ok_or("not a day")?;
+    let mut any = false;
+    {
+        let mut d = open(&def)?;
+        while let Some(r) = d.decode_record_ref().map_err(|e| e.to_string())? {
+            let Some(def_msg) = r.get::<dbn::InstrumentDefMsg>() else {
+                continue;
+            };
+            let symbol = def_msg.raw_symbol().map_err(|e| e.to_string())?;
+            if !cov.covers(symbol, from, from + 86_400_000_000_000) {
+                return Ok(None);
+            }
+            any = true;
+        }
+    }
+    Ok(any.then_some(def))
 }
 
 /// `YYYY-MM-DD` of an import's file name, `YYYY-MM-DD.dbn.zst`.
@@ -336,7 +518,47 @@ enum Step {
         existing: PathBuf,
         held: Coverage,
         new: Coverage,
+        /// The records of each, as recorded and as read.
+        counts: (Option<u64>, u64),
     },
+}
+
+fn ledger_cov(entry: &Value) -> Coverage {
+    Coverage::from_json(&entry["coverage"]).unwrap_or(Coverage { pieces: Vec::new() })
+}
+
+/// Make a partial day complete when it holds every contract of the day's
+/// definitions (of the same parent), each over the whole day: its entry
+/// keeps its file's record and drops its coverage. Returns whether it did.
+///
+/// # Errors
+/// If the definitions or the manifest can't be read, or it can't be written.
+fn promote(
+    dir: &Path,
+    day: &str,
+    roots: &[PathBuf],
+    level: &Path,
+    cov: &Coverage,
+) -> Result<bool, String> {
+    let definition = level
+        .parent()
+        .ok_or("no parent level")?
+        .join("definition")
+        .join(format!("{day}.dbn.zst"));
+    let Some(def) = complete_by(roots, &definition, day, cov)? else {
+        return Ok(false);
+    };
+    let mut entry = read_day(dir, day)?.ok_or("the day's entry vanished")?;
+    if let Some(o) = entry.as_object_mut() {
+        o.remove("coverage");
+        o.remove("pending");
+    }
+    entry["completed"] = json!({
+        "by": format!("every contract of {} held all day", def.display()),
+        "pieces": cov.pieces.len(), "at": tinytrader_observe::unix_seconds(),
+    });
+    set_entry(dir, day, Some(entry))?;
+    Ok(true)
 }
 
 /// File an import waiting in `.incoming/<id>` on one or more volumes.
@@ -428,18 +650,21 @@ pub fn import(
         let rel = level.join(format!("{day}.dbn.zst"));
         // The day where it's held, settled if a merge was interrupted.
         let mut held = None;
+        let mut held_source = Value::Null;
         for r in &everywhere {
             let p = r.join(&rel);
             if p.exists() {
-                let entry = settle(&r.join(&level), &day)?.filter(is_partial);
-                held = Some((p, entry));
+                let entry = settle(&r.join(&level), &day)?;
+                held_source = entry.as_ref().map_or(Value::Null, |e| e["source"].clone());
+                held = Some((p, entry.filter(is_partial)));
                 break;
             }
         }
         let Ok(meta) = fs::metadata(&path) else {
-            // Filed by an earlier, interrupted run?
+            // Filed, or merged, by an earlier run of this import that stopped
+            // after its incoming copy was gone?
             if let Some((p, _)) = &held
-                && hash_file(p)? == want
+                && (held_source == format!("import/{id}").as_str() || hash_file(p)? == want)
             {
                 return Ok(());
             }
@@ -458,9 +683,14 @@ pub fn import(
         }
         check_header(&path, dataset, schema, &day).map_err(|e| format!("{name}: {e}"))?;
         let (cov, records) = inspect(&path).map_err(|e| format!("{name}: {e}"))?;
-        belongs(parent, &cov.symbols).map_err(|e| format!("{name}: {e}"))?;
-        ledger.record(json!({ "step": "verified", "file": path, "bytes": meta.len(), "sha256": got, "records": records, "contracts": cov.symbols.len() }))?;
+        belongs(parent, &cov.symbols()).map_err(|e| format!("{name}: {e}"))?;
+        // Its coverage on record, so what went into a day can be rebuilt.
+        ledger.record(json!({ "step": "verified", "file": path, "day": day, "bytes": meta.len(), "sha256": got, "records": records, "contracts": cov.symbols().len(), "coverage": cov.to_json() }))?;
         let entry = json!({ "file": format!("{day}.dbn.zst"), "size": meta.len(), "sha256": got, "records": records, "coverage": cov.to_json(), "source": format!("import/{id}") });
+        let held_sha = match &held {
+            Some((p, _)) => Some(hash_file(p)?),
+            None => None,
+        };
         match held {
             None => steps.push((
                 day,
@@ -470,7 +700,7 @@ pub fn import(
                     entry,
                 },
             )),
-            Some((existing, _)) if hash_file(&existing)? == got => {
+            Some((existing, _)) if held_sha.as_deref() == Some(got.as_str()) => {
                 steps.push((
                     day,
                     Step::Duplicate {
@@ -490,7 +720,7 @@ pub fn import(
             Some((existing, Some(e)))
                 if e["source"] == format!("import/{id}").as_str()
                     && Coverage::from_json(&e["coverage"])
-                        .is_some_and(|h| cov.symbols.is_subset(&h.symbols)) =>
+                        .is_some_and(|h| cov.symbols().is_subset(&h.symbols())) =>
             {
                 steps.push((
                     day,
@@ -503,14 +733,28 @@ pub fn import(
             Some((existing, Some(e))) => {
                 let held_cov = Coverage::from_json(&e["coverage"])
                     .ok_or_else(|| format!("{name}: the held day's coverage is unreadable"))?;
-                let both: Vec<&String> = held_cov.symbols.intersection(&cov.symbols).collect();
+                // The day held is the file its entry records.
+                let size = fs::metadata(&existing).map_err(|e| e.to_string())?.len();
+                let sha = held_sha.unwrap_or_default();
+                if e["size"].as_u64().is_some_and(|s| s != size)
+                    || e["sha256"].as_str().is_some_and(|h| h != sha)
+                {
+                    return Err(format!(
+                        "{name}: {} is {size} bytes, SHA-256 {sha}, but its manifest records {} bytes, SHA-256 {}; nothing is merged into it until that is looked at",
+                        existing.display(),
+                        e["size"],
+                        e["sha256"]
+                    ));
+                }
+                let both = held_cov.overlap(&cov);
                 if let Some(s) = both.first() {
                     return Err(format!(
-                        "{name}: {} already holds {} of these contracts ({s}, …); only contracts not held are filed",
+                        "{name}: {} already holds {} of these contracts over the same hours ({s}, …); only contracts not held are filed",
                         existing.display(),
                         both.len()
                     ));
                 }
+                same_ids(&existing, &path).map_err(|e| format!("{name}: {e}"))?;
                 steps.push((
                     day,
                     Step::Merge {
@@ -518,6 +762,7 @@ pub fn import(
                         existing,
                         held: held_cov,
                         new: cov,
+                        counts: (e["records"].as_u64(), records),
                     },
                 ));
             }
@@ -539,6 +784,7 @@ pub fn import(
     for (day, step) in steps {
         match step {
             Step::Place { from, to, entry } => {
+                let cov = ledger_cov(&entry);
                 let dir = to.parent().ok_or("no folder")?.to_path_buf();
                 // The manifest first: a crash before the move leaves an entry
                 // for a missing file (filed again on a retry), never a
@@ -550,7 +796,8 @@ pub fn import(
                     return Err(why);
                 }
                 ledger.record(json!({ "step": "moved", "from": from, "to": to }))?;
-                done.push(json!({ "day": day, "path": to, "filed": "new" }));
+                let promoted = promote(&dir, &day, &everywhere, &level, &cov)?;
+                done.push(json!({ "day": day, "path": to, "filed": "new", "complete": promoted }));
             }
             Step::Duplicate { from, existing } => {
                 fs::remove_file(&from).map_err(|e| e.to_string())?;
@@ -564,6 +811,7 @@ pub fn import(
                 existing,
                 held,
                 new,
+                counts,
             } => {
                 let dir = existing.parent().ok_or("no folder")?.to_path_buf();
                 // Written beside the day's file, on its volume, so the swap is a rename.
@@ -575,29 +823,40 @@ pub fn import(
                 fs::create_dir_all(&work).map_err(|e| e.to_string())?;
                 let out = work.join(format!("merged-{day}.dbn.zst"));
                 let _ = fs::remove_file(&out);
-                let records = merge(&existing, &from, &out)?;
+                // Partial days written before sidecars move to theirs, so the
+                // swap below touches only this day's.
+                crate::manifest::write_days(&dir, &[])?;
+                let records = merge(&existing, &from, &out, &held, &new)?;
+                // Every record of both, and nothing else.
+                if let (Some(h), n) = counts
+                    && h + n != records
+                {
+                    let _ = fs::remove_file(&out);
+                    return Err(format!(
+                        "{}: the merge holds {records} records, but the day held {h} and the file {n}; nothing was swapped in",
+                        existing.display()
+                    ));
+                }
                 let sha = hash_file(&out)?;
                 let size = fs::metadata(&out).map_err(|e| e.to_string())?.len();
-                let mut entry = read_manifest(&dir)?
-                    .get(&day)
-                    .cloned()
-                    .ok_or("the held day's entry vanished")?;
+                let entry = read_day(&dir, &day)?.ok_or("the held day's entry vanished")?;
                 let union = held.union(&new);
-                entry["pending"] = json!({ "file": format!("{day}.dbn.zst"), "size": size, "sha256": sha, "records": records, "coverage": union.to_json(), "source": format!("import/{id}") });
+                let mut next = json!({ "file": format!("{day}.dbn.zst"), "size": size, "sha256": sha, "records": records, "coverage": union.to_json(), "source": format!("import/{id}") });
                 // The day's condition stays with it.
                 if let Some(c) = entry.get("condition").cloned() {
-                    entry["pending"]["condition"] = c;
+                    next["condition"] = c;
                 }
-                set_entry(&dir, &day, Some(entry.clone()))?;
+                crate::manifest::write_pending(&dir, &day, &next)?;
                 ledger.record(json!({ "step": "merged", "inputs": [existing, from], "output": out, "sha256": sha, "records": records }))?;
                 fs::rename(&out, &existing)
                     .map_err(|e| format!("{} -> {}: {e}", out.display(), existing.display()))?;
                 sync_dir(&dir).map_err(|e| e.to_string())?;
-                set_entry(&dir, &day, Some(entry["pending"].clone()))?;
+                crate::manifest::promote_pending(&dir, &day)?;
                 fs::remove_file(&from).map_err(|e| e.to_string())?;
                 let _ = fs::remove_dir(&work);
                 ledger.record(json!({ "step": "swapped", "path": existing, "sha256": sha }))?;
-                done.push(json!({ "day": day, "path": existing, "filed": "merged", "contracts": union.symbols.len() }));
+                let promoted = promote(&dir, &day, &everywhere, &level, &union)?;
+                done.push(json!({ "day": day, "path": existing, "filed": "merged", "contracts": union.symbols().len(), "pieces": union.pieces.len(), "complete": promoted }));
             }
         }
     }
@@ -762,7 +1021,9 @@ fn row(day: &str, volume: &str, filed: bool, size: u64, entry: Option<&Value>) -
         }
         Some(m) => json!({
             "day": day, "volume": volume, "kind": "partial", "filed": filed, "size": size,
-            "coverage": m["coverage"], "records": m["records"], "sha256": m["sha256"],
+            // In pieces, however it was recorded.
+            "coverage": Coverage::from_json(&m["coverage"]).map_or_else(|| m["coverage"].clone(), |c| c.to_json()),
+            "records": m["records"], "sha256": m["sha256"],
             "pending": m.get("pending").is_some(), "condition": condition,
         }),
     }
@@ -830,11 +1091,11 @@ fn held_row(
 ) -> Value {
     let partial = (!contracts.is_empty()).then(|| {
         let from = ingest::day_ns(day).unwrap_or(0);
-        let held = Coverage {
-            symbols: contracts.clone(),
-            start: window.0.max(from),
-            end: window.1.min(from + 86_400_000_000_000),
-        };
+        let held = Coverage::one(
+            contracts.clone(),
+            window.0.max(from),
+            window.1.min(from + 86_400_000_000_000),
+        );
         json!({ "coverage": held.to_json(), "records": null, "sha256": null })
     });
     row(day, volume, false, size, partial.as_ref())
@@ -911,10 +1172,14 @@ pub fn coverage_in(
                     && s.as_deref() == symbol
                     && k == schema =>
                 {
-                    let manifest = read_manifest(dir)?;
+                    // The index, and the sidecars of the days asked for.
+                    let index = crate::manifest::read_index(dir)?;
                     for (day, size, filed) in days.iter().filter(|d| wanted(&d.0)) {
-                        let entry = if *filed { manifest.get(day) } else { None };
-                        let r = row(day, volume, *filed, *size, entry);
+                        let entry = match index.get(day).filter(|_| *filed) {
+                            Some(e) => Some(crate::manifest::resolve(dir, day, e)?),
+                            None => None,
+                        };
+                        let r = row(day, volume, *filed, *size, entry.as_ref());
                         copies.entry(day.clone()).or_default().push(r);
                     }
                 }
@@ -1007,16 +1272,16 @@ fn merge_copies(copies: Vec<Value>) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::num::NonZeroU64;
 
     use dbn::{CbboMsg, MappingInterval, Schema, SymbolMapping};
 
     use super::*;
 
-    const DAY: &str = "2026-10-02";
-    const C1: &str = "SPY   261002C00728000";
-    const C2: &str = "SPY   261002P00728000";
+    pub(crate) const DAY: &str = "2026-10-02";
+    pub(crate) const C1: &str = "SPY   261002C00728000";
+    pub(crate) const C2: &str = "SPY   261002P00728000";
     const C3: &str = "SPY   261002C00729000";
 
     fn scratch(name: &str) -> PathBuf {
@@ -1033,7 +1298,16 @@ mod tests {
 
     /// A partial cbbo-1m day: `contracts` (symbol, instrument ID) listed and
     /// mapped, and one record per (instrument, minute) in `records`.
-    fn day_bytes(contracts: &[(&str, u32)], records: &[(u32, u64)]) -> Vec<u8> {
+    pub(crate) fn day_bytes(contracts: &[(&str, u32)], records: &[(u32, u64)]) -> Vec<u8> {
+        day_window(contracts, records, (13, 24))
+    }
+
+    /// As `day_bytes`, its window the hours `(from, to)` of the day (UTC).
+    fn day_window(
+        contracts: &[(&str, u32)],
+        records: &[(u32, u64)],
+        (from, to): (u64, u64),
+    ) -> Vec<u8> {
         let start = ingest::day_ns(DAY).unwrap();
         let date = time::Date::parse(
             DAY,
@@ -1043,8 +1317,8 @@ mod tests {
         let m = Metadata::builder()
             .dataset("OPRA.PILLAR")
             .schema(Some(Schema::Cbbo1M))
-            .start(start + 13 * 3_600_000_000_000)
-            .end(NonZeroU64::new(start + 24 * 3_600_000_000_000))
+            .start(start + from * 3_600_000_000_000)
+            .end(NonZeroU64::new(start + to * 3_600_000_000_000))
             .stype_in(Some(SType::RawSymbol))
             .stype_out(SType::InstrumentId)
             .symbols(contracts.iter().map(|(s, _)| (*s).to_owned()).collect())
@@ -1079,7 +1353,7 @@ mod tests {
     }
 
     /// An import waiting in `<root>/.incoming/<id>/`: its files and receipt.
-    fn stage(root: &Path, id: &str, files: &[(&str, Vec<u8>)]) -> Part {
+    pub(crate) fn stage(root: &Path, id: &str, files: &[(&str, Vec<u8>)]) -> Part {
         let inc = root.join(INCOMING).join(id);
         fs::create_dir_all(&inc).unwrap();
         let mut listed = Vec::new();
@@ -1104,7 +1378,7 @@ mod tests {
             .join(format!("{DAY}.dbn.zst"))
     }
 
-    fn name() -> String {
+    pub(crate) fn name() -> String {
         format!("{DAY}.dbn.zst")
     }
 
@@ -1255,7 +1529,7 @@ mod tests {
         let (cov, n) = inspect(&file(&root)).unwrap();
         assert_eq!(n, 6);
         assert_eq!(
-            cov.symbols,
+            cov.symbols(),
             BTreeSet::from([C1.to_owned(), C2.to_owned(), C3.to_owned()])
         );
         let (_, recs) = read_all(&file(&root)).unwrap();
@@ -1339,28 +1613,40 @@ mod tests {
         .unwrap();
         let dir = file(&root).parent().unwrap().to_path_buf();
         let held = hash_file(&file(&root)).unwrap();
+        let pending = crate::manifest::write_pending;
         // Stopped after recording the pending merge, before the swap: dropped.
-        let mut e = read_manifest(&dir).unwrap()[DAY].clone();
-        e["pending"] = json!({ "sha256": "f00d", "coverage": {} });
-        set_entry(&dir, DAY, Some(e)).unwrap();
+        pending(&dir, DAY, &json!({ "sha256": "f00d", "coverage": {} })).unwrap();
         let now = settle(&dir, DAY).unwrap().unwrap();
         assert!(now.get("pending").is_none() && now["sha256"] == held.as_str());
+        assert!(crate::manifest::pending_days(&dir).is_empty());
         // Stopped after the swap: the pending entry becomes current.
         let merged = day_bytes(&[(C1, 11), (C2, 12)], &[(11, 0), (12, 1)]);
-        let mut e = read_manifest(&dir).unwrap()[DAY].clone();
         fs::write(file(&root), &merged).unwrap();
         let sha = hash_file(&file(&root)).unwrap();
-        e["pending"] = json!({ "sha256": sha, "records": 2, "coverage": { "kind": "contracts", "symbols": [C1, C2], "window": [0, 1] } });
-        set_entry(&dir, DAY, Some(e)).unwrap();
+        pending(&dir, DAY, &json!({ "sha256": sha, "records": 2, "coverage": { "kind": "contracts", "symbols": [C1, C2], "window": [0, 1] } })).unwrap();
         let now = settle(&dir, DAY).unwrap().unwrap();
         assert_eq!(now["records"], 2);
         assert!(now.get("pending").is_none());
+        assert_eq!(read_manifest(&dir).unwrap()[DAY]["records"], 2);
         // Neither: refused, for a person to look at.
         fs::write(file(&root), b"something else").unwrap();
-        let mut e = read_manifest(&dir).unwrap()[DAY].clone();
-        e["pending"] = json!({ "sha256": "f00d" });
-        set_entry(&dir, DAY, Some(e)).unwrap();
+        pending(&dir, DAY, &json!({ "sha256": "f00d" })).unwrap();
         assert!(settle(&dir, DAY).is_err());
+        // A pending merge recorded inline, before sidecars, is settled too.
+        fs::remove_file(
+            dir.join(crate::manifest::SIDECARS)
+                .join(format!("{DAY}.pending.json")),
+        )
+        .unwrap();
+        let entry = json!({ "sha256": "0ld", "coverage": { "kind": "contracts", "symbols": [C1], "window": [0, 1] },
+            "pending": { "sha256": hash_file(&file(&root)).unwrap(), "records": 9, "coverage": { "kind": "contracts", "symbols": [C1, C2], "window": [0, 1] } } });
+        fs::write(
+            dir.join(MANIFEST),
+            json!({ "days": { DAY: entry } }).to_string(),
+        )
+        .unwrap();
+        assert_eq!(settle(&dir, DAY).unwrap().unwrap()["records"], 9);
+        assert!(read_manifest(&dir).unwrap()[DAY].get("pending").is_none());
     }
 
     #[test]
@@ -1497,6 +1783,303 @@ mod tests {
         let entry = &read_manifest(&dir).unwrap()[DAY];
         assert_eq!(entry["coverage"]["symbols"], json!([C1, C2]));
         assert_eq!(entry["condition"]["state"], "missing");
+    }
+
+    const HOUR: u64 = 3_600_000_000_000;
+
+    fn coverage_of(root: &Path) -> Coverage {
+        let e = read_manifest(file(root).parent().unwrap()).unwrap()[DAY].clone();
+        Coverage::from_json(&e["coverage"]).unwrap()
+    }
+
+    fn file_one(root: &Path, id: &str, bytes: Vec<u8>) -> Result<Value, String> {
+        import(
+            &[stage(root, id, &[(&name(), bytes)])],
+            &[],
+            id,
+            "2026-10-19",
+        )
+    }
+
+    #[test]
+    fn keeps_each_files_hours_as_its_own_piece() {
+        let root = scratch("pieces").join("Databento");
+        file_one(&root, "A", day_bytes(&[(C1, 11)], &[(11, 0)])).unwrap();
+        // 14:00 to 20:00 UTC, beside the held 13:00 to 24:00.
+        file_one(&root, "B", day_window(&[(C2, 12)], &[(12, 60)], (14, 20))).unwrap();
+        let from = ingest::day_ns(DAY).unwrap();
+        let cov = coverage_of(&root);
+        assert_eq!(cov.pieces.len(), 2);
+        assert!(cov.covers(C1, from + 13 * HOUR, from + 24 * HOUR));
+        assert!(cov.covers(C2, from + 14 * HOUR, from + 20 * HOUR));
+        assert!(
+            !cov.covers(C2, from + 13 * HOUR, from + 20 * HOUR),
+            "not C2's hours"
+        );
+        // Another file of the same hours joins that piece.
+        file_one(&root, "C", day_window(&[(C3, 13)], &[(13, 61)], (14, 20))).unwrap();
+        let cov = coverage_of(&root);
+        assert_eq!(cov.pieces.len(), 2);
+        assert_eq!(
+            cov.pieces[1].symbols,
+            BTreeSet::from([C2.to_owned(), C3.to_owned()])
+        );
+        // /coverage: the pieces, and for older readers all the contracts
+        // over the span of the hours.
+        let vol = root.parent().unwrap();
+        let row = &spy(&[("v", vol)], "databento").unwrap()[0]["coverage"];
+        assert_eq!(row["pieces"].as_array().unwrap().len(), 2);
+        assert_eq!(row["symbols"], json!([C1, C3, C2]));
+        assert_eq!(row["window"], json!([from + 13 * HOUR, from + 24 * HOUR]));
+        // The form before pieces reads as one.
+        let old = json!({ "kind": "contracts", "symbols": [C1], "window": [1, 2] });
+        assert_eq!(
+            Coverage::from_json(&old).unwrap(),
+            Coverage::one(BTreeSet::from([C1.to_owned()]), 1, 2)
+        );
+    }
+
+    #[test]
+    fn files_a_contract_again_for_hours_not_held() {
+        let root = scratch("hours").join("Databento");
+        file_one(
+            &root,
+            "A",
+            day_window(&[(C1, 11)], &[(11, 0), (11, 100)], (13, 16)),
+        )
+        .unwrap();
+        // Its later hours: merged, each record kept with its own input.
+        file_one(
+            &root,
+            "B",
+            day_window(&[(C1, 11)], &[(11, 200), (11, 300)], (16, 24)),
+        )
+        .unwrap();
+        let (cov, n) = (coverage_of(&root), inspect(&file(&root)).unwrap().1);
+        assert_eq!((cov.pieces.len(), n), (2, 4));
+        let from = ingest::day_ns(DAY).unwrap();
+        assert!(cov.covers(C1, from + 13 * HOUR, from + 24 * HOUR));
+        // Hours already held are refused.
+        let e = file_one(&root, "C", day_window(&[(C1, 11)], &[(11, 150)], (15, 18))).unwrap_err();
+        assert!(e.contains("over the same hours"), "{e}");
+    }
+
+    #[test]
+    fn refuses_a_merge_into_a_day_that_isnt_its_record() {
+        let root = scratch("not-its-record").join("Databento");
+        file_one(&root, "A", day_bytes(&[(C1, 11)], &[(11, 0)])).unwrap();
+        // The file changed behind the store's back.
+        fs::write(file(&root), day_bytes(&[(C1, 11)], &[(11, 0), (11, 1)])).unwrap();
+        let e = file_one(&root, "B", day_bytes(&[(C2, 12)], &[(12, 1)])).unwrap_err();
+        assert!(e.contains("its manifest records"), "{e}");
+    }
+
+    #[test]
+    fn a_retry_after_its_file_was_gone_is_a_duplicate() {
+        let root = scratch("retry").join("Databento");
+        file_one(&root, "A", day_bytes(&[(C1, 11)], &[(11, 0)])).unwrap();
+        file_one(&root, "B", day_bytes(&[(C2, 12)], &[(12, 1)])).unwrap();
+        // Stopped after the merge removed its incoming file, before its
+        // receipt: filed again, it is already there.
+        let part = stage(&root, "B", &[(&name(), day_bytes(&[(C2, 12)], &[(12, 1)]))]);
+        fs::remove_file(part.inc.join(name())).unwrap();
+        import(&[part], &[], "B", "2026-10-19").unwrap();
+        assert_eq!(coverage_of(&root).symbols().len(), 2);
+    }
+
+    #[test]
+    fn refuses_a_merge_that_isnt_both_days_records_in_order() {
+        let root = scratch("merge-checks").join("Databento");
+        file_one(&root, "A", day_bytes(&[(C1, 11)], &[(11, 0)])).unwrap();
+        let dir = file(&root).parent().unwrap().to_path_buf();
+        // The file's records out of time order.
+        let e = file_one(&root, "B", day_bytes(&[(C2, 12)], &[(12, 5), (12, 1)])).unwrap_err();
+        assert!(e.contains("back in time"), "{e}");
+        // Its entry records a different count.
+        let mut entry = read_manifest(&dir).unwrap()[DAY].clone();
+        entry["records"] = json!(99);
+        set_entry(&dir, DAY, Some(entry)).unwrap();
+        let e = file_one(&root, "C", day_bytes(&[(C3, 13)], &[(13, 1)])).unwrap_err();
+        assert!(e.contains("the merge holds 2 records"), "{e}");
+        assert_eq!(inspect(&file(&root)).unwrap().1, 1, "nothing swapped in");
+    }
+
+    #[test]
+    fn refuses_two_contracts_on_one_instrument() {
+        let root = scratch("one-id").join("Databento");
+        file_one(&root, "A", day_bytes(&[(C1, 11)], &[(11, 0)])).unwrap();
+        let e = file_one(&root, "B", day_bytes(&[(C2, 11)], &[(11, 1)])).unwrap_err();
+        assert!(e.contains("instrument 11"), "{e}");
+    }
+
+    /// A definition day file of SPY.OPT listing `contracts`.
+    fn definitions(root: &Path, contracts: &[&str]) {
+        let start = ingest::day_ns(DAY).unwrap();
+        let m = Metadata::builder()
+            .dataset("OPRA.PILLAR")
+            .schema(Some(Schema::Definition))
+            .start(start)
+            .end(NonZeroU64::new(start + 24 * HOUR))
+            .stype_in(Some(SType::Parent))
+            .stype_out(SType::InstrumentId)
+            .symbols(vec!["SPY.OPT".into()])
+            .build();
+        let mut out = Vec::new();
+        {
+            let mut enc = dbn::encode::dbn::Encoder::with_zstd(&mut out, &m).unwrap();
+            for (i, c) in contracts.iter().enumerate() {
+                let mut r = dbn::InstrumentDefMsg::default();
+                r.hd.instrument_id = 11 + u32::try_from(i).unwrap();
+                r.hd.ts_event = start;
+                r.ts_recv = start;
+                r.raw_symbol = dbn::record::str_to_c_chars(c).unwrap();
+                enc.encode_record(&r).unwrap();
+            }
+            enc.flush().unwrap();
+        }
+        put(
+            &root.join("OPRA.PILLAR/SPY.OPT/definition").join(name()),
+            &out,
+        );
+    }
+
+    #[test]
+    fn a_day_holding_every_contract_all_day_is_complete() {
+        let root = scratch("promote").join("Databento");
+        definitions(&root, &[C1, C2]);
+        let s = file_one(&root, "A", day_window(&[(C1, 11)], &[(11, 0)], (0, 24))).unwrap();
+        assert_eq!(s["days"][0]["complete"], false, "C2 isn't held");
+        // C2 for part of the day: still partial.
+        let s = file_one(&root, "B", day_window(&[(C2, 12)], &[(12, 1)], (13, 24))).unwrap();
+        assert_eq!(s["days"][0]["complete"], false);
+        // C2's other hours: every contract, all day.
+        let s = file_one(&root, "C", day_window(&[(C2, 12)], &[], (0, 13))).unwrap();
+        assert_eq!(s["days"][0]["complete"], true, "{s}");
+        let entry = read_manifest(file(&root).parent().unwrap()).unwrap()[DAY].clone();
+        assert!(
+            !is_partial(&entry) && entry["completed"]["pieces"] == 3,
+            "{entry}"
+        );
+        let vol = root.parent().unwrap();
+        assert_eq!(
+            spy(&[("v", vol)], "databento").unwrap()[0]["kind"],
+            "complete"
+        );
+    }
+
+    #[test]
+    fn a_merge_writes_its_day_alone() {
+        let root = scratch("sidecar").join("Databento");
+        file_one(&root, "A", day_bytes(&[(C1, 11)], &[(11, 0)])).unwrap();
+        let dir = file(&root).parent().unwrap().to_path_buf();
+        let index = fs::read(dir.join(MANIFEST)).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&index).contains(C1),
+            "contracts are in the day's own file"
+        );
+        // Written whole, by a rename: a write is a new file.
+        let ino =
+            || std::os::unix::fs::MetadataExt::ino(&fs::metadata(dir.join(MANIFEST)).unwrap());
+        let before = ino();
+        file_one(&root, "B", day_bytes(&[(C2, 12)], &[(12, 1)])).unwrap();
+        assert_eq!(ino(), before, "the index isn't written by a merge");
+        let side: Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("manifest.d").join(format!("{DAY}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(side["coverage"]["symbols"], json!([C1, C2]));
+        // An index from before sidecars, partial days inline, is read, and
+        // moves them out the first time it is written.
+        let inline = json!({ "days": { DAY: side, "2026-10-01": { "coverage": { "kind": "contracts", "symbols": [C3], "window": [0, 1] },
+            "pending": { "sha256": "f00d" } } } });
+        fs::write(dir.join(MANIFEST), inline.to_string()).unwrap();
+        fs::remove_dir_all(dir.join("manifest.d")).unwrap();
+        assert_eq!(
+            read_manifest(&dir).unwrap()["2026-10-01"]["coverage"]["symbols"],
+            json!([C3])
+        );
+        crate::manifest::write_days(&dir, &[]).unwrap();
+        let index = fs::read_to_string(dir.join(MANIFEST)).unwrap();
+        assert!(
+            !index.contains(C3) && dir.join("manifest.d/2026-10-01.json").exists(),
+            "{index}"
+        );
+        // Its merge left pending stays pending.
+        assert_eq!(crate::manifest::pending_days(&dir), ["2026-10-01"]);
+        assert_eq!(
+            read_manifest(&dir).unwrap()["2026-10-01"]["coverage"]["symbols"],
+            json!([C3])
+        );
+    }
+
+    #[test]
+    fn rebuilds_merged_days_from_their_inputs() {
+        let root = scratch("rebuild").join("Databento");
+        file_one(&root, "A", day_bytes(&[(C1, 11)], &[(11, 0)])).unwrap();
+        // A provider batch of C2, 14:00 to 20:00, filed as a partial day.
+        let inc = root.join(INCOMING).join("OPRA-B");
+        fs::create_dir_all(&inc).unwrap();
+        let fname = "opra-pillar-20261002.cbbo-1m.dbn.zst";
+        let bytes = day_window(&[(C2, 12)], &[(12, 60)], (14, 20));
+        fs::write(inc.join(fname), &bytes).unwrap();
+        let sha = hash_file(&inc.join(fname)).unwrap();
+        fs::write(inc.join("manifest.json"), json!({ "files": [{ "filename": fname, "size": bytes.len(), "hash": format!("sha256:{sha}") }] }).to_string()).unwrap();
+        let from = ingest::day_ns(DAY).unwrap();
+        let q = json!({ "dataset": "OPRA.PILLAR", "schema": "cbbo-1m", "stype_in": "raw_symbol", "symbols": [C2], "encoding": "dbn", "compression": "zstd",
+            "start": from + 14 * HOUR, "end": from + 20 * HOUR });
+        fs::write(inc.join("metadata.json"), json!({ "query": q, "customizations": { "split_duration": "day", "split_symbols": false } }).to_string()).unwrap();
+        let part = Part {
+            inc,
+            root: root.clone(),
+        };
+        import_batch(&[part], &[], "OPRA-B", "SPY.OPT", "2026-10-19").unwrap();
+        let dir = file(&root).parent().unwrap().to_path_buf();
+        let right = coverage_of(&root);
+        // As merged before pieces: every contract over the span, and ledgers
+        // that didn't record what each file held.
+        let hull = || {
+            let mut e = read_manifest(&dir).unwrap()[DAY].clone();
+            e["coverage"] = json!({ "kind": "contracts", "symbols": [C1, C2], "window": [from + 13 * HOUR, from + 24 * HOUR] });
+            set_entry(&dir, DAY, Some(e)).unwrap();
+        };
+        let forget = |id: &str| {
+            for e in fs::read_dir(root.join("migrations")).unwrap().flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if n.ends_with(&format!("-import-{id}.events.jsonl")) {
+                    let text: Vec<String> = fs::read_to_string(e.path())
+                        .unwrap()
+                        .lines()
+                        .map(|l| {
+                            let mut v: Value = serde_json::from_str(l).unwrap();
+                            v.as_object_mut().unwrap().remove("coverage");
+                            v.to_string()
+                        })
+                        .collect();
+                    fs::write(e.path(), text.join("\n")).unwrap();
+                }
+            }
+        };
+        hull();
+        forget("OPRA-B");
+        let roots = [root.clone()];
+        let r = crate::rebuild::rebuild(&roots, std::slice::from_ref(&dir)).unwrap();
+        assert_eq!(r["changed"].as_array().unwrap().len(), 1, "{r}");
+        assert_eq!(coverage_of(&root), right, "B's hours from its receipt");
+        let again = crate::rebuild::rebuild(&roots, std::slice::from_ref(&dir)).unwrap();
+        assert_eq!(
+            (again["changed"].clone(), again["unchanged"].clone()),
+            (json!([]), json!(1))
+        );
+        // A's hours on record nowhere: left as it is, and listed.
+        hull();
+        forget("A");
+        let r = crate::rebuild::rebuild(&roots, std::slice::from_ref(&dir)).unwrap();
+        assert_eq!(r["changed"], json!([]));
+        assert!(
+            r["not_rebuilt"][0]["why"].as_str().unwrap().contains("A"),
+            "{r}"
+        );
+        assert_eq!(coverage_of(&root).pieces.len(), 1);
     }
 
     #[test]

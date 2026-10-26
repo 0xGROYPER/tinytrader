@@ -14,6 +14,12 @@
 > `GET /coverage`). **Not yet built:** section 5 (`databento-jobs` buying only
 > what's missing) and promotion of a merged day to `complete`. Until then the
 > jobs service refuses any day the store holds, partial or not.
+>
+> **Since (2026-10-25):** coverage is kept in pieces, each file's contracts
+> over its own hours, so a merged day no longer claims the span of every
+> file's hours; a day holding every contract of its definitions all day is
+> promoted to `complete`; merges stream; and partial days' entries are each
+> in their own file (`manifest.d/`). See the [store API](../api/store.md#partial-days).
 
 ## Context
 
