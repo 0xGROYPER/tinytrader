@@ -49,8 +49,8 @@ pub struct Alpaca {
     pub history_url: String,
 }
 
-/// The next page token, refused (as alpaca-history refuses them) if it is
-/// empty or malformed, repeats the last, or would go past `cap` pages.
+/// The next page token (none when absent or empty: the last page), refused
+/// if it is malformed, repeats the last, or would go past `cap` pages.
 fn next_token(
     kind: &str,
     last: Option<&str>,
@@ -58,8 +58,10 @@ fn next_token(
     pages: usize,
     cap: usize,
 ) -> Result<Option<String>, String> {
-    let Some(t) = next else { return Ok(None) };
-    if t.is_empty() || t.len() > 256 || !t.bytes().all(|b| b.is_ascii_graphic()) {
+    let Some(t) = next.filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    if t.len() > 256 || !t.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(format!("{kind}: an unusable page token"));
     }
     if last == Some(t.as_str()) {
@@ -788,15 +790,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_repeated_or_empty_token_ends_paging_with_an_error() {
+    async fn a_repeated_or_malformed_token_ends_paging_with_an_error() {
         let (a, n) = fake(|_| r#"{"trades":{},"next_page_token":"abc"}"#.into()).await;
         let e = a.pages("SPY", "trades", 0, 1).await.unwrap_err();
         assert!(e.contains("the same page token twice"), "{e}");
         assert_eq!(n.load(Ordering::Relaxed), 2);
-        let (a, _) = fake(|_| r#"{"quotes":{},"next_page_token":""}"#.into()).await;
+        let (a, _) = fake(|_| r#"{"quotes":{},"next_page_token":"a b"}"#.into()).await;
         let e = a.pages("SPY", "quotes", 0, 1).await.unwrap_err();
         assert!(e.contains("unusable page token"), "{e}");
-        let (a, _) = fake(|_| r#"{"bars":{},"next_page_token":""}"#.into()).await;
+        let (a, _) = fake(|_| r#"{"bars":{},"next_page_token":"é"}"#.into()).await;
         assert!(a.minute_bars("SPY", 0, 1).await.is_err());
         let (a, _) = fake(|_| "not json".into()).await;
         assert!(
@@ -813,5 +815,9 @@ mod tests {
         assert_eq!(n.load(Ordering::Relaxed), BAR_PAGES);
         let (a, _) = fake(|_| r#"{"bars":{},"next_page_token":null}"#.into()).await;
         assert_eq!(a.minute_bars("SPY", 0, 1).await, Ok(Vec::new()));
+        // An empty token is the last page, as null is.
+        let (a, n) = fake(|_| r#"{"trades":{},"next_page_token":""}"#.into()).await;
+        assert_eq!(a.pages("SPY", "trades", 0, 1).await.map(|p| p.len()), Ok(1));
+        assert_eq!(n.load(Ordering::Relaxed), 1);
     }
 }

@@ -257,6 +257,7 @@ impl App {
                 .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok()?.trim().parse().ok());
+            // Seconds only: a Retry-After given as an HTTP-date falls back to 60 s.
             let secs: u64 = secs.unwrap_or(60).min(600);
             *lock(&self.hold) = Some(Instant::now() + Duration::from_secs(secs));
             let e = format!("busy: Alpaca's rate limit (429); try again in {secs} s");
