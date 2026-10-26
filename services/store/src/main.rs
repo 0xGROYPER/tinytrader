@@ -20,14 +20,16 @@
 //!   list of contracts is a partial day, merged with any partial day already
 //!   held. `GET /coverage?provider=&dataset=&symbol=&schema=&start=&end=`
 //!   says, for each day held, whether it is complete or which contracts and
-//!   hours it holds.
+//!   hours it holds, and the files holding it.
 //! - **Day conditions** (see the conditions module): each filed day keeps
 //!   the provider's `available` / `degraded` / `missing`, from its batch's
 //!   `condition.json`, `POST /conditions/{provider}`, or `POST
 //!   /conditions/backfill` over the receipts kept.
 //! - **Reading** (see the read module): `GET /files?pattern=&provider=&limit=`
-//!   lists the DBN files the volumes hold by logical name, `<volume>/<path>`;
-//!   `GET /files/{volume}/{path}` sends one. Read-only, finished files only.
+//!   lists the DBN files the last scan found by logical name,
+//!   `<volume>/<path>`; `GET /files/{volume}/{path}` sends one, or answers
+//!   `503` while its volume is away or not yet scanned. Read-only, finished
+//!   files only.
 //! - **Holdings that fail closed** (decision 0019): `/catalog` and `/coverage`
 //!   answer `503` until the first scan is done. Every volume the store has
 //!   used is remembered in its state file (`STORE_STATE`), so one that is
@@ -156,6 +158,9 @@ struct Index {
     scanned_at: f64,
     updated_at: f64,
     volumes: Vec<(String, Vec<catalog::Place>)>,
+    /// The files it found that the store serves, by volume, sorted: `/files`
+    /// lists them.
+    files: Vec<(String, Vec<catalog::Served>)>,
     /// What the scan couldn't read, on volumes that are there.
     errors: Vec<String>,
 }
@@ -428,21 +433,21 @@ async fn scan(store: &Shared, observer: &Observer) {
             .map(|v| {
                 let mine: Vec<&Value> = ignored.iter().filter(|i| i["volume"] == v.name.as_str()).collect();
                 let skip: Vec<PathBuf> = mine.iter().filter_map(|i| i["path"].as_str()).map(PathBuf::from).collect();
-                let (mut root, mut places) = match volumes::present(v) {
+                let (mut root, mut places, mut served) = match volumes::present(v) {
                     Ok(()) => catalog::scan_volume(&v.name, &v.path, limits, &skip),
                     Err(e) => {
                         // What it held when last read in full, so its data
                         // shows as away rather than gone.
                         let was = held.get(&v.name).cloned().unwrap_or_else(|| json!({}));
                         let root = json!({ "name": v.name, "path": v.path, "present": false, "datasets": [], "held": was, "unrecognised": [], "errors": [e], "pending_files": [] });
-                        (root, Vec::new())
+                        (root, Vec::new(), Vec::new())
                     }
                 };
                 // Settling writes manifests: only while no filing runs (one
                 // may be between recording its merge and swapping it in).
                 // Otherwise the merge stays listed, for the next scan.
                 if let Ok(_one_at_a_time) = s.filing.try_lock() {
-                    settle_merges(v, &mut root, &mut places);
+                    settle_merges(v, &mut root, &mut places, &mut served);
                 }
                 let errors: Vec<String> = if root["present"] == true {
                     root["errors"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(str::to_owned)).collect()
@@ -459,7 +464,7 @@ async fn scan(store: &Shared, observer: &Observer) {
                     errors.push(json!(emptied(v)));
                 }
                 root["writable"] = json!(v.writable);
-                (root, (v.name.clone(), places), errors)
+                (root, (v.name.clone(), places), (v.name.clone(), served), errors)
             })
             .collect::<Vec<_>>()
     })
@@ -470,9 +475,10 @@ async fn scan(store: &Shared, observer: &Observer) {
         ..Index::default()
     };
     let mut scanned = Vec::new();
-    for (root, places, errors) in found {
+    for (root, places, served, errors) in found {
         scanned.push(root);
         index.volumes.push(places);
+        index.files.push(served);
         index.errors.extend(errors);
     }
     let scanned_at = index.scanned_at;
@@ -504,7 +510,7 @@ async fn scan(store: &Shared, observer: &Observer) {
     let mut redo = lock(&store.refreshed);
     let volumes = store.volumes();
     for dir in redo.drain(..) {
-        reapply(&volumes, &dir, &mut scanned, &mut index.volumes);
+        reapply(&volumes, &dir, &mut scanned, &mut index);
     }
     *lock(&store.index) = Arc::new(index);
     *lock(&store.catalog) = json!({
@@ -590,7 +596,12 @@ fn target_folders(
 /// Settle the merges a volume's scan found left pending (decision 0018): the
 /// day file's hash says whether its merged file is in place. Each folder
 /// settled is read again into the scan's answer.
-fn settle_merges(v: &Volume, root: &mut Value, places: &mut Vec<catalog::Place>) {
+fn settle_merges(
+    v: &Volume,
+    root: &mut Value,
+    places: &mut Vec<catalog::Place>,
+    served: &mut Vec<catalog::Served>,
+) {
     let merges = root["pending_merges"]
         .as_array()
         .cloned()
@@ -620,18 +631,14 @@ fn settle_merges(v: &Volume, root: &mut Value, places: &mut Vec<catalog::Place>)
         if let Some(f) = catalog::Folder::read(&v.path, &folder) {
             f.apply_root(root, &v.name);
             f.apply_places(places);
+            f.apply_files(served);
         }
     }
 }
 
-/// Read the schema folder `dir` again into a scan's answer: the root and
-/// places of the volume holding it.
-fn reapply(
-    volumes: &[Volume],
-    dir: &Path,
-    roots: &mut [Value],
-    places: &mut [(String, Vec<catalog::Place>)],
-) {
+/// Read the schema folder `dir` again into a scan's answer: the root,
+/// places and served files of the volume holding it.
+fn reapply(volumes: &[Volume], dir: &Path, roots: &mut [Value], index: &mut Index) {
     let Some(v) = volumes.iter().find(|v| dir.starts_with(&v.path)) else {
         return;
     };
@@ -641,8 +648,11 @@ fn reapply(
     if let Some(root) = roots.iter_mut().find(|r| r["name"] == v.name.as_str()) {
         folder.apply_root(root, &v.name);
     }
-    if let Some((_, p)) = places.iter_mut().find(|(n, _)| *n == v.name) {
+    if let Some((_, p)) = index.volumes.iter_mut().find(|(n, _)| *n == v.name) {
         folder.apply_places(p);
+    }
+    if let Some((_, f)) = index.files.iter_mut().find(|(n, _)| *n == v.name) {
+        folder.apply_files(f);
     }
 }
 
@@ -661,7 +671,7 @@ impl Store {
                 redo.push(dir.clone());
             }
             if let Some(roots) = catalog["roots"].as_array_mut() {
-                reapply(&volumes, dir, roots, &mut index.volumes);
+                reapply(&volumes, dir, roots, index);
             }
         }
         let now = unix_seconds();
@@ -1376,22 +1386,71 @@ struct ListFiles {
     limit: Option<usize>,
 }
 
-/// The DBN files the volumes hold whose logical name matches `pattern`
-/// (by default all), in `provider`'s folder if given, at most `limit` of
-/// them.
+/// The DBN files the last scan found, on the volumes there now, whose
+/// logical name matches `pattern` (by default all), in `provider`'s folder
+/// if given, at most `limit` of them; `503` until the first scan is done.
+/// The volumes aren't walked for it.
 async fn list_files(AxState(store): AxState<Shared>, Query(q): Query<ListFiles>) -> Reply {
-    let volumes = store.volumes();
+    if lock(&store.catalog).is_null() {
+        return refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the store is still scanning",
+        );
+    }
+    let index = lock(&store.index).clone();
+    let present: Vec<String> = store
+        .volumes()
+        .into_iter()
+        .filter(|v| volumes::present(v).is_ok())
+        .map(|v| v.name)
+        .collect();
     let pattern = q.pattern.unwrap_or_else(|| "*".to_owned());
     let limit = q.limit.unwrap_or(read::MAX_LISTED).min(read::MAX_LISTED);
     let provider = q.provider;
     match tokio::task::spawn_blocking(move || {
-        read::list(&volumes, &pattern, provider.as_deref(), limit)
+        let found: Vec<(&str, &[catalog::Served])> = index
+            .files
+            .iter()
+            .filter(|(n, _)| present.contains(n))
+            .map(|(n, f)| (n.as_str(), f.as_slice()))
+            .collect();
+        let mut v = read::list(&found, &pattern, provider.as_deref(), limit);
+        v["scanned_at"] = json!(index.scanned_at);
+        v["updated_at"] = json!(index.updated_at);
+        v
     })
     .await
     {
         Ok(v) => reply(StatusCode::OK, v),
         Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+/// Why a file that can't be found may still be there: its volume isn't
+/// mounted, or found missing by the last scan, or hasn't been scanned yet.
+/// `None` when it is there and scanned, so the file really is absent.
+fn away(store: &Store, v: &Volume) -> Option<String> {
+    if let Err(e) = volumes::present(v) {
+        return Some(format!(
+            "volume {} is not mounted ({e}); ask again when it is",
+            v.name
+        ));
+    }
+    let (first_done, missing) = {
+        let c = lock(&store.catalog);
+        let missing = c["missing_volumes"]
+            .as_array()
+            .is_some_and(|m| m.iter().any(|n| n == v.name.as_str()));
+        (!c.is_null(), missing)
+    };
+    if missing {
+        return Some(format!(
+            "volume {} is missing (its errors are in /catalog); ask again when it is read",
+            v.name
+        ));
+    }
+    let scanned = first_done && lock(&store.index).files.iter().any(|(n, _)| *n == v.name);
+    (!scanned).then(|| format!("volume {} is being scanned; ask again shortly", v.name))
 }
 
 /// One DBN file, as it is on the volume.
@@ -1402,8 +1461,30 @@ async fn send_file(
     use axum::response::IntoResponse as _;
     use tokio::io::AsyncReadExt as _;
 
+    let started = std::time::Instant::now();
+    let name = format!("{volume}/{path}");
     let volumes = store.volumes();
-    let found = tokio::task::spawn_blocking(move || read::locate(&volumes, &volume, &path)).await;
+    // Nothing is served from a volume that isn't mounted (an empty folder
+    // left behind holds nothing of it).
+    if let Some(v) = volumes.iter().find(|v| v.name == volume)
+        && volumes::present(v).is_err()
+        && let Some(why) = away(&store, v)
+    {
+        return refused(StatusCode::SERVICE_UNAVAILABLE, why).into_response();
+    }
+    // A file not found on a volume found missing, or not yet scanned, may
+    // be there: only a scanned volume's absent file is a 404.
+    let s = store.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        read::locate(&volumes, &volume, &path).map_err(|(code, why)| {
+            let v = volumes.iter().find(|v| v.name == volume);
+            match v.filter(|_| code == 404).and_then(|v| away(&s, v)) {
+                Some(why) => (503, why),
+                None => (code, why),
+            }
+        })
+    })
+    .await;
     let file = match found {
         Ok(Ok(f)) => f,
         Ok(Err((code, why))) => {
@@ -1412,6 +1493,7 @@ async fn send_file(
         }
         Err(e) => return refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
+    let found_in = started.elapsed();
     let opened = tokio::fs::File::open(&file).await;
     let (f, len) = match opened {
         Ok(f) => match f.metadata().await {
@@ -1422,15 +1504,33 @@ async fn send_file(
         },
         Err(e) => return refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let chunks = futures_util::stream::unfold(f, |mut f| async move {
-        let mut buf = vec![0u8; 256 * 1024];
-        match f.read(&mut buf).await {
-            Ok(0) => None,
-            Ok(n) => {
-                buf.truncate(n);
-                Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(buf)), f))
+    // Each download is logged once sent, with how long it took.
+    let chunks = futures_util::stream::unfold((f, 0u64), move |(mut f, sent)| {
+        let name = name.clone();
+        async move {
+            let mut buf = vec![0u8; 256 * 1024];
+            match f.read(&mut buf).await {
+                Ok(0) => {
+                    eprintln!(
+                        "store: sent {name}: {sent} bytes in {:.3}s (found in {:.3}s)",
+                        started.elapsed().as_secs_f64(),
+                        found_in.as_secs_f64()
+                    );
+                    None
+                }
+                Ok(n) => {
+                    buf.truncate(n);
+                    let bytes = axum::body::Bytes::from(buf);
+                    Some((Ok::<_, std::io::Error>(bytes), (f, sent + n as u64)))
+                }
+                Err(e) => {
+                    eprintln!(
+                        "store: sending {name} failed after {sent} bytes in {:.3}s: {e}",
+                        started.elapsed().as_secs_f64()
+                    );
+                    Some((Err(e), (f, sent)))
+                }
             }
-            Err(e) => Some((Err(e), f)),
         }
     });
     (
@@ -2142,6 +2242,72 @@ mod tests {
         // The provider must be given.
         let (code, _) = get(&addr, &COVERAGE.replace("provider=databento&", "")).await;
         assert_eq!(code, 400);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn files_are_listed_from_the_scan_and_refused_while_away() {
+        let dir = scratch("files");
+        let vol = dir.join("v");
+        let day = vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("2026-10-01.dbn.zst"), b"abc").unwrap();
+        let s = store(&[("v", &vol)], &dir.join("state.json"));
+        let addr = serve_store(s.clone(), WriteToken::open()).await;
+        let name = "v/Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-01.dbn.zst";
+        let absent = "/files/v/Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-09.dbn.zst";
+        let error = |body: &Value| body["error"].as_str().unwrap_or_default().to_owned();
+
+        // Before the first scan: no listing, and a file not found may yet be
+        // there. One that is there is served.
+        let (code, body) = get(&addr, "/files").await;
+        assert_eq!(
+            (code, error(&body)),
+            (503, "the store is still scanning".into())
+        );
+        let (code, body) = get(&addr, absent).await;
+        assert_eq!(code, 503);
+        assert!(error(&body).contains("volume v is being scanned"), "{body}");
+        let (code, bytes) = call(&addr, "GET", &format!("/files/{name}"), None, "").await;
+        assert_eq!((code, bytes.as_str()), (200, "abc"));
+
+        scanned(&s).await;
+        let (code, body) = get(&addr, "/files?pattern=*cbbo-1m*").await;
+        assert_eq!(code, 200);
+        assert_eq!(
+            body["files"],
+            json!([{ "name": name, "volume": "v", "path": &name[2..], "bytes": 3 }])
+        );
+        assert_eq!(body["truncated"], false);
+        assert!(body["scanned_at"].as_f64().is_some());
+        // From the scan, not the disk: a file written since is listed after
+        // the next.
+        std::fs::write(day.join("2026-10-02.dbn.zst"), b"de").unwrap();
+        let count = |v: &Value| v["files"].as_array().map_or(0, Vec::len);
+        assert_eq!(count(&get(&addr, "/files").await.1), 1);
+        scanned(&s).await;
+        assert_eq!(count(&get(&addr, "/files").await.1), 2);
+        let (_, one) = get(&addr, "/files?limit=1&provider=databento").await;
+        assert_eq!((count(&one), one["truncated"].clone()), (1, json!(true)));
+        assert_eq!(count(&get(&addr, "/files?provider=alpaca").await.1), 0);
+
+        // Scanned and there: an absent file is a 404.
+        let (code, body) = get(&addr, absent).await;
+        assert_eq!(code, 404);
+        assert!(error(&body).starts_with("no file"), "{body}");
+        assert_eq!(get(&addr, "/files/nowhere/a.dbn").await.0, 404);
+
+        // Away: nothing listed, and every file refused as not mounted.
+        let away = dir.join("v-away");
+        std::fs::rename(&vol, &away).unwrap();
+        assert_eq!(count(&get(&addr, "/files").await.1), 0);
+        for path in [format!("/files/{name}"), absent.to_owned()] {
+            let (code, body) = get(&addr, &path).await;
+            assert_eq!(code, 503, "{path}");
+            assert!(error(&body).contains("volume v is not mounted"), "{body}");
+        }
+        std::fs::rename(&away, &vol).unwrap();
+        assert_eq!(count(&get(&addr, "/files").await.1), 2);
         let _ = std::fs::remove_dir_all(dir);
     }
 
