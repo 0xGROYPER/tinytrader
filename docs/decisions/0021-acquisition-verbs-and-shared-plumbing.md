@@ -41,20 +41,57 @@ porting it still holds; this takes those two properties, not its code.
 
 ## Decision
 
-### 1. Four verbs, one meaning everywhere
+### 1. Three verbs over sources
 
-| Verb | What it does | Served by |
-|---|---|---|
-| `fetch` | A historical range into the store: priced first; free goes ahead, paid waits for a person's yes. | `databento-jobs`, `alpaca-history` |
-| `poll` | `fetch` of the latest days, on a schedule. Not a separate code path: the deployment's scheduler (0020; Nomad today) runs `tt fetch`, so nothing in tinytrader keeps a schedule. | the same |
-| `listen` | Live DBN from now. | the relay |
-| `replay` | DBN of held days from the store, then (optionally) `listen`: the same protocol and bytes as live. | the relay, with the store as a source |
+A request names a **source** and a **verb**. Sources are where records come
+from; verbs are how they're asked for. They're independent: any verb a
+source supports, with the same arguments and the same output.
 
-**A paid poll still needs a person.** 0019 stands: a scheduled `fetch` of a
-free source goes ahead; of a paid one it prices, leaves the quote waiting
-and notifies, and buys nothing until someone says yes. A standing approval
-(per dataset, a daily dollar cap, expiring) would be its own decision; this
-one doesn't propose it.
+| Source | What it is |
+|---|---|
+| a provider | `databento`, `alpaca` (and later others): the vendor's API |
+| `store` | what the store holds: replay is reading this source, not a verb of its own |
+
+| Verb | What it does |
+|---|---|
+| `fetch` | A finite range, once: a provider's range into the store (priced first; free goes ahead, paid waits for a person's yes), or held days from the store. |
+| `poll` | `fetch`, again and again, on a **trigger**. Sugar over `fetch`: the same provider operation, pagination, retries and output, with only the range and the cadence as inputs. |
+| `listen` | A stream: a provider's live feed through the relay, or the store's held days played back through the same relay protocol, as the same bytes. |
+
+**Triggers** make `poll` composable:
+
+- **A time:** `--every 5s`, `--every 1m`, aligned to the clock, or a market
+  calendar point (`--at close+15m`, sessions only, early closes included).
+- **An event from a stream:** `--on <listen>`, each record (or each one
+  matching a filter) of another stream fires a fetch. The bar-close case:
+  `tt poll alpaca chain SPY --on 'listen alpaca bars SPY 1m'` fetches SPY's
+  option chain snapshot at each minute bar's close.
+
+So "fetch on each event" is a `poll`, not a `listen`: the action is a
+finite fetch, and the stream only says when. Its output is a stream of
+snapshots that can itself be listened to or trigger a further poll; each
+snapshot keeps its own reception time, never one time stamped across a
+whole chain.
+
+**Rules every poll keeps.** One fetch in flight per poll. A trigger that
+fires while a fetch is still running is coalesced (the next fetch starts
+when the running one ends, once), never queued without bound; skipped
+triggers are counted and reported. Failures back off on `libs/net`'s
+bounded retry, and a poll that gives up says so and stops. A poll of a
+source that can't do it (a provider without the endpoint, a cadence finer
+than its rate allows) is refused at the start with the reason, not run
+slowly.
+
+**Two kinds of schedule.** Intraday cadence (seconds, bars, events) is the
+poll's own, in the process doing the fetching. Daily and batch work
+(tonight's top-off) is the deployment's scheduler (0020; Nomad today)
+running `tt fetch`, so tinytrader keeps no batch scheduler.
+
+**A paid poll still needs a person.** 0019 stands: a poll of a free source
+goes ahead; of a paid one it prices, leaves the quote waiting and notifies,
+and buys nothing until someone says yes. A standing approval (per dataset,
+a daily dollar cap, expiring) would be its own decision; this one doesn't
+propose it.
 
 Each verb is an HTTP endpoint first. A command line, the TUI and the console
 are front ends over the same endpoints, as 0003 has it for reads.
@@ -72,7 +109,10 @@ tt quotes                      waiting quotes, with cost and time left
 tt approve QUOTE | tt decline QUOTE
 tt jobs [--follow]             purchases and their downloads and filing;
                                --follow ends with each job's filing result
-tt listen SYMBOL… | tt replay SYMBOL… --start T [--end T]   DBN to stdout
+tt poll SOURCE … (--every D | --at T | --on 'listen …')   snapshots, as DBN
+tt listen SOURCE SYMBOL… [--start T [--end T]]   DBN to stdout; SOURCE store
+                               plays held days, a provider is live (from T
+                               where it keeps history)
 ```
 
 **Approval goes through the console, not a key.** `tt approve` sends the
@@ -90,14 +130,18 @@ sends.
   `tt` says why instead of retrying.
 - With no authenticating proxy (no allowed logins configured), the console
   refuses every write, approvals included, and `tt approve` refuses with
-  that message. There is no fallback to a token alone. Where the console asks for its order token on approvals (as
-for a live order, unless `CONSOLE_LIVE_NEEDS_TOKEN` is `false`), `tt` asks
-for it at the prompt and keeps it for that run only. The y/N is the confirmation 0019 asks for: it shows the exact
-price and sends that price.
+  that message. There is no fallback to a token alone.
+- Where the console asks for its order token on approvals (as for a live
+  order, unless `CONSOLE_LIVE_NEEDS_TOKEN` is `false`), `tt` asks for it at
+  the prompt and keeps it for that run only.
+
+The y/N is the confirmation 0019 asks for: it shows the exact price and
+sends that price.
 
 **A quote that expires is said so.** Quotes carry `expires_at`; `tt` and the
-console's Jobs widget both show the time left, and an approval after expiry offers to price it
-again (free) and asks again, never buys at a new price unasked.
+console's Jobs widget both show the time left, and an approval after
+expiry offers to price it again (free) and asks again, never buys at a new
+price unasked.
 
 `tt` replaces the queue's `tt` that 0020 removes; it shares no code with it.
 
@@ -134,10 +178,10 @@ reviewed and deployed after a close, under the trading hold.
 Services keep their own HTTP APIs and guards. Nothing here is a framework:
 no service is required to have a given shape, only to stop copying these.
 
-### 5. Replay from the store
+### 5. The store as a source
 
-The relay gains a store source: for `start` before today on a dataset the
-store holds, it sends the stored records for the days asked, then
+The relay gains the store as a source: a `listen` (or `fetch`) of `store`
+sends the stored records for the days asked, then
 `ReplayCompleted`, then live if the request asked for it. The records sent
 are the stored DBN, unchanged.
 
@@ -170,11 +214,13 @@ and report before going 30% over.
 | 2. `libs/store-client`; `alpaca-history` and `databento-jobs` on it | 250 | 200 |
 | 3. `tt fetch/quotes/approve/decline/jobs`; quote `expires_at` in `tt` and the console | 450 | 250 |
 | 4a. Relay store source: one symbol-day, streamed, holes as gaps | 450 | 300 |
-| 4b. The k-way merge across files, pace, and `tt listen/replay` | 450 | 300 |
+| 4b. The k-way merge across files, pace, and `tt listen` | 450 | 300 |
+| 6. `poll`: time and calendar triggers, `--on` stream triggers, coalescing | 400 | 350 |
 | 5. Docs: the verbs in each API page | (docs) | |
 
 Step 0 comes first for the endpoints 2 and 3 use; 1, 2 and 3 can then land
-in any order; 4a needs 2, 4b needs 4a. Each step reports the lines it
+in any order; 4a needs 2, 4b needs 4a; 6 needs 1 and 3, and its `--on` triggers need a
+`listen` to read (the relay today). Each step reports the lines it
 removes beside these.
 
 ## Consequences
@@ -183,7 +229,7 @@ removes beside these.
   with the same guards and ledger as the console.
 - A new feed gets retries, reconnects, store filing and a fake provider for
   free, and the review of a feed is of what's specific to it.
-- A strategy runs over held days through the relay, as it runs live; OPRA
+- A strategy listens to held days through the relay, as it listens live; OPRA
   `cmbp-1` days held in the store can be replayed although Databento won't.
 - `libs/net` and `libs/store-client` are contracts between services; change
   them additively.
