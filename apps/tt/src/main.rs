@@ -1,0 +1,700 @@
+//! `tt`: tinytrader from a terminal (decisions 0021 and 0023). A front end
+//! only: every command is a call to the console at `TT_CONSOLE` (its address
+//! under the authenticating proxy, such as `https://<console host>`), which
+//! adds its write gate and the login, and passes reads and prices to the jobs
+//! service. stdout carries the answer (JSON, or `--format table`); progress
+//! and prompts go to stderr. Exit: 0 done, 1 failed, 2 usage, 130 signalled.
+
+use std::io::{BufRead, IsTerminal, Write};
+use std::sync::Mutex;
+use std::time::Duration;
+
+use clap::{Parser, Subcommand, ValueEnum};
+use serde_json::{Value, json};
+
+#[derive(Parser)]
+#[command(name = "tt", about = "tinytrader from a terminal, through TT_CONSOLE")]
+struct Cli {
+    /// How the answer is written on stdout.
+    #[arg(long, value_enum, default_value_t = Format::Json, global = true)]
+    format: Format,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum Format {
+    Json,
+    Table,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Price a purchase, ask before anything is charged, buy it and follow its submission.
+    Fetch {
+        #[command(subcommand)]
+        source: Source,
+    },
+    /// The waiting and recent quotes.
+    Quotes,
+    /// Show a waiting quote, ask, approve it and follow its submission.
+    Approve { quote: String },
+    /// Ask, then drop a waiting quote.
+    Decline { quote: String },
+    /// The purchases' jobs and their filing outcomes; with --follow, until
+    /// those named (job IDs, or quote IDs for their jobs) are filed or failed.
+    Jobs {
+        #[arg(long)]
+        follow: bool,
+        ids: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum Source {
+    /// Databento's batch API, through databento-jobs.
+    Databento(Fetch),
+}
+
+/// `--symbols` is one symbol (a parent such as `SPY.OPT`, or a raw symbol);
+/// `--hours` is `HH:MM-HH:MM` New York time; `--contracts` a JSON file of
+/// `{"YYYY-MM-DD": ["SPY   221021C00370000", …]}`; `--write` only `store`.
+#[derive(clap::Args)]
+struct Fetch {
+    #[arg(long)]
+    dataset: String,
+    #[arg(long)]
+    schema: String,
+    #[arg(long)]
+    symbols: String,
+    #[arg(long)]
+    start: String,
+    #[arg(long)]
+    end: String,
+    #[arg(long)]
+    hours: Option<String>,
+    #[arg(long)]
+    contracts: Option<std::path::PathBuf>,
+    #[arg(long, default_value = "store", value_parser = ["store"])]
+    write: String,
+}
+
+/// What a person at the terminal sees and says (stderr, never stdout).
+trait Term {
+    fn tty(&self) -> bool;
+    fn say(&mut self, line: &str);
+    fn ask(&mut self, prompt: &str) -> Option<String>;
+    /// A line read without echo.
+    fn secret(&mut self, prompt: &str) -> Option<String>;
+}
+
+/// The terminal's settings while echo is off, to restore (also on a signal).
+static ECHO: Mutex<Option<rustix::termios::Termios>> = Mutex::new(None);
+
+fn echo(on: bool) {
+    use rustix::termios::{LocalModes, OptionalActions::Now, tcgetattr, tcsetattr};
+    let stdin = std::io::stdin();
+    let mut saved = ECHO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if on {
+        saved.take().map(|t| tcsetattr(&stdin, Now, &t));
+    } else if let Ok(t) = tcgetattr(&stdin) {
+        let mut quiet = t.clone();
+        quiet.local_modes.remove(LocalModes::ECHO);
+        *saved = tcsetattr(&stdin, Now, &quiet).ok().map(|()| t);
+    }
+}
+
+struct Real;
+
+impl Term for Real {
+    fn tty(&self) -> bool {
+        std::io::stdin().is_terminal()
+    }
+    fn say(&mut self, line: &str) {
+        eprintln!("{line}");
+    }
+    fn ask(&mut self, prompt: &str) -> Option<String> {
+        eprint!("{prompt} ");
+        let mut line = String::new();
+        let n = tokio::task::block_in_place(|| std::io::stdin().lock().read_line(&mut line));
+        let got = n.ok().filter(|n| *n > 0).map(|_| line.trim().to_owned());
+        if got.is_none() {
+            eprintln!(); // end of input: the prompt's line ends here
+        }
+        got
+    }
+    fn secret(&mut self, prompt: &str) -> Option<String> {
+        echo(false);
+        let line = self.ask(prompt);
+        echo(true);
+        eprintln!();
+        line
+    }
+}
+
+/// The console, and the order token once a person has given it (this run only).
+struct Console {
+    base: String,
+    http: reqwest::Client,
+    token: Mutex<Option<String>>,
+    poll: Duration,
+}
+
+/// An answer: its status, its body, and whether the write gate refused it.
+struct Answer {
+    code: u16,
+    body: Value,
+    gate: bool,
+}
+
+fn why(a: &Answer) -> String {
+    let code = a.code;
+    a.body["error"]
+        .as_str()
+        .map_or_else(|| format!("the console answered {code}"), str::to_owned)
+}
+
+const PROXY_ONLY: &str = "approvals need the console's proxy address, where your tailnet login is attached; this machine may be tagged";
+
+impl Console {
+    async fn send(&self, post: Option<&Value>, path: &str, wait: u64) -> Result<Answer, String> {
+        let url = format!("{}{path}", self.base);
+        let mut r = post.map_or_else(|| self.http.get(&url), |b| self.http.post(&url).json(b));
+        if let Some(t) = self.token.lock().unwrap().as_deref() {
+            r = r.header("X-Order-Token", t);
+        }
+        let r = r.timeout(Duration::from_secs(wait)).send().await;
+        let r = r.map_err(|e| format!("the console at {}: {}", self.base, e.without_url()))?;
+        let code = r.status().as_u16();
+        let gate = r
+            .headers()
+            .get("x-write-gate")
+            .is_some_and(|v| v == "refused");
+        let body = r.json().await.unwrap_or(Value::Null);
+        Ok(Answer { code, body, gate })
+    }
+
+    async fn get(&self, path: &str) -> Result<Value, String> {
+        let a = self.send(None, path, 60).await?;
+        if a.code == 200 {
+            Ok(a.body)
+        } else {
+            Err(why(&a))
+        }
+    }
+
+    /// A write through the gate. Its 401 asks for the order token, once; its
+    /// 403 is never retried. With `follow`, the quote's submission progress
+    /// is shown, every 50 requests, while the answer is awaited.
+    async fn write(
+        &self,
+        term: &mut dyn Term,
+        path: &str,
+        body: &Value,
+        follow: Option<&str>,
+    ) -> Result<Answer, String> {
+        loop {
+            let call = self.send(Some(body), path, 4 * 3600);
+            tokio::pin!(call);
+            let mut shown = None;
+            let a = loop {
+                tokio::select! {
+                    a = &mut call => break a?,
+                    () = tokio::time::sleep(self.poll), if follow.is_some() => {
+                        let Ok(q) = self.get(&format!("/api/jobs/quotes/{}", follow.unwrap_or_default())).await else { continue };
+                        let (n, of) = (q["submitted"].as_u64().unwrap_or(0), q["of"].as_u64().unwrap_or(0));
+                        if q["state"] == "submitting" && shown.is_none_or(|s| n >= s + 50 || n == of) {
+                            term.say(&format!("submitted {n} of {of} requests"));
+                            shown = Some(n);
+                        }
+                    }
+                }
+            };
+            if a.gate && a.code == 401 && self.token.lock().unwrap().is_none() && term.tty() {
+                let t = term
+                    .secret("The console's order token:")
+                    .unwrap_or_default();
+                if t.is_empty() {
+                    return Err("no order token given".into());
+                }
+                *self.token.lock().unwrap() = Some(t);
+            } else if a.gate && a.code == 403 {
+                return Err(format!("{}: {PROXY_ONLY}", why(&a)));
+            } else {
+                return Ok(a);
+            }
+        }
+    }
+
+    /// Price a request and follow it until it's ready.
+    async fn price(&self, term: &mut dyn Term, ask: &Value) -> Result<Value, String> {
+        let a = self.write(term, "/api/jobs/price", ask, None).await?;
+        if a.code != 200 && a.code != 202 {
+            return Err(why(&a));
+        }
+        let (mut q, mut shown) = (a.body, None);
+        while q["state"] == "pricing" {
+            let now = (
+                q["priced"].as_u64().unwrap_or(0),
+                q["of"].as_u64().unwrap_or(0),
+            );
+            if shown.replace(now) != Some(now) {
+                term.say(&format!("pricing: {} of {} requests", now.0, now.1));
+            }
+            tokio::time::sleep(self.poll).await;
+            q = self
+                .get(&format!("/api/jobs/quotes/{}", text(&q["quote"])))
+                .await?;
+        }
+        match q["state"].as_str() {
+            Some("ready") => Ok(q),
+            _ => Err(format!("pricing failed: {}", text(&q["error"]))),
+        }
+    }
+}
+
+fn text(v: &Value) -> String {
+    v.as_str().map_or_else(|| v.to_string(), str::to_owned)
+}
+
+fn now() -> u64 {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    t.map_or(0, |d| d.as_secs())
+}
+
+/// When a ready quote stops being good: `expires_at`, or from `valid_seconds`.
+fn expires(q: &Value) -> u64 {
+    let left = q["valid_seconds"].as_u64().unwrap_or(0);
+    q["expires_at"].as_u64().unwrap_or_else(|| now() + left)
+}
+
+/// In cents, marked ≈ when that isn't the exact value (which is what's confirmed).
+fn dollars(v: &Value) -> String {
+    let exact = |n: f64| {
+        if (n * 100.0).round() / 100.0 == n {
+            ""
+        } else {
+            "≈"
+        }
+    };
+    v.as_f64()
+        .map_or("not a price".into(), |n| format!("{}${n:.2}", exact(n)))
+}
+
+fn what(q: &Value) -> String {
+    let (s, e) = (text(&q["start"]), text(&q["end"]));
+    let days = if s == e { s } else { format!("{s} → {e}") };
+    let [d, sc, sy] = ["dataset", "schema", "symbol"].map(|k| text(&q[k]));
+    format!("{d} {sc} {sy}, {days}")
+}
+
+fn until(q: &Value) -> String {
+    tinytrader_schedule::ny_date_time(expires(q) as i64).1 + " ET"
+}
+
+fn left(q: &Value) -> String {
+    match expires(q).checked_sub(now()).filter(|s| *s > 0) {
+        Some(s) => format!("{} min left (expires {})", s / 60, until(q)),
+        None => "expired".into(),
+    }
+}
+
+/// The quote, in summary: counts, not every note.
+fn show(term: &mut dyn Term, q: &Value) {
+    let n = q["requests"].as_array().map_or(0, Vec::len);
+    term.say(&format!("{} ({})", what(q), text(&q["quote"])));
+    let mut line = format!("{} for {n} requests", dollars(&q["cost_usd"]));
+    if let (Some(c), Some(d)) = (q["contracts"].as_u64(), q["contract_days"].as_u64()) {
+        line += &format!(", {c} contracts over {d} days");
+    }
+    term.say(&format!("{line}, {}", left(q)));
+    let notes = q["notes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    let (days, rest): (Vec<&str>, Vec<&str>) =
+        notes.partition(|n| n.starts_with("Databento marks"));
+    days.iter().for_each(|d| term.say(d));
+    if let Some(first) = rest.first() {
+        let n = rest.len();
+        term.say(&format!(
+            "{n} notes on what was skipped (first: {first}); --format json lists them all"
+        ));
+    }
+}
+
+fn yes(term: &mut dyn Term, prompt: &str) -> bool {
+    let a = term.ask(prompt).unwrap_or_default().to_lowercase();
+    a == "y" || a == "yes"
+}
+
+fn cells(c: &[&str]) -> Vec<String> {
+    c.iter().map(|s| (*s).to_owned()).collect()
+}
+
+/// The answer on stdout: the JSON, or the rows as a table.
+fn emit(out: &mut dyn Write, format: Format, v: &Value, rows: &[Vec<String>]) {
+    let mut width = vec![0; rows.iter().map(Vec::len).max().unwrap_or(0)];
+    for (i, c) in rows.iter().flat_map(|r| r.iter().enumerate()) {
+        width[i] = width[i].max(c.chars().count());
+    }
+    let line = |r: &Vec<String>| {
+        let padded: Vec<String> = r
+            .iter()
+            .zip(&width)
+            .map(|(c, w)| format!("{c:<w$}"))
+            .collect();
+        padded.join("  ").trim_end().to_owned() + "\n"
+    };
+    let s = match format {
+        Format::Json => format!("{v}\n"),
+        Format::Table => rows.iter().map(line).collect(),
+    };
+    let _ = out.write_all(s.as_bytes());
+}
+
+/// A person's yes, then the purchase; an expired or changed price is offered
+/// again, priced afresh and asked again, never bought unasked. `ask` is the
+/// request to price again, when it's known.
+async fn purchase(
+    c: &Console,
+    term: &mut dyn Term,
+    out: &mut dyn Write,
+    f: Format,
+    mut q: Value,
+    ask: Option<Value>,
+) -> Result<u8, String> {
+    loop {
+        show(term, &q);
+        let id = text(&q["quote"]);
+        let n = q["requests"].as_array().map_or(0, Vec::len);
+        if n == 0 {
+            term.say("Nothing to buy: everything asked for is already had.");
+            emit(out, f, &q, &[cells(&[&id, "nothing to buy"])]);
+            return Ok(0);
+        }
+        let paid = q["needs_approval"] != false || q["cost_usd"].as_f64() != Some(0.0);
+        let stale = if expires(&q) <= now() {
+            "that price has expired".to_owned()
+        } else {
+            let (path, body) = if paid {
+                if !q["cost_usd"].is_number() {
+                    return Err("its price isn't a number of dollars, so it can't be bought".into());
+                }
+                if !term.tty() {
+                    return Err(format!(
+                        "a paid purchase needs a person at a terminal: run `tt approve {id}` there, or approve it in the console"
+                    ));
+                }
+                let (what, usd) = (what(&q), dollars(&q["cost_usd"]));
+                if !yes(
+                    term,
+                    &format!(
+                        "Buy {what}, {n} requests, for {usd}? (expires {}) [y/N]",
+                        until(&q)
+                    ),
+                ) {
+                    return Err(format!(
+                        "not bought; it waits until it expires, and `tt decline {id}` drops it"
+                    ));
+                }
+                // The quoted value itself, exactly as given: never re-typed or rounded.
+                let body = json!({ "confirm_usd": q["cost_usd"], "again": q["again"] });
+                (format!("/api/job-quotes/{id}/approve"), body)
+            } else {
+                ("/api/jobs/submit".to_owned(), json!({ "quote": id }))
+            };
+            let a = c.write(term, &path, &body, Some(&id)).await?;
+            if a.code == 200 {
+                let mut v = a.body;
+                v["quote"] = json!(id);
+                term.say(&format!(
+                    "Submitted {n} requests; `tt jobs --follow {id}` follows their filing."
+                ));
+                let rows: Vec<_> = v["submitted"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|r| {
+                        let days = format!("{} → {}", text(&r["first_day"]), text(&r["last_day"]));
+                        vec![text(&r["job"]), days, dollars(&r["cost_usd"])]
+                    })
+                    .collect();
+                emit(out, f, &v, &rows);
+                return Ok(0);
+            }
+            let e = why(&a);
+            if a.code != 409 || !e.contains("again") {
+                if let Some(sent) = a.body["submitted"].as_array() {
+                    term.say(&format!("It stopped after {} of {n} requests; price the same request again to buy the rest.", sent.len()));
+                }
+                return Err(format!("not bought: {e}"));
+            }
+            e
+        };
+        term.say(&format!("Not bought: {stale}."));
+        let Some(ask) = ask.as_ref() else {
+            return Err("price it again with `tt fetch`".into());
+        };
+        if !term.tty() || !yes(term, "Price it again (free)? [y/N]") {
+            return Ok(1);
+        }
+        q = c.price(term, ask).await?;
+    }
+}
+
+/// The request a quote was priced from, when the quote says all of it (not
+/// for contract lists or rules, whose contracts it only counts).
+fn asked_again(q: &Value) -> Option<Value> {
+    if q["contracts"].is_number() || q["rule"] == true {
+        return None;
+    }
+    let keys = [
+        "dataset", "schema", "symbol", "stype_in", "start", "end", "hours", "again",
+    ];
+    Some(
+        keys.iter()
+            .filter(|k| !q[**k].is_null())
+            .map(|k| ((*k).to_owned(), q[*k].clone()))
+            .collect(),
+    )
+}
+
+/// A job's filing outcome: `filed`, `failed` or `pending`, and why.
+fn outcome(j: &Value) -> (&'static str, String) {
+    let (t, held) = (&j["transfer"], j["held"]["how"].as_str());
+    match (j["state"].as_str(), t["state"].as_str(), held) {
+        (_, Some("filed"), _) | (_, _, Some("filed" | "folder")) => {
+            ("filed", text(&j["held"]["volume"]))
+        }
+        (_, Some("failed"), _) => ("failed", text(&t["error"])),
+        (Some("done"), None, None) if j["unfileable"].is_string() => (
+            "failed",
+            format!("not fileable: {}", text(&j["unfileable"])),
+        ),
+        (Some("expired"), _, None) => ("failed", "expired at Databento before it was filed".into()),
+        (s, t, _) => ("pending", t.or(s).unwrap_or("unknown").to_owned()),
+    }
+}
+
+async fn jobs(
+    c: &Console,
+    term: &mut dyn Term,
+    out: &mut dyn Write,
+    f: Format,
+    follow: bool,
+    ids: Vec<String>,
+) -> Result<u8, String> {
+    let (mut quotes, mut wanted): (Vec<String>, Vec<String>) =
+        ids.into_iter().partition(|i| i.starts_with("q-"));
+    let (all, mut failed, mut seen) = (
+        !follow && wanted.is_empty() && quotes.is_empty(),
+        Vec::new(),
+        std::collections::HashMap::new(),
+    );
+    loop {
+        let mut waiting = Vec::new();
+        for id in quotes.drain(..) {
+            let q = c.get(&format!("/api/jobs/quotes/{id}")).await?;
+            match q["state"].as_str() {
+                Some("submitting") => waiting.push(id),
+                Some("submitted") => {
+                    wanted.extend(q["jobs"].as_array().into_iter().flatten().map(text))
+                }
+                Some("failed") => {
+                    wanted.extend(q["jobs"].as_array().into_iter().flatten().map(text));
+                    failed.push(json!({ "quote": id, "outcome": "failed", "detail": q["error"] }));
+                }
+                _ => {
+                    return Err(format!(
+                        "{id} hasn't been submitted (it's {})",
+                        text(&q["state"])
+                    ));
+                }
+            }
+        }
+        quotes = waiting;
+        let jobs = c.get("/api/jobs/jobs").await?["jobs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if follow && wanted.is_empty() && quotes.is_empty() && seen.is_empty() {
+            // Nothing named: the jobs in flight now.
+            let flying = jobs
+                .iter()
+                .filter(|j| j["follow"] == true && outcome(j).0 == "pending");
+            wanted = flying.map(|j| text(&j["id"])).collect();
+        }
+        let mut rows: Vec<Value> = jobs
+            .into_iter()
+            .filter(|j| all || wanted.contains(&text(&j["id"])))
+            .collect();
+        for j in &mut rows {
+            let (o, d) = outcome(j);
+            (j["outcome"], j["detail"]) = (json!(o), json!(d));
+            if follow && seen.insert(text(&j["id"]), o) != Some(o) {
+                term.say(&format!("{}: {o} {d}", text(&j["id"])));
+            }
+        }
+        let pending = rows.iter().any(|j| j["outcome"] == "pending");
+        if !follow || (!pending && rows.len() == wanted.len() && quotes.is_empty()) {
+            rows.sort_by_key(|j| {
+                ["pending", "failed", "filed"]
+                    .iter()
+                    .position(|o| j["outcome"] == *o)
+            });
+            let bad = !failed.is_empty() || rows.iter().any(|j| j["outcome"] == "failed");
+            rows.extend(failed);
+            let mut table = vec![cells(&["JOB", "OUTCOME", "WHAT", "DETAIL"])];
+            table.extend(rows.iter().map(|j| {
+                let id = if j["id"].is_null() {
+                    &j["quote"]
+                } else {
+                    &j["id"]
+                };
+                let what = format!("{} {}", text(&j["schema"]), text(&j["symbols"]));
+                vec![text(id), text(&j["outcome"]), what, text(&j["detail"])]
+            }));
+            emit(out, f, &json!({ "jobs": rows }), &table);
+            return Ok(u8::from(follow && bad));
+        }
+        tokio::time::sleep(c.poll * 5).await;
+    }
+}
+
+async fn run(
+    cli: Cli,
+    c: &Console,
+    term: &mut dyn Term,
+    out: &mut dyn Write,
+) -> Result<u8, String> {
+    let f = cli.format;
+    match cli.command {
+        Command::Fetch {
+            source: Source::Databento(a),
+        } => {
+            if a.symbols.contains(',') {
+                term.say("one symbol per purchase (--symbols SPY.OPT)");
+                return Ok(2);
+            }
+            let mut ask = json!({ "dataset": a.dataset, "schema": a.schema, "symbol": a.symbols, "start": a.start, "end": a.end });
+            if let Some(h) = &a.hours {
+                let Some((s, e)) = h.split_once('-') else {
+                    term.say("--hours is HH:MM-HH:MM, New York time");
+                    return Ok(2);
+                };
+                ask["hours"] = json!({ "start": s, "end": e, "tz": "America/New_York" });
+            }
+            if let Some(p) = &a.contracts {
+                let read = std::fs::read(p).map_err(|e| e.to_string());
+                let v = read.and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string()));
+                ask["contracts"] = v.map_err(|e| format!("{}: {e}", p.display()))?;
+            }
+            let q = c.price(term, &ask).await?;
+            purchase(c, term, out, f, q, Some(ask)).await
+        }
+        Command::Quotes => {
+            let v = c.get("/api/jobs/quotes").await?;
+            let mut rows = vec![cells(&["QUOTE", "WHAT", "COST", "STATE", "LEFT"])];
+            for q in v["quotes"].as_array().into_iter().flatten() {
+                let state = text(&q["state"]);
+                let when = match state.as_str() {
+                    "ready" => left(q),
+                    "pricing" => format!("priced {} of {}", q["priced"], q["of"]),
+                    _ if q["submitted"].is_number() => {
+                        format!("submitted {} of {}", q["submitted"], q["of"])
+                    }
+                    _ => String::new(),
+                };
+                rows.push(vec![
+                    text(&q["quote"]),
+                    what(q),
+                    dollars(&q["cost_usd"]),
+                    state,
+                    when,
+                ]);
+            }
+            emit(out, f, &v, &rows);
+            Ok(0)
+        }
+        Command::Approve { quote } => {
+            let q = c.get(&format!("/api/jobs/quotes/{quote}")).await?;
+            if q["state"] != "ready" {
+                return Err(format!(
+                    "{quote} isn't waiting for approval (it's {})",
+                    text(&q["state"])
+                ));
+            }
+            let ask = asked_again(&q);
+            purchase(c, term, out, f, q, ask).await
+        }
+        Command::Decline { quote } => {
+            show(term, &c.get(&format!("/api/jobs/quotes/{quote}")).await?);
+            if !term.tty() || !yes(term, &format!("Decline {quote}? [y/N]")) {
+                return Err("not declined (that needs a person at a terminal saying y)".into());
+            }
+            let a = c
+                .write(
+                    term,
+                    &format!("/api/job-quotes/{quote}/decline"),
+                    &json!({}),
+                    None,
+                )
+                .await?;
+            if a.code != 200 {
+                return Err(why(&a));
+            }
+            emit(out, f, &a.body, &[cells(&[&quote, "declined"])]);
+            Ok(0)
+        }
+        Command::Jobs { follow, ids } => jobs(c, term, out, f, follow, ids).await,
+    }
+}
+
+/// `run`, with its failure said: 1.
+async fn exit(cli: Cli, c: &Console, term: &mut dyn Term, out: &mut dyn Write) -> u8 {
+    run(cli, c, term, out).await.unwrap_or_else(|e| {
+        term.say(&format!("tt: {e}"));
+        1
+    })
+}
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn main() -> std::process::ExitCode {
+    let cli = Cli::parse();
+    let base = std::env::var("TT_CONSOLE").unwrap_or_default();
+    if !base.starts_with("http://") && !base.starts_with("https://") {
+        eprintln!(
+            "tt: set TT_CONSOLE to the console's address under its proxy, such as https://<console host>"
+        );
+        return 2.into();
+    }
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    tokio::spawn(async {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("a SIGTERM handler");
+        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
+        echo(true);
+        std::process::exit(130);
+    });
+    let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .user_agent("tinytrader-tt")
+        .build();
+    let base = base.trim_end_matches('/').to_owned();
+    let c = Console {
+        base,
+        http: http.expect("an HTTP client"),
+        token: Mutex::new(None),
+        poll: Duration::from_secs(2),
+    };
+    exit(cli, &c, &mut Real, &mut std::io::stdout())
+        .await
+        .into()
+}
+
+#[cfg(test)]
+mod tests;

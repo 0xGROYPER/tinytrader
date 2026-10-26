@@ -1294,6 +1294,8 @@ async fn a_paid_purchase_needs_the_consoles_approval() {
     let r = rig("free").await;
     let (_, v) = r.price(json!({})).await;
     assert!(v["valid_seconds"].as_u64().unwrap() <= 900);
+    let at = v["expires_at"].as_u64().unwrap() as f64 - tinytrader_observe::unix_seconds();
+    assert!((898.0..=901.0).contains(&at), "{v}");
     let (code, v) = r.submit(v["quote"].as_str().unwrap(), None).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert_eq!(r.states(), ["sending", "submitted"]);
@@ -1984,6 +1986,7 @@ async fn a_submission_shows_its_progress_and_why_it_stopped() {
         (seen["state"].as_str(), seen["of"].as_u64()),
         (Some("submitting"), Some(5))
     );
+    assert_eq!(seen["jobs"].as_array().map(Vec::len), Some(2), "{seen}");
     let (code, _) = sent.await.unwrap();
     assert_eq!(code, StatusCode::BAD_GATEWAY);
     let (_, Json(v)) = quote_get(AxState(r.jobs.clone()), UrlPath(quote.clone())).await;

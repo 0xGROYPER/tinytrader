@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/tui",
+    "apps/tt",
     "libs/fleet",
     "libs/observe",
     "services/alpaca-news",

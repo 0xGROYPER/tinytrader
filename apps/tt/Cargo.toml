@@ -1,0 +1,22 @@
+[package]
+name = "tt"
+description = "tinytrader from a terminal: purchases priced, approved and followed through the console (decision 0021)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+reqwest.workspace = true
+rustix = { version = "1", features = ["termios"] }
+rustls.workspace = true
+serde_json.workspace = true
+tinytrader-schedule.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+axum.workspace = true

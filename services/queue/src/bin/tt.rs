@@ -1,13 +1,13 @@
-//! `tt`: tinytrader from the command line. For now, the job queue:
+//! `tt-queue` (named `tt` until decision 0021's `tt` took the name; removed with the queue): the job queue from the command line.
 //!
 //! ```text
-//! tt queue list
-//! tt queue templates
-//! tt queue add TEMPLATE [NAME=VALUE ...] [--not-before "HH:MM" | "YYYY-MM-DD HH:MM"]
+//! tt-queue queue list
+//! tt-queue queue templates
+//! tt-queue queue add TEMPLATE [NAME=VALUE ...] [--not-before "HH:MM" | "YYYY-MM-DD HH:MM"]
 //!                       [--when anytime|after-close|background-may-run] [--after ID ...]
-//! tt queue cancel ID
-//! tt queue run-now ID
-//! tt queue log ID
+//! tt-queue queue cancel ID
+//! tt-queue queue run-now ID
+//! tt-queue queue log ID
 //! ```
 //!
 //! Times are New York time. The queue's address comes from `TT_QUEUE`
@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use serde_json::{Value, json};
 use tinytrader_schedule::{ny_date_time, ny_to_unix};
 
-const USAGE: &str = "usage: tt queue list | templates | add TEMPLATE [NAME=VALUE ...] [--not-before T] [--when W] [--after ID ...] | cancel ID | run-now ID | log ID";
+const USAGE: &str = "usage: tt-queue queue list | templates | add TEMPLATE [NAME=VALUE ...] [--not-before T] [--when W] [--after ID ...] | cancel ID | run-now ID | log ID";
 
 /// `HH:MM` (today) or `YYYY-MM-DD HH:MM`, New York time, as Unix seconds.
 fn when_at(s: &str) -> Result<f64, String> {

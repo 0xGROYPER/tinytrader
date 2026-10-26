@@ -1,0 +1,360 @@
+//! `tt` against a fake console on loopback: price, quote, approve,
+//! submitting, submitted. No network beyond it.
+
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use clap::Parser;
+use serde_json::{Value, json};
+
+use super::*;
+
+/// A price with more digits than cents: what's confirmed must be exactly it.
+const COST: f64 = 12.345_678_901_234_567;
+
+#[derive(Default)]
+struct Fake {
+    /// The price of each `/price` in turn (the last repeats).
+    costs: Vec<f64>,
+    prices: usize,
+    /// Each approval's body and its order token.
+    approves: Vec<(Value, Option<String>)>,
+    submits: usize,
+    /// The gate refuses approvals: 403, or 401 without this token.
+    forbid: bool,
+    token: Option<&'static str>,
+    /// The first approval finds the price expired.
+    expire_first: bool,
+    jobs: Value,
+    /// The quotes bought.
+    done: Vec<String>,
+}
+
+type Shared = Arc<Mutex<Fake>>;
+
+fn quote(id: usize, cost: f64, state: &str) -> Value {
+    json!({ "quote": format!("q-t-{id}"), "state": state, "priced": 1, "of": 2,
+        "dataset": "OPRA.PILLAR", "schema": "cbbo-1m", "symbol": "SPY.OPT", "start": "2026-10-01", "end": "2026-10-02",
+        "rule": false, "again": [], "cost_usd": cost, "needs_approval": cost != 0.0, "expires_at": now() + 3600,
+        "requests": [{ "kind": "whole", "first_day": "2026-10-01", "last_day": "2026-10-02", "cost_usd": cost }],
+        "notes": ["Databento marks 1 day degraded: 2026-10-01", "2026-10-02: not bought, it overlaps a", "2026-10-02: not bought, it overlaps b"],
+        "submitted": if state == "submitted" { json!(1) } else { Value::Null }, "jobs": ["J1"] })
+}
+
+fn gate(code: StatusCode, why: &str) -> Response {
+    (
+        code,
+        [("x-write-gate", "refused")],
+        Json(json!({ "error": why, "gate": true })),
+    )
+        .into_response()
+}
+
+async fn price(State(f): State<Shared>) -> Response {
+    let mut f = f.lock().unwrap();
+    f.prices += 1;
+    (StatusCode::ACCEPTED, Json(json!({ "quote": format!("q-t-{}", f.prices), "state": "pricing", "priced": 0, "of": 2 }))).into_response()
+}
+
+async fn one(State(f): State<Shared>, Path(id): Path<String>) -> Json<Value> {
+    let f = f.lock().unwrap();
+    let n: usize = id.trim_start_matches("q-t-").parse().unwrap();
+    let bought = f.done.contains(&id) || !f.jobs.is_null();
+    let cost = f.costs[(n - 1).min(f.costs.len() - 1)];
+    Json(quote(n, cost, if bought { "submitted" } else { "ready" }))
+}
+
+async fn approve(
+    State(f): State<Shared>,
+    Path(id): Path<String>,
+    h: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut f = f.lock().unwrap();
+    let token = h
+        .get("x-order-token")
+        .map(|v| v.to_str().unwrap().to_owned());
+    f.approves.push((body.clone(), token.clone()));
+    if f.forbid {
+        return gate(
+            StatusCode::FORBIDDEN,
+            "writes are not allowed for this login",
+        );
+    }
+    if f.token.is_some_and(|t| token.as_deref() != Some(t)) {
+        return gate(
+            StatusCode::UNAUTHORIZED,
+            "this write needs the console's order token",
+        );
+    }
+    if f.expire_first && f.approves.len() == 1 {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "that price has expired; price the request again" })),
+        )
+            .into_response();
+    }
+    f.done.push(id);
+    Json(json!({ "submitted": [{ "job": "J1", "first_day": "2026-10-01", "last_day": "2026-10-02", "cost_usd": body["confirm_usd"] }], "cost_usd": body["confirm_usd"] })).into_response()
+}
+
+async fn submit(State(f): State<Shared>, Json(body): Json<Value>) -> Json<Value> {
+    let mut f = f.lock().unwrap();
+    f.submits += 1;
+    f.done.push(text(&body["quote"]));
+    Json(json!({ "submitted": [{ "job": "J1" }], "cost_usd": 0.0 }))
+}
+
+/// A fake console with these prices, changed by `with` before it serves.
+async fn serve(costs: &[f64], with: impl FnOnce(&mut Fake)) -> (String, Shared) {
+    let mut f = Fake {
+        costs: costs.to_vec(),
+        ..Fake::default()
+    };
+    with(&mut f);
+    let f = Arc::new(Mutex::new(f));
+    let app = axum::Router::new()
+        .route("/api/jobs/price", post(price))
+        .route(
+            "/api/jobs/quotes",
+            get(|State(f): State<Shared>| async move {
+                Json(json!({ "quotes": [quote(1, f.lock().unwrap().costs[0], "ready")] }))
+            }),
+        )
+        .route("/api/jobs/quotes/{id}", get(one))
+        .route("/api/jobs/submit", post(submit))
+        .route(
+            "/api/jobs/jobs",
+            get(|State(f): State<Shared>| async move { Json(f.lock().unwrap().jobs.clone()) }),
+        )
+        .route("/api/job-quotes/{id}/approve", post(approve))
+        .with_state(f.clone());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (base, f)
+}
+
+/// A person at a terminal (or not), with their answers.
+#[derive(Default)]
+struct Script {
+    tty: bool,
+    answers: VecDeque<&'static str>,
+    said: Vec<String>,
+    asked: Vec<String>,
+    secrets: usize,
+}
+
+impl Term for Script {
+    fn tty(&self) -> bool {
+        self.tty
+    }
+    fn say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+    fn ask(&mut self, prompt: &str) -> Option<String> {
+        self.asked.push(prompt.to_owned());
+        self.answers.pop_front().map(str::to_owned)
+    }
+    fn secret(&mut self, _: &str) -> Option<String> {
+        self.secrets += 1;
+        Some("made-up-token".into())
+    }
+}
+
+fn person(answers: &[&'static str]) -> Script {
+    Script {
+        tty: true,
+        answers: answers.iter().copied().collect(),
+        ..Script::default()
+    }
+}
+
+async fn tt(base: &str, args: &str, term: &mut Script) -> (u8, String) {
+    let cli = Cli::try_parse_from(std::iter::once("tt").chain(args.split_whitespace())).unwrap();
+    let c = Console {
+        base: base.into(),
+        http: reqwest::Client::new(),
+        token: Mutex::new(None),
+        poll: Duration::from_millis(5),
+    };
+    let mut out = Vec::new();
+    let code = exit(cli, &c, term, &mut out).await;
+    (code, String::from_utf8(out).unwrap())
+}
+
+const FETCH: &str = "fetch databento --dataset OPRA.PILLAR --schema cbbo-1m --symbols SPY.OPT --start 2026-10-01 --end 2026-10-02 --hours 09:30-16:01";
+
+fn said(t: &Script, part: &str) -> bool {
+    t.said.iter().any(|l| l.contains(part))
+}
+
+#[tokio::test]
+async fn a_paid_fetch_confirms_exactly_the_quoted_price() {
+    let (base, f) = serve(&[COST], |_| {}).await;
+    let mut t = person(&["y"]);
+    let (code, out) = tt(&base, FETCH, &mut t).await;
+    assert_eq!(code, 0, "{:?}", t.said);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        (&v["quote"], &v["submitted"][0]["job"]),
+        (&json!("q-t-1"), &json!("J1"))
+    );
+    let body = f.lock().unwrap().approves[0].0.clone();
+    assert_eq!(
+        body["confirm_usd"].as_f64().map(f64::to_bits),
+        Some(COST.to_bits())
+    );
+    assert!(body.get("approved_by").is_none(), "{body}");
+    let ask = "Buy OPRA.PILLAR cbbo-1m SPY.OPT, 2026-10-01 → 2026-10-02, 1 requests, for ≈$12.35? (expires ";
+    assert!(
+        t.asked[0].starts_with(ask) && t.asked[0].ends_with(" ET) [y/N]"),
+        "{:?}",
+        t.asked
+    );
+    for line in [
+        "pricing: 0 of 2",
+        "degraded: 2026-10-01",
+        "2 notes on what was skipped",
+    ] {
+        assert!(said(&t, line), "{line}: {:?}", t.said);
+    }
+}
+
+#[tokio::test]
+async fn only_y_or_yes_buys() {
+    for (answer, code) in [
+        ("n", 1),
+        ("", 1),
+        ("sure", 1),
+        ("yes please", 1),
+        ("YES", 0),
+    ] {
+        let (base, f) = serve(&[COST], |_| {}).await;
+        let (got, _) = tt(&base, FETCH, &mut person(&[answer])).await;
+        let approves = f.lock().unwrap().approves.len();
+        assert_eq!(
+            (got, approves),
+            (code, usize::from(code == 0)),
+            "{answer:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn without_a_terminal_a_paid_purchase_is_refused_and_a_free_one_goes_ahead() {
+    let (base, f) = serve(&[COST], |_| {}).await;
+    let mut t = Script::default();
+    assert_eq!(tt(&base, FETCH, &mut t).await.0, 1);
+    assert!(said(&t, "needs a person at a terminal"), "{:?}", t.said);
+    assert!(t.asked.is_empty() && f.lock().unwrap().approves.is_empty());
+    let (base, f) = serve(&[0.0], |_| {}).await;
+    assert_eq!(tt(&base, FETCH, &mut Script::default()).await.0, 0);
+    let f = f.lock().unwrap();
+    assert_eq!((f.submits, f.approves.len()), (1, 0));
+}
+
+#[tokio::test]
+async fn the_gates_403_says_why_and_is_never_retried() {
+    let (base, f) = serve(&[COST], |f| f.forbid = true).await;
+    let mut t = person(&["y"]);
+    assert_eq!(tt(&base, "approve q-t-1", &mut t).await.0, 1);
+    let why = format!("writes are not allowed for this login: {PROXY_ONLY}");
+    assert!(said(&t, &why), "{:?}", t.said);
+    assert_eq!(f.lock().unwrap().approves.len(), 1);
+}
+
+#[tokio::test]
+async fn the_order_token_is_asked_for_once_and_sent_as_a_header() {
+    let (base, f) = serve(&[COST], |f| f.token = Some("made-up-token")).await;
+    let mut t = person(&["y"]);
+    let (code, out) = tt(&base, "approve q-t-1", &mut t).await;
+    assert_eq!(
+        (code, t.secrets, out.contains("made-up-token")),
+        (0, 1, false)
+    );
+    let tokens: Vec<_> = f
+        .lock()
+        .unwrap()
+        .approves
+        .iter()
+        .map(|a| a.1.clone())
+        .collect();
+    assert_eq!(tokens, [None, Some("made-up-token".into())]);
+}
+
+#[tokio::test]
+async fn an_expired_price_is_priced_again_and_asked_again() {
+    let (base, f) = serve(&[5.0, 6.5], |f| f.expire_first = true).await;
+    let mut t = person(&["y", "y", "y"]);
+    assert_eq!(tt(&base, FETCH, &mut t).await.0, 0);
+    assert!(said(&t, "that price has expired"));
+    let a = &t.asked;
+    assert!(
+        a[0].contains("for $5.00?")
+            && a[1] == "Price it again (free)? [y/N]"
+            && a[2].contains("for $6.50?"),
+        "{a:?}"
+    );
+    {
+        let f = f.lock().unwrap();
+        assert_eq!(
+            (f.prices, f.approves[1].0["confirm_usd"].as_f64()),
+            (2, Some(6.5))
+        );
+    }
+    // Not priced again, nor bought, unasked.
+    let (base, f) = serve(&[5.0, 6.5], |f| f.expire_first = true).await;
+    assert_eq!(tt(&base, FETCH, &mut person(&["y", "n"])).await.0, 1);
+    let f = f.lock().unwrap();
+    assert_eq!((f.prices, f.approves.len()), (1, 1));
+}
+
+#[tokio::test]
+async fn quotes_are_json_by_default_and_a_table_on_request() {
+    let (base, _) = serve(&[COST], |_| {}).await;
+    let (code, out) = tt(&base, "quotes", &mut Script::default()).await;
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!((code, &v["quotes"][0]["quote"]), (0, &json!("q-t-1")));
+    let (_, out) = tt(&base, "quotes --format table", &mut Script::default()).await;
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines[0].starts_with("QUOTE")
+            && lines[1].contains("≈$12.35")
+            && lines[1].contains("min left"),
+        "{out}"
+    );
+}
+
+#[tokio::test]
+async fn following_jobs_ends_with_each_outcome_and_fails_if_any_failed() {
+    let jobs = json!({ "jobs": [
+        { "id": "J1", "state": "done", "held": { "how": "filed", "volume": "M1" } },
+        { "id": "J2", "state": "done", "transfer": { "state": "failed", "error": "the store refused it" } },
+    ] });
+    let (base, _) = serve(&[COST], |f| f.jobs = jobs).await;
+    let (code, out) = tt(&base, "jobs --follow J1 J2", &mut Script::default()).await;
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let got: Vec<_> = v["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|j| (text(&j["id"]), text(&j["outcome"])))
+        .collect();
+    assert_eq!(code, 1);
+    assert_eq!(
+        got,
+        [
+            ("J2".into(), "failed".into()),
+            ("J1".into(), "filed".into())
+        ]
+    );
+    // A quote's jobs, by its ID.
+    let (code, _) = tt(&base, "jobs --follow q-t-1", &mut Script::default()).await;
+    assert_eq!(code, 0);
+}
