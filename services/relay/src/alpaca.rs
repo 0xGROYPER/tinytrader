@@ -29,7 +29,11 @@ use crate::source::{Feed, History, Source};
 
 const LIVE_URL: &str = "wss://stream.data.alpaca.markets/v2/iex";
 const TEST_URL: &str = "wss://stream.data.alpaca.markets/v2/test";
-const HISTORY_URL: &str = "https://data.alpaca.markets/v2/stocks";
+pub const HISTORY_URL: &str = "https://data.alpaca.markets/v2/stocks";
+/// Pages a request may take, refused beyond: 10 days of minutes is 2 pages
+/// (72 at 200 a page); 10 million trades or quotes is many busy IEX days.
+const BAR_PAGES: usize = 100;
+const TICK_PAGES: usize = 1_000;
 /// History is sent to clients in chunks of about this many bytes.
 const CHUNK: usize = 64 * 1024;
 
@@ -41,6 +45,30 @@ pub struct Alpaca {
     /// accept its non-IEX venue codes.
     pub test: bool,
     pub http: reqwest::Client,
+    /// Alpaca's stock history (`HISTORY_URL`).
+    pub history_url: String,
+}
+
+/// The next page token, refused (as alpaca-history refuses them) if it is
+/// empty or malformed, repeats the last, or would go past `cap` pages.
+fn next_token(
+    kind: &str,
+    last: Option<&str>,
+    next: Option<String>,
+    pages: usize,
+    cap: usize,
+) -> Result<Option<String>, String> {
+    let Some(t) = next else { return Ok(None) };
+    if t.is_empty() || t.len() > 256 || !t.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(format!("{kind}: an unusable page token"));
+    }
+    if last == Some(t.as_str()) {
+        return Err(format!("{kind}: the same page token twice"));
+    }
+    if pages >= cap {
+        return Err(format!("{kind}: more than {cap} pages"));
+    }
+    Ok(Some(t))
 }
 
 /// One element of a stream frame: its type and symbol.
@@ -399,10 +427,10 @@ impl Alpaca {
         let (start, end) = (rfc3339(start), rfc3339(end));
         let mut out = Vec::new();
         let mut token: Option<String> = None;
-        loop {
+        for n in 1.. {
             let mut req = self
                 .http
-                .get(format!("{HISTORY_URL}/bars"))
+                .get(format!("{}/bars", self.history_url))
                 .header("APCA-API-KEY-ID", &self.key)
                 .header("APCA-API-SECRET-KEY", &self.secret)
                 .query(&[
@@ -443,11 +471,12 @@ impl Alpaca {
                     v: b.v as u64,
                 });
             }
-            token = page.next_page_token;
+            token = next_token("bars", token.as_deref(), page.next_page_token, n, BAR_PAGES)?;
             if token.is_none() {
-                return Ok(out);
+                break;
             }
         }
+        Ok(out)
     }
 
     /// Every page of one kind of history for a symbol, oldest first.
@@ -479,7 +508,7 @@ impl Alpaca {
         let get = |kind: &'static str, limit: &'static str, token: Option<String>| {
             let mut req = self
                 .http
-                .get(format!("{HISTORY_URL}/{kind}"))
+                .get(format!("{}/{kind}", self.history_url))
                 .header("APCA-API-KEY-ID", &self.key)
                 .header("APCA-API-SECRET-KEY", &self.secret)
                 .query(&[
@@ -568,10 +597,10 @@ impl Alpaca {
         let (start, end) = (rfc3339(start), rfc3339(end));
         let mut pages = Vec::new();
         let mut token: Option<String> = None;
-        loop {
+        for n in 1.. {
             let mut req = self
                 .http
-                .get(format!("{HISTORY_URL}/{kind}"))
+                .get(format!("{}/{kind}", self.history_url))
                 .header("APCA-API-KEY-ID", &self.key)
                 .header("APCA-API-SECRET-KEY", &self.secret)
                 .query(&[
@@ -594,14 +623,14 @@ impl Alpaca {
             struct Next {
                 next_page_token: Option<String>,
             }
-            token = serde_json::from_str::<Next>(&text)
-                .ok()
-                .and_then(|n| n.next_page_token);
+            let next = serde_json::from_str::<Next>(&text).map_err(|e| format!("{kind}: {e}"))?;
+            token = next_token(kind, token.as_deref(), next.next_page_token, n, TICK_PAGES)?;
             pages.push(text);
             if token.is_none() {
-                return Ok(pages);
+                break;
             }
         }
+        Ok(pages)
     }
 }
 
@@ -726,4 +755,63 @@ fn rfc3339(ns: u64) -> String {
         t.second(),
         t.nanosecond()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// An Alpaca on loopback answering every page with `body(n)`, `n` counting
+    /// from 0; and how many it answered.
+    async fn fake(body: fn(usize) -> String) -> (Alpaca, Arc<AtomicUsize>) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let history_url = format!("http://{}", l.local_addr().unwrap());
+        let n = Arc::new(AtomicUsize::new(0));
+        let seen = n.clone();
+        let app = axum::Router::new()
+            .fallback(move || std::future::ready(body(seen.fetch_add(1, Ordering::Relaxed))));
+        tokio::spawn(async move { axum::serve(l, app).await });
+        let (key, secret, symbols) = (String::new(), String::new(), vec!["SPY".into()]);
+        let http = reqwest::Client::new();
+        (
+            Alpaca {
+                key,
+                secret,
+                symbols,
+                test: false,
+                http,
+                history_url,
+            },
+            n,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_repeated_or_empty_token_ends_paging_with_an_error() {
+        let (a, n) = fake(|_| r#"{"trades":{},"next_page_token":"abc"}"#.into()).await;
+        let e = a.pages("SPY", "trades", 0, 1).await.unwrap_err();
+        assert!(e.contains("the same page token twice"), "{e}");
+        assert_eq!(n.load(Ordering::Relaxed), 2);
+        let (a, _) = fake(|_| r#"{"quotes":{},"next_page_token":""}"#.into()).await;
+        let e = a.pages("SPY", "quotes", 0, 1).await.unwrap_err();
+        assert!(e.contains("unusable page token"), "{e}");
+        let (a, _) = fake(|_| r#"{"bars":{},"next_page_token":""}"#.into()).await;
+        assert!(a.minute_bars("SPY", 0, 1).await.is_err());
+        let (a, _) = fake(|_| "not json".into()).await;
+        assert!(
+            a.pages("SPY", "trades", 0, 1).await.is_err(),
+            "malformed is no last page"
+        );
+    }
+
+    #[tokio::test]
+    async fn paging_stops_at_its_cap_with_an_error() {
+        let (a, n) = fake(|i| format!(r#"{{"bars":{{}},"next_page_token":"t{i}"}}"#)).await;
+        let e = a.minute_bars("SPY", 0, 1).await.unwrap_err();
+        assert!(e.contains("more than 100 pages"), "{e}");
+        assert_eq!(n.load(Ordering::Relaxed), BAR_PAGES);
+        let (a, _) = fake(|_| r#"{"bars":{},"next_page_token":null}"#.into()).await;
+        assert_eq!(a.minute_bars("SPY", 0, 1).await, Ok(Vec::new()));
+    }
 }

@@ -143,6 +143,11 @@ struct App {
     observer: Observer,
     /// Recent requests to Alpaca, for the rate limit.
     sent: Mutex<VecDeque<Instant>>,
+    /// Until when Alpaca asked not to be asked (its 429's `Retry-After`).
+    hold: Mutex<Option<Instant>>,
+    /// Alpaca's data and trading APIs (`BASE`, `TRADING`).
+    data_api: String,
+    trading_api: String,
     /// Answers kept briefly, by request: when, the answer, its size.
     cache: Mutex<HashMap<String, (Instant, Value, usize)>>,
     /// Requests being answered, by key: a second asker waits for the first's
@@ -222,19 +227,19 @@ impl App {
             {
                 sent.pop_front();
             }
-            if sent.len() >= PER_MINUTE {
+            if let Some(s) = self.wait(&sent) {
                 return Err((
                     StatusCode::TOO_MANY_REQUESTS,
-                    "busy: Alpaca's request limit for this minute is used up".into(),
+                    format!("busy: Alpaca's request limit is used up; try again in {s} s"),
                 ));
             }
             sent.push_back(Instant::now());
         }
         // Contract listings live on the trading API; everything else on the data API.
         let host = if path.starts_with("/v2/options/contracts") {
-            TRADING
+            &self.trading_api
         } else {
-            BASE
+            &self.data_api
         };
         let r = self
             .http
@@ -246,6 +251,18 @@ impl App {
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e.without_url().to_string()))?;
         let status = r.status();
+        // A rate limit is "not now", not a failure: callers try again later.
+        if status.as_u16() == 429 {
+            let secs = r
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()?.trim().parse().ok());
+            let secs: u64 = secs.unwrap_or(60).min(600);
+            *lock(&self.hold) = Some(Instant::now() + Duration::from_secs(secs));
+            let e = format!("busy: Alpaca's rate limit (429); try again in {secs} s");
+            self.observer.record_error(&e);
+            return Err((StatusCode::TOO_MANY_REQUESTS, e));
+        }
         let v: Value = r
             .json()
             .await
@@ -265,6 +282,18 @@ impl App {
         }
         self.observer.set_state(State::Ready, "answering");
         Ok(v)
+    }
+
+    /// Seconds until Alpaca may be asked again, if not now: it asked to wait,
+    /// or this minute's requests (`sent`) are used up.
+    fn wait(&self, sent: &VecDeque<Instant>) -> Option<u64> {
+        let held = lock(&self.hold).and_then(|t| t.checked_duration_since(Instant::now()));
+        let minute = Duration::from_secs(60);
+        let full = (sent.len() >= PER_MINUTE).then(|| {
+            sent.front()
+                .map_or(minute, |t| minute.saturating_sub(t.elapsed()))
+        });
+        held.max(full).map(|d| d.as_secs() + 1)
     }
 
     /// A kept answer for `key` if younger than `ttl`, else `make`'s. An
@@ -346,6 +375,17 @@ fn symbol_ok(s: &str) -> bool {
 
 fn refuse(code: StatusCode, why: impl Into<String>) -> Response {
     (code, Json(json!({ "error": why.into() }))).into_response()
+}
+
+/// Every 429 says when to try again, so clients back off instead of
+/// retrying at once. 429 rather than 503: this service is up, the request
+/// rate (Alpaca's, shared by every client) is what's exhausted.
+async fn retry_after(AxState(app): AxState<Arc<App>>, mut r: Response) -> Response {
+    if r.status() == StatusCode::TOO_MANY_REQUESTS {
+        let s = app.wait(&lock(&app.sent)).unwrap_or(1);
+        r.headers_mut().insert("retry-after", s.into());
+    }
+    r
 }
 
 fn answer(r: Result<Value, (StatusCode, String)>) -> Response {
@@ -1682,6 +1722,9 @@ async fn main() {
         history_feed: args.history_feed,
         observer: observer.clone(),
         sent: Mutex::default(),
+        hold: Mutex::default(),
+        data_api: BASE.to_owned(),
+        trading_api: TRADING.to_owned(),
         cache: Mutex::default(),
         flights: Mutex::default(),
         screen: Mutex::default(),
@@ -1725,6 +1768,10 @@ async fn main() {
         .route("/option_bars", get(option_bars))
         .route("/option_contracts", get(option_contracts))
         .route("/screener", get(screen))
+        .layer(axum::middleware::map_response_with_state(
+            app.clone(),
+            retry_after,
+        ))
         .with_state(app)
         .merge(observer.router());
     let listen = listen_address("ALPACA_DATA_LISTEN", "127.0.0.1:9125");
@@ -1798,6 +1845,55 @@ mod tests {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(1_791_399_840), "2026-10-07T19:04:00Z");
         assert_eq!(unix(&rfc3339(1_709_164_800)), Some(1_709_164_800)); // 29 February 2024
+    }
+
+    #[tokio::test]
+    async fn alpacas_429_is_not_a_scan_and_says_when() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let busy = || async {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", "7")],
+                "slow down",
+            )
+        };
+        tokio::spawn(async move { axum::serve(l, Router::new().fallback(busy)).await });
+        let app = Arc::new(App {
+            http: reqwest::Client::new(),
+            key: String::new(),
+            secret: String::new(),
+            feed: "iex".into(),
+            options_feed: "indicative".into(),
+            history_feed: "sip".into(),
+            observer: Observer::new("alpaca-data", "test"),
+            sent: Mutex::default(),
+            hold: Mutex::default(),
+            data_api: url.clone(),
+            trading_api: url,
+            cache: Mutex::default(),
+            flights: Mutex::default(),
+            screen: Mutex::default(),
+            dir: None,
+            relays: HashMap::new(),
+        });
+        daily_bars(&app, &["AAPL".into()]).await;
+        assert!(
+            lock(&app.screen).daily.is_empty(),
+            "a rate limit is not a scan"
+        );
+        near_chain(&app, "AAPL", 100.0).await;
+        assert!(lock(&app.screen).options.is_empty());
+        assert_eq!(lock(&app.sent).len(), 1, "held: the second isn't sent");
+        let r = answer(app.get("/v2/stocks/bars", &[]).await);
+        let r = retry_after(AxState(app.clone()), r).await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let s: u64 = r.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((6..=8).contains(&s), "{s}");
     }
 
     #[test]

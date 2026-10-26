@@ -162,6 +162,7 @@ async fn run(args: Args) -> Result<(), String> {
                     .timeout(Duration::from_secs(30))
                     .build()
                     .map_err(|e| e.to_string())?,
+                history_url: alpaca::HISTORY_URL.to_owned(),
             });
             alpaca_source = Some(a.clone());
             a
