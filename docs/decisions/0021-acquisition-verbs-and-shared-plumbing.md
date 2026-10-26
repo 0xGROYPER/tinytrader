@@ -71,6 +71,14 @@ never published as a source gap.
 stored DBN unchanged, so a subscriber can't tell a replay from a live
 session except by the metadata that says which it is.
 
+**Lossless and fanned out are different paths.** A lossless replay is a
+direct stream from the store producer to its one subscriber, paced by that
+subscriber's reads; it does not go through the hub. Through the hub (a
+replay several subscribers share), the live rule applies: a subscriber
+that falls too far behind is cut off with an explicit error, and the
+others go on. The request says which it wants; there is no case where both
+rules apply.
+
 ### 2. Verbs: how a producer asks its source
 
 | Verb | Transport | What it does |
@@ -125,7 +133,7 @@ bare loopback `IP:PORT`):
 
 | | Flag | Address |
 |---|---|---|
-| Output | `--publish ADDR` | `tcp://127.0.0.1:7610`, `unix:///run/tt/spy.sock`: a stream any number of subscribers join (through distribution) |
+| Output | `--publish ADDR` | `tcp://127.0.0.1:7610`, `unix://$TT_SOCKETS/spy.sock`: a stream any number of subscribers join (through distribution) |
 | | `--output -` | stdout: protocol bytes only; logs go to stderr |
 | | `--write STORE` | the store service (`http://…:9120`): filed through its API, never written to a disk directly (0005) |
 | Input | `--connect ADDR` | a published stream |
@@ -140,7 +148,26 @@ Commands run in the foreground and exit truthfully (0, 1 failed, 2 usage,
 
 `apps/tt`, one binary, front end only: each command is a call to the
 service that owns it (the relay, `databento-jobs`, `alpaca-history`, the
-store, the console). Examples, in the shape Hyphae's scripts use:
+store, the console).
+
+- **`tt` never dials a vendor.** A provider `fetch` or `listen` is always a
+  request to the service that owns that provider's connection and key: the
+  relay for live streams, `databento-jobs` and `alpaca-history` for
+  history. Only those services hold the keys (0013's rule for Databento),
+  `tt` runs from any tailnet machine, and Alpaca allows one stream per
+  account. `tt listen … --publish` or `--output` re-publishes a relay
+  subscription; it opens no provider connection.
+- **The owning service runs `--every`.** A repeating or event-triggered
+  fetch is a request to the service that owns the fetch (and, for an event
+  trigger, the stream): it runs the trigger loop beside its connection and
+  publishes the results on its output. `tt` only asks for it and reads it.
+- **Anything long-lived is a service job.** A `--every` or `--publish`
+  that should outlive a terminal runs as a service job in the deployment's
+  scheduler (a Nomad service job today), with its limits and restarts
+  there. tinytrader ships no supervisor, as it ships no batch scheduler.
+- **Socket addresses** default to a per-user directory, `$TT_SOCKETS`
+  (`$XDG_RUNTIME_DIR/tt` on Linux, `$TMPDIR/tt` on macOS, where `/run` is
+  root's), mode 0700. Examples, in the shape Hyphae's scripts use:
 
 ```sh
 # Historical, finite (REST). Paid: prints the quote and asks y/N.
@@ -149,21 +176,22 @@ tt fetch databento --dataset OPRA.PILLAR --schema cbbo-1m --symbols SPY.OPT \
 tt fetch alpaca --feed sip --schema cmbp-1 --symbols SPY,QQQ \
   --start 2026-10-05 --end 2026-10-23 --write store
 
-# Live (websocket), published for any number of subscribers.
+# Live (websocket): a subscription to the relay that holds the provider's
+# connection, re-published here for any number of subscribers.
 tt listen databento --dataset OPRA.PILLAR --schema cmbp-1 --symbols SPY.OPT \
   --publish tcp://127.0.0.1:7600
 
 # A repeating fetch on a timer.
 tt fetch alpaca --schema chain --symbols SPY --every 1m \
-  --publish unix:///run/tt/spy-chain.sock
+  --publish unix://$TT_SOCKETS/spy-chain.sock
 
 # A fetch on each event of a stream: SPY's chain at every minute bar's close.
 tt listen alpaca --schema ohlcv-1m --symbols SPY \
   --every bar --fetch chain \
-  --publish unix:///run/tt/spy-bars-chain.sock
+  --publish unix://$TT_SOCKETS/spy-bars-chain.sock
 
 # The recorder: an ordinary subscriber, filing through the store.
-tt record --connect unix:///run/tt/spy-bars-chain.sock --write store
+tt record --connect unix://$TT_SOCKETS/spy-bars-chain.sock --write store
 
 # Replay: the store as the source, same output as live.
 tt listen store --dataset OPRA.PILLAR --schema cmbp-1 --symbols SPY.OPT \
@@ -274,23 +302,34 @@ are the stored DBN, unchanged.
 Each step is its own PR, built after hours. Production / tests lines; stop
 and report before going 30% over.
 
+**First deliverable: the approval command line.** Steps 0–3 stand on their
+own and don't wait for any of the rest.
+
 | Step | Prod | Tests |
 |---|---|---|
-| 0. Generated OpenAPI for the endpoints the steps use, and the CI check | 300 | 100 |
+| 0. Generated OpenAPI for the endpoints steps 2–3 use, and the CI check | 300 | 100 |
 | 1. `libs/net`; the data services' backoff loops moved onto it (net negative) | 400 | 300 |
-| 1b. order-gateway and alpaca-account onto `libs/net` (own PR, after a close) | 150 | 150 |
 | 2. `libs/store-client`; `alpaca-history` and `databento-jobs` on it | 250 | 200 |
 | 3. `tt fetch` (historical, `--write store`), `quotes`, `approve`, `decline`, `jobs`; quote `expires_at` in `tt` and the console | 450 | 250 |
+| **First deliverable** | **1,400** | **850** |
+
+**Then the Hyphae model,** each step accepted on its own:
+
+| Step | Prod | Tests |
+|---|---|---|
+| 1b. order-gateway and alpaca-account onto `libs/net` (own PR, after a close) | 150 | 150 |
 | 4. Addresses: `--publish`/`--connect` with `tcp://` and `unix://`, `--output -`/`--input -`, on the relay and `tt` | 300 | 250 |
-| 5a. The store producer: one symbol-day, streamed, holes as gaps | 450 | 300 |
-| 5b. The k-way merge across files, pace, and `tt listen store` | 450 | 300 |
-| 6. `--every`: time and calendar triggers, then stream-event triggers on `listen`; coalescing | 450 | 400 |
+| 5a. The store producer: one symbol-day, direct and lossless, holes as gaps | 450 | 300 |
+| 5b. The k-way merge across files, pace, the shared (hub) path, and `tt listen store` | 450 | 300 |
+| 6a. `--every` time and calendar triggers, in the services that own the fetch | 250 | 200 |
+| 6b. `--every` stream-event triggers on the relay (one provider), coalescing | 350 | 300 |
 | 7. `tt record`: the recorder as a subscriber filing through the store (with 0013) | (scoped with 0013) | |
 | 8. Docs: the roles, verbs and addresses in each API page | (docs) | |
+| **The rest, before 7** | **1,950** | **1,500** |
 
-Step 0 comes first for the endpoints 2 and 3 use; 1, 2 and 3 can then land
-in any order; 4 before 5b and 6; 5a needs 2, 5b needs 5a; 6 needs 1 and 4.
-Each step reports the lines it removes beside these.
+Order: 0 first for the endpoints 2 and 3 use; then 1, 2 and 3 in any
+order. After them: 4 before 5b and 6b; 5a needs 2, 5b needs 5a; 6a needs
+1; 6b needs 4 and 6a. Each step reports the lines it removes beside these.
 
 ## Consequences
 
