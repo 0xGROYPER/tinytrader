@@ -1,4 +1,4 @@
-# 0021: Acquisition as verbs any front end calls, on shared plumbing
+# 0021: Producers, verbs and addresses for acquisition, on shared plumbing
 
 - **Status:** Proposed
 - **Date:** 2026-10-26
@@ -41,79 +41,145 @@ porting it still holds; this takes those two properties, not its code.
 
 ## Decision
 
-### 1. Three verbs over sources
+This takes Hyphae's acquisition and distribution model (its `docs/TODO.org`
+architecture, `docs/src/{architecture,concepts,cli,reactive-acquisition}.md`,
+`transport-v1` and `dbn-publication-v1`), mapped onto tinytrader's services.
+Where Hyphae specified something it never built, that is said.
 
-A request names a **source** and a **verb**. Sources are where records come
-from; verbs are how they're asked for. They're independent: any verb a
-source supports, with the same arguments and the same output.
+### 1. Roles: producers, distribution, subscribers
 
-| Source | What it is |
-|---|---|
-| a provider | `databento`, `alpaca` (and later others): the vendor's API |
-| `store` | what the store holds: replay is reading this source, not a verb of its own |
+| Role | What it is | tinytrader today |
+|---|---|---|
+| **Producer** | Turns a source into DBN records. Two kinds, siblings with one output contract: a **provider** producer (a vendor's API) and the **store** producer (held days). | relay sources, `alpaca-history`, `databento-jobs`; no store producer |
+| **Distribution** | Fans a producer's stream out to any number of subscribers. Never parses or judges the records. | the relay's hub |
+| **Subscriber** | Anything that reads a stream: a strategy, the console, the recorder. | relay clients |
+| **Recorder** | An ordinary subscriber that files what it reads in the store. | none (the relay keeps no recording, 0006; 0013 proposes capture) |
 
-| Verb | What it does |
-|---|---|
-| `fetch` | A finite range, once: a provider's range into the store (priced first; free goes ahead, paid waits for a person's yes), or held days from the store. |
-| `poll` | `fetch`, again and again, on a **trigger**. Sugar over `fetch`: the same provider operation, pagination, retries and output, with only the range and the cadence as inputs. |
-| `listen` | A stream: a provider's live feed through the relay, or the store's held days played back through the same relay protocol, as the same bytes. |
+**Zero-consumer correctness.** A producer publishes with no subscribers at
+all, and nothing a subscriber does (including the recorder: its capacity,
+its commits, its failures) enters the producer's progress. A slow live
+subscriber is cut off with an explicit error, never allowed to slow the
+provider connection or the others (the relay does this today). The store
+producer defaults to lossless: it waits for its reader.
 
-**Triggers** make `poll` composable:
+**Gaps say whose they are.** A source gap (the provider skipped, the
+connection dropped) is published to everyone. A subscriber's own loss (it
+fell behind and was cut off, its disk filled) is that subscriber's, and is
+never published as a source gap.
 
-- **A time:** `--every 5s`, `--every 1m`, aligned to the clock, or a market
-  calendar point (`--at close+15m`, sessions only, early closes included).
-- **An event from a stream:** `--on <listen>`, each record (or each one
-  matching a filter) of another stream fires a fetch. The bar-close case:
-  `tt poll alpaca chain SPY --on 'listen alpaca bars SPY 1m'` fetches SPY's
-  option chain snapshot at each minute bar's close.
+**One output contract for both producers.** The store producer sends the
+stored DBN unchanged, so a subscriber can't tell a replay from a live
+session except by the metadata that says which it is.
 
-So "fetch on each event" is a `poll`, not a `listen`: the action is a
-finite fetch, and the stream only says when. Its output is a stream of
-snapshots that can itself be listened to or trigger a further poll; each
-snapshot keeps its own reception time, never one time stamped across a
+### 2. Verbs: how a producer asks its source
+
+| Verb | Transport | What it does |
+|---|---|---|
+| `fetch` | request/response (REST) | A finite range, all pages, with bounded retries and an explicit outcome. Free goes ahead; paid is priced and waits for a person's yes. |
+| `listen` | stream (websocket) | A provider's live feed, with reconnects and gaps marked. From the store, the held days as a stream: that is replay. |
+
+`replay` is not a verb: it is `listen` (or `fetch`) with `store` as the
+source. Which source is a designation, the first argument; the verbs mean
+the same for both.
+
+**`--every`: the one trigger keyword.** A poll is a `fetch` that repeats:
+the same provider operation, pages, retries and output, with only the range
+and the trigger as inputs. The trigger is either a time or an event that
+arrives on a stream:
+
+- `--every 5s`, `--every 1m`: clock-aligned.
+- `--every close+15m`: a market-calendar point (sessions only, early closes
+  included). Named points come from the calendar, never from parsing a name.
+- `--every bar`: an event from a `listen` of the same provider. The REST
+  fetch is triggered by the websocket.
+
+Hyphae called the event case "reactive acquisition" and kept it to one
+provider and one feed lifecycle: "Cross-feed or cross-provider triggers are
+orchestration concerns above `feed`". The same holds here: a trigger and
+its fetch share a provider (and its credentials and rate limit); triggering
+one provider from another's stream is two commands composed, not a flag.
+
+**Rules every repeating fetch keeps** (Hyphae's poll card): one fetch in
+flight; a trigger that fires during a fetch is coalesced into one next
+fetch, never queued without bound; skipped triggers are counted and
+reported; failures back off on `libs/net`'s bounded retry, and a poll that
+gives up says so and stops; a trigger the source can't serve (no endpoint,
+faster than its rate allows) is refused at the start with the reason.
+Fetched records go out on the same output as the stream that triggered
+them, each with its own reception time: never one time stamped across a
 whole chain.
 
-**Rules every poll keeps.** One fetch in flight per poll. A trigger that
-fires while a fetch is still running is coalesced (the next fetch starts
-when the running one ends, once), never queued without bound; skipped
-triggers are counted and reported. Failures back off on `libs/net`'s
-bounded retry, and a poll that gives up says so and stops. A poll of a
-source that can't do it (a provider without the endpoint, a cadence finer
-than its rate allows) is refused at the start with the reason, not run
-slowly.
+**Batch schedules stay outside.** Intraday cadence is `--every`, in the
+process doing the fetching. Tonight's top-off is the deployment's scheduler
+(0020; Nomad today) running `tt fetch`, so tinytrader keeps no batch
+scheduler. A paid repeating fetch still needs a person: under 0019 it
+prices, leaves the quote waiting and notifies, and buys nothing until
+someone says yes. A standing approval (per dataset, a daily dollar cap,
+expiring) would be its own decision; this one doesn't propose it.
 
-**Two kinds of schedule.** Intraday cadence (seconds, bars, events) is the
-poll's own, in the process doing the fetching. Daily and batch work
-(tonight's top-off) is the deployment's scheduler (0020; Nomad today)
-running `tt fetch`, so tinytrader keeps no batch scheduler.
+### 3. Addresses: one input, one output
 
-**A paid poll still needs a person.** 0019 stands: a poll of a free source
-goes ahead; of a paid one it prices, leaves the quote waiting and notifies,
-and buys nothing until someone says yes. A standing approval (per dataset,
-a daily dollar cap, expiring) would be its own decision; this one doesn't
-propose it.
+Every command has exactly one input and one output, each an address with a
+scheme (Hyphae's `docs/src/cli.md` conventions; Hyphae itself still uses
+bare loopback `IP:PORT`):
 
-Each verb is an HTTP endpoint first. A command line, the TUI and the console
-are front ends over the same endpoints, as 0003 has it for reads.
+| | Flag | Address |
+|---|---|---|
+| Output | `--publish ADDR` | `tcp://127.0.0.1:7610`, `unix:///run/tt/spy.sock`: a stream any number of subscribers join (through distribution) |
+| | `--output -` | stdout: protocol bytes only; logs go to stderr |
+| | `--write STORE` | the store service (`http://…:9120`): filed through its API, never written to a disk directly (0005) |
+| Input | `--connect ADDR` | a published stream |
+| | `--input -` | stdin |
 
-### 2. `tt`: the command line
+The provider's own address, when it must be given, is `--provider-endpoint`;
+credentials are never arguments (environment or a file, as today).
+Commands run in the foreground and exit truthfully (0, 1 failed, 2 usage,
+130 signal), so Bash and the scheduler compose them without hidden logic.
 
-`apps/tt`, one binary, front end only (no logic a service doesn't own):
+### 4. `tt`, and what it looks like
 
-```text
-tt fetch PROVIDER DATASET SCHEMA SYMBOL START END [--hours 09:30-16:01] [--contracts FILE]
-    → prices it, prints the quote (cost, requests, skipped, expiry), and for a
-      paid one asks "Buy for $45.03? [y/N]"; y approves, then follows the
-      submit and filing to the end
-tt quotes                      waiting quotes, with cost and time left
+`apps/tt`, one binary, front end only: each command is a call to the
+service that owns it (the relay, `databento-jobs`, `alpaca-history`, the
+store, the console). Examples, in the shape Hyphae's scripts use:
+
+```sh
+# Historical, finite (REST). Paid: prints the quote and asks y/N.
+tt fetch databento --dataset OPRA.PILLAR --schema cbbo-1m --symbols SPY.OPT \
+  --start 2022-09-01 --end 2025-10-07 --hours 09:30-16:01 --write store
+tt fetch alpaca --feed sip --schema cmbp-1 --symbols SPY,QQQ \
+  --start 2026-10-05 --end 2026-10-23 --write store
+
+# Live (websocket), published for any number of subscribers.
+tt listen databento --dataset OPRA.PILLAR --schema cmbp-1 --symbols SPY.OPT \
+  --publish tcp://127.0.0.1:7600
+
+# A repeating fetch on a timer.
+tt fetch alpaca --schema chain --symbols SPY --every 1m \
+  --publish unix:///run/tt/spy-chain.sock
+
+# A fetch on each event of a stream: SPY's chain at every minute bar's close.
+tt listen alpaca --schema ohlcv-1m --symbols SPY \
+  --every bar --fetch chain \
+  --publish unix:///run/tt/spy-bars-chain.sock
+
+# The recorder: an ordinary subscriber, filing through the store.
+tt record --connect unix:///run/tt/spy-bars-chain.sock --write store
+
+# Replay: the store as the source, same output as live.
+tt listen store --dataset OPRA.PILLAR --schema cmbp-1 --symbols SPY.OPT \
+  --start 2026-09-01 --end 2026-09-05 --publish tcp://127.0.0.1:7700
+tt fetch store --dataset ALPACA.SIP --schema cmbp-1 --symbols SPY \
+  --start 2026-10-02 --end 2026-10-02 --output - | my-strategy --input -
+
+# Purchases.
+tt quotes                       # waiting, with cost and time left
 tt approve QUOTE | tt decline QUOTE
-tt jobs [--follow]             purchases and their downloads and filing;
-                               --follow ends with each job's filing result
-tt poll SOURCE … (--every D | --at T | --on 'listen …')   snapshots, as DBN
-tt listen SOURCE SYMBOL… [--start T [--end T]]   DBN to stdout; SOURCE store
-                               plays held days, a provider is live (from T
-                               where it keeps history)
+tt jobs --follow                # ends with each job's filing result
 ```
+
+Exact flags follow the generated contract (section 5); these fix the shape:
+source first, then what, then when (`--every`), then where (`--publish`,
+`--output`, `--write`).
 
 **Approval goes through the console, not a key.** `tt approve` sends the
 console's own `POST /api/job-quotes/{id}/approve` with `confirm_usd`; the
@@ -145,7 +211,7 @@ price unasked.
 
 `tt` replaces the queue's `tt` that 0020 removes; it shares no code with it.
 
-### 3. One contract, generated
+### 5. One contract, generated
 
 The endpoints these verbs use are described once, by an OpenAPI document
 generated from the axum handlers' types, and CI fails on a breaking change
@@ -156,7 +222,7 @@ covers only the endpoints the verbs touch at first: `databento-jobs`
 `/files`; the console's `/api/job-quotes`. Other services follow as they're
 touched.
 
-### 4. Shared plumbing in `libs`
+### 6. Shared plumbing in `libs`
 
 - **`libs/net`:** one retry/backoff (doubling, capped, jittered, **bounded**:
   it ends with an error saying it gave up), one reconnect loop for streams,
@@ -178,10 +244,11 @@ reviewed and deployed after a close, under the trading hold.
 Services keep their own HTTP APIs and guards. Nothing here is a framework:
 no service is required to have a given shape, only to stop copying these.
 
-### 5. The store as a source
+### 7. The store producer
 
-The relay gains the store as a source: a `listen` (or `fetch`) of `store`
-sends the stored records for the days asked, then
+The store producer is served by the relay, as a source beside its
+providers: a `listen` (or `fetch`) of `store` sends the stored records for
+the days asked, then
 `ReplayCompleted`, then live if the request asked for it. The records sent
 are the stored DBN, unchanged.
 
@@ -189,8 +256,9 @@ are the stored DBN, unchanged.
   Databento orders them (`ts_recv` where the schema has it, else
   `ts_event`). Ties keep the order of the request's symbols, then each
   file's own order, so a replay is the same every time.
-- **Pace.** As fast as the client reads, by default, with backpressure: the
-  relay never buffers a day. `speed=1` paces by index time (real time),
+- **Pace.** As fast as the client reads, by default, with backpressure (it
+  is lossless: it waits for its reader, never drops): the relay never
+  buffers a day. (Hyphae specified pacing but never built it.) `speed=1` paces by index time (real time),
   `speed=N` N times faster. There is no simulated clock: a client that
   wants one keeps it from the record times.
 - **Size and drives.** A `cmbp-1` day is up to about 28 GB, on drives that
@@ -208,20 +276,21 @@ and report before going 30% over.
 
 | Step | Prod | Tests |
 |---|---|---|
-| 0. Generated OpenAPI for the endpoints above, and the CI check | 300 | 100 |
+| 0. Generated OpenAPI for the endpoints the steps use, and the CI check | 300 | 100 |
 | 1. `libs/net`; the data services' backoff loops moved onto it (net negative) | 400 | 300 |
 | 1b. order-gateway and alpaca-account onto `libs/net` (own PR, after a close) | 150 | 150 |
 | 2. `libs/store-client`; `alpaca-history` and `databento-jobs` on it | 250 | 200 |
-| 3. `tt fetch/quotes/approve/decline/jobs`; quote `expires_at` in `tt` and the console | 450 | 250 |
-| 4a. Relay store source: one symbol-day, streamed, holes as gaps | 450 | 300 |
-| 4b. The k-way merge across files, pace, and `tt listen` | 450 | 300 |
-| 6. `poll`: time and calendar triggers, `--on` stream triggers, coalescing | 400 | 350 |
-| 5. Docs: the verbs in each API page | (docs) | |
+| 3. `tt fetch` (historical, `--write store`), `quotes`, `approve`, `decline`, `jobs`; quote `expires_at` in `tt` and the console | 450 | 250 |
+| 4. Addresses: `--publish`/`--connect` with `tcp://` and `unix://`, `--output -`/`--input -`, on the relay and `tt` | 300 | 250 |
+| 5a. The store producer: one symbol-day, streamed, holes as gaps | 450 | 300 |
+| 5b. The k-way merge across files, pace, and `tt listen store` | 450 | 300 |
+| 6. `--every`: time and calendar triggers, then stream-event triggers on `listen`; coalescing | 450 | 400 |
+| 7. `tt record`: the recorder as a subscriber filing through the store (with 0013) | (scoped with 0013) | |
+| 8. Docs: the roles, verbs and addresses in each API page | (docs) | |
 
 Step 0 comes first for the endpoints 2 and 3 use; 1, 2 and 3 can then land
-in any order; 4a needs 2, 4b needs 4a; 6 needs 1 and 3, and its `--on` triggers need a
-`listen` to read (the relay today). Each step reports the lines it
-removes beside these.
+in any order; 4 before 5b and 6; 5a needs 2, 5b needs 5a; 6 needs 1 and 4.
+Each step reports the lines it removes beside these.
 
 ## Consequences
 
@@ -231,6 +300,8 @@ removes beside these.
   free, and the review of a feed is of what's specific to it.
 - A strategy listens to held days through the relay, as it listens live; OPRA
   `cmbp-1` days held in the store can be replayed although Databento won't.
+- A chain snapshot on every bar close, a top-off every night, and a capture
+  with a recorder are compositions of the same commands, not new services.
 - `libs/net` and `libs/store-client` are contracts between services; change
   them additively.
 - **Open: the name.** `tt` is already the queue's command (removed by 0020),
@@ -238,4 +309,5 @@ removes beside these.
   don't collide on `PATH`, but if the shared name confuses, the command can
   be renamed before step 3.
 - Not doing: Hyphae's slot transactions and page evidence (0014's reasons
-  stand), a connector framework, or a scheduler.
+  stand), its HTRN/MDS1 framed transport (the relay's DBN-over-TCP join stays
+  the stream protocol), a connector framework, or a batch scheduler.
