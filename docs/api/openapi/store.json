@@ -1,0 +1,789 @@
+{
+  "components": {
+    "schemas": {
+      "Catalog": {
+        "properties": {
+          "candidates": {
+            "description": "Drives found that could be approved.",
+            "items": true,
+            "type": "array"
+          },
+          "discover": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "generated_at": {
+            "description": "Seconds since the epoch: when the scan was made, and last updated in place.",
+            "format": "double",
+            "type": "number"
+          },
+          "missing_volumes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "roots": {
+            "items": {
+              "$ref": "#/components/schemas/Root"
+            },
+            "type": "array"
+          },
+          "thresholds": {
+            "$ref": "#/components/schemas/Thresholds"
+          },
+          "updated_at": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "generated_at",
+          "thresholds",
+          "roots",
+          "missing_volumes",
+          "candidates"
+        ],
+        "type": "object"
+      },
+      "Coverage": {
+        "properties": {
+          "days": {
+            "items": {
+              "$ref": "#/components/schemas/Day"
+            },
+            "type": "array"
+          },
+          "missing_volumes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "scanned_at": {
+            "format": "double",
+            "type": "number"
+          },
+          "updated_at": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "days",
+          "missing_volumes",
+          "scanned_at"
+        ],
+        "type": "object"
+      },
+      "Dataset": {
+        "properties": {
+          "filed": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "description": "`null` outside every provider's folder.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schemas": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SchemaHeld"
+            },
+            "type": "object"
+          },
+          "sources": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "filed",
+          "sources",
+          "schemas"
+        ],
+        "type": "object"
+      },
+      "Day": {
+        "description": "One day held, on one or more volumes.",
+        "properties": {
+          "condition": true,
+          "conflict": {
+            "type": "boolean"
+          },
+          "coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Held"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "day": {
+            "type": "string"
+          },
+          "filed": {
+            "type": "boolean"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/DayKind"
+          },
+          "pending": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "records": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "volume": {
+            "type": "string"
+          },
+          "volumes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "day",
+          "volume",
+          "volumes",
+          "kind",
+          "filed",
+          "conflict"
+        ],
+        "type": "object"
+      },
+      "DayKind": {
+        "enum": [
+          "complete",
+          "partial"
+        ],
+        "type": "string"
+      },
+      "Error": {
+        "description": "Every error answer: `{\"error\": \"<one human-readable sentence>\"}`.",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "File": {
+        "properties": {
+          "bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "description": "`<volume>/<path>`.",
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "volume": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "volume",
+          "path",
+          "bytes"
+        ],
+        "type": "object"
+      },
+      "Files": {
+        "properties": {
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/File"
+            },
+            "type": "array"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "files",
+          "truncated"
+        ],
+        "type": "object"
+      },
+      "Held": {
+        "description": "The contracts and hours a partial day holds.",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "pieces": {
+            "items": {
+              "$ref": "#/components/schemas/Piece"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "stype": {
+            "type": "string"
+          },
+          "symbols": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "window": {
+            "description": "Nanoseconds since the epoch, each end.",
+            "items": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "stype",
+          "symbols",
+          "window"
+        ],
+        "type": "object"
+      },
+      "Piece": {
+        "properties": {
+          "symbols": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "window": {
+            "items": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "symbols",
+          "window"
+        ],
+        "type": "object"
+      },
+      "Root": {
+        "description": "One volume.",
+        "properties": {
+          "dataset_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "datasets": {
+            "items": {
+              "$ref": "#/components/schemas/Dataset"
+            },
+            "type": "array"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "held": {
+            "description": "For a volume that isn't there: what it held when last read in full."
+          },
+          "ignored": {
+            "items": true,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "other": {
+            "items": true,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "other_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "pending_files": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pending_merges": {
+            "items": true,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "present": {
+            "type": "boolean"
+          },
+          "unrecognised": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "volume": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Space"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "writable": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "path",
+          "present",
+          "datasets",
+          "unrecognised",
+          "errors",
+          "pending_files"
+        ],
+        "type": "object"
+      },
+      "SchemaHeld": {
+        "description": "A schema's files, days and bytes, as the catalog lists them.",
+        "properties": {
+          "bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "days": {
+            "additionalProperties": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "degraded": {
+            "description": "Days the provider calls degraded, or missing (their condition).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "encodings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "files": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "missing": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "partial": {
+            "description": "Days holding only some contracts (decision 0018); the rest are complete.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "symbols": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "unfiled": {
+            "description": "Days not in the store layout: in a batch download, or a day folder.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "files",
+          "bytes",
+          "symbols",
+          "encodings",
+          "days",
+          "partial",
+          "unfiled",
+          "degraded",
+          "missing"
+        ],
+        "type": "object"
+      },
+      "Space": {
+        "properties": {
+          "available_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/SpaceStatus"
+          },
+          "total_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "used_fraction": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "SpaceStatus": {
+        "enum": [
+          "ok",
+          "warning",
+          "critical",
+          "floor",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "Thresholds": {
+        "properties": {
+          "critical": {
+            "format": "double",
+            "type": "number"
+          },
+          "floor": {
+            "format": "double",
+            "type": "number"
+          },
+          "warning": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "warning",
+          "critical",
+          "floor"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "See docs/api/store.md.",
+    "title": "store",
+    "version": "0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/catalog": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "fresh",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Catalog"
+                }
+              }
+            },
+            "description": "the catalog"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "refused or failed"
+          }
+        },
+        "summary": "What each volume holds"
+      }
+    },
+    "/coverage": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "dataset",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fresh",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "provider",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "schema",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "start",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "symbol",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Coverage"
+                }
+              }
+            },
+            "description": "the days"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "refused or failed"
+          }
+        },
+        "summary": "Each day held"
+      }
+    },
+    "/files": {
+      "get": {
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "pattern",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "provider",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Files"
+                }
+              }
+            },
+            "description": "the files"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "refused or failed"
+          }
+        },
+        "summary": "DBN files by logical name"
+      }
+    }
+  }
+}

@@ -1,0 +1,158 @@
+{
+  "components": {
+    "schemas": {
+      "Approve": {
+        "description": "A person's approval of a paid purchase.",
+        "properties": {
+          "again": {
+            "description": "When given, exactly the quote's `again`.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "confirm_usd": {
+            "description": "The quoted price, exactly as the jobs service listed it.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "confirm_usd"
+        ],
+        "type": "object"
+      },
+      "Decline": {
+        "type": "object"
+      },
+      "Declined": {
+        "properties": {
+          "declined": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "declined"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "description": "Every error answer: `{\"error\": \"<one human-readable sentence>\"}`.",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Approvals only; see docs/api/console.md.",
+    "title": "console",
+    "version": "0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/job-quotes/{id}/approve": {
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Approve"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "databento-jobs.json#/components/schemas/Submitted"
+                }
+              }
+            },
+            "description": "the jobs service's answer to /submit"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "refused or failed"
+          }
+        },
+        "summary": "Approve a paid purchase"
+      }
+    },
+    "/api/job-quotes/{id}/decline": {
+      "post": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Decline"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Declined"
+                }
+              }
+            },
+            "description": "declined"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "refused or failed"
+          }
+        },
+        "summary": "Decline a quote"
+      }
+    }
+  }
+}

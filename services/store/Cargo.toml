@@ -22,4 +22,6 @@ sha2 = "0.10"
 tokio = { workspace = true, features = ["fs", "io-util"] }
 
 [dev-dependencies]
+schemars.workspace = true
+tinytrader-openapi.workspace = true
 time = { version = "0.3", features = ["macros", "parsing"] }

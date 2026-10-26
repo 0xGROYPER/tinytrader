@@ -24,6 +24,8 @@
           ../libs/dbn
           ../libs/tinytrader
           ../libs/alpaca
+          ../libs/openapi
+          ../docs/api/openapi # the committed documents the tests compare with
           ../apps/tui
           ../services/ticker
           ../services/databento-jobs

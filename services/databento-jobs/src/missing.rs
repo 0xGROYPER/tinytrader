@@ -15,6 +15,7 @@ pub const MAX_SYMBOLS: usize = 2_000;
 /// Which of a day's contracts are wanted. Every field is optional; none at
 /// all is the whole chain.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Rule {
     /// The day's first N expiries, counting that day's own (1: same-day
     /// expiry; 2: same day and the next).
@@ -111,6 +112,7 @@ pub fn parent_of(symbols: &[String]) -> Option<String> {
 /// `America/New_York` (daylight saving from the second Sunday in March to the
 /// first Sunday in November).
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Hours {
     /// `HH:MM`.
     pub start: String,

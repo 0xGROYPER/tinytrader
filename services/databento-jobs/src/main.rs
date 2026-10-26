@@ -43,6 +43,8 @@ mod guard_tests;
 mod had;
 mod ledger;
 mod missing;
+#[cfg(test)]
+mod openapi;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -125,6 +127,7 @@ fn parse_day(s: &str) -> Result<time::Date, String> {
 
 /// What to price, and then buy: what's missing of one symbol over some days.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct PriceRequest {
     dataset: String,
     schema: String,
@@ -1909,6 +1912,7 @@ fn write_step(
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 struct Submit {
     quote: String,
     confirm_usd: Option<f64>,

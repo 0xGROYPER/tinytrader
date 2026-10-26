@@ -131,6 +131,8 @@ mod delta;
 mod gateways;
 mod journal;
 mod notify;
+#[cfg(test)]
+mod openapi;
 mod prefs;
 mod profiles;
 mod reminders;

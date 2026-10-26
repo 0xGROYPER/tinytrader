@@ -24,3 +24,7 @@ time = { version = "0.3", features = ["macros", "parsing"] }
 tinytrader-observe.workspace = true
 tinytrader-schedule.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+schemars.workspace = true
+tinytrader-openapi.workspace = true
