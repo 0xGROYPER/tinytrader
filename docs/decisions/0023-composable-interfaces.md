@@ -116,10 +116,18 @@ A strategy that backtests in-process and trades as a client sees the same
 semantics; a test runs one strategy both ways over the same days and
 compares its orders.
 
-**The store: one writer per volume, any number of data nodes.** Each data
-node runs a store over the volumes attached to it (the M2's drives, the
-mini's, a NAS later) and is the only writer to them (0005, per node).
-There is no single store process:
+**The store: one store per data node, one owner per volume, any number of
+nodes.** Each data node runs one store over the volumes attached to it (the
+M2's drives, the mini's, a NAS later), and writes only to volumes it owns
+(0005, per node). There is no single store process.
+
+- **A volume has one owner at a time**, recorded on the volume as a claim
+  (its volume id, the owning node, when it last renewed it). A store opens
+  a volume read-write only while the claim is its own. Taking a volume over
+  (a drive moved to another Mac, a NAS share mounted on two) is a deliberate
+  handover, never automatic; a claim another node holds is reported, not
+  broken.
+- **Any node reads any volume it can reach**; reading needs no claim.
 
 - Each node declares its volumes and holdings in `/describe` and
   `/catalog`; the deployment's inventory says where the nodes are.
