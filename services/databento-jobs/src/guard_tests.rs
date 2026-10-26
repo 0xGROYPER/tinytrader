@@ -267,6 +267,9 @@ struct StoreState {
     batches: Value,
     /// Answers 503 to this many `/catalog` reads first (a rescan).
     catalog_503s: u32,
+    /// And to this many `/incoming` reads; then this.
+    incoming_503s: u32,
+    incoming: Value,
     /// Files uploaded to incoming, and each filing asked for (path and query).
     uploaded: Vec<String>,
     incorporated: Vec<String>,
@@ -321,6 +324,8 @@ fn ready_store() -> StoreState {
         health: "idle",
         batches: json!({}),
         catalog_503s: 0,
+        incoming_503s: 0,
+        incoming: json!({ "batches": [] }),
         uploaded: Vec::new(),
         incorporated: Vec::new(),
         incorporate_error: None,
@@ -380,7 +385,17 @@ async fn serve_store(state: StoreHandle) -> String {
                 Json(json!({ "provider": "databento", "batches": lock(&s).batches.clone() }))
             }),
         )
-        .route("/incoming", get(|| async { Json(json!({ "batches": [] })) }))
+        .route(
+            "/incoming",
+            get(|AxState(s): AxState<StoreHandle>| async move {
+                let mut s = lock(&s);
+                if s.incoming_503s > 0 {
+                    s.incoming_503s -= 1;
+                    return answer((503, json!({ "error": "rescanning" })));
+                }
+                answer((200, s.incoming.clone()))
+            }),
+        )
         .route(
             "/incoming/databento/{job}/{file}",
             axum::routing::put(
@@ -2028,4 +2043,113 @@ async fn a_refused_submission_is_told() {
         (Some("failed"), Some(1))
     );
     assert!(v["error"].as_str().unwrap().contains("429"), "{v}");
+}
+
+#[tokio::test]
+async fn a_job_left_failed_is_tried_again_after_a_while() {
+    let r = rig_with("rearm", |j| j.rearm_after = Duration::from_millis(50)).await;
+    contract_job(&r, "OPRA-C1");
+    lock(&r.store).incorporate_error = Some("a day's file is missing".into());
+    for _ in 0..MAX_TRIES + 2 {
+        refresh(&r.jobs).await.unwrap();
+        settled(&r).await;
+    }
+    assert_eq!(lock(&r.store).incorporated.len(), MAX_TRIES as usize);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    lock(&r.store).incorporate_error = None;
+    refresh(&r.jobs).await.unwrap();
+    settled(&r).await;
+    assert_eq!(lock(&r.store).incorporated.len(), MAX_TRIES as usize + 1);
+}
+
+#[tokio::test]
+async fn a_job_near_its_expiry_and_not_filed_is_told() {
+    let r = rig("expiring").await;
+    let mut j = job(
+        "OPRA-OLD",
+        json!("SPY.OPT,QQQ.OPT"),
+        "parent",
+        whole_day(),
+        "done",
+    );
+    j.ts_expiration = Some(time::OffsetDateTime::now_utc() + time::Duration::days(3));
+    r.fake.add(j);
+    refresh(&r.jobs).await.unwrap();
+    refresh(&r.jobs).await.unwrap();
+    let row = jobs_view(&r.jobs)["jobs"][0].clone();
+    assert_eq!(row["expires_soon"], true, "{row}");
+    let told = r.jobs.events.since(0, 500).to_string();
+    assert_eq!(
+        r.jobs.events.since(0, 500)["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["summary"]
+                .as_str()
+                .unwrap()
+                .starts_with("OPRA-OLD isn't filed and expires"))
+            .count(),
+        1,
+        "{told}"
+    );
+}
+
+#[tokio::test]
+async fn a_merge_waits_for_room_on_the_days_volume() {
+    let r = rig_with("merge-room", |j| j.merge_wait = Duration::from_millis(30)).await;
+    contract_job(&r, "OPRA-C1");
+    // The day it merges into is 1 TB, on v1, which has room for 400 GB.
+    lock(&r.store).coverage.1 = json!({ "days": [
+        { "day": DAY, "kind": "partial", "volumes": ["v1"], "size": 1_000_000_000_000_u64, "coverage": { "kind": "contracts", "symbols": [C1] } },
+    ], "missing_volumes": [] });
+    refresh(&r.jobs).await.unwrap();
+    settled(&r).await;
+    let t = lock(&r.jobs.transfers).get("OPRA-C1").cloned().unwrap();
+    assert!(
+        t.error.unwrap().contains("v1 needs 1000.0 GB to merge"),
+        "{}",
+        t.state
+    );
+    assert!(lock(&r.store).uploaded.is_empty());
+}
+
+#[tokio::test]
+async fn the_store_s_incoming_list_is_waited_for_too() {
+    let r = rig("incoming").await;
+    contract_job(&r, "OPRA-C1");
+    // The day's file is uploaded already: once the store answers, it isn't sent again.
+    let name = format!("opra-pillar-{}.cmbp-1.dbn.zst", DAY.replace('-', ""));
+    lock(&r.store).incoming =
+        json!({ "batches": [{ "batch": "OPRA-C1", "files": [{ "name": name, "bytes": 9 }] }] });
+    lock(&r.store).incoming_503s = 2;
+    refresh(&r.jobs).await.unwrap();
+    settled(&r).await;
+    let s = lock(&r.store);
+    assert_eq!(
+        (s.incorporated.len(), s.uploaded.len()),
+        (1, 1),
+        "only the manifest: {:?}",
+        s.uploaded
+    );
+}
+
+#[test]
+fn startup_says_how_many_jobs_are_followed() {
+    let dir =
+        std::env::temp_dir().join(format!("tinytrader-jobs-{}-following", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut l = ledger::Ledger::open(&dir.join("submissions.jsonl")).unwrap();
+    for (n, job) in ["OPRA-1", "OPRA-2"].iter().enumerate() {
+        l.append(ledger::Entry {
+            at: 1.0,
+            request: format!("r{n}"),
+            state: "submitted".into(),
+            job: Some((*job).into()),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    assert!(following(&l).starts_with("following 2 jobs submitted here"));
+    drop(l);
+    let _ = std::fs::remove_dir_all(&dir);
 }
