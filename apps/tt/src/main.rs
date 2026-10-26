@@ -2,8 +2,10 @@
 //! only: every command is a call to the console at `TT_CONSOLE` (its address
 //! under the authenticating proxy, such as `https://<console host>`), which
 //! adds its write gate and the login, and passes reads and prices to the jobs
-//! service. stdout carries the answer (JSON, or `--format table`); progress
-//! and prompts go to stderr. Exit: 0 done, 1 failed, 2 usage, 130 signalled.
+//! service. stdout carries the answer: a table at a terminal, else JSON
+//! (`--format` chooses); progress and prompts go to stderr. Exit: 0 done,
+//! 1 failed, 2 usage, 3 refused (a 403, a paid purchase without a terminal,
+//! or an expired quote not priced again), 128+n on signal n.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::sync::Mutex;
@@ -15,9 +17,9 @@ use serde_json::{Value, json};
 #[derive(Parser)]
 #[command(name = "tt", about = "tinytrader from a terminal, through TT_CONSOLE")]
 struct Cli {
-    /// How the answer is written on stdout.
-    #[arg(long, value_enum, default_value_t = Format::Json, global = true)]
-    format: Format,
+    /// How the answer is written on stdout (default: a table at a terminal, else JSON).
+    #[arg(long, value_enum, global = true)]
+    format: Option<Format>,
     #[command(subcommand)]
     command: Command,
 }
@@ -47,6 +49,13 @@ enum Command {
         #[arg(long)]
         follow: bool,
         ids: Vec<String>,
+    },
+    /// Any console endpoint, through the same guards: `GET|POST /api/…`, a
+    /// POST's JSON body read from stdin. The answer is printed as JSON.
+    Api {
+        #[arg(value_parser = ["GET", "POST"])]
+        method: String,
+        path: String,
     },
 }
 
@@ -86,6 +95,8 @@ trait Term {
     fn ask(&mut self, prompt: &str) -> Option<String>;
     /// A line read without echo.
     fn secret(&mut self, prompt: &str) -> Option<String>;
+    /// All of stdin when it isn't a terminal (a request's body), else nothing.
+    fn input(&mut self) -> Result<String, String>;
 }
 
 /// The terminal's settings while echo is off, to restore (also on a signal).
@@ -125,6 +136,14 @@ impl Term for Real {
         }
         got
     }
+    fn input(&mut self) -> Result<String, String> {
+        let mut body = String::new();
+        if !self.tty() {
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut body)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(body)
+    }
     fn secret(&mut self, prompt: &str) -> Option<String> {
         echo(false);
         let line = self.ask(prompt);
@@ -149,6 +168,24 @@ struct Answer {
     gate: bool,
 }
 
+/// A failure and its exit code: 1 failed, 3 refused.
+struct Fail(u8, String);
+
+impl From<String> for Fail {
+    fn from(why: String) -> Self {
+        Fail(1, why)
+    }
+}
+
+fn no<T>(why: String) -> Result<T, Fail> {
+    Err(Fail(1, why))
+}
+
+/// An answer that isn't a success: refused (3) when it's a 403.
+fn failed(a: &Answer) -> Fail {
+    Fail(if a.code == 403 { 3 } else { 1 }, why(a))
+}
+
 fn why(a: &Answer) -> String {
     let code = a.code;
     a.body["error"]
@@ -159,7 +196,7 @@ fn why(a: &Answer) -> String {
 const PROXY_ONLY: &str = "approvals need the console's proxy address, where your tailnet login is attached; this machine may be tagged";
 
 impl Console {
-    async fn send(&self, post: Option<&Value>, path: &str, wait: u64) -> Result<Answer, String> {
+    async fn send(&self, post: Option<&Value>, path: &str, wait: u64) -> Result<Answer, Fail> {
         let url = format!("{}{path}", self.base);
         let mut r = post.map_or_else(|| self.http.get(&url), |b| self.http.post(&url).json(b));
         if let Some(t) = self.token.lock().unwrap().as_deref() {
@@ -176,12 +213,12 @@ impl Console {
         Ok(Answer { code, body, gate })
     }
 
-    async fn get(&self, path: &str) -> Result<Value, String> {
+    async fn get(&self, path: &str) -> Result<Value, Fail> {
         let a = self.send(None, path, 60).await?;
         if a.code == 200 {
             Ok(a.body)
         } else {
-            Err(why(&a))
+            Err(failed(&a))
         }
     }
 
@@ -194,7 +231,7 @@ impl Console {
         path: &str,
         body: &Value,
         follow: Option<&str>,
-    ) -> Result<Answer, String> {
+    ) -> Result<Answer, Fail> {
         loop {
             let call = self.send(Some(body), path, 4 * 3600);
             tokio::pin!(call);
@@ -217,11 +254,11 @@ impl Console {
                     .secret("The console's order token:")
                     .unwrap_or_default();
                 if t.is_empty() {
-                    return Err("no order token given".into());
+                    return no("no order token given".into());
                 }
                 *self.token.lock().unwrap() = Some(t);
             } else if a.gate && a.code == 403 {
-                return Err(format!("{}: {PROXY_ONLY}", why(&a)));
+                return Err(Fail(3, format!("{}: {PROXY_ONLY}", why(&a))));
             } else {
                 return Ok(a);
             }
@@ -229,10 +266,10 @@ impl Console {
     }
 
     /// Price a request and follow it until it's ready.
-    async fn price(&self, term: &mut dyn Term, ask: &Value) -> Result<Value, String> {
+    async fn price(&self, term: &mut dyn Term, ask: &Value) -> Result<Value, Fail> {
         let a = self.write(term, "/api/jobs/price", ask, None).await?;
         if a.code != 200 && a.code != 202 {
-            return Err(why(&a));
+            return Err(failed(&a));
         }
         let (mut q, mut shown) = (a.body, None);
         while q["state"] == "pricing" {
@@ -250,7 +287,7 @@ impl Console {
         }
         match q["state"].as_str() {
             Some("ready") => Ok(q),
-            _ => Err(format!("pricing failed: {}", text(&q["error"]))),
+            _ => no(format!("pricing failed: {}", text(&q["error"]))),
         }
     }
 }
@@ -366,7 +403,7 @@ async fn purchase(
     f: Format,
     mut q: Value,
     ask: Option<Value>,
-) -> Result<u8, String> {
+) -> Result<u8, Fail> {
     loop {
         show(term, &q);
         let id = text(&q["quote"]);
@@ -382,11 +419,14 @@ async fn purchase(
         } else {
             let (path, body) = if paid {
                 if !q["cost_usd"].is_number() {
-                    return Err("its price isn't a number of dollars, so it can't be bought".into());
+                    return no("its price isn't a number of dollars, so it can't be bought".into());
                 }
                 if !term.tty() {
-                    return Err(format!(
-                        "a paid purchase needs a person at a terminal: run `tt approve {id}` there, or approve it in the console"
+                    return Err(Fail(
+                        3,
+                        format!(
+                            "a paid purchase needs a person at a terminal: run `tt approve {id}` there, or approve it in the console"
+                        ),
                     ));
                 }
                 let (what, usd) = (what(&q), dollars(&q["cost_usd"]));
@@ -397,7 +437,7 @@ async fn purchase(
                         until(&q)
                     ),
                 ) {
-                    return Err(format!(
+                    return no(format!(
                         "not bought; it waits until it expires, and `tt decline {id}` drops it"
                     ));
                 }
@@ -431,16 +471,16 @@ async fn purchase(
                 if let Some(sent) = a.body["submitted"].as_array() {
                     term.say(&format!("It stopped after {} of {n} requests; price the same request again to buy the rest.", sent.len()));
                 }
-                return Err(format!("not bought: {e}"));
+                return Err(Fail(failed(&a).0, format!("not bought: {e}")));
             }
             e
         };
         term.say(&format!("Not bought: {stale}."));
         let Some(ask) = ask.as_ref() else {
-            return Err("price it again with `tt fetch`".into());
+            return no("price it again with `tt fetch`".into());
         };
         if !term.tty() || !yes(term, "Price it again (free)? [y/N]") {
-            return Ok(1);
+            return Ok(3);
         }
         q = c.price(term, ask).await?;
     }
@@ -487,7 +527,7 @@ async fn jobs(
     f: Format,
     follow: bool,
     ids: Vec<String>,
-) -> Result<u8, String> {
+) -> Result<u8, Fail> {
     let (mut quotes, mut wanted): (Vec<String>, Vec<String>) =
         ids.into_iter().partition(|i| i.starts_with("q-"));
     let (all, mut failed, mut seen) = (
@@ -509,7 +549,7 @@ async fn jobs(
                     failed.push(json!({ "quote": id, "outcome": "failed", "detail": q["error"] }));
                 }
                 _ => {
-                    return Err(format!(
+                    return no(format!(
                         "{id} hasn't been submitted (it's {})",
                         text(&q["state"])
                     ));
@@ -565,13 +605,8 @@ async fn jobs(
     }
 }
 
-async fn run(
-    cli: Cli,
-    c: &Console,
-    term: &mut dyn Term,
-    out: &mut dyn Write,
-) -> Result<u8, String> {
-    let f = cli.format;
+async fn run(cli: Cli, c: &Console, term: &mut dyn Term, out: &mut dyn Write) -> Result<u8, Fail> {
+    let f = cli.format.unwrap_or(Format::Json);
     match cli.command {
         Command::Fetch {
             source: Source::Databento(a),
@@ -623,7 +658,7 @@ async fn run(
         Command::Approve { quote } => {
             let q = c.get(&format!("/api/jobs/quotes/{quote}")).await?;
             if q["state"] != "ready" {
-                return Err(format!(
+                return no(format!(
                     "{quote} isn't waiting for approval (it's {})",
                     text(&q["state"])
                 ));
@@ -633,8 +668,11 @@ async fn run(
         }
         Command::Decline { quote } => {
             show(term, &c.get(&format!("/api/jobs/quotes/{quote}")).await?);
-            if !term.tty() || !yes(term, &format!("Decline {quote}? [y/N]")) {
-                return Err("not declined (that needs a person at a terminal saying y)".into());
+            if !term.tty() {
+                return Err(Fail(3, "declining needs a person at a terminal".into()));
+            }
+            if !yes(term, &format!("Decline {quote}? [y/N]")) {
+                return no("not declined".into());
             }
             let a = c
                 .write(
@@ -645,21 +683,56 @@ async fn run(
                 )
                 .await?;
             if a.code != 200 {
-                return Err(why(&a));
+                return Err(failed(&a));
             }
             emit(out, f, &a.body, &[cells(&[&quote, "declined"])]);
             Ok(0)
         }
         Command::Jobs { follow, ids } => jobs(c, term, out, f, follow, ids).await,
+        Command::Api { method, path } => {
+            if !path.starts_with("/api/") {
+                term.say("the path is a console endpoint: /api/…");
+                return Ok(2);
+            }
+            let a = if method == "GET" {
+                c.send(None, &path, 60).await?
+            } else {
+                let body = term.input()?;
+                let body = if body.trim().is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str(&body).map_err(|e| format!("stdin: {e}"))?
+                };
+                c.write(term, &path, &body, None).await?
+            };
+            emit(out, Format::Json, &a.body, &[]);
+            if (200..300).contains(&a.code) {
+                Ok(0)
+            } else {
+                Err(failed(&a))
+            }
+        }
     }
 }
 
-/// `run`, with its failure said: 1.
-async fn exit(cli: Cli, c: &Console, term: &mut dyn Term, out: &mut dyn Write) -> u8 {
-    run(cli, c, term, out).await.unwrap_or_else(|e| {
-        term.say(&format!("tt: {e}"));
-        1
-    })
+/// `run`, with its failure said, and the format chosen by whether stdout
+/// is a terminal unless `--format` says.
+async fn exit(
+    mut cli: Cli,
+    c: &Console,
+    term: &mut dyn Term,
+    out: &mut dyn Write,
+    out_tty: bool,
+) -> u8 {
+    cli.format = cli
+        .format
+        .or(Some(if out_tty { Format::Table } else { Format::Json }));
+    run(cli, c, term, out)
+        .await
+        .unwrap_or_else(|Fail(code, e)| {
+            term.say(&format!("tt: {e}"));
+            code
+        })
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -676,9 +749,9 @@ async fn main() -> std::process::ExitCode {
     tokio::spawn(async {
         use tokio::signal::unix::{SignalKind, signal};
         let mut term = signal(SignalKind::terminate()).expect("a SIGTERM handler");
-        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
+        let n = tokio::select! { _ = tokio::signal::ctrl_c() => 2, _ = term.recv() => 15 };
         echo(true);
-        std::process::exit(130);
+        std::process::exit(128 + n);
     });
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -691,7 +764,8 @@ async fn main() -> std::process::ExitCode {
         token: Mutex::new(None),
         poll: Duration::from_secs(2),
     };
-    exit(cli, &c, &mut Real, &mut std::io::stdout())
+    let tty = std::io::stdout().is_terminal();
+    exit(cli, &c, &mut Real, &mut std::io::stdout(), tty)
         .await
         .into()
 }

@@ -161,6 +161,9 @@ impl Term for Script {
         self.asked.push(prompt.to_owned());
         self.answers.pop_front().map(str::to_owned)
     }
+    fn input(&mut self) -> Result<String, String> {
+        Ok(String::new())
+    }
     fn secret(&mut self, _: &str) -> Option<String> {
         self.secrets += 1;
         Some("made-up-token".into())
@@ -176,6 +179,11 @@ fn person(answers: &[&'static str]) -> Script {
 }
 
 async fn tt(base: &str, args: &str, term: &mut Script) -> (u8, String) {
+    at(base, args, term, false).await
+}
+
+/// `tt`, its stdout a terminal or not.
+async fn at(base: &str, args: &str, term: &mut Script, out_tty: bool) -> (u8, String) {
     let cli = Cli::try_parse_from(std::iter::once("tt").chain(args.split_whitespace())).unwrap();
     let c = Console {
         base: base.into(),
@@ -184,7 +192,7 @@ async fn tt(base: &str, args: &str, term: &mut Script) -> (u8, String) {
         poll: Duration::from_millis(5),
     };
     let mut out = Vec::new();
-    let code = exit(cli, &c, term, &mut out).await;
+    let code = exit(cli, &c, term, &mut out, out_tty).await;
     (code, String::from_utf8(out).unwrap())
 }
 
@@ -250,7 +258,7 @@ async fn only_y_or_yes_buys() {
 async fn without_a_terminal_a_paid_purchase_is_refused_and_a_free_one_goes_ahead() {
     let (base, f) = serve(&[COST], |_| {}).await;
     let mut t = Script::default();
-    assert_eq!(tt(&base, FETCH, &mut t).await.0, 1);
+    assert_eq!(tt(&base, FETCH, &mut t).await.0, 3);
     assert!(said(&t, "needs a person at a terminal"), "{:?}", t.said);
     assert!(t.asked.is_empty() && f.lock().unwrap().approves.is_empty());
     let (base, f) = serve(&[0.0], |_| {}).await;
@@ -263,7 +271,7 @@ async fn without_a_terminal_a_paid_purchase_is_refused_and_a_free_one_goes_ahead
 async fn the_gates_403_says_why_and_is_never_retried() {
     let (base, f) = serve(&[COST], |f| f.forbid = true).await;
     let mut t = person(&["y"]);
-    assert_eq!(tt(&base, "approve q-t-1", &mut t).await.0, 1);
+    assert_eq!(tt(&base, "approve q-t-1", &mut t).await.0, 3);
     let why = format!("writes are not allowed for this login: {PROXY_ONLY}");
     assert!(said(&t, &why), "{:?}", t.said);
     assert_eq!(f.lock().unwrap().approves.len(), 1);
@@ -310,18 +318,20 @@ async fn an_expired_price_is_priced_again_and_asked_again() {
     }
     // Not priced again, nor bought, unasked.
     let (base, f) = serve(&[5.0, 6.5], |f| f.expire_first = true).await;
-    assert_eq!(tt(&base, FETCH, &mut person(&["y", "n"])).await.0, 1);
+    assert_eq!(tt(&base, FETCH, &mut person(&["y", "n"])).await.0, 3);
     let f = f.lock().unwrap();
     assert_eq!((f.prices, f.approves.len()), (1, 1));
 }
 
 #[tokio::test]
-async fn quotes_are_json_by_default_and_a_table_on_request() {
+async fn quotes_are_a_table_at_a_terminal_and_json_elsewhere() {
     let (base, _) = serve(&[COST], |_| {}).await;
     let (code, out) = tt(&base, "quotes", &mut Script::default()).await;
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!((code, &v["quotes"][0]["quote"]), (0, &json!("q-t-1")));
-    let (_, out) = tt(&base, "quotes --format table", &mut Script::default()).await;
+    let (_, out) = at(&base, "quotes --format json", &mut Script::default(), true).await;
+    assert!(serde_json::from_str::<Value>(&out).is_ok(), "{out}");
+    let (_, out) = at(&base, "quotes", &mut Script::default(), true).await;
     let lines: Vec<&str> = out.lines().collect();
     assert!(
         lines[0].starts_with("QUOTE")
@@ -357,4 +367,26 @@ async fn following_jobs_ends_with_each_outcome_and_fails_if_any_failed() {
     // A quote's jobs, by its ID.
     let (code, _) = tt(&base, "jobs --follow q-t-1", &mut Script::default()).await;
     assert_eq!(code, 0);
+}
+
+#[tokio::test]
+async fn api_passes_through_with_the_same_guards() {
+    let (base, _) = serve(&[COST], |f| f.forbid = true).await;
+    let (code, out) = tt(
+        &base,
+        "api GET /api/jobs/quotes/q-t-1",
+        &mut Script::default(),
+    )
+    .await;
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!((code, &v["cost_usd"]), (0, &json!(COST)));
+    let mut t = Script::default();
+    let (code, _) = tt(&base, "api POST /api/job-quotes/q-t-1/approve", &mut t).await;
+    assert!(code == 3 && said(&t, PROXY_ONLY), "{:?}", t.said);
+    assert_eq!(
+        tt(&base, "api GET /elsewhere", &mut Script::default())
+            .await
+            .0,
+        2
+    );
 }

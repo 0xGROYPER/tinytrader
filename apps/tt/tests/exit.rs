@@ -1,4 +1,4 @@
-//! The `tt` binary's exit codes: 2 for usage, 130 on a signal.
+//! The `tt` binary's exit codes: 2 for usage, 128+n on signal n.
 
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -32,7 +32,13 @@ fn usage_errors_exit_2() {
 }
 
 #[tokio::test]
-async fn a_signal_exits_130() {
+async fn a_signal_exits_128_plus_its_number() {
+    for (signal, code) in [("-INT", 130), ("-TERM", 143)] {
+        signalled(signal, code).await;
+    }
+}
+
+async fn signalled(signal: &str, want: i32) {
     let asked = Arc::new(AtomicUsize::new(0));
     let seen = asked.clone();
     let app = axum::Router::new().route(
@@ -56,7 +62,7 @@ async fn a_signal_exits_130() {
     let pid = child.id().to_string();
     assert!(
         Command::new("kill")
-            .args(["-INT", &pid])
+            .args([signal, &pid])
             .status()
             .unwrap()
             .success()
@@ -64,5 +70,5 @@ async fn a_signal_exits_130() {
     let code = tokio::task::spawn_blocking(move || child.wait().unwrap())
         .await
         .unwrap();
-    assert_eq!(code.code(), Some(130));
+    assert_eq!(code.code(), Some(want));
 }
