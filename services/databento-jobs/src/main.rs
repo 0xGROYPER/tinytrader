@@ -24,6 +24,8 @@
 //!   listed is bought again only when the quote's `again` names its job. A
 //!   submission is never retried; if its outcome is uncertain it blocks until
 //!   found on the job list or resolved with `POST /ledger/resolve`.
+//! - `GET /ledger/unresolved`: the submissions whose outcome isn't known,
+//!   each with the `request` and `at` that resolving it names.
 //! - `POST /ledger/resolve` with `{ request, at, job, note }`: the operator's
 //!   word on a submission whose outcome isn't known.
 //! - `POST /download/{job}`: streams the job's files into the store, each
@@ -635,6 +637,7 @@ async fn main() {
         .route("/submit", post(submit))
         .route("/quotes", get(quotes_list))
         .route("/quotes/{id}", get(quote_get).delete(quote_delete))
+        .route("/ledger/unresolved", get(ledger_unresolved))
         .route("/ledger/resolve", post(resolve))
         .route("/download/{job}", post(download))
         // A web page of another origin can't submit (or pay for) anything.
@@ -2185,6 +2188,26 @@ async fn send_quote(
         }
     }
     reply_ok(json!({ "submitted": submitted, "cost_usd": now }))
+}
+
+/// The submissions whose outcome isn't known: each one's latest step (its
+/// `request` fingerprint and `at`, which `POST /ledger/resolve` names) and
+/// when it was sent. Reads only.
+async fn ledger_unresolved(AxState(jobs): AxState<Shared>) -> Reply {
+    let guard = lock(&jobs.ledger);
+    let Some(l) = guard.as_ref() else {
+        return refused(StatusCode::SERVICE_UNAVAILABLE, "no ledger configured");
+    };
+    let list: Vec<Value> = l
+        .unresolved()
+        .iter()
+        .map(|e| {
+            let mut v = json!(e);
+            v["sent_at"] = json!(l.attempt_at(e));
+            v
+        })
+        .collect();
+    reply_ok(json!({ "unresolved": list }))
 }
 
 #[derive(Deserialize)]

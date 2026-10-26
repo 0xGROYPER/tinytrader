@@ -1068,6 +1068,26 @@ fn resolution(request: &str, at: f64, job: Option<&str>) -> Json<Resolve> {
 }
 
 #[tokio::test]
+async fn unresolved_submissions_are_listed_with_what_resolve_needs() {
+    let r = rig("unresolved-list").await;
+    let now = tinytrader_observe::unix_seconds();
+    let open = fp(&["SPY.OPT"]);
+    let done = fp(&["QQQ.OPT"]);
+    r.write(&open, "sending", None, now - 60.0);
+    r.write(&open, "uncertain", None, now - 50.0);
+    r.write(&done, "sending", None, now - 40.0);
+    r.write(&done, "submitted", Some("OPRA-DONE"), now - 30.0);
+    let (code, Json(v)) = ledger_unresolved(AxState(r.jobs.clone())).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    let list = v["unresolved"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{v}");
+    assert_eq!(list[0]["request"], json!(open));
+    assert_eq!(list[0]["state"], "uncertain");
+    assert_eq!(list[0]["at"], json!(now - 50.0));
+    assert_eq!(list[0]["sent_at"], json!(now - 60.0));
+}
+
+#[tokio::test]
 async fn never_made_only_after_half_an_hour_and_a_full_read_since() {
     let r = rig("resolve-none").await;
     let now = tinytrader_observe::unix_seconds();
