@@ -59,7 +59,25 @@ Every `tt` command, and every process tinytrader ships, keeps one contract:
 - **Help is the reference for flags**; the API pages are the reference for
   behaviour.
 
-### 3. Services and processes
+### 3. The console is a client like any other
+
+The console reads the same endpoints `tt` and strategies do, by capability
+(0017), with no data path of its own. Today it polls services' JSON views
+(the relay's bars, quotes and ticks; alpaca-data's snapshots and chains)
+through `/api/bars/{service}` and `/api/stream/{service}/{stream}`. Under
+this rule:
+
+- **Those views are `fetch`es** (0021 section 2): documented in the
+  generated contract, each with a `tt` command over the same endpoint
+  (`tt bars relay SPY --days 2`, `tt chain alpaca SPY`).
+- **Live widgets `listen`.** The relay serves its stream over a WebSocket as
+  well as TCP: the same records, the same join and the same markers, so a
+  page is one more subscriber, cut off like any slow one. The page decodes
+  the few schemas it shows (bars, BBO, trades) instead of polling.
+- **The console server stays a front end** (0003): it proxies, adds the
+  write gate and holds no market-data logic.
+
+### 4. Services and processes
 
 The rule shapes interfaces, not process lifetimes:
 
@@ -70,7 +88,7 @@ The rule shapes interfaces, not process lifetimes:
 - **Short-lived work is a process per run:** a fetch, a session (0022), a
   sweep, an import. It starts, does one thing, reports and exits.
 
-### 4. Libraries carry the logic
+### 5. Libraries carry the logic
 
 0021's layering is the rule for all code: foundation, plumbing, venues and
 clients as libraries; services and front ends on top. A library never
@@ -79,15 +97,16 @@ CI), and holds no process concerns (argument parsing, environment or secret
 lookup, signals, exits, runtime startup). So the same code runs behind HTTP,
 a socket, a pipe or a test.
 
-### 5. How it's applied
+### 6. How it's applied
 
 - **New services and commands** follow it from the start; a review checks
-  them against sections 1 to 4.
+  them against sections 1 to 5.
 - **Existing services move when they are next touched**, in the PR that
   touches them, not in a rewrite. Each such PR lists which parts of the
   rule it brings that service to, and its lines added and removed.
 - **The order** follows need: acquisition and the approval command line
-  (0021), sessions (0022), then the store's reads, the gateways' operator
+  (0021), sessions (0022), the console's data views and a WebSocket
+  `listen` on the relay, then the store's reads, the gateways' operator
   actions (`tt orders`, `tt flatten`, behind their existing tokens), and the
   rest as they come up.
 - **Exceptions** are written down in the service's API page with the
