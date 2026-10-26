@@ -97,10 +97,47 @@ CI), and holds no process concerns (argument parsing, environment or secret
 lookup, signals, exits, runtime startup). So the same code runs behind HTTP,
 a socket, a pipe or a test.
 
-### 6. How it's applied
+### 6. Placement is configuration
+
+Once the logic is in libraries (section 5), which pieces share a process is
+a deployment's choice, not a design boundary; the contracts are the same
+over a socket, a channel or a direct call.
+
+**Strategies run in one of three placements**, with the same records, the
+same ordering (0009) and the same fill model in each; only latency differs:
+
+| Placement | In the process | For |
+|---|---|---|
+| Client (default) | the strategy and the client libraries; the relay and gateway on loopback or the network | live and paper; any language; a strategy's crash never touches a feed or an account |
+| In-process backtest | the strategy, the store producer, the merge, simulated venues, 0009's runtime | backtests and sweeps: no sockets, deterministic, as fast as the data reads |
+| Co-located live | the strategy, a venue library's live connection, the gateway's broker and safety rules as libraries | only where latency demands it; it gives up fan-out (it holds the provider connection itself) and isolation, so it has its own feed connection and account |
+
+A strategy that backtests in-process and trades as a client sees the same
+semantics; a test runs one strategy both ways over the same days and
+compares its orders.
+
+**The store: one writer per volume, any number of data nodes.** Each data
+node runs a store over the volumes attached to it (the M2's drives, the
+mini's, a NAS later) and is the only writer to them (0005, per node).
+There is no single store process:
+
+- Each node declares its volumes and holdings in `/describe` and
+  `/catalog`; the deployment's inventory says where the nodes are.
+- Readers (`store-client`, the store producer, `tt store`, the console)
+  ask every node and merge the answers: one catalog, one coverage, each day
+  naming the node and volume that hold it. A node that isn't answering is
+  reported as away, as a missing volume is today, and anything that must
+  know everything held (a purchase's "what's had", 0019) fails closed while
+  one is away.
+- Filing goes to one node, chosen by placement (where there's room, the
+  deployment's preference), never to two. A move between nodes is the
+  node-to-node form of today's verified moves: copy, verify at the
+  destination, then release.
+
+### 7. How it's applied
 
 - **New services and commands** follow it from the start; a review checks
-  them against sections 1 to 5.
+  them against sections 1 to 6.
 - **Existing services move when they are next touched**, in the PR that
   touches them, not in a rewrite. Each such PR lists which parts of the
   rule it brings that service to, and its lines added and removed.
@@ -121,5 +158,5 @@ a socket, a pipe or a test.
 - Moving services over adds work to PRs that touch them; the "lines added
   and removed" line keeps that visible, and moving code into libraries
   should often remove more than it adds.
-- Not doing: a rewrite, a plugin or connector framework, or a process
-  supervisor.
+- Not doing: a rewrite, a plugin or connector framework, a process
+  supervisor, or a store that spans nodes as one writer.
