@@ -58,8 +58,12 @@ jobs:
     timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
+      # The OpenAPI check must compare with main's documents here.
+      OPENAPI_REQUIRE_BASE: "1"
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0 # the OpenAPI check compares with main's documents
       - name: Install the pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustc --version
       - uses: Swatinem/rust-cache@v2.9.2
