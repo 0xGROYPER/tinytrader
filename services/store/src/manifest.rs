@@ -104,13 +104,27 @@ pub fn pending_days(dir: &Path) -> Vec<String> {
 /// # Errors
 /// If a sidecar can't be read.
 pub fn resolve(dir: &Path, day: &str, indexed: &Value) -> Result<Value, String> {
+    resolve_listed(dir, day, indexed, true)
+}
+
+/// As [`resolve`], reading the day's merge in progress only if `pending`
+/// (as [`pending_days`] listed it).
+///
+/// # Errors
+/// If a sidecar can't be read.
+pub fn resolve_listed(
+    dir: &Path,
+    day: &str,
+    indexed: &Value,
+    pending: bool,
+) -> Result<Value, String> {
     let mut entry = if indexed.get("sidecar").is_some() {
         read_json(&sidecar(dir, day))?
             .ok_or_else(|| format!("{}: missing", sidecar(dir, day).display()))?
     } else {
         indexed.clone()
     };
-    if let Some(p) = read_json(&pending_path(dir, day))? {
+    if pending && let Some(p) = read_json(&pending_path(dir, day))? {
         entry["pending"] = p;
     }
     Ok(entry)

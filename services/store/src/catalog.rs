@@ -351,6 +351,10 @@ pub fn provider_name(folder: &str) -> Option<String> {
     crate::ingest::provider_dir(folder).map(str::to_ascii_lowercase)
 }
 
+/// A schema folder's day entries (or why its index couldn't be read), each
+/// day's or why its sidecar couldn't be.
+pub type Entries = std::sync::Arc<Result<BTreeMap<String, Result<Value, String>>, String>>;
+
 /// Where data was found on a volume, with the provider it belongs to: a
 /// dataset in the store layout, a provider's batch download (or a download
 /// folder without its manifest, by its query), or any other DBN file, by its
@@ -366,6 +370,10 @@ pub enum Place {
         schema: String,
         dir: PathBuf,
         days: Vec<(String, u64, bool)>,
+        /// The manifest's entry of each filed day that has one, as
+        /// `/coverage` reports it, read when the folder was: `/coverage`
+        /// answers from memory, and every write to the folder reads it again.
+        entries: Entries,
     },
     Batch {
         provider: Option<String>,
@@ -866,14 +874,17 @@ fn add_days(dir: &Path, k: &Key, schema: &str, scan: &mut Scan) -> bool {
     let mut any = false;
     // Partial days are those the folder's manifest lists (its coverage); an
     // unreadable manifest is an error of the volume.
-    // The index only: a partial day's sidecar isn't read to catalog it.
-    let partial = crate::manifest::read_index(dir).unwrap_or_else(|e| {
-        scan.fail(dir, e);
-        BTreeMap::new()
-    });
+    let (partial, unreadable) = match crate::manifest::read_index(dir) {
+        Ok(index) => (index, None),
+        Err(e) => {
+            scan.fail(dir, e.clone());
+            (BTreeMap::new(), Some(e))
+        }
+    };
     // Merges left pending, for the store to settle.
-    for day in crate::manifest::pending_days(dir) {
-        scan.unsettled.push((dir.to_path_buf(), day));
+    let pending = crate::manifest::pending_days(dir);
+    for day in &pending {
+        scan.unsettled.push((dir.to_path_buf(), day.clone()));
     }
     for (day, e) in &partial {
         if e.get("pending").is_some() {
@@ -925,6 +936,21 @@ fn add_days(dir: &Path, k: &Key, schema: &str, scan: &mut Scan) -> bool {
         any = true;
     }
     if any {
+        // Each filed day's entry, its sidecar read once here rather than on
+        // every `/coverage`.
+        let entries = match unreadable {
+            Some(e) => Err(e),
+            None => Ok(held
+                .iter()
+                .filter(|(_, _, filed)| *filed)
+                .filter_map(|(day, _, _)| {
+                    let indexed = partial.get(day)?;
+                    let listed = pending.contains(day);
+                    let entry = crate::manifest::resolve_listed(dir, day, indexed, listed);
+                    Some((day.clone(), entry.map(|e| crate::partial::reported(&e))))
+                })
+                .collect()),
+        };
         let (provider, dataset, symbol) = k.clone();
         scan.places.push(Place::Days {
             provider,
@@ -933,6 +959,7 @@ fn add_days(dir: &Path, k: &Key, schema: &str, scan: &mut Scan) -> bool {
             schema: schema.to_owned(),
             dir: dir.to_path_buf(),
             days: held,
+            entries: std::sync::Arc::new(entries),
         });
     }
     any
