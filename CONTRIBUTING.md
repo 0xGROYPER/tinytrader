@@ -31,7 +31,7 @@ deployment?* If not, it goes in yours.
 - Links to anyone's private repositories or infrastructure.
 
 Example values are fine inside `examples/`, because they are clearly samples
-(the quickstart's public Coinbase products, for instance).
+(public Coinbase products, for instance).
 
 ## Mechanisms here, choices there
 
