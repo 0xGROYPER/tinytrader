@@ -24,14 +24,19 @@ there and an old one moves there when it is next touched.
 
 ## Decision
 
-### 1. Every capability is an endpoint, and every endpoint has a `tt` command
+### 1. Every platform capability is an endpoint, and has a `tt` command
 
-- What a service can do, it does through a documented endpoint (HTTP, or a
-  stream protocol for the relay and the gateways), in the generated contract
-  (0021 section 5). Nothing a person can do is reachable only from the
-  console's page or only from a script.
+- What the platform does (data, acquisition, trading, sessions, operations)
+  it does through a documented endpoint (HTTP, or a stream protocol for the
+  relay and the gateways), in the generated contract (0021 section 5).
+  Nothing a person can do is reachable only from the console's page or only
+  from a script.
 - `tt` has a command for each: `tt store coverage …`, `tt store files …`,
   `tt fetch …`, `tt quotes`, `tt orders …`, `tt session …`, `tt news …`.
+- The console's own optional modules (prefs, which are opaque per-browser
+  keys; reminders, profiles, journal, collections) stay in the contract but
+  get no dedicated commands: `tt api GET|POST /api/…` reaches any endpoint
+  through the same guards.
   The console and the TUI are front ends over the same endpoints; none of
   the three holds logic the service doesn't own.
 - Writes from `tt` go through the same guards as from the console: the
@@ -46,10 +51,14 @@ Every `tt` command, and every process tinytrader ships, keeps one contract:
   command's arguments. Outputs: `--publish ADDR`, `--output -`, `--write
   store`, or its answer on stdout. Addresses have a scheme (`tcp://`,
   `unix://`, `http(s)://`).
-- **stdout is data only.** Protocol bytes or the answer (JSON by default,
-  `--format table` for people); logs and progress go to stderr.
-- **Exit codes are truthful:** 0 done, 1 failed, 2 usage, 130 signalled; a
-  partial result is a failure that says what it got.
+- **stdout is data only.** Protocol bytes or the answer: a table when stdout
+  is a terminal, JSON when it isn't (`--format table|json` overrides), and
+  NDJSON, one object per line, for anything that streams. Logs, progress and
+  prompts go to stderr.
+- **Exit codes are truthful:** 0 done, 1 failed, 2 usage, 3 refused (a guard
+  said no, or something it must know can't be known: a node away, a quote
+  expired), 128+n on signal n (130 for SIGINT, 143 for SIGTERM). A partial
+  result is a failure that says what it got.
 - **Foreground.** A command runs until done and stops on a signal, cleaning
   up only what it started. Whatever must outlive a terminal runs as a job or
   service in the deployment's scheduler (0020); tinytrader ships no
@@ -70,12 +79,16 @@ this rule:
 - **Those views are `fetch`es** (0021 section 2): documented in the
   generated contract, each with a `tt` command over the same endpoint
   (`tt bars relay SPY --days 2`, `tt chain alpaca SPY`).
-- **Live widgets `listen`.** The relay serves its stream over a WebSocket as
-  well as TCP: the same records, the same join and the same markers, so a
-  page is one more subscriber, cut off like any slow one. The page decodes
-  the few schemas it shows (bars, BBO, trades) instead of polling.
-- **The console server stays a front end** (0003): it proxies, adds the
-  write gate and holds no market-data logic.
+- **Live widgets `listen`, through a bridge.** A page can only open `wss://`
+  on the console's HTTPS address (personal devices reach the services'
+  hosts only on 443 and 22), and the relay is the hot path, so the relay
+  gains nothing. A bridge (in the console, or its own process) subscribes to
+  the relay over TCP like any client and serves the same records, join and
+  markers over `wss://` on the console's address, cutting off a slow page
+  itself. The page decodes the few schemas it shows (bars, BBO, trades)
+  instead of polling.
+- **The console server stays a front end** (0003): it proxies, bridges,
+  adds the write gate and holds no market-data logic.
 
 ### 4. Services and processes
 
@@ -133,10 +146,19 @@ M2's drives, the mini's, a NAS later), and writes only to volumes it owns
   `/catalog`; the deployment's inventory says where the nodes are.
 - Readers (`store-client`, the store producer, `tt store`, the console)
   ask every node and merge the answers: one catalog, one coverage, each day
-  naming the node and volume that hold it. A node that isn't answering is
-  reported as away, as a missing volume is today, and anything that must
-  know everything held (a purchase's "what's had", 0019) fails closed while
-  one is away.
+  naming the node and volume that hold it. **The set of nodes comes from the
+  deployment's inventory, never from discovery**, so a node that's missing
+  is known to be missing.
+- **A purchase is refused (0019) while any inventoried node:** doesn't
+  answer; answers 503 (its first scan isn't done); can't give a fresh scan
+  begun after the request; or reports any missing volume. **And while any
+  volume claim is contested, stale or unreadable, or a volume is between
+  owners.**
+- **A handover never leaves a volume uncounted:** the new owner reports the
+  volume before the old one stops reporting it, so for a moment both do,
+  never neither. A day held on two nodes is merged as 0019 section 3 merges
+  any day held twice.
+- 0019's tests gain a case for each refusal above.
 - Filing goes to one node, chosen by placement (where there's room, the
   deployment's preference), never to two. A move between nodes is the
   node-to-node form of today's verified moves: copy, verify at the
@@ -150,8 +172,8 @@ M2's drives, the mini's, a NAS later), and writes only to volumes it owns
   touches them, not in a rewrite. Each such PR lists which parts of the
   rule it brings that service to, and its lines added and removed.
 - **The order** follows need: acquisition and the approval command line
-  (0021), sessions (0022), the console's data views and a WebSocket
-  `listen` on the relay, then the store's reads, the gateways' operator
+  (0021), sessions (0022), the console's data views and the WebSocket
+  bridge, then the store's reads, the gateways' operator
   actions (`tt orders`, `tt flatten`, behind their existing tokens), and the
   rest as they come up.
 - **Exceptions** are written down in the service's API page with the
