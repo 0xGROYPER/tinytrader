@@ -134,6 +134,11 @@ venues:
   the holes are then gap messages at their times (0021 section 9).
 - **Schema per need.** A cross-section can read `cbbo-1m` for the chain and
   `cmbp-1` for the few contracts it trades, as two sources.
+- **Mixed schemas are said so.** A stream carrying more than one schema
+  (two sources merged, or a `cbbo-1m` warm-up before `cmbp-1` live, 0021
+  section 9) has `schema` unset in its DBN metadata (mixed), and each
+  record's rtype says what it is, so a reader that trusts the header never
+  misdecodes. `ReplayCompleted` marks the hand-over from history to live.
 
 ### 5. The simulator grows for multi-day options
 
