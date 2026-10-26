@@ -336,7 +336,36 @@ are the stored DBN, unchanged.
   A partial day sends what's held and a gap message naming what isn't (its
   coverage pieces: the contracts and hours missing).
 
-### 9. Resume and loss accounting: later, in DBN
+### 9. Warm-up: history, then live, in one join
+
+A strategy that needs a lookback (indicator windows, today's high and low,
+a book) gets it from the join that gives it live data: `listen` with
+`start`. It reads history from `start`, then `ReplayCompleted`, then live,
+in one stream, and never stitches sources itself. The relay assembles the
+history from three tiers:
+
+| Part of the lookback | Comes from |
+|---|---|
+| Days the store holds | the store producer (section 8) |
+| Today, before the join | the relay's own retention of today, or the recorder's hot copy once capture exists; a provider's history only where it replays intraday (Alpaca yes; OPRA `cmbp-1` no) |
+| From the join on | live |
+
+**One cut, no seam errors.** The relay fixes a cut point at the join:
+history is every record before it, live every record after it, so nothing
+is sent twice or missed at the hand-over, and a tier that can't supply its
+part is an explicit gap, never a skip. A client that reconnects mid-session
+resumes at its own last point (section 10), not at a fresh `start`.
+
+**Today's retention is the missing tier.** An OPRA relay today keeps
+nothing of the session before a client joins. Holding it (in memory or on a
+local hot disk; a `cmbp-1` day is up to about 28 GB) is sized and decided
+with 0013's capture, since the recorder's hot copy serves the same need.
+
+**A cheaper warm-up** for lookbacks that are bars: `fetch` the bars, then
+`listen` live, accepting a seam at a bar boundary. The one join stays the
+default because it is exact.
+
+### 10. Resume and loss accounting, in DBN
 
 Hyphae's framed protocol wrapped the stream in frames with a stream ID, an
 epoch per producer restart, a contiguous sequence, resumable subscriptions
@@ -344,15 +373,14 @@ and acknowledgement windows. That gives exact resume after a disconnect,
 and exact accounting of what a subscriber missed, at the cost of a wire
 format no DBN tool reads.
 
-tinytrader's relay doesn't need it yet. A client that drops rejoins with
-`start` (where the source keeps history), source gaps are marked, and a
-cut-off client is told. It will matter when the recorder (step 7, 0013)
-must prove a capture whole across a relay restart or a reconnect. Then the
-same guarantees go in-band, in standard DBN: the relay sends an epoch at
+tinytrader needs those guarantees, not that format. They are what makes
+the warm-up's cut exact (section 9) and a mid-session reconnect resume
+where it left off, and later what lets the recorder (step 7, 0013) prove a
+capture whole across a relay restart. So they go in-band, in standard DBN: the relay sends an epoch at
 each start and a running record count in periodic `SystemMsg` markers, and
 the join takes `after: {epoch, count}` to resume from what it still holds,
-or says the gap. A DBN tool skips the markers; the recorder checks them.
-Not built until the recorder needs it.
+or says the gap. A DBN tool skips the markers; strategies and the recorder check them.
+Built with the store producer's hand-over to live (step 5c).
 
 ## Steps and budgets
 
@@ -378,6 +406,7 @@ own and don't wait for any of the rest.
 | 4. Addresses: `--publish`/`--connect` with `tcp://` and `unix://`, `--output -`/`--input -`, on the relay and `tt` | 300 | 250 |
 | 5a. The store producer: one symbol-day, direct and lossless, holes as gaps | 450 | 300 |
 | 5b. The k-way merge across files, pace, the shared (hub) path, and `tt listen store` | 450 | 300 |
+| 5c. Warm-up: the cut, the hand-over from store to live, epoch and count markers, `after` resume | 400 | 400 |
 | 6a. `--every` time and calendar triggers, in the services that own the fetch | 250 | 200 |
 | 6b. `--every` stream-event triggers on the relay (one provider), coalescing | 350 | 300 |
 | 7. `tt record`: the recorder as a subscriber filing through the store (with 0013) | (scoped with 0013) | |
@@ -385,10 +414,10 @@ own and don't wait for any of the rest.
 | 9b. The dependency-rule CI check; `libs/alpaca` to `libs/venues/alpaca`; `libs/instruments` from the services' OCC and root parsing | 350 | 250 |
 | 9c. `libs/venues/databento` from the relay's and `databento-jobs`' mapping (net negative) | 300 | 200 |
 | 8. Docs: the roles, verbs and addresses in each API page | (docs) | |
-| **The rest, before 7** | **1,950** | **1,500** |
+| **The rest, before 7** | **2,350** | **1,900** |
 
 Order: 0 first for the endpoints 2 and 3 use; then 1, 2 and 3 in any
-order. After them: 4 before 5b and 6b; 5a needs 2, 5b needs 5a; 6a needs
+order. After them: 4 before 5b and 6b; 5a needs 2, 5b needs 5a, 5c needs 5b; 6a needs
 1; 6b needs 4 and 6a. 9a stands alone; 9b before 9c, and 9c before 6b. Each step reports the lines it removes beside these.
 
 ## Consequences
