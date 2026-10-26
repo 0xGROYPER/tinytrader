@@ -347,7 +347,7 @@ history from three tiers:
 | Part of the lookback | Comes from |
 |---|---|
 | Days the store holds | the store producer (section 8) |
-| Today, before the join | the relay's own retention of today, or the recorder's hot copy once capture exists; a provider's history only where it replays intraday (Alpaca yes; OPRA `cmbp-1` no) |
+| Today, before the join | the provider's intraday replay where it has one: Alpaca's history; for OPRA, Databento's intraday replay of `cbbo-1s`, `cbbo-1m`, `tcbbo` or `trades` (it won't replay `cmbp-1`). At full `cmbp-1` fidelity, only the relay's own retention of today or the recorder's hot copy, once capture exists. |
 | From the join on | live |
 
 **One cut, no seam errors.** The relay fixes a cut point at the join:
@@ -356,10 +356,20 @@ is sent twice or missed at the hand-over, and a tier that can't supply its
 part is an explicit gap, never a skip. A client that reconnects mid-session
 resumes at its own last point (section 10), not at a fresh `start`.
 
-**Today's retention is the missing tier.** An OPRA relay today keeps
-nothing of the session before a client joins. Holding it (in memory or on a
-local hot disk; a `cmbp-1` day is up to about 28 GB) is sized and decided
-with 0013's capture, since the recorder's hot copy serves the same need.
+**For OPRA today, a coarser schema closes the gap.** Most lookbacks want
+minute or second quotes and trades, not every book update. A join that asks
+for `cmbp-1` live with a warm-up in `cbbo-1m` (or `cbbo-1s`, `tcbbo`) gets
+today's part from Databento's intraday replay. The relay already does this
+for one contract (`/session`); the warm-up asks for the strategy's symbols,
+or the whole parent. The history's metadata says which schema it is, so a
+strategy never mistakes minute quotes for the book. Before it's built: check
+that an intraday replay is covered by the live subscription. If it would be
+charged, it is a priced request under 0019, like any purchase.
+
+**Full fidelity before the join** (`cmbp-1` from the open) needs the relay
+to keep today itself, in memory or on a local hot disk (a `cmbp-1` day is up
+to about 28 GB). That is sized and decided with 0013's capture, since the
+recorder's hot copy serves the same need.
 
 **A cheaper warm-up** for lookbacks that are bars: `fetch` the bars, then
 `listen` live, accepting a seam at a bar boundary. The one join stays the
