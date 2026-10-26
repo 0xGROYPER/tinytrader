@@ -1,6 +1,6 @@
 # 0021: Producers, verbs and addresses for acquisition, on shared plumbing
 
-- **Status:** Proposed
+- **Status:** Accepted for the first deliverable, steps 0–3 (2026-10-26); the rest Proposed, each step accepted on its own
 - **Date:** 2026-10-26
 - **Builds on:** [0003](0003-front-ends.md) (one data layer, any number of
   front ends), [0014](0014-history-feeds.md) (history feeds, and why Hyphae's
@@ -218,8 +218,9 @@ signed in as an allowed login, holds no secret, and every approval records
 who gave it: the approver is the login the proxy sets, never a value `tt`
 sends.
 
-- `tt` approves only through the proxy's address (`TT_CONSOLE`, for example
-  `https://mini.tail8aa7c8.ts.net`), even on the console's own host. A
+- `tt` approves only through the proxy's address (`TT_CONSOLE`: the
+  console's name under `tailscale serve`, say), even on the console's own
+  host. A
   loopback address has no proxy login, so the write gate refuses it, and
   `tt` says why instead of retrying.
 - With no authenticating proxy (no allowed logins configured), the console
