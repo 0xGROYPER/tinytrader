@@ -189,7 +189,7 @@ venues:
 
 ### 6. The run, end to end
 
-`tt` drives it, as a front end to the session service:
+`tt` drives it, starting the session process and reading its control connection:
 
 ```sh
 # 1. Plan: what the inputs are, whether the store holds them, what's missing.
