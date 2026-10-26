@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use crate::catalog::Served;
 use crate::ingest::Volume;
 
 /// The suffixes of the files the store serves.
@@ -21,31 +22,23 @@ fn served(name: &str) -> bool {
     SERVED.iter().any(|s| name.ends_with(s))
 }
 
-/// Every served file on the volumes whose logical name matches `pattern`
-/// (`*` any run of characters, `/` included; `?` any one character), and,
-/// given a `provider`, that is in that provider's top-level folder (case
-/// ignored), sorted, at most `limit`: `{ files: [{ name, volume, path, bytes
-/// }], truncated }`.
-pub fn list(volumes: &[Volume], pattern: &str, provider: Option<&str>, limit: usize) -> Value {
+/// Every served file the last scan found (`index`: each volume's, sorted)
+/// whose logical name matches `pattern` (`*` any run of characters, `/`
+/// included; `?` any one character), and, given a `provider`, that is in
+/// that provider's top-level folder (case ignored), at most `limit`: `{
+/// files: [{ name, volume, path, bytes }], truncated }`. The volumes aren't
+/// walked: a listing is as quick as the index is long.
+pub fn list(
+    index: &[(&str, &[Served])],
+    pattern: &str,
+    provider: Option<&str>,
+    limit: usize,
+) -> Value {
     let mut files = Vec::new();
     let mut truncated = false;
-    'volumes: for v in volumes {
-        let mut found = Vec::new();
-        match provider {
-            // Only that provider's folders are walked.
-            Some(p) => {
-                for top in fs::read_dir(&v.path).into_iter().flatten().flatten() {
-                    let name = top.file_name().to_string_lossy().into_owned();
-                    if name.eq_ignore_ascii_case(p) && top.path().is_dir() {
-                        walk(&v.path, &top.path(), &mut found);
-                    }
-                }
-            }
-            None => walk(&v.path, &v.path, &mut found),
-        }
-        found.sort();
+    'volumes: for &(volume, found) in index {
         for (rel, bytes) in found {
-            let name = format!("{}/{rel}", v.name);
+            let name = format!("{volume}/{rel}");
             let top = rel.split('/').next().unwrap_or_default();
             if !matches(pattern, &name) || provider.is_some_and(|p| !top.eq_ignore_ascii_case(p)) {
                 continue;
@@ -54,7 +47,7 @@ pub fn list(volumes: &[Volume], pattern: &str, provider: Option<&str>, limit: us
                 truncated = true;
                 break 'volumes;
             }
-            files.push(json!({ "name": name, "volume": v.name, "path": rel, "bytes": bytes }));
+            files.push(json!({ "name": name, "volume": volume, "path": rel, "bytes": bytes }));
         }
     }
     json!({ "files": files, "truncated": truncated })
@@ -62,7 +55,7 @@ pub fn list(volumes: &[Volume], pattern: &str, provider: Option<&str>, limit: us
 
 /// Served files under `dir`, as paths relative to `root`, with sizes. Links
 /// are not followed and hidden entries are skipped.
-fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) {
+pub fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -155,6 +148,22 @@ mod tests {
         )
     }
 
+    /// The listing `/files` gives, from a scan of `v`.
+    fn list_of(v: &Volume, pattern: &str, provider: Option<&str>, limit: usize) -> Value {
+        let t = crate::catalog::Thresholds {
+            warning: 100.0,
+            critical: 100.0,
+            floor: 100.0,
+        };
+        let (_, _, served) = crate::catalog::scan_volume(&v.name, &v.path, t, &[]);
+        list(
+            &[(v.name.as_str(), served.as_slice())],
+            pattern,
+            provider,
+            limit,
+        )
+    }
+
     #[test]
     fn lists_finished_dbn_files_only() {
         let (v, d) = volume("list");
@@ -168,7 +177,7 @@ mod tests {
         fs::write(inc.join("opra-20260903.cmbp-1.dbn.zst"), b"y").unwrap();
         fs::write(d.join("loose.dbn"), b"zz").unwrap();
 
-        let all = list(std::slice::from_ref(&v), "*", None, MAX_LISTED);
+        let all = list_of(&v, "*", None, MAX_LISTED);
         let names: Vec<&str> = all["files"]
             .as_array()
             .unwrap()
@@ -186,9 +195,9 @@ mod tests {
         assert_eq!(all["files"][0]["volume"], "list");
         assert_eq!(all["truncated"], false);
 
-        let some = list(std::slice::from_ref(&v), "*cmbp-1*", None, MAX_LISTED);
+        let some = list_of(&v, "*cmbp-1*", None, MAX_LISTED);
         assert_eq!(some["files"].as_array().unwrap().len(), 1);
-        let one = list(std::slice::from_ref(&v), "*", None, 1);
+        let one = list_of(&v, "*", None, 1);
         assert_eq!(one["files"].as_array().unwrap().len(), 1);
         assert_eq!(one["truncated"], true);
         // Scoped to a provider, by its folder, case ignored.
@@ -197,7 +206,7 @@ mod tests {
         fs::write(alpaca.join("2026-09-01.dbn.zst"), b"a").unwrap();
         let pattern = "*/OPRA.PILLAR/SPY.OPT/cmbp-1/*";
         let count = |p: Option<&str>| {
-            list(std::slice::from_ref(&v), pattern, p, MAX_LISTED)["files"]
+            list_of(&v, pattern, p, MAX_LISTED)["files"]
                 .as_array()
                 .unwrap()
                 .len()

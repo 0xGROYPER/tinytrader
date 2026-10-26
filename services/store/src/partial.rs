@@ -1184,6 +1184,7 @@ pub fn coverage_in(
                     schema: k,
                     days,
                     entries,
+                    files,
                     ..
                 } if ours(p.as_deref(), provider)
                     && d.eq_ignore_ascii_case(dataset)
@@ -1196,20 +1197,28 @@ pub fn coverage_in(
                             Some(e) => Some(e.as_ref().map_err(Clone::clone)?),
                             None => None,
                         };
-                        let r = row(day, volume, *filed, *size, entry);
+                        let mut r = row(day, volume, *filed, *size, entry);
+                        r["files"] = named(volume, files.get(day).into_iter().flatten().cloned());
                         copies.entry(day.clone()).or_default().push(r);
                     }
                 }
                 crate::catalog::Place::Batch {
                     provider: p,
                     batch: b,
+                    dir,
                 } if ours(p.as_deref(), provider) && b.dataset.eq_ignore_ascii_case(dataset) => {
                     let Some(contracts) = holds(&b.symbols, b.stype_in.as_deref(), symbol) else {
                         continue;
                     };
                     for (day, _, _, size) in b.files.iter().filter(|f| f.1 == schema) {
                         if wanted(day) {
-                            let r = held_row(day, volume, *size, &contracts, (0, u64::MAX));
+                            let mut r = held_row(day, volume, *size, &contracts, (0, u64::MAX));
+                            let names = b.names.get(&(day.clone(), schema.to_owned()));
+                            let within = names
+                                .into_iter()
+                                .flatten()
+                                .map(|n| Path::new(dir).join(n).to_string_lossy().into_owned());
+                            r["files"] = named(volume, within);
                             copies.entry(day.clone()).or_default().push(r);
                         }
                     }
@@ -1220,6 +1229,7 @@ pub fn coverage_in(
                     provider: p,
                     header: h,
                     size,
+                    path,
                 } if ours(p.as_deref(), provider)
                     && h.dataset.eq_ignore_ascii_case(dataset)
                     && h.schema.as_deref().is_none_or(|s| s == schema) =>
@@ -1227,10 +1237,13 @@ pub fn coverage_in(
                     let Some(contracts) = holds(&h.symbols, h.stype_in.as_deref(), symbol) else {
                         continue;
                     };
-                    for (i, day) in h.days().into_iter().enumerate() {
+                    let days = h.days();
+                    let n = days.len();
+                    for (i, day) in days.into_iter().enumerate() {
                         if wanted(&day) {
-                            let size = if i == 0 { *size } else { 0 };
-                            let r = held_row(&day, volume, size, &contracts, (h.start, h.end));
+                            let size = crate::catalog::share(*size, n, i);
+                            let mut r = held_row(&day, volume, size, &contracts, (h.start, h.end));
+                            r["files"] = named(volume, std::iter::once(path.clone()));
                             copies.entry(day).or_default().push(r);
                         }
                     }
@@ -1242,8 +1255,15 @@ pub fn coverage_in(
     Ok(copies.into_values().map(merge_copies).collect())
 }
 
+/// Files by their logical names, `<volume>/<path>`, as `GET /files` serves
+/// them.
+fn named(volume: &str, within: impl Iterator<Item = String>) -> Value {
+    json!(within.map(|w| format!("{volume}/{w}")).collect::<Vec<_>>())
+}
+
 /// One day's row from its copies: a complete copy if there is one, otherwise
-/// the union of the partial copies' contracts and windows.
+/// the union of the partial copies' contracts and windows. Its `files` are
+/// that complete copy's, or every partial copy's.
 fn merge_copies(copies: Vec<Value>) -> Value {
     let same = |a: &Value, b: &Value| {
         ["kind", "coverage", "size", "sha256"]
@@ -1266,6 +1286,17 @@ fn merge_copies(copies: Vec<Value>) -> Value {
                     .reduce(|a, b| a.union(&b));
                 out["coverage"] = union.map_or(Value::Null, |u| u.to_json());
                 out["pending"] = json!(copies.iter().any(|c| c["pending"] == true));
+                let mut files: Vec<&Value> = Vec::new();
+                for f in copies
+                    .iter()
+                    .filter_map(|c| c["files"].as_array())
+                    .flatten()
+                {
+                    if !files.contains(&f) {
+                        files.push(f);
+                    }
+                }
+                out["files"] = json!(files);
                 for k in ["size", "sha256", "records"] {
                     out[k] = Value::Null;
                 }
@@ -2669,6 +2700,134 @@ pub(crate) mod tests {
             7,
             "the backup once, as a folder"
         );
+    }
+
+    #[test]
+    fn a_day_is_held_only_with_data_to_serve() {
+        let vol = scratch("servable");
+        let cbbo = vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+        // An empty day file, padding: not held.
+        put(&cbbo.join("2026-10-01.dbn.zst"), b"");
+        put(&cbbo.join("2026-10-02.dbn.zst"), b"abc");
+        // The older layout: a day folder of data and its definitions; a
+        // weekend's shell, of receipts and an archive; a day folder of only
+        // the definitions.
+        put(&cbbo.join("2026-10-03/definition.dbn.zst"), b"d");
+        put(&cbbo.join("2026-10-03/cbbo-1m.dbn.zst"), b"data");
+        put(&cbbo.join("2026-10-04/.archive/cbbo-1m.dbn.zst"), b"old");
+        put(&cbbo.join("2026-10-04/manifest.json"), b"{}");
+        put(&cbbo.join("2026-10-05/definition.dbn.zst"), b"d");
+        // A batch download: a file of two days, each counted its share, and
+        // an empty file, holding none.
+        let batch = vol.join("OPRA-20261006-X");
+        put(
+            &batch.join("metadata.json"),
+            json!({ "job_id": "OPRA-20261006-X", "query": { "dataset": "OPRA.PILLAR", "symbols": ["SPY.OPT"] } })
+                .to_string()
+                .as_bytes(),
+        );
+        put(&batch.join("manifest.json"), b"{}");
+        put(
+            &batch.join("opra-pillar-20261006-20261007.cbbo-1m.dbn.zst"),
+            b"12345",
+        );
+        put(&batch.join("opra-pillar-20261008.cbbo-1m.dbn.zst"), b"");
+        // Scratch output with no end in its header: its start's day only,
+        // not every day until it last changed.
+        let rec = recording(
+            "OPRA.PILLAR",
+            Some(Schema::Cbbo1M),
+            Some("2026-10-09"),
+            true,
+        );
+        put(&vol.join("tmp/scratch/combined-output.dbn.zst"), &rec);
+
+        let days = spy_coverage(&vol);
+        let at = "Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m";
+        let range = "v/OPRA-20261006-X/opra-pillar-20261006-20261007.cbbo-1m.dbn.zst";
+        let brief: Vec<(&str, Value, Value)> = days
+            .iter()
+            .map(|d| {
+                (
+                    d["day"].as_str().unwrap(),
+                    d["size"].clone(),
+                    d["files"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            brief,
+            [
+                (
+                    "2026-10-02",
+                    json!(3),
+                    json!([format!("v/{at}/2026-10-02.dbn.zst")])
+                ),
+                (
+                    "2026-10-03",
+                    json!(5),
+                    json!([
+                        format!("v/{at}/2026-10-03/cbbo-1m.dbn.zst"),
+                        format!("v/{at}/2026-10-03/definition.dbn.zst")
+                    ])
+                ),
+                ("2026-10-06", json!(3), json!([range])),
+                ("2026-10-07", json!(2), json!([range])),
+                (
+                    "2026-10-09",
+                    json!(rec.len()),
+                    json!(["v/tmp/scratch/combined-output.dbn.zst"])
+                ),
+            ]
+        );
+
+        let (cat, _, served) = crate::catalog::scan_volume("v", &vol, T, &[]);
+        assert_eq!(cat["errors"], json!([]));
+        let datasets = cat["datasets"].as_array().unwrap();
+        let filed = datasets
+            .iter()
+            .find(|d| d["provider"] == "databento")
+            .unwrap();
+        assert_eq!(
+            filed["schemas"]["cbbo-1m"]["days"],
+            json!({ "2026-10-02": 3, "2026-10-03": 5 })
+        );
+        assert_eq!(filed["stray"], false);
+        // Outside every provider's folder: the download is a dataset, the
+        // scratch output is stray.
+        let stray: Vec<(&Value, &Value)> = datasets
+            .iter()
+            .filter(|d| d["provider"].is_null())
+            .map(|d| (&d["symbol"], &d["stray"]))
+            .collect();
+        assert_eq!(
+            stray,
+            [
+                (&Value::Null, &json!(true)),
+                (&json!("SPY.OPT"), &json!(false))
+            ]
+        );
+        let scratch = datasets.iter().find(|d| d["stray"] == true).unwrap();
+        assert_eq!(
+            scratch["schemas"]["cbbo-1m"]["days"],
+            json!({ "2026-10-09": rec.len() })
+        );
+        // `/files` lists every served file, held or not, never a hidden one.
+        let listed: Vec<&str> = served.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            listed,
+            [
+                "Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-01.dbn.zst",
+                "Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-02.dbn.zst",
+                "Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-03/cbbo-1m.dbn.zst",
+                "Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-03/definition.dbn.zst",
+                "Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-05/definition.dbn.zst",
+                "OPRA-20261006-X/opra-pillar-20261006-20261007.cbbo-1m.dbn.zst",
+                "OPRA-20261006-X/opra-pillar-20261008.cbbo-1m.dbn.zst",
+                "tmp/scratch/combined-output.dbn.zst",
+            ]
+        );
+        fs::remove_dir_all(&vol).unwrap();
     }
 
     #[test]

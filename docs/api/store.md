@@ -15,8 +15,8 @@ Shared conventions are in the [API overview](README.md).
 | Endpoint | | |
 |---|---|---|
 | `GET /catalog?fresh=` | read | Each volume's datasets by provider, their schemas and days, and how full it is. Each schema lists its `partial` and `unfiled` days ([below](#what-the-store-holds)). |
-| `GET /coverage?provider=&dataset=&symbol=&schema=&start=&end=&fresh=` | read | Each day held: `complete`, or `partial` with its contracts and time window ([below](#partial-days)). |
-| `GET /files` | read | DBN files the volumes hold, by logical name (below). |
+| `GET /coverage?provider=&dataset=&symbol=&schema=&start=&end=&fresh=` | read | Each day held: `complete`, or `partial` with its contracts and time window, and the files that hold it ([below](#partial-days)). |
+| `GET /files` | read | DBN files the last scan found, by logical name (below). |
 | `GET /files/{volume}/{path}` | read | One DBN file, as it is on the volume. |
 | `GET /incoming` | read | Batches uploaded and waiting to be filed. |
 | `GET /batches/{provider}` | read | Which batches the volumes hold, and how. |
@@ -95,8 +95,21 @@ bought again), so they say what the store holds or say they can't
 - `filed` is true when every day of the dataset is in the store layout.
   Days in a batch download, or in the older layout of a folder per day, are
   listed in their schema's `unfiled`.
+- A day is held only when a file the store serves holds data for it
+  ([Reading files](#reading-files)). An empty day file (padding) holds
+  nothing, nor does a day folder of the older layout holding only receipts,
+  an `.archive`, its definitions (a `definition.*` sidecar, in a schema other
+  than `definition`) or empty files, such as a weekend's shell. An empty file
+  in a batch download, or anywhere else, holds no day either.
+- `stray` is true for a dataset held only in DBN files outside every
+  provider's folder and every layout (scratch output, a shadow run's, a
+  recording of another program's). They are counted, as every DBN file is,
+  but aren't a dataset the store keeps: a view of the datasets can leave
+  them out.
 - A batch file named for a range of days (`…-20261001-20261031.cbbo-1m…`)
-  counts every day of it, both ends included. When a batch is split by
+  counts every day of it, both ends included, its bytes shared evenly among
+  them (the remainder on the first), as are those of any file holding
+  several days. When a batch is split by
   symbol, or a file's name doesn't say its days, the batch counts every day of
   its query (`start` and `end` in `metadata.json`, the end excluded, as
   Databento means it: an end of `2026-10-10` or `2026-10-10T00:00:00Z` stops
@@ -112,7 +125,9 @@ bought again), so they say what the store holds or say they can't
   (`Alpaca/UVXY/2026-05-29.spot.trades.dbn.zst` under `UVXY`), when that
   folder is below the top-level one and named as a symbol is. A header
   without its start or its end takes the day its file is named for
-  (`2026-05-29.…`); without such a name, its start to its last change.
+  (`2026-05-29.…`). Without such a name, a header with no end holds its
+  start's day only: how far it reaches is unknown, and every day to its last
+  change would be counted with nothing in it.
   Hidden folders, such as a provider's `.incoming`, are
   skipped. Headers are read once and kept while a file's size and last change
   stay the same. A file whose header can't be read yet and that changed in
@@ -146,7 +161,7 @@ bought again), so they say what the store holds or say they can't
 ```json
 { "generated_at": 1792500000.0, "missing_volumes": [],
   "roots": [{ "name": "data", "path": "/Volumes/Data", "present": true, "writable": true, "errors": [],
-    "datasets": [{ "provider": "databento", "id": "OPRA.PILLAR", "symbol": "SPY.OPT", "filed": true,
+    "datasets": [{ "provider": "databento", "id": "OPRA.PILLAR", "symbol": "SPY.OPT", "filed": true, "stray": false,
       "sources": ["store: /Volumes/Data/Databento/OPRA.PILLAR"],
       "schemas": { "cbbo-1m": { "files": 2, "bytes": 1234, "symbols": [], "encodings": ["dbn.zst"],
         "days": { "2026-10-01": 600, "2026-10-02": 634 }, "partial": ["2026-10-02"], "unfiled": [], "degraded": [], "missing": [] } } }],
@@ -293,7 +308,8 @@ immutable, so a file once read can be kept.
 ### `GET /files?pattern=&provider=&limit=`
 
 ```json
-{ "files": [{ "name": "newdrive/Databento/…/2026-09-01.dbn.zst", "volume": "newdrive", "path": "Databento/…/2026-09-01.dbn.zst", "bytes": 1234 }], "truncated": false }
+{ "files": [{ "name": "newdrive/Databento/…/2026-09-01.dbn.zst", "volume": "newdrive", "path": "Databento/…/2026-09-01.dbn.zst", "bytes": 1234 }], "truncated": false,
+  "scanned_at": 1792500000.0, "updated_at": 1792500100.0 }
 ```
 
 - `pattern` (default `*`) is matched against the whole name: `*` any run of
@@ -303,13 +319,37 @@ immutable, so a file once read can be kept.
   folder, case ignored: `?pattern=*/OPRA.PILLAR/SPY.OPT/definition/*&provider=databento`.
 - `limit` (default and most 100,000) caps the list; `truncated` says whether
   more matched.
-- Sorted by volume, then path. The volumes are walked on each request; with
-  `provider`, only that provider's folders.
+- Sorted by volume, then path.
+- From the last scan (`scanned_at`, seconds since the epoch; `updated_at`
+  when a filing last updated it), which notes
+  every served file on a volume, held or not (all but those in a path an
+  operator [ignores](#post-volumesnameignore)): the volumes aren't walked on
+  a request, so a listing takes as long as matching the names. A file the store
+  files is listed at once (the folders a filing writes are read again in
+  place, as for `/coverage`); one copied onto a drive behind the store's back
+  is listed after the next scan (every `STORE_RESCAN_SECONDS`). Volumes that aren't there now are left out.
+  `503 {"error": "the store is still scanning"}` until the first scan is
+  done.
 
 ### `GET /files/{volume}/{path}`
 
 The file's bytes (`application/octet-stream`, with its length), streamed.
-`404` for an unknown volume or file, `400` for a name that isn't served.
+`400` for a name that isn't served. `404` for an unknown volume, or a file
+that isn't on a volume that is mounted and scanned. When the file may be
+there but can't be read now, `503`, so a client can ask again:
+
+- `volume newdrive is not mounted (…); ask again when it is`: the volume
+  isn't there, or is an empty folder left where a drive was mounted.
+  Nothing is served from it.
+- `volume newdrive is missing (its errors are in /catalog); ask again when it
+  is read`: the last scan found it missing, and the file wasn't found.
+- `volume newdrive is being scanned; ask again shortly`: the file wasn't
+  found, and the volume hasn't been scanned yet (the store just started, or
+  the drive just appeared).
+
+Each file sent is logged on the store's standard error with its size and
+how long it took: `store: sent newdrive/…/2026-09-01.dbn.zst: 1234 bytes in
+0.012s (found in 0.001s)`.
 
 Each request reads one whole file. Ranges of records, bulk reads across many
 days, and running work beside the data are later steps.
@@ -428,9 +468,10 @@ kept in `provenance/{id}/`, and each step is recorded in `migrations/`.
 ```json
 { "days": [
   { "day": "2026-10-01", "volume": "data", "volumes": ["data"], "kind": "complete", "filed": true, "size": 1234, "conflict": false,
+    "files": ["data/Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-01.dbn.zst"],
     "condition": { "state": "degraded", "last_modified": "2026-10-03", "source": "batch OPRA-20261003-X", "checked_at": 1792500000.0 } },
   { "day": "2026-10-02", "volume": "data", "volumes": ["data"], "kind": "partial", "filed": true, "size": 4567,
-    "records": 68851, "sha256": "…",
+    "records": 68851, "sha256": "…", "files": ["data/Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m/2026-10-02.dbn.zst"],
     "coverage": { "kind": "contracts", "stype": "raw_symbol", "symbols": ["SPY   261002C00728000", "…"], "window": [1790946000000000000, 1790985600000000000] },
     "pending": false, "conflict": false, "condition": null }
 ], "missing_volumes": [], "scanned_at": 1792500000.0 }
@@ -451,6 +492,22 @@ coverage is the union of the copies' contracts and the span of their
 windows, with no single `size`, `sha256` or `records`. `conflict` is true
 when the copies differ. `filed` is true when any copy is in the store
 layout.
+
+`files` names the files that hold the day, as
+[`GET /files/{volume}/{path}`](#get-filesvolumepath) serves them, so a
+client needn't know each provider's layout:
+
+| Where the day is | `files` |
+|---|---|
+| A day file of the store layout (Databento's) | `<volume>/<Provider>/<DATASET>/<symbol>/<schema>/<day>.dbn.zst` |
+| A day folder of the older layout (Alpaca's) | Its DBN files, the data first (`…/<schema>/<day>/<schema>.dbn.zst`), then sidecars such as `…/<day>/definition.dbn.zst` |
+| A batch download | The batch's DBN files holding that day of the schema; a file of a range, or of every day of the query, may hold other days too |
+| Any other DBN file | That file, which may hold other days, schemas or symbols too |
+
+A complete day held in several places names the files of the copy the row
+describes; a partial day held in copies that differ names every copy's. A
+batch download in CSV or JSON has no DBN files to name: its `files` is
+empty.
 
 `pending` is true while a merge into that day is unfinished. Each scan (and
 so the store's start) settles it, unless a filing is running (it may be

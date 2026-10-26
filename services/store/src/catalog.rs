@@ -40,7 +40,7 @@ pub fn severity(status: &str) -> u8 {
 }
 
 /// One root: `{ name, path, present, volume: { total_bytes, available_bytes,
-/// used_fraction, status }, datasets: [{ provider, id, symbol, filed, sources,
+/// used_fraction, status }, datasets: [{ provider, id, symbol, filed, stray, sources,
 /// schemas: { schema: { files, bytes, symbols, days: { "YYYY-MM-DD": bytes },
 /// partial, unfiled } } }], dataset_bytes, unrecognised: [names], errors,
 /// pending_files }`.
@@ -49,17 +49,21 @@ pub fn scan_root(name: &str, path: &Path, t: Thresholds) -> Value {
     scan_volume(name, path, t, &[]).0
 }
 
+/// A served file found by a scan: its path within the volume, and its size.
+pub type Served = (String, u64);
+
 /// As [`scan_root`], skipping the `ignored` paths, with every place found
-/// (the index `/coverage` answers from).
+/// (the index `/coverage` answers from) and every file the store serves,
+/// sorted (the index `/files` answers from).
 pub fn scan_volume(
     name: &str,
     path: &Path,
     t: Thresholds,
     ignored: &[PathBuf],
-) -> (Value, Vec<Place>) {
+) -> (Value, Vec<Place>, Vec<Served>) {
     if !path.is_dir() {
         let root = json!({ "name": name, "path": path, "present": false, "datasets": [], "unrecognised": [], "errors": [], "pending_files": [] });
-        return (root, Vec::new());
+        return (root, Vec::new(), Vec::new());
     }
     let volume = match shared_folder_filesystem(path) {
         // Folders shared into a container by Docker Desktop report the
@@ -96,8 +100,11 @@ pub fn scan_volume(
         places,
         foreign,
         unsettled,
+        mut served,
         ..
     } = scan;
+    served.sort();
+    served.dedup();
     // Counted as space used, never as data held (once: a top-level folder
     // holding nothing else is already counted whole).
     for ((folder, id), u) in foreign {
@@ -132,7 +139,7 @@ pub fn scan_volume(
         "pending_files": pending,
         "pending_merges": merges_json(&unsettled),
     });
-    (root, places)
+    (root, places, served)
 }
 
 fn merges_json(unsettled: &[(PathBuf, String)]) -> Value {
@@ -155,6 +162,9 @@ pub struct Folder {
     schema: String,
     stats: Option<Schema>,
     place: Option<Place>,
+    /// The folder within the volume, and the served files of its days.
+    within: String,
+    served: Vec<Served>,
     errors: Vec<(PathBuf, String)>,
     unsettled: Vec<(PathBuf, String)>,
 }
@@ -184,7 +194,10 @@ impl Folder {
             _ => return None,
         };
         let key = key(provider.as_deref(), &parts[at], symbol);
-        let mut scan = Scan::default();
+        let mut scan = Scan {
+            root: volume.to_path_buf(),
+            ..Scan::default()
+        };
         add_days(dir, &key, &schema, &mut scan);
         let stats = scan
             .datasets
@@ -197,6 +210,8 @@ impl Folder {
             schema,
             stats,
             place: scan.places.pop(),
+            within: rel.to_string_lossy().into_owned(),
+            served: scan.served,
             errors: scan.errors,
             unsettled: scan.unsettled,
         })
@@ -206,6 +221,21 @@ impl Folder {
     pub fn apply_places(&self, places: &mut Vec<Place>) {
         places.retain(|p| !matches!(p, Place::Days { dir, .. } if *dir == self.dir));
         places.extend(self.place.clone());
+    }
+
+    /// Put the served files of its days now in a scan's list of its
+    /// volume's (sorted), in place of those it had.
+    pub fn apply_files(&self, files: &mut Vec<Served>) {
+        files.retain(|(f, _)| {
+            let day = f
+                .strip_prefix(&self.within)
+                .and_then(|r| r.strip_prefix('/'))
+                .and_then(|r| r.get(..10));
+            !day.is_some_and(is_iso_date)
+        });
+        files.extend(self.served.iter().cloned());
+        files.sort();
+        files.dedup();
     }
 
     /// Put what the folder holds now in a scan's root of its volume: its days
@@ -250,7 +280,7 @@ impl Folder {
             Some(i) => &mut datasets[i],
             None => {
                 datasets.push(
-                    json!({ "provider": provider, "id": id, "symbol": symbol, "filed": true,
+                    json!({ "provider": provider, "id": id, "symbol": symbol, "filed": true, "stray": false,
                     "sources": [format!("store: {}", self.dataset_dir.display())], "schemas": {} }),
                 );
                 datasets.last_mut().expect("just pushed")
@@ -362,7 +392,8 @@ pub type Entries = std::sync::Arc<Result<BTreeMap<String, Result<Value, String>>
 #[derive(Clone)]
 pub enum Place {
     /// A schema folder in the store layout, with its day files (or older
-    /// day folders, not filed) and their sizes.
+    /// day folders, not filed) and their sizes, and each day's served files
+    /// (paths within the volume; a day folder's data first).
     Days {
         provider: Option<String>,
         dataset: String,
@@ -374,15 +405,20 @@ pub enum Place {
         /// `/coverage` reports it, read when the folder was: `/coverage`
         /// answers from memory, and every write to the folder reads it again.
         entries: Entries,
+        files: BTreeMap<String, Vec<String>>,
     },
+    /// A batch download, with the folder it is in (within the volume).
     Batch {
         provider: Option<String>,
         batch: Batch,
+        dir: String,
     },
+    /// Any other DBN file, with its path within the volume.
     Loose {
         provider: Option<String>,
         header: Header,
         size: u64,
+        path: String,
     },
 }
 
@@ -394,7 +430,7 @@ pub enum Place {
 /// file's header is unreadable.
 #[cfg(test)]
 pub fn places(root: &Path) -> Result<Vec<Place>, String> {
-    let (r, places) = scan_volume(
+    let (r, places, _) = scan_volume(
         "v",
         root,
         Thresholds {
@@ -507,6 +543,8 @@ struct Scan {
     foreign: BTreeMap<(String, String), Usage>,
     /// Days with a merge left pending (folder, day), for the store to settle.
     unsettled: Vec<(PathBuf, String)>,
+    /// Every file the store serves, read or not.
+    served: Vec<Served>,
 }
 
 /// Folders the store writes in a provider's folder: receipts and its
@@ -516,6 +554,14 @@ const OWN: [&str; 2] = ["provenance", "migrations"];
 impl Scan {
     fn fail(&mut self, path: &Path, e: String) {
         self.errors.push((path.to_path_buf(), e));
+    }
+
+    /// `path` within the volume, as `/files` names it.
+    fn within(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -553,7 +599,11 @@ impl Dataset {
             .map(|(k, s)| (k.clone(), s.to_json()))
             .collect();
         let filed = self.schemas.values().all(|s| s.unfiled.is_empty());
-        json!({ "provider": provider, "id": id, "symbol": symbol, "filed": filed, "sources": self.sources, "schemas": schemas })
+        // Held only in DBN files outside every provider's folder and every
+        // layout: scratch output, a shadow run's, a recording. Counted, as
+        // all data is, but not a dataset the store keeps.
+        let stray = provider.is_none() && self.sources.iter().all(|s| s.starts_with("files in "));
+        json!({ "provider": provider, "id": id, "symbol": symbol, "filed": filed, "stray": stray, "sources": self.sources, "schemas": schemas })
     }
 }
 
@@ -586,7 +636,8 @@ fn visit(dir: &Path, depth: usize, provider: Option<&str>, scan: &mut Scan) -> b
 /// folder without its manifest by its query. Hidden folders (such as
 /// `.incoming`) are skipped. A file whose header can't be read yet, changed
 /// in the last two minutes, is still being written: it is listed as pending
-/// and read again on the next scan. Returns whether any were found.
+/// and read again on the next scan. An empty file holds nothing. Returns
+/// whether any were found.
 fn loose(path: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
@@ -611,6 +662,10 @@ fn loose(path: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
         return false;
     };
     if !meta.is_file() {
+        return false;
+    }
+    scan.served.push((scan.within(path), meta.len()));
+    if meta.len() == 0 {
         return false;
     }
     let h = match header(path) {
@@ -671,8 +726,10 @@ fn loose(path: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
     note_encoding(s, encoding);
     s.files += 1;
     s.bytes += meta.len();
-    for (i, day) in h.days().into_iter().enumerate() {
-        *s.days.entry(day.clone()).or_default() += if i == 0 { meta.len() } else { 0 };
+    let days = h.days();
+    let n = days.len();
+    for (i, day) in days.into_iter().enumerate() {
+        *s.days.entry(day.clone()).or_default() += share(meta.len(), n, i);
         if raw && !s.partial.contains(&day) {
             s.partial.push(day.clone());
         }
@@ -685,12 +742,22 @@ fn loose(path: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
             s.symbols.push(sym.clone());
         }
     }
+    let within = scan.within(path);
     scan.places.push(Place::Loose {
         provider: provider.map(str::to_owned),
         header: h,
         size: meta.len(),
+        path: within,
     });
     true
+}
+
+/// Day `i`'s share of `bytes` held over `days` days: an even split, the
+/// remainder on the first, so no day a file holds is counted as empty.
+#[must_use]
+pub fn share(bytes: u64, days: usize, i: usize) -> u64 {
+    let n = days.max(1) as u64;
+    bytes / n + if i == 0 { bytes % n } else { 0 }
 }
 
 /// A download folder with `metadata.json` but no manifest, such as one
@@ -747,8 +814,9 @@ fn unmanifested(dir: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
             .into_iter()
             .map(|d| (d, schema.to_owned(), "query", 0))
             .collect(),
+        names: BTreeMap::new(),
     };
-    count_batch(batch, provider, scan)
+    count_batch(batch, dir, provider, scan)
 }
 
 /// What a DBN file's header says it holds.
@@ -760,7 +828,8 @@ pub struct Header {
     pub stype_in: Option<String>,
     pub symbols: Vec<String>,
     pub start: u64,
-    /// Its end (excluded), or its last change when the header has none.
+    /// Its end (excluded); when the header has none, the end of the day
+    /// its file is named for, or of its start's day.
     pub end: u64,
 }
 
@@ -806,7 +875,9 @@ pub fn header(path: &Path) -> Result<Header, String> {
         .map_or(0, |t| u64::try_from(t.as_nanos()).unwrap_or(u64::MAX));
     // A header without its start (0) or end takes the day its file is
     // named for (`2026-05-29.spot.trades.dbn.zst`), not every day from 1970
-    // or until its last change.
+    // or until its last change. Without such a name, a header with no end
+    // holds its start's day: how far it reaches is unknown, and every day
+    // up to its last change would be counted with nothing in it.
     const DAY: u64 = 86_400_000_000_000;
     let named = file_name(path)
         .get(..10)
@@ -819,6 +890,7 @@ pub fn header(path: &Path) -> Result<Header, String> {
     let end = match (m.end, named) {
         (Some(end), _) => end.get(),
         (None, Some(day)) if day + DAY > start => day + DAY,
+        (None, _) if start > 0 => (start / DAY + 1) * DAY,
         (None, _) => last_change,
     };
     let h = Header {
@@ -869,7 +941,9 @@ fn store_dataset(dir: &Path, id: &str, provider: Option<&str>, scan: &mut Scan) 
 }
 
 /// Add every day in `dir` (a `<YYYY-MM-DD>.dbn.zst` file or a `<YYYY-MM-DD>/`
-/// folder) to the schema of the dataset listed under `k`.
+/// folder) to the schema of the dataset listed under `k`. A day is held only
+/// with data the store can serve: never an empty day file, nor a day folder
+/// holding only receipts or an `.archive`.
 fn add_days(dir: &Path, k: &Key, schema: &str, scan: &mut Scan) -> bool {
     let mut any = false;
     // Partial days are those the folder's manifest lists (its coverage); an
@@ -892,23 +966,36 @@ fn add_days(dir: &Path, k: &Key, schema: &str, scan: &mut Scan) -> bool {
         }
     }
     let mut held = Vec::new();
+    let mut files = BTreeMap::new();
     for f in listing(dir, true, scan) {
         let n = file_name(&f);
-        let (day, size, encoding) = if let Some(day) =
+        let (day, size, encoding, served) = if let Some(day) =
             n.strip_suffix(".dbn.zst").filter(|d| is_iso_date(d))
             && f.is_file()
         {
-            (
-                day.to_owned(),
-                f.metadata().map(|m| m.len()).unwrap_or(0),
-                "dbn.zst",
-            )
+            let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+            let within = scan.within(&f);
+            scan.served.push((within.clone(), size));
+            let served = if size > 0 { vec![within] } else { Vec::new() };
+            (day.to_owned(), size, "dbn.zst", served)
         } else if is_iso_date(&n) && f.is_dir() {
-            (n.clone(), usage(&f).bytes, "day folders")
+            let mut found = Vec::new();
+            crate::read::walk(&scan.root, &f, &mut found);
+            scan.served.extend(found.iter().cloned());
+            (
+                n.clone(),
+                usage(&f).bytes,
+                "day folders",
+                day_folder_files(found, schema),
+            )
         } else {
             continue;
         };
         scan.claimed.insert(f.clone());
+        if served.is_empty() {
+            continue;
+        }
+        files.insert(day.clone(), served);
         held.push((day.clone(), size, encoding != "day folders"));
         let s = scan
             .datasets
@@ -960,9 +1047,29 @@ fn add_days(dir: &Path, k: &Key, schema: &str, scan: &mut Scan) -> bool {
             dir: dir.to_path_buf(),
             days: held,
             entries: std::sync::Arc::new(entries),
+            files,
         });
     }
     any
+}
+
+/// The files of a day folder (the older layout) the store serves, its data
+/// first, then sidecars such as the day's definitions; none when it holds no
+/// data (only receipts, an `.archive`, a sidecar, or empty files).
+fn day_folder_files(found: Vec<Served>, schema: &str) -> Vec<String> {
+    let sidecar = |within: &str| {
+        schema != "definition" && file_name(Path::new(within)).starts_with("definition.")
+    };
+    let mut names: Vec<String> = found
+        .into_iter()
+        .filter(|(_, bytes)| *bytes > 0)
+        .map(|(within, _)| within)
+        .collect();
+    if names.iter().all(|n| sidecar(n)) {
+        return Vec::new();
+    }
+    names.sort_by_key(|n| (sidecar(n), n.clone()));
+    names
 }
 
 /// Space used under a path, its file count and its newest change.
@@ -1023,8 +1130,10 @@ pub struct Batch {
     pub stype_in: Option<String>,
     pub job: String,
     /// Each day of each schema it holds, with the encoding and the bytes
-    /// counted to it (a file covering several days counts on its first).
+    /// counted to it (a file covering several days shared among them).
     pub files: Vec<(String, String, &'static str, u64)>,
+    /// The DBN files holding each day of each schema, by name.
+    pub names: BTreeMap<(String, String), Vec<String>>,
 }
 
 /// The days a batch file's name says it holds: `<dataset>-<YYYYMMDD>`, or
@@ -1103,8 +1212,10 @@ pub fn read_batch(dir: &Path) -> Result<Option<Batch>, String> {
     };
     let q = &meta["query"];
     let mut files = Vec::new();
+    let mut names: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     // Files split by symbol, or whose names don't say their days.
     let mut unnamed: Option<(&'static str, u64)> = None;
+    let mut unnamed_names = Vec::new();
     for f in read_entries(dir)? {
         let n = file_name(&f);
         let Some((stem, encoding)) = ENCODINGS
@@ -1114,6 +1225,11 @@ pub fn read_batch(dir: &Path) -> Result<Option<Batch>, String> {
             continue;
         };
         let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+        // An empty file holds no day.
+        if size == 0 {
+            continue;
+        }
+        let dbn = encoding.starts_with("dbn");
         // <dataset>-<YYYYMMDD>[-<YYYYMMDD>].<schema>; receipts such as
         // `metadata.json` have no schema.
         let named = stem
@@ -1121,18 +1237,23 @@ pub fn read_batch(dir: &Path) -> Result<Option<Batch>, String> {
             .and_then(|(head, schema)| Some((named_days(head)?, schema)));
         match named {
             Some((days, schema)) if meta["customizations"]["split_symbols"] != true => {
+                let count = days.len();
                 for (i, day) in days.into_iter().enumerate() {
-                    files.push((
-                        day,
-                        schema.to_owned(),
-                        encoding,
-                        if i == 0 { size } else { 0 },
-                    ));
+                    if dbn {
+                        names
+                            .entry((day.clone(), schema.to_owned()))
+                            .or_default()
+                            .push(n.clone());
+                    }
+                    files.push((day, schema.to_owned(), encoding, share(size, count, i)));
                 }
             }
-            _ if stem.contains('.') || encoding.starts_with("dbn") => {
+            _ if stem.contains('.') || dbn => {
                 let (_, bytes) = unnamed.get_or_insert((encoding, 0));
                 *bytes += size;
+                if dbn {
+                    unnamed_names.push(n.clone());
+                }
             }
             _ => {}
         }
@@ -1145,14 +1266,14 @@ pub fn read_batch(dir: &Path) -> Result<Option<Batch>, String> {
                 dir.display()
             ));
         };
+        let count = days.len();
         for (i, day) in days.into_iter().enumerate() {
             if !files.iter().any(|f| f.0 == day && f.1 == schema) {
-                files.push((
-                    day,
-                    schema.to_owned(),
-                    encoding,
-                    if i == 0 { bytes } else { 0 },
-                ));
+                names
+                    .entry((day.clone(), schema.to_owned()))
+                    .or_default()
+                    .extend(unnamed_names.iter().cloned());
+                files.push((day, schema.to_owned(), encoding, share(bytes, count, i)));
             }
         }
     }
@@ -1164,6 +1285,7 @@ pub fn read_batch(dir: &Path) -> Result<Option<Batch>, String> {
             .as_str()
             .map_or_else(|| file_name(dir), str::to_owned),
         files,
+        names,
     }))
 }
 
@@ -1179,11 +1301,15 @@ fn databento_batch(dir: &Path, provider: Option<&str>, scan: &mut Scan) -> bool 
         }
     };
     scan.claimed.insert(dir.to_path_buf());
-    count_batch(b, provider, scan)
+    let mut found = Vec::new();
+    crate::read::walk(&scan.root, dir, &mut found);
+    scan.served.extend(found);
+    count_batch(b, dir, provider, scan)
 }
 
-/// Count a batch's days, unfiled, under its one symbol or under none.
-fn count_batch(b: Batch, provider: Option<&str>, scan: &mut Scan) -> bool {
+/// Count a batch's days, in `dir`, unfiled, under its one symbol or under
+/// none.
+fn count_batch(b: Batch, dir: &Path, provider: Option<&str>, scan: &mut Scan) -> bool {
     let k = match b.symbols.as_slice() {
         [one] => key(provider, &b.dataset, Some(one)),
         _ => key(provider, &b.dataset, None),
@@ -1205,9 +1331,11 @@ fn count_batch(b: Batch, provider: Option<&str>, scan: &mut Scan) -> bool {
         }
     }
     d.sources.push(format!("databento batch {}", b.job));
+    let dir = scan.within(dir);
     scan.places.push(Place::Batch {
         provider: provider.map(str::to_owned),
         batch: b,
+        dir,
     });
     true
 }
