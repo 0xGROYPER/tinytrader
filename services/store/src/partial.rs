@@ -1009,6 +1009,22 @@ pub fn import_batch(
     import(parts, elsewhere, batch, today)
 }
 
+/// The part of a day's full entry that [`row`] reports, kept in memory for
+/// `/coverage` (without the contracts it lists, say).
+#[must_use]
+pub fn reported(entry: &Value) -> Value {
+    let mut out = json!({});
+    for k in ["condition", "coverage", "partial", "records", "sha256"] {
+        if let Some(v) = entry.get(k) {
+            out[k] = v.clone();
+        }
+    }
+    if entry.get("pending").is_some() {
+        out["pending"] = json!(true);
+    }
+    out
+}
+
 /// What one copy of a day holds, as `/coverage` reports it.
 fn row(day: &str, volume: &str, filed: bool, size: u64, entry: Option<&Value>) -> Value {
     let condition = entry
@@ -1141,7 +1157,8 @@ pub fn coverage(
 }
 
 /// As [`coverage`], from the places a scan found on each volume (`index`),
-/// and the current manifests of the matching schema folders, so a merge into
+/// with the manifest entries read with them: nothing is read from disk. Each
+/// write to a schema folder reads it again into the places, so a merge into
 /// a partial day shows at once.
 ///
 /// # Errors
@@ -1165,21 +1182,21 @@ pub fn coverage_in(
                     dataset: d,
                     symbol: s,
                     schema: k,
-                    dir,
                     days,
+                    entries,
+                    ..
                 } if ours(p.as_deref(), provider)
                     && d.eq_ignore_ascii_case(dataset)
                     && s.as_deref() == symbol
                     && k == schema =>
                 {
-                    // The index, and the sidecars of the days asked for.
-                    let index = crate::manifest::read_index(dir)?;
+                    let entries = entries.as_ref().as_ref().map_err(Clone::clone)?;
                     for (day, size, filed) in days.iter().filter(|d| wanted(&d.0)) {
-                        let entry = match index.get(day).filter(|_| *filed) {
-                            Some(e) => Some(crate::manifest::resolve(dir, day, e)?),
+                        let entry = match entries.get(day).filter(|_| *filed) {
+                            Some(e) => Some(e.as_ref().map_err(Clone::clone)?),
                             None => None,
                         };
-                        let r = row(day, volume, *filed, *size, entry.as_ref());
+                        let r = row(day, volume, *filed, *size, entry);
                         copies.entry(day.clone()).or_default().push(r);
                     }
                 }

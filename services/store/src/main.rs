@@ -159,6 +159,21 @@ struct Index {
     /// What the scan couldn't read, on volumes that are there.
     errors: Vec<String>,
 }
+
+impl Index {
+    /// Every schema folder the scan found in the store layout.
+    fn days_folders(&self) -> Vec<PathBuf> {
+        self.volumes
+            .iter()
+            .flat_map(|(_, places)| places)
+            .filter_map(|p| match p {
+                catalog::Place::Days { dir, .. } => Some(dir.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 type Reply = (StatusCode, Json<Value>);
 
 fn reply(code: StatusCode, v: Value) -> Reply {
@@ -1001,7 +1016,10 @@ async fn incorporate(
                 .push(format!("refused {pdir}/{batch}: {e}"), e.clone());
             refused(StatusCode::CONFLICT, e)
         }
-        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => {
+            tokio::task::block_in_place(|| store.refresh(&targets));
+            refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
     }
 }
 
@@ -1055,7 +1073,10 @@ async fn import(
                 .push(format!("refused import {pdir}/{id}: {e}"), e.clone());
             refused(StatusCode::CONFLICT, e)
         }
-        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => {
+            tokio::task::block_in_place(|| store.refresh(&targets));
+            refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
     }
 }
 
@@ -1341,7 +1362,10 @@ async fn adopt(
                 .push(format!("refused {}: {e}", dir.display()), e.clone());
             refused(StatusCode::CONFLICT, e)
         }
-        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => {
+            tokio::task::block_in_place(|| store.refresh(&targets));
+            refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
     }
 }
 
@@ -1770,6 +1794,9 @@ async fn apply_conditions(
     let mut out = conditions::Applied::default();
     let result = tokio::task::block_in_place(|| f(&index.volumes, &mut out));
     if let Err(e) = result {
+        // It may have written some folders before it stopped: read them all
+        // again, so `/coverage` never answers from what they were.
+        tokio::task::block_in_place(|| store.refresh(&index.days_folders()));
         return refused(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
     if !out.changed.is_empty() {
@@ -1818,15 +1845,8 @@ async fn rebuild_coverage(AxState(store): AxState<Shared>) -> Reply {
         .filter(|p| p.is_dir() && catalog::provider_name(&catalog_name(p)).is_some())
         .collect();
     let index = lock(&store.index).clone();
-    let folders: Vec<PathBuf> = index
-        .volumes
-        .iter()
-        .flat_map(|(_, places)| places)
-        .filter_map(|p| match p {
-            catalog::Place::Days { dir, .. } => Some(dir.clone()),
-            _ => None,
-        })
-        .collect();
+    let folders = index.days_folders();
+    let all = folders.clone();
     match tokio::task::spawn_blocking(move || rebuild::rebuild(&roots, &folders)).await {
         Ok(Ok(report)) => {
             let dirs = rebuild::folders(&report);
@@ -1842,7 +1862,11 @@ async fn rebuild_coverage(AxState(store): AxState<Shared>) -> Reply {
             }
             reply(StatusCode::OK, report)
         }
-        Ok(Err(e)) => refused(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Ok(Err(e)) => {
+            // What it rewrote before it stopped is read again.
+            tokio::task::block_in_place(|| store.refresh(&all));
+            refused(StatusCode::INTERNAL_SERVER_ERROR, e)
+        }
         Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -2333,7 +2357,8 @@ mod tests {
         std::fs::write(day.join("2026-10-02.dbn.zst"), b"x").unwrap();
         let (_, cov) = get(&addr, COVERAGE).await;
         assert_eq!(days(&cov), ["2026-10-01 complete"]);
-        // ...but the manifest is read as it is now.
+        // ...and so does a manifest written behind the store's back (the
+        // store's own writes read their folder again at once).
         let entry = json!({ "file": "2026-10-01.dbn.zst", "coverage": { "kind": "contracts", "stype": "raw_symbol", "symbols": ["SPY   261002C00728000"], "window": [0, 1] } });
         std::fs::write(
             day.join("manifest.json"),
@@ -2341,7 +2366,7 @@ mod tests {
         )
         .unwrap();
         let (_, cov) = get(&addr, COVERAGE).await;
-        assert_eq!(days(&cov), ["2026-10-01 partial"]);
+        assert_eq!(days(&cov), ["2026-10-01 complete"]);
         // A rescan asked for (as after a filing) is waited for.
         s.request_rescan();
         let later = s.clone();
@@ -2554,6 +2579,12 @@ mod tests {
         let (_, cov) = get(&addr, COVERAGE).await;
         assert_eq!(cov["days"][0]["coverage"]["symbols"], json!([C1, C2]));
         assert_eq!(s.requested.load(Ordering::SeqCst), 0, "no scan asked for");
+        // Answered from memory: the manifest isn't read again for it.
+        let folder = vol.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+        std::fs::rename(folder.join("manifest.d"), dir.join("away")).unwrap();
+        std::fs::rename(folder.join("manifest.json"), dir.join("away.json")).unwrap();
+        let (code, again) = get(&addr, COVERAGE).await;
+        assert_eq!((code, &again["days"]), (200, &cov["days"]), "{again}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
