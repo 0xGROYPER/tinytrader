@@ -113,7 +113,7 @@ fn parse_stamp(s: &str) -> Option<i64> {
 }
 
 /// The root of an OCC option symbol (`SPY   261002C00728000`).
-fn occ_root(s: &str) -> Option<&str> {
+pub fn occ_root(s: &str) -> Option<&str> {
     let b = s.as_bytes();
     let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
     (b.len() == 21
@@ -334,24 +334,31 @@ pub fn store_pieces(
         );
         let whole = parse_stamp(day).map_or(ALWAYS, |s| (s, s.saturating_add(DAY_NS)));
         let c = &row["coverage"];
-        let (scope, window) = if row["kind"] == "complete" {
-            (Scope::All, whole)
-        } else {
-            let symbols: Option<Vec<&str>> = c["symbols"]
-                .as_array()
-                .map(|a| a.iter().map(|s| s.as_str().unwrap_or("")).collect());
-            let scope = symbols.map_or(Some(Scope::All), |s| scope_of(&s, target));
-            let window = match (c["window"][0].as_i64(), c["window"][1].as_i64()) {
-                (Some(a), Some(b)) => (a, b),
-                _ => whole,
-            };
-            (scope.unwrap_or(Scope::All), window)
-        };
         let what = format!(
             "{day} ({}, in the store)",
             row["kind"].as_str().unwrap_or("held")
         );
-        out.push(held(scope, window, what));
+        // A complete day, or one being merged (until it settles), is held
+        // in full.
+        if row["kind"] == "complete" || row["pending"] == true {
+            out.push(held(Scope::All, whole, what));
+            continue;
+        }
+        // Each piece's contracts over its own window; without pieces, the
+        // one list and window.
+        let one = [c.clone()];
+        let pieces = c["pieces"].as_array().map_or(&one[..], Vec::as_slice);
+        for piece in pieces {
+            let symbols: Option<Vec<&str>> = piece["symbols"]
+                .as_array()
+                .map(|a| a.iter().map(|s| s.as_str().unwrap_or("")).collect());
+            let scope = symbols.map_or(Some(Scope::All), |s| scope_of(&s, target));
+            let window = match (piece["window"][0].as_i64(), piece["window"][1].as_i64()) {
+                (Some(a), Some(b)) => (a, b),
+                _ => whole,
+            };
+            out.push(held(scope.unwrap_or(Scope::All), window, what.clone()));
+        }
     }
     for root in catalog["roots"].as_array().into_iter().flatten() {
         let volume = root["name"].as_str();
@@ -618,6 +625,51 @@ mod tests {
             !whole(&copy("v2", json!("alpaca"), "SPY.OPT")),
             "another provider's"
         );
+    }
+
+    #[test]
+    fn a_partial_day_is_held_piece_by_piece() {
+        let day = day_window(d("2026-10-02"));
+        let h = 3_600_000_000_000_i64;
+        let coverage = json!({ "days": [
+            { "day": "2026-10-02", "kind": "partial", "volumes": ["v1"], "coverage": {
+                "kind": "contracts", "stype": "raw_symbol",
+                // The old union and hull, kept for older readers.
+                "symbols": [C1, C2], "window": [day.0, day.1],
+                "pieces": [
+                    { "symbols": [C1], "window": [day.0, day.0 + 13 * h] },
+                    { "symbols": [C2], "window": [day.0 + 13 * h, day.1] },
+                ] } },
+        ] });
+        let p = store_pieces(
+            &json!({}),
+            &coverage,
+            "OPRA.PILLAR",
+            "cmbp-1",
+            "SPY.OPT",
+            day,
+        );
+        let n = need(&set(&[C1, C2]), &p, day);
+        assert_eq!(
+            n.hours.get(&vec![(day.0 + 13 * h, day.1)]),
+            Some(&vec![C1.to_owned()])
+        );
+        assert_eq!(
+            n.hours.get(&vec![(day.0, day.0 + 13 * h)]),
+            Some(&vec![C2.to_owned()])
+        );
+        // A day being merged is held in full until it settles.
+        let mut merging = coverage.clone();
+        merging["days"][0]["pending"] = json!(true);
+        let p = store_pieces(
+            &json!({}),
+            &merging,
+            "OPRA.PILLAR",
+            "cmbp-1",
+            "SPY.OPT",
+            day,
+        );
+        assert_eq!(need(&set(&[C1, C2, Q1]), &p, day).skipped_held, 3);
     }
 
     #[test]

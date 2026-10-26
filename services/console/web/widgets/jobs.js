@@ -73,11 +73,15 @@ function requestLine(r) {
 function approvals(J) {
   if (shared.qErr) return `<div class="box empty msg-err">${esc(shared.qErr)}</div>`;
   if (!shared.quotes) return '<div class="box empty">Loading…</div>';
-  const list = shared.quotes.filter(q => q.state === 'pricing' || (q.state === 'ready' && q.needs_approval));
+  const list = shared.quotes.filter(q => ['pricing', 'submitting', 'submitted'].includes(q.state) || (q.state === 'failed' && q.submitted != null) || (q.state === 'ready' && q.needs_approval));
   if (!list.length) return '<div class="box empty">Nothing waits for approval.</div>';
   return list.map(q => {
     const head = `<b class="mono">${esc(q.dataset)} ${esc(q.schema)} ${esc(q.symbol)}</b> <span class="mono">${esc(q.start)}${q.end !== q.start ? ' → ' + esc(q.end) : ''}</span>`;
     if (q.state === 'pricing') return `<div class="box" style="margin-bottom:8px">${head}<div class="muted">Pricing: ${q.priced} of ${q.of || '…'} requests</div></div>`;
+    // A submission: under way, done, or stopped (price the same request again to buy the rest).
+    if (q.state === 'submitting') return `<div class="box" style="margin-bottom:8px">${head}<div class="muted">Submitting: ${q.submitted} of ${q.of} requests sent</div></div>`;
+    if (q.state === 'submitted') return `<div class="box" style="margin-bottom:8px">${head}<div class="msg-ok">Submitted all ${q.of} requests; they download into the store when done.</div></div>`;
+    if (q.state === 'failed' && q.submitted != null) return `<div class="box" style="margin-bottom:8px">${head}<div class="msg-err">Stopped after ${q.submitted} of ${q.of} requests: ${esc(q.error || 'no reason given')}</div><div class="muted">Price the same request again to buy the rest: what was sent is subtracted.</div></div>`;
     const a = J.acts[q.quote] || {}, reqs = q.requests || [];
     const asked = [q.contracts != null ? `${q.contracts.toLocaleString()} contracts over ${plural(q.contract_days, 'day', 'days')}` : q.rule ? 'contracts by rule' : 'whole chain or symbol',
       q.hours ? `hours ${esc(q.hours.start)}–${esc(q.hours.end)} ${esc(q.hours.tz)}` : 'whole days',
