@@ -208,14 +208,14 @@ report before going 30% over.
 | **R10.** `libs/fleet` typed views for both front ends | 250 / 150 | ~150 JS, ~200 Rust | |
 | **R11.** DBN header reading and the merge into `libs/dbn` | moves ~500 | ~250 | the store producer (0021 step 5) needs the merge |
 | **R12.** `order-gateway` onto the shared crates; `session.rs` split by phase | moves ~2,000 | ~400 | under the trading hold, after a close |
-| **R13.** `venues/coinbase` and a Coinbase relay source, ported from Hyphae's venue and live driver (public feed, no account); `ticker` retired | ~1,800 / ~900 | ~430 (`ticker`) | the README's first live example |
+| **R13.** `venues/coinbase` and a Coinbase relay source, ported from Hyphae's venue and live driver (public feed, no account); `ticker` retired | ~1,800 / ~900 | ~430 (`ticker`) | the README's first live example; needs Hyphae's crypto DBN records (`TradeWide`, `MboWide`, `Mbp10Wide`) in `libs/dbn` first, which is 0021's step 9a |
 | **R14.** `tt sync` (section 6); the evening top-off as a batch job | 250 / 200 | ~60 | after 0021 step 3 and R6 |
 | **R15.** Nix out of tinytrader (section 7): modules, packages and image building to tinytrader-deploy; `generic` as a script; CI without Nix | moves ~1,500 | – | with a tinytrader-deploy PR, same day |
 
 0021's steps 1 (`libs/net`) and 2 (`libs/store-client`) come before R3, R5
 and R6; R5 and R6 are 0021's 9c and 9b. Order: R0, R1, R2 any time; then
 R3; R4 and R5 any order; R6 after R3; R7 after R3; R8 after R7; R9 and R10
-any time; R11 before 0021's store producer; R12 last; R13 after R3 and R7 (it uses `libs/service`'s supervised loop and the fan-out), and early among them; R14 after R6; R15 any time, with its deploy-repo PR.
+any time; R11 before 0021's store producer; R12 last; R13 after 0021's 9a (the crypto records), R3 and R7 (it uses `libs/service`'s supervised loop and the fan-out), and early among them; R14 after R6; R15 any time, with its deploy-repo PR.
 
 ## Consequences
 
