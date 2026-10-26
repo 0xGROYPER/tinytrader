@@ -1164,20 +1164,24 @@ async fn store_json(
     }
     let url = reqwest::Url::parse_with_params(&format!("{}{path}", jobs.store), &query)
         .map_err(|e| format!("the store's {path}: {e}"))?;
-    let r = jobs
-        .http
-        .get(url)
-        .timeout(Duration::from_secs(if fresh { 660 } else { 120 }))
-        .send()
-        .await
-        .map_err(|e| format!("the store's {path}: {e}"))?;
-    if !r.status().is_success() {
-        return Err(format!("the store's {path}: HTTP {}", r.status()));
-    }
-    let v: Value = r
-        .json()
-        .await
-        .map_err(|e| format!("the store's {path}: {e}"))?;
+    let url = &url;
+    let fail = |e: reqwest::Error| (!e.is_timeout(), format!("the store's {path}: {e}"));
+    let v: Value = store_retrying(|| async move {
+        let r = jobs
+            .http
+            .get(url.clone())
+            .timeout(Duration::from_secs(if fresh { 660 } else { 120 }))
+            .send()
+            .await
+            .map_err(fail)?;
+        let status = r.status();
+        if !status.is_success() {
+            let again = status == StatusCode::SERVICE_UNAVAILABLE;
+            return Err((again, format!("the store's {path}: HTTP {status}")));
+        }
+        r.json().await.map_err(fail)
+    })
+    .await?;
     match v["missing_volumes"].as_array() {
         Some(m) if m.is_empty() => Ok(v),
         Some(m) => Err(format!(
@@ -1568,11 +1572,9 @@ async fn definitions(
             "{}/files?provider=databento&pattern=*/{dataset}/{parent}/definition/*",
             jobs.store
         ),
+        |body| serde_json::from_slice(body).map_err(|e| format!("store: {e}")),
     )
-    .await?
-    .json()
-    .await
-    .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")))?;
+    .await?;
     Ok(listing["files"]
         .as_array()
         .into_iter()
@@ -1588,20 +1590,64 @@ async fn definitions(
         .collect())
 }
 
-/// A read of the store (120 s at most).
-async fn store_get(jobs: &Jobs, url: &str) -> Result<reqwest::Response, (StatusCode, String)> {
-    let down = |e: String| (StatusCode::SERVICE_UNAVAILABLE, e);
-    let resp = jobs
-        .http
-        .get(url)
-        .timeout(Duration::from_secs(120))
-        .send()
-        .await
-        .map_err(|e| down(format!("store: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(down(format!("store: HTTP {} for {url}", resp.status())));
+/// A read of the store (120 s at most each try), its answer read by
+/// `decode`, tried again as [`store_retrying`] says.
+async fn store_get<T>(
+    jobs: &Jobs,
+    url: &str,
+    decode: impl Fn(&[u8]) -> Result<T, String>,
+) -> Result<T, (StatusCode, String)> {
+    let decode = &decode;
+    let fail = |e: reqwest::Error| (!e.is_timeout(), format!("store: {e}"));
+    store_retrying(|| async move {
+        let resp = jobs
+            .http
+            .get(url)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(fail)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let again = status == StatusCode::SERVICE_UNAVAILABLE;
+            return Err((again, format!("store: HTTP {status} for {url}")));
+        }
+        decode(&resp.bytes().await.map_err(fail)?).map_err(|e| (true, e))
+    })
+    .await
+    .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))
+}
+
+/// How long a read-only store call waits before its second and third tries.
+const STORE_RETRY: [Duration; 2] = if cfg!(test) {
+    [Duration::from_millis(10), Duration::from_millis(40)]
+} else {
+    [Duration::from_secs(2), Duration::from_secs(8)]
+};
+
+/// A read-only store call, tried up to three times while it fails in a way
+/// worth trying again (`Err((true, why))`): a dropped connection, an answer
+/// cut off or unreadable, or a 503 (the store rescanning). Not a timeout,
+/// which waited its whole limit already, and never a write.
+async fn store_retrying<T, F, Fut>(mut call: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, (bool, String)>>,
+{
+    let mut waits = STORE_RETRY.iter();
+    loop {
+        match call().await {
+            Ok(v) => return Ok(v),
+            Err((true, e)) => match waits.next() {
+                Some(w) => {
+                    eprintln!("databento-jobs: {e}; trying again in {w:?}");
+                    tokio::time::sleep(*w).await;
+                }
+                None => return Err(e),
+            },
+            Err((false, e)) => return Err(e),
+        }
     }
-    Ok(resp)
 }
 
 /// One day of an option parent bought by contract: the contracts wanted
@@ -1628,12 +1674,8 @@ async fn contract_day(
         let weekend = matches!(d.weekday(), time::Weekday::Saturday | time::Weekday::Sunday);
         return Ok((Vec::new(), (!weekend).then_some(why)));
     };
-    let bytes = store_get(jobs, &format!("{}/files/{volume}/{path}", jobs.store))
-        .await?
-        .bytes()
-        .await
-        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("store: {e}")))?;
-    let all = missing::contracts(&bytes).map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e))?;
+    let url = format!("{}/files/{volume}/{path}", jobs.store);
+    let all = store_get(jobs, &url, missing::contracts).await?;
     let wanted = match a.contracts.as_ref().and_then(|m| m.get(&d)) {
         Some(list) => {
             let known: HashSet<&str> = all.iter().map(|c| c.symbol.as_str()).collect();

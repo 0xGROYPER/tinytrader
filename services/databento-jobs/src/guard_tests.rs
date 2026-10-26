@@ -2153,3 +2153,72 @@ fn startup_says_how_many_jobs_are_followed() {
     drop(l);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A store that answers each connection as `script` says, in turn: `drop`
+/// (closed unanswered), `cut` (an answer cut off), or a status (with `body`
+/// when 200). Counts the connections.
+async fn flaky_store(script: &[&'static str], body: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = format!("http://{}", l.local_addr().unwrap());
+    let seen = Arc::new(AtomicUsize::new(0));
+    let (script, count) = (script.to_vec(), seen.clone());
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = l.accept().await.unwrap();
+            let step = script
+                .get(count.fetch_add(1, Ordering::SeqCst))
+                .copied()
+                .unwrap_or("200");
+            let mut req = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = s.read(&mut buf).await.unwrap();
+                req.extend_from_slice(&buf[..n]);
+            }
+            let head = |code: &str, len: usize| {
+                format!("HTTP/1.1 {code} X\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n")
+            };
+            let out = match step {
+                "drop" => Vec::new(),
+                "cut" => [head("200", body.len() + 100).as_bytes(), &body[..1]].concat(),
+                "200" => [head("200", body.len()).as_bytes(), &body].concat(),
+                code => head(code, 0).into_bytes(),
+            };
+            let _ = s.write_all(&out).await;
+        }
+    });
+    (addr, seen)
+}
+
+#[tokio::test]
+async fn store_reads_are_tried_again_after_a_dropped_answer() {
+    let ok = serde_json::to_vec(&json!({ "days": [], "missing_volumes": [] })).unwrap();
+    let cases: [(&[&str], bool, usize); 4] = [
+        (&["drop", "cut"], true, 3),
+        (&["503", "drop"], true, 3),
+        (&["503", "503", "503"], false, 3),
+        (&["500"], false, 1),
+    ];
+    for (script, works, tries) in cases {
+        let (url, seen) = flaky_store(script, ok.clone()).await;
+        let r = rig_with("flaky", |j| j.store = url).await;
+        let got = store_json(&r.jobs, "/coverage", &[], false).await;
+        let n = seen.load(Ordering::SeqCst);
+        assert_eq!((got.is_ok(), n), (works, tries), "{script:?}: {got:?}");
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+    // The definitions read and a definition day's file, the same way.
+    let file = format!("{DS}/SPY.OPT/definition/{DAY}.dbn.zst");
+    let listing = json!({ "files": [{ "volume": "v1", "path": file }] });
+    let (url, seen) = flaky_store(&["drop"], serde_json::to_vec(&listing).unwrap()).await;
+    let r = rig_with("flaky-defs", |j| j.store = url).await;
+    let defs = super::definitions(&r.jobs, DS, "SPY.OPT").await.unwrap();
+    assert_eq!((defs.len(), seen.load(Ordering::SeqCst)), (1, 2));
+    let (url, seen) = flaky_store(&["cut"], definitions(&[C1])).await;
+    let url = format!("{url}/files/v1/{file}");
+    let day = store_get(&r.jobs, &url, missing::contracts).await;
+    let n = seen.load(Ordering::SeqCst);
+    assert_eq!((day.map(|c| c.len()), n), (Ok(1), 2));
+    let _ = std::fs::remove_dir_all(&r.dir);
+}
