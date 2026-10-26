@@ -156,6 +156,7 @@ only what's missing"). It becomes one verb, the same for every provider:
 ```sh
 tt sync alpaca --feed sip --schema cmbp-1 --symbols SPY,QQQ --from 2026-09-28 --write store
 tt sync databento --dataset OPRA.PILLAR --schema statistics --symbols SPY.OPT --from 2025-10-01 --write store
+tt sync alpaca --feed iex --schema mbp-1 --symbols SPY --latest --write store   # from the newest day held to today
 ```
 
 - **What it fetches:** every session day from `--from` through the latest
@@ -163,6 +164,16 @@ tt sync databento --dataset OPRA.PILLAR --schema statistics --symbols SPY.OPT --
   store doesn't hold in full, oldest first, with `--max-days` and the
   provider's request budget bounding one run. Days held are skipped by
   the store's coverage, not by a local record.
+- **`--latest`** instead of `--from`: start the day after the newest day
+  the store holds for that dataset, symbol and schema, and fill through the
+  latest complete day. Holes before that newest day are left to an
+  explicit `--from` run.
+  - **If the store holds nothing**, `--latest` starts at the provider's
+    earliest day for the symbol (probed once; Hyphae's `--start earliest`).
+    For a free source that's a backfill that `--max-days` spreads over runs,
+    newest days first. For a paid source it prices the whole history and
+    asks, showing the total (0019): empty storage never buys on its own, and
+    a run without a person at a terminal leaves the quote and notifies.
 - **One operation:** it plans the days and calls `fetch` for them, with the
   same paging, pacing, retries and output. A paid provider prices the
   missing days and asks as `fetch` does (0019): a scheduled `sync` of a
