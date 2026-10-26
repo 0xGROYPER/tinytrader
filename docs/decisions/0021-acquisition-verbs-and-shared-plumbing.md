@@ -250,7 +250,46 @@ covers only the endpoints the verbs touch at first: `databento-jobs`
 `/files`; the console's `/api/job-quotes`. Other services follow as they're
 touched.
 
-### 6. Shared plumbing in `libs`
+### 6. Layered libraries, with a stated dependency direction
+
+Hyphae's crates were its best-reused part: each owned one concern, the
+dependency direction was written down, and no library held process
+concerns. tinytrader's `libs` (`alpaca`, `dbn`, `fleet`, `observe`,
+`schedule`) start that; most provider and network logic is still inside
+services' `main.rs`. The layers:
+
+| Layer | Libraries | Depends on |
+|---|---|---|
+| Foundation | `dbn` (DBN, re-exported, plus tinytrader's extension records), `schedule` (clock, market calendar), `instruments` (symbology: OCC contracts, option roots, a symbol's dataset), `observe` | upstream crates and std only |
+| Plumbing | `net` (below), `market` (only when two services need it: book state, gaps) | foundation |
+| Venues | `venues/alpaca` (today's `libs/alpaca`), `venues/databento`, later `venues/coinbase`, `venues/kraken`: each provider's wire format to DBN, its pagination and its rate rules, once | foundation, plumbing |
+| Clients | `store-client` and the clients generated from the contract (section 5) | foundation, plumbing |
+| Front ends and services | `apps/tt`, `apps/tui`, the console, every service | any library |
+
+**Rules.**
+
+- A library never depends on a service or an app, and a layer never on a
+  layer above it. CI checks this from `cargo metadata`.
+- Libraries hold no process concerns: no argument parsing, environment or
+  secret lookup, signal handling, exits, or listener and runtime startup.
+  A service's `main` reads its configuration and passes values in. So the
+  same code runs behind HTTP, a socket, a pipe or a test, and `fetch`,
+  `--every` and `listen` reuse one provider mapping.
+- A venue library is the only place a provider's wire format is known. A
+  service that talks to Alpaca or Databento does it through it.
+
+**Crypto records.** `libs/dbn` takes Hyphae's `dbn-ext` crypto records as
+they are (`TradeWide`, `MboWide`, `Mbp10Wide`: wider fields for crypto's
+fractional sizes; rtypes `0xD1` to `0xD3`). The crate depends only on
+upstream `dbn` and std, and its `TradeConditions` (`0xD4`) is already
+byte-identical to tinytrader's. Hyphae's crypto days are then readable here
+unchanged.
+
+**Not taken:** Hyphae's `message`, `transport` and `archive` crates (its
+framed protocol and its archive), and `store` as a library: tinytrader's
+store is a service, the only writer to the data disks (0005).
+
+### 7. Shared plumbing in `libs`
 
 - **`libs/net`:** one retry/backoff (doubling, capped, jittered, **bounded**:
   it ends with an error saying it gave up), one reconnect loop for streams,
@@ -272,7 +311,7 @@ reviewed and deployed after a close, under the trading hold.
 Services keep their own HTTP APIs and guards. Nothing here is a framework:
 no service is required to have a given shape, only to stop copying these.
 
-### 7. The store producer
+### 8. The store producer
 
 The store producer is served by the relay, as a source beside its
 providers: a `listen` (or `fetch`) of `store` sends the stored records for
@@ -296,6 +335,24 @@ are the stored DBN, unchanged.
 - **Holes.** A day the store lacks is a gap message, never a silent skip.
   A partial day sends what's held and a gap message naming what isn't (its
   coverage pieces: the contracts and hours missing).
+
+### 9. Resume and loss accounting: later, in DBN
+
+Hyphae's framed protocol wrapped the stream in frames with a stream ID, an
+epoch per producer restart, a contiguous sequence, resumable subscriptions
+and acknowledgement windows. That gives exact resume after a disconnect,
+and exact accounting of what a subscriber missed, at the cost of a wire
+format no DBN tool reads.
+
+tinytrader's relay doesn't need it yet. A client that drops rejoins with
+`start` (where the source keeps history), source gaps are marked, and a
+cut-off client is told. It will matter when the recorder (step 7, 0013)
+must prove a capture whole across a relay restart or a reconnect. Then the
+same guarantees go in-band, in standard DBN: the relay sends an epoch at
+each start and a running record count in periodic `SystemMsg` markers, and
+the join takes `after: {epoch, count}` to resume from what it still holds,
+or says the gap. A DBN tool skips the markers; the recorder checks them.
+Not built until the recorder needs it.
 
 ## Steps and budgets
 
@@ -324,12 +381,15 @@ own and don't wait for any of the rest.
 | 6a. `--every` time and calendar triggers, in the services that own the fetch | 250 | 200 |
 | 6b. `--every` stream-event triggers on the relay (one provider), coalescing | 350 | 300 |
 | 7. `tt record`: the recorder as a subscriber filing through the store (with 0013) | (scoped with 0013) | |
+| 9a. Hyphae's crypto records into `libs/dbn` (moved, byte-compatible, with their tests) | ~1,300 moved | ~700 moved |
+| 9b. The dependency-rule CI check; `libs/alpaca` to `libs/venues/alpaca`; `libs/instruments` from the services' OCC and root parsing | 350 | 250 |
+| 9c. `libs/venues/databento` from the relay's and `databento-jobs`' mapping (net negative) | 300 | 200 |
 | 8. Docs: the roles, verbs and addresses in each API page | (docs) | |
 | **The rest, before 7** | **1,950** | **1,500** |
 
 Order: 0 first for the endpoints 2 and 3 use; then 1, 2 and 3 in any
 order. After them: 4 before 5b and 6b; 5a needs 2, 5b needs 5a; 6a needs
-1; 6b needs 4 and 6a. Each step reports the lines it removes beside these.
+1; 6b needs 4 and 6a. 9a stands alone; 9b before 9c, and 9c before 6b. Each step reports the lines it removes beside these.
 
 ## Consequences
 
@@ -343,10 +403,9 @@ order. After them: 4 before 5b and 6b; 5a needs 2, 5b needs 5a; 6a needs
   with a recorder are compositions of the same commands, not new services.
 - `libs/net` and `libs/store-client` are contracts between services; change
   them additively.
-- **Open: the name.** `tt` is already the queue's command (removed by 0020),
-  and research imports a Python package `tt`. A binary and a Python package
-  don't collide on `PATH`, but if the shared name confuses, the command can
-  be renamed before step 3.
+- **The name stays `tt`.** It was the queue's command (removed by 0020),
+  and research imports a Python package `tt`; a binary and a Python package
+  don't collide on `PATH`.
 - Not doing: Hyphae's slot transactions and page evidence (0014's reasons
   stand), its HTRN/MDS1 framed transport (the relay's DBN-over-TCP join stays
   the stream protocol), a connector framework, or a batch scheduler.
