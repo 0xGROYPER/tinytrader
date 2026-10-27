@@ -65,7 +65,6 @@ if [ -n "${WATCH_SERVICES_FROM:-}" ]; then
   fi
 fi
 native="$(words <<<"${WATCH_NATIVE:-}")"
-disks="$(words <<<"${WATCH_DISKS:-}")"
 # Files that must have changed recently: NAME:MAX_AGE_SECONDS:PATH each.
 fresh="$(words <<<"${WATCH_FRESH:-}")"
 
@@ -82,6 +81,17 @@ done
 for n in "$interval" "$disk_warn" "$disk_crit" "$disk_min_gib" "$degraded_after" "$restart_hold" "$repeat_high" "$repeat_warn"; do
   [[ "$n" =~ ^[0-9]+$ ]] || { log "not a whole number: $n"; exit 2; }
 done
+# Disks: PATH, or PATH:WARN:CRIT:MIN_FREE_GIB for thresholds of its own (an
+# empty field takes the host-wide one); kept as PATH<TAB>WARN<TAB>CRIT<TAB>MIN.
+disks=""
+while read -r e; do
+  [ -n "$e" ] || continue
+  if ! [[ "$e" =~ ^([^:]+)(:([0-9]*):([0-9]*):([0-9]*))?$ ]]; then
+    log "WATCH_DISKS entry not PATH or PATH:WARN:CRIT:MIN_FREE_GIB (whole numbers or empty): $e"
+    exit 2
+  fi
+  disks+="${BASH_REMATCH[1]}"$'\t'"${BASH_REMATCH[3]:-$disk_warn}"$'\t'"${BASH_REMATCH[4]:-$disk_crit}"$'\t'"${BASH_REMATCH[5]:-$disk_min_gib}"$'\n'
+done < <(words <<<"${WATCH_DISKS:-}")
 mkdir -p "$state_dir"
 
 # One run's findings: key<TAB>severity (warn|high)<TAB>message, one per line.
@@ -210,8 +220,8 @@ check_native() {
 }
 
 check_disks() {
-  local m out size avail target pct free
-  while read -r m; do
+  local m warn crit min_gib out size avail target pct free
+  while IFS=$'\t' read -r m warn crit min_gib; do
     [ -n "$m" ] || continue
     if ! out="$(df -B1 --output=size,avail,target -- "$m" 2>/dev/null | tail -n1)"; then
       problem "disk:$m" high "$m: missing (not mounted?)"
@@ -226,9 +236,9 @@ check_disks() {
     # Used against the whole size: on APFS, volumes share their container's space.
     pct=$(( (size - avail) * 100 / size ))
     free=$(( avail / 1073741824 ))
-    if [ "$pct" -ge "$disk_crit" ] || [ "$avail" -lt $(( disk_min_gib * 1073741824 )) ]; then
+    if [ "$pct" -ge "$crit" ] || [ "$avail" -lt $(( min_gib * 1073741824 )) ]; then
       problem "disk:$m" high "$m: $pct% full, $free GiB free"
-    elif [ "$pct" -ge "$disk_warn" ]; then
+    elif [ "$pct" -ge "$warn" ]; then
       problem "disk:$m" warn "$m: $pct% full, $free GiB free"
     fi
   done <<<"$disks"
