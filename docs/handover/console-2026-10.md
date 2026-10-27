@@ -38,4 +38,10 @@ Written when the sessions on the old Mac were closed. Nothing is in progress.
 
 ## Test harness and screenshots
 
-The browser harness (Playwright) is in the private ops repo, on branch `handover/console-harness`, under `scripts/console-browser/`. It holds the mini's address, so it isn't in this repo. Journal screenshots are in `docs/screenshots/journal/`.
+The Playwright scripts were on a scratch area that was cleared before the
+move, so they're gone from disk. Their surviving copies: `test.mjs` and
+`sweep.mjs` are in the description of PR #9; the journal test's steps are in
+the description of PR #26, and the script itself must be rewritten. A README
+on branch `handover/console-harness` in the private ops repo says the same.
+Journal screenshots are in `docs/screenshots/journal/`; the full day view
+(with live P/L) was not kept.
