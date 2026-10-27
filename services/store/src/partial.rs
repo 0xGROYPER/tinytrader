@@ -512,7 +512,12 @@ pub(crate) fn holds_all(held: &Path, cov: &Coverage, whole: &Path) -> Result<Hel
             got.entry(s.as_str()).or_default().add(r.as_ref());
         }
     }
-    for s in want.keys().chain(got.keys()).copied().collect::<BTreeSet<_>>() {
+    for s in want
+        .keys()
+        .chain(got.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+    {
         let (w, g) = (
             want.remove(s).unwrap_or_default().finish(),
             got.remove(s).unwrap_or_default().finish(),

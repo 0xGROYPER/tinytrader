@@ -428,10 +428,15 @@ fn supersede(
             .map_err(|e| io(&tmp, e))?;
         if hash_file(&tmp)? != s.sha256 {
             let _ = fs::remove_file(&tmp);
-            return Err(format!("{}: copied with a different SHA-256", tmp.display()));
+            return Err(format!(
+                "{}: copied with a different SHA-256",
+                tmp.display()
+            ));
         }
         fs::rename(&tmp, &staged).map_err(|e| io(&staged, e))?;
-        ledger.record(json!({ "step": "copied", "from": s.from, "to": staged, "sha256": s.sha256 }))?;
+        ledger.record(
+            json!({ "step": "copied", "from": s.from, "to": staged, "sha256": s.sha256 }),
+        )?;
     }
     crash("copied")?;
     let kept = s
@@ -480,7 +485,9 @@ fn supersede(
         let _ = fs::remove_dir(s.root.join(INCOMING));
     }
     ledger.record(json!({ "step": "swapped", "path": s.at, "sha256": s.sha256 }))?;
-    Ok(json!({ "path": s.at, "sha256": s.sha256, "superseded": { "path": kept, "sha256": s.old, "records": s.held.records } }))
+    Ok(
+        json!({ "path": s.at, "sha256": s.sha256, "superseded": { "path": kept, "sha256": s.old, "records": s.held.records } }),
+    )
 }
 
 /// One volume's share of a batch: the folder holding its files, and that
@@ -729,9 +736,10 @@ fn file_batch(
         // that this whole chain may supersede.
         let mut partial_held = None;
         if let Some((p, h, e)) = existing.iter().find(|(_, h, _)| *h != want) {
-            match e.as_ref().filter(|e| {
-                whole && existing.len() == 1 && crate::manifest::is_partial(e)
-            }) {
+            match e
+                .as_ref()
+                .filter(|e| whole && existing.len() == 1 && crate::manifest::is_partial(e))
+            {
                 Some(e) => partial_held = Some((p.clone(), h.clone(), e.clone())),
                 None => {
                     return Err(format!(
@@ -766,7 +774,8 @@ fn file_batch(
         let mut verified =
             json!({ "step": "verified", "file": path, "bytes": meta.len(), "sha256": got });
         if let (Some((at, old, entry)), Some(day)) = (partial_held, &day) {
-            let held = supersedable(&at, &old, &entry, &path).map_err(|e| format!("{name}: {e}"))?;
+            let held =
+                supersedable(&at, &old, &entry, &path).map_err(|e| format!("{name}: {e}"))?;
             verified["records"] = json!(held.total);
             verified["supersedes"] = json!({ "path": at, "sha256": old, "records": held.records, "contracts": held.contracts });
             ledger.record(verified)?;
@@ -877,7 +886,8 @@ fn file_batch(
                 ledger.record(json!({ "step": "duplicate-dropped", "file": from, "identical_to": existing, "sha256": sha256 }))?;
                 let mut f = json!({ "path": existing, "sha256": sha256, "already_present": true });
                 // Superseded by an earlier run of this batch?
-                if let Some(e) = entry.filter(|e| e["source"] == format!("batch/{batch}").as_str()) {
+                if let Some(e) = entry.filter(|e| e["source"] == format!("batch/{batch}").as_str())
+                {
                     f["superseded"] = e["superseded"].clone();
                 }
                 placed.push(f);
@@ -1540,7 +1550,10 @@ mod tests {
             )
             .unwrap();
             assert_eq!(old["source"], "import/I1");
-            assert!(root.join(format!("provenance/{batch}/manifest.json")).exists());
+            assert!(
+                root.join(format!("provenance/{batch}/manifest.json"))
+                    .exists()
+            );
             assert!(!root.join(INCOMING).exists());
         }
 
@@ -1579,7 +1592,11 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                (cov.len(), cov[0]["kind"].clone(), cov[0]["conflict"].clone()),
+                (
+                    cov.len(),
+                    cov[0]["kind"].clone(),
+                    cov[0]["conflict"].clone()
+                ),
                 (1, json!("complete"), json!(false)),
                 "the kept file isn't counted"
             );
@@ -1597,10 +1614,7 @@ mod tests {
         fn refuses_a_chain_without_every_record_of_the_partial_day() {
             let root = scratch("supersede-missing").join("Databento");
             holding(&root);
-            let missing: Vec<_> = chain()
-                .into_iter()
-                .filter(|r| *r != (12, at(0)))
-                .collect();
+            let missing: Vec<_> = chain().into_iter().filter(|r| *r != (12, at(0))).collect();
             let mut extra = chain();
             extra.push((11, at(5)));
             for (batch, bytes, stype, why) in [
