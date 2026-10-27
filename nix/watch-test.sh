@@ -52,6 +52,23 @@ says "not-there: missing"
 WATCH_DISK_MIN_FREE_GIB=0 WATCH_DISKS="$work" run; WATCH_DISK_MIN_FREE_GIB=0 WATCH_DISKS="$work" run
 says "not mounted (it is part of"
 
+echo "== disk thresholds: a disk's own, else the host-wide ones"
+# Host-wide: warn at $1 % used, never high priority.
+disk() { WATCH_DISK_WARN="$1" WATCH_DISK_CRIT=100 WATCH_DISK_MIN_FREE_GIB=0 WATCH_DISKS="$2" run; }
+disk 0 /; disk 0 /; says "would notify: testhost: /: "
+disk 0 /:100:100:0; says "resolved"
+disk 0 /:100:100:0; silent "its own thresholds over the host's"
+disk 100 /:0::; disk 100 /:0::; says "would notify: testhost: /: "
+disk 100 /::100:; says "resolved"
+disk 100 /::100:; silent "an empty field takes the host-wide threshold"
+
+echo "== a malformed WATCH_DISKS entry stops watch at start"
+for bad in /data:90:95 /data:90:95:10:5 /data:9x:95:10 :90:95:10; do
+  rc=0; WATCH_DISKS="/ $bad" "$WATCH" --once 2> "$work/log" || rc=$?
+  [ "$rc" = 2 ] || { echo "FAIL: WATCH_DISKS=$bad: exit $rc, not 2" >&2; exit 1; }
+  says "WATCH_DISKS entry not PATH or PATH:WARN:CRIT:MIN_FREE_GIB (whole numbers or empty): $bad"
+done
+
 echo "== a job's stamp: missing or stale is a warning; fresh is fine"
 WATCH_FRESH="backup:3600:$work/stamp" run; WATCH_FRESH="backup:3600:$work/stamp" run
 says "backup: never done"

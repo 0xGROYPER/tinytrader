@@ -30,7 +30,11 @@
 #                         is a warning, WATCH_DISK_CRIT % (95) or under
 #                         WATCH_DISK_MIN_FREE_GIB free (10) high priority; a
 #                         path that isn't its own mount (an unplugged drive)
-#                         is high priority too
+#                         is high priority too. An entry
+#                         PATH:WARN:CRIT:MIN_FREE_GIB (e.g.
+#                         /Volumes/archive:90:95:10) has thresholds of its
+#                         own; an empty field (/data::98:) takes the
+#                         host-wide one. A malformed entry stops watch at start
 #   WATCH_FRESH           files a scheduled job touches when it succeeds, as
 #                         NAME:MAX_AGE_SECONDS:PATH (e.g.
 #                         backup:108000:/var/lib/backup/last-backup): one
