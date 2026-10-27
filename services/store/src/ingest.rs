@@ -352,7 +352,9 @@ enum Plan {
 
 /// A complete day to put in place of a partial day.
 struct Supersede {
+    /// The incoming file, and its copies on the batch's other volumes.
     from: PathBuf,
+    copies: Vec<PathBuf>,
     /// The partial day held, and the provider directory holding it.
     at: PathBuf,
     root: PathBuf,
@@ -478,12 +480,14 @@ fn supersede(
     sync_dir(dir).map_err(|e| io(dir, e))?;
     crash("swapped")?;
     crate::manifest::settle(dir, &s.day)?;
-    if staged != s.from {
-        // A proven duplicate: the copy just swapped in has its SHA-256.
-        fs::remove_file(&s.from).map_err(|e| io(&s.from, e))?;
-        let _ = fs::remove_dir(staged.parent().unwrap_or(dir));
-        let _ = fs::remove_dir(s.root.join(INCOMING));
+    // Other copies are proven duplicates of the file just swapped in.
+    for c in std::iter::once(&s.from).chain(&s.copies) {
+        if *c != staged && hash_file(c).is_ok_and(|h| h == s.sha256) {
+            fs::remove_file(c).map_err(|e| io(c, e))?;
+        }
     }
+    let _ = fs::remove_dir(staged.parent().unwrap_or(dir));
+    let _ = fs::remove_dir(s.root.join(INCOMING));
     ledger.record(json!({ "step": "swapped", "path": s.at, "sha256": s.sha256 }))?;
     Ok(
         json!({ "path": s.at, "sha256": s.sha256, "superseded": { "path": kept, "sha256": s.old, "records": s.held.records } }),
@@ -785,6 +789,11 @@ fn file_batch(
                 .ok_or("the partial day isn't under a provider folder")?
                 .clone();
             plans.push(Plan::Supersede(Box::new(Supersede {
+                copies: parts
+                    .iter()
+                    .map(|p| p.inc.join(name))
+                    .filter(|p| *p != path && p.exists())
+                    .collect(),
                 from: path,
                 at,
                 root,
@@ -1693,7 +1702,11 @@ mod tests {
                 partial(),
                 "a crash after the copy changes nothing"
             );
-            incorporate(&parts, elsewhere, "OPRA-V", "2026-10-27").unwrap();
+            // Filed again as the store finds it: b holds part of it now, the
+            // copy (listed first, so filed from there).
+            let mut both = one(&b, "OPRA-V");
+            both.extend(parts);
+            incorporate(&both, &[], "OPRA-V", "2026-10-27").unwrap();
             superseded(&a, &b, "OPRA-V");
             assert!(!day(&a).exists() && !b.join(INCOMING).exists());
             assert!(
