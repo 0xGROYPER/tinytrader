@@ -104,6 +104,11 @@ struct Args {
     /// before it is sent. Without one, nothing is submitted.
     #[arg(long, env = "JOBS_LEDGER")]
     ledger: Option<std::path::PathBuf>,
+
+    /// Jobs downloaded at once (decision 0024). Filing is left to the
+    /// store, which files one at a time.
+    #[arg(long, env = "JOBS_DOWNLOADS", default_value_t = 4)]
+    downloads: usize,
 }
 
 /// How long a price stays good for submitting: an hour when it costs
@@ -431,7 +436,14 @@ struct Jobs {
     /// Bytes to download (compressed, as delivered) of done jobs.
     delivered: Mutex<HashMap<String, u64>>,
     listed: Mutex<Value>,
-    one_at_a_time: tokio::sync::Semaphore,
+    /// Downloads running at once (`--downloads`), each until its files and
+    /// manifest are in the store's incoming folder, not while it files.
+    downloads: tokio::sync::Semaphore,
+    /// The room each job in flight holds until it files or fails: its
+    /// download's bytes not yet in the store (those that are count in its
+    /// free room), and its merges' by volume.
+    reserved: Mutex<HashMap<String, (u64, ByVolume)>>,
+    room_check: tokio::sync::Mutex<()>,
     /// While in the pause window, when it ends (ns since the epoch); else 0.
     /// Nonzero while yielding to live capture.
     paused_until: AtomicU64,
@@ -479,7 +491,9 @@ impl Jobs {
             details: Mutex::default(),
             delivered: Mutex::default(),
             listed: Mutex::new(json!({ "jobs": [], "updated_at": null })),
-            one_at_a_time: tokio::sync::Semaphore::new(1),
+            downloads: tokio::sync::Semaphore::new(4),
+            reserved: Mutex::default(),
+            room_check: tokio::sync::Mutex::new(()),
             events: Events::default(),
             next_quote: AtomicU64::new(1),
             boot: {
@@ -511,6 +525,8 @@ impl Jobs {
 }
 
 type Shared = Arc<Jobs>;
+/// Bytes by volume name.
+type ByVolume = HashMap<String, u64>;
 type Reply = (StatusCode, Json<Value>);
 
 fn refused(code: StatusCode, why: impl Into<String>) -> Reply {
@@ -592,6 +608,7 @@ async fn main() {
         })
         .collect();
     jobs.capture_hours = args.capture_hours;
+    jobs.downloads = tokio::sync::Semaphore::new(args.downloads.max(1));
     jobs.approve_token = match tinytrader_observe::optional_secret("JOBS_APPROVE_TOKEN") {
         Ok(t) => t,
         Err(e) => {
@@ -2393,13 +2410,14 @@ fn start_download(jobs: &Shared, job: String) {
     });
     let jobs = jobs.clone();
     tokio::spawn(async move {
-        let _turn = jobs.one_at_a_time.acquire().await;
+        let turn = jobs.downloads.acquire().await.ok();
         // Downloads wait while capture is live.
         while jobs.paused_until.load(Ordering::Relaxed) != 0 {
             set(&jobs, &job, |t| t.state = "waiting: capture is live".into());
             tokio::time::sleep(Duration::from_secs(15)).await;
         }
-        let result = fetch_and_file(&jobs, &job).await;
+        let result = fetch_and_file(&jobs, &job, turn).await;
+        lock(&jobs.reserved).remove(&job);
         match result {
             Ok(n) => {
                 lock(&jobs.tries).remove(&job);
@@ -2454,9 +2472,14 @@ async fn filed(jobs: &Jobs, job: &str) -> bool {
     }
 }
 
-/// Stream every file of a done job into the store, then have it filed
-/// (none, `Ok(0)`, when the store already has).
-async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
+/// Stream every file of a done job into the store, then, its download's
+/// `turn` given back, have it filed (none, `Ok(0)`, when the store already
+/// has).
+async fn fetch_and_file(
+    jobs: &Jobs,
+    job: &str,
+    turn: Option<tokio::sync::SemaphorePermit<'_>>,
+) -> Result<usize, String> {
     if filed(jobs, job).await {
         return Ok(0);
     }
@@ -2488,58 +2511,74 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
             .sum::<u64>();
     // Files are placed one by one on whichever drive has most room
     // (decision 0007): the pool must hold them all, and a drive the largest.
-    let (pool, one, _) = room(jobs).await?;
-    if needed > pool {
-        return Err(format!(
-            "needs {}, but the store has room for {} across its drives",
-            gb(needed),
-            gb(pool)
-        ));
-    }
     let largest = files
         .iter()
         .filter(|f| have.get(&f.filename) != Some(&f.size))
         .map(|f| f.size)
         .max()
         .unwrap_or(0);
-    if largest > one {
-        return Err(format!(
-            "its largest file is {}, but no drive has room for more than {}",
-            gb(largest),
-            gb(one)
-        ));
-    }
-    // Merging into a day held takes room for both files on its volume:
-    // wait for it, saying so.
+    // Merging into a day held takes room for both files on its volume.
     let details = lock(&jobs.details).get(job).cloned();
-    if let Some(j) = details
-        && let Some(parent) = contract_parent(&j)
-    {
-        let need = merge_room(jobs, &j, &parent, &files).await?;
-        let until = Instant::now() + jobs.merge_wait;
-        loop {
-            let (_, _, each) = room(jobs).await?;
-            let short: Vec<String> = need
+    let need = match details.and_then(|j| contract_parent(&j).map(|p| (j, p))) {
+        Some((j, parent)) => merge_room(jobs, &j, &parent, &files).await?,
+        None => HashMap::new(),
+    };
+    // Room net of what the downloads in flight hold (each might land on any
+    // drive), checked and reserved as one step; until there is, it waits,
+    // saying why.
+    let until = Instant::now() + jobs.merge_wait;
+    loop {
+        let why = {
+            let _one_at_a_time = jobs.room_check.lock().await;
+            let (pool, one, each) = room(jobs).await?;
+            if needed > pool {
+                return Err(format!(
+                    "needs {}, but the store has room for {} across its drives",
+                    gb(needed),
+                    gb(pool)
+                ));
+            }
+            if largest > one {
+                return Err(format!(
+                    "its largest file is {}, but no drive has room for more than {}",
+                    gb(largest),
+                    gb(one)
+                ));
+            }
+            let mut held = lock(&jobs.reserved);
+            let flight: u64 = held.values().map(|r| r.0).sum();
+            let merging: u64 = held.values().flat_map(|r| r.1.values()).sum();
+            let free = |v: &String| {
+                let m: u64 = held.values().filter_map(|r| r.1.get(v)).sum();
+                each.get(v).copied().unwrap_or(0).saturating_sub(flight + m)
+            };
+            let mut short: Vec<String> = need
                 .iter()
-                .filter(|(v, n)| each.get(*v).copied().unwrap_or(0) < **n)
+                .filter(|(v, n)| free(v) < **n)
                 .map(|(v, n)| {
                     format!(
                         "{v} needs {} to merge these days, and has room for {}",
                         gb(*n),
-                        gb(each.get(v).copied().unwrap_or(0))
+                        gb(free(v))
                     )
                 })
                 .collect();
+            if needed > pool.saturating_sub(flight + merging)
+                || largest > each.keys().map(free).max().unwrap_or(0)
+            {
+                short.push("downloads in flight hold the room it needs".into());
+            }
             if short.is_empty() {
+                held.insert(job.to_owned(), (needed, need.clone()));
                 break;
             }
-            let why = short.join("; ");
-            if Instant::now() >= until {
-                return Err(why);
-            }
-            set(jobs, job, |t| t.state = format!("waiting: {why}"));
-            tokio::time::sleep(Duration::from_millis(if cfg!(test) { 10 } else { 60_000 })).await;
+            short.join("; ")
+        };
+        if Instant::now() >= until {
+            return Err(why);
         }
+        set(jobs, job, |t| t.state = format!("waiting: {why}"));
+        tokio::time::sleep(Duration::from_millis(if cfg!(test) { 10 } else { 60_000 })).await;
     }
     set(jobs, job, |t| {
         t.state = "downloading".into();
@@ -2571,7 +2610,12 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
             loop {
                 attempt += 1;
                 match copy(jobs, job, &f.filename, url, f.size, &f.hash, done).await {
-                    Ok(()) => break,
+                    Ok(()) => {
+                        if let Some(r) = lock(&jobs.reserved).get_mut(job) {
+                            r.0 = r.0.saturating_sub(f.size);
+                        }
+                        break;
+                    }
                     Err(e) if attempt < 3 => {
                         eprintln!("databento-jobs: {job}/{}: {e}; retrying", f.filename);
                         tokio::time::sleep(Duration::from_secs(5 * attempt)).await;
@@ -2605,6 +2649,7 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
             ));
         }
     }
+    drop(turn);
     set(jobs, job, |t| {
         t.state = "filing".into();
         t.file.clear();

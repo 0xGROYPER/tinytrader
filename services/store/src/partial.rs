@@ -337,37 +337,49 @@ impl Tally {
     }
 }
 
-/// Merge two partial days into a new file `out`, record by record, in order
-/// of their index timestamps (ties: `a`'s first, each in its own order),
-/// never holding more than one record of each. Then read it back, sorting
-/// each record to the input it came from (by its instrument, and, for a
-/// contract in both, which input's coverage holds its time), and check each
-/// input's records are there, all of them, in order: by count and a running
-/// hash. Returns its record count.
+/// Merge partial days (the day held first) into a new file `out`, record by
+/// record, in order of their index timestamps (ties: the earlier input's
+/// first, each in its own order), never holding more than one record of
+/// each. Then read it back, sorting each record to the input it came from
+/// (by its instrument, and, for a contract in several, which input's
+/// coverage holds its time), and check each input's records are there, all
+/// of them, in order: by count and a running hash. Returns its record count.
 ///
 /// # Errors
 /// If the headers can't be merged, an instrument ID is two contracts, `out`
 /// exists, or the file read back differs from what was written.
-pub fn merge(
-    a: &Path,
-    b: &Path,
-    out: &Path,
-    held: &Coverage,
-    new: &Coverage,
-) -> Result<u64, String> {
-    let (ids_a, ids_b) = same_ids(a, b)?;
-    let (mut da, mut db) = (open(a)?, open(b)?);
-    let m = da
+pub fn merge(inputs: &[(&Path, &Coverage)], out: &Path) -> Result<u64, String> {
+    let mut maps: Vec<Ids> = Vec::new();
+    let mut all = Ids::new();
+    for (p, _) in inputs {
+        let m = ids(open(p)?.metadata())?;
+        for (id, s) in &m {
+            if let Some(t) = all.insert(*id, s.clone())
+                && t != *s
+            {
+                return Err(format!(
+                    "instrument {id} is {t} in one input and {s} in another; they can't be merged"
+                ));
+            }
+        }
+        maps.push(m);
+    }
+    let mut decoders = inputs
+        .iter()
+        .map(|(p, _)| open(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (first, rest) = decoders.split_first().ok_or("nothing to merge")?;
+    let m = first
         .metadata()
         .clone()
-        .merge([db.metadata().clone()])
-        .map_err(|e| format!("the two headers can't be merged: {e}"))?;
+        .merge(rest.iter().map(|d| d.metadata().clone()))
+        .map_err(|e| format!("the headers can't be merged: {e}"))?;
     let file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(out)
         .map_err(|e| format!("{}: {e}", out.display()))?;
-    let mut written = [Tally::default(), Tally::default()];
+    let mut written: Vec<Tally> = inputs.iter().map(|_| Tally::default()).collect();
     {
         let mut enc = dbn::encode::dbn::Encoder::with_zstd(std::io::BufWriter::new(&file), &m)
             .map_err(|e| e.to_string())?;
@@ -376,23 +388,21 @@ pub fn merge(
                 .map_err(|e| e.to_string())?
                 .map(|r| r.to_owned()))
         };
-        let mut heads = [next(&mut da)?, next(&mut db)?];
-        loop {
-            let pick = match (&heads[0], &heads[1]) {
-                (None, None) => break,
-                (Some(_), None) => 0,
-                (None, Some(_)) => 1,
-                (Some(x), Some(y)) => usize::from(y.raw_index_ts() < x.raw_index_ts()),
-            };
+        let mut heads = decoders
+            .iter_mut()
+            .map(next)
+            .collect::<Result<Vec<_>, _>>()?;
+        while let Some((_, pick)) = heads
+            .iter()
+            .enumerate()
+            .filter_map(|(i, h)| Some((h.as_ref()?.raw_index_ts(), i)))
+            .min()
+        {
             let r = heads[pick].take().ok_or("lost a record")?;
             enc.encode_record_ref(r.as_rec_ref())
                 .map_err(|e| e.to_string())?;
             written[pick].add(r.as_ref());
-            heads[pick] = if pick == 0 {
-                next(&mut da)?
-            } else {
-                next(&mut db)?
-            };
+            heads[pick] = next(&mut decoders[pick])?;
         }
         enc.flush().map_err(|e| e.to_string())?;
     }
@@ -405,7 +415,7 @@ pub fn merge(
     if back.metadata().symbols != m.symbols {
         return Err("the merged file's contracts differ from its inputs'".into());
     }
-    let mut seen = [Tally::default(), Tally::default()];
+    let mut seen: Vec<Tally> = inputs.iter().map(|_| Tally::default()).collect();
     let mut last = 0;
     while let Some(r) = back.decode_record_ref().map_err(|e| e.to_string())? {
         let (id, t) = (r.header().instrument_id, r.raw_index_ts());
@@ -415,33 +425,35 @@ pub fn merge(
             ));
         }
         last = t;
-        let input = match (ids_a.get(&id), ids_b.get(&id)) {
-            (Some(_), None) => 0,
-            (None, Some(_)) => 1,
-            (Some(s), Some(_)) => match (held.covers(s, t, t + 1), new.covers(s, t, t + 1)) {
-                (true, false) => 0,
-                (false, true) => 1,
-                _ => {
-                    return Err(format!(
-                        "the merged file's record at {t} of {s} can't be told to one input"
-                    ));
-                }
-            },
-            (None, None) => {
-                return Err(format!(
-                    "the merged file has instrument {id}, of neither input"
-                ));
-            }
+        let Some(s) = all.get(&id) else {
+            return Err(format!("the merged file has instrument {id}, of no input"));
+        };
+        let of: Vec<usize> = (0..inputs.len())
+            .filter(|i| maps[*i].contains_key(&id))
+            .collect();
+        let of: Vec<usize> = match of[..] {
+            [_] => of,
+            _ => of
+                .into_iter()
+                .filter(|i| inputs[*i].1.covers(s, t, t + 1))
+                .collect(),
+        };
+        let [input] = of[..] else {
+            return Err(format!(
+                "the merged file's record at {t} of {s} can't be told to one input"
+            ));
         };
         seen[input].add(r.as_ref());
     }
-    let total = written[0].records + written[1].records;
+    let total = written.iter().map(|w| w.records).sum();
     for (i, (w, s)) in written.into_iter().zip(seen).enumerate() {
         let (w, s) = (w.finish(), s.finish());
         if w != s {
             return Err(format!(
-                "the merged file holds {} records of input {i} that read back differently ({} written)",
-                s.0, w.0
+                "the merged file holds {} records of {} that read back differently ({} written)",
+                s.0,
+                inputs[i].0.display(),
+                w.0
             ));
         }
     }
@@ -502,31 +514,6 @@ fn belongs(parent: &str, symbols: &BTreeSet<String>) -> Result<(), String> {
     }
 }
 
-/// What happens to one imported day.
-enum Step {
-    /// Nothing holds the day: file it.
-    Place {
-        from: PathBuf,
-        to: PathBuf,
-        entry: Value,
-    },
-    /// Byte-identical to the day already held.
-    Duplicate { from: PathBuf, existing: PathBuf },
-    /// A partial day is held with other contracts: merge the two.
-    Merge {
-        from: PathBuf,
-        existing: PathBuf,
-        held: Coverage,
-        new: Coverage,
-        /// The records of each, as recorded and as read.
-        counts: (Option<u64>, u64),
-    },
-}
-
-fn ledger_cov(entry: &Value) -> Coverage {
-    Coverage::from_json(&entry["coverage"]).unwrap_or(Coverage { pieces: Vec::new() })
-}
-
 /// Make a partial day complete when it holds every contract of the day's
 /// definitions (of the same parent), each over the whole day: its entry
 /// keeps its file's record and drops its coverage. Returns whether it did.
@@ -561,22 +548,135 @@ fn promote(
     Ok(true)
 }
 
-/// File an import waiting in `.incoming/<id>` on one or more volumes.
-///
-/// # Errors
-/// If `import.json` is missing or malformed, a file doesn't match it or its
-/// own header, or a day can't be filed: held complete, held as a different
-/// file, or held partly with some of the same contracts.
+/// What a group of filings does to one day (decision 0024, section 8b),
+/// planned before anything moves: the day's file, held or where its first
+/// input goes, and every input, merged into it in one write.
+#[derive(Clone)]
+struct Day {
+    day: String,
+    at: PathBuf,
+    /// The partial day held: its coverage and recorded record count.
+    held: Option<(Coverage, Option<u64>)>,
+    inputs: Vec<Input>,
+    /// What it holds once every input so far is in it.
+    cov: Coverage,
+    level: PathBuf,
+    everywhere: Vec<PathBuf>,
+}
+
+#[derive(Clone)]
+struct Input {
+    /// The filing it is of, in the group.
+    of: usize,
+    from: PathBuf,
+    cov: Coverage,
+    records: u64,
+    entry: Value,
+}
+
+/// Did an earlier run of import `id` file into the day at `path`? Its
+/// ledger moved a file there, or merged or swapped one in (a merge whose
+/// swap was undone leaves the day without the file's coverage, which the
+/// caller checks).
+fn filed_by(roots: &[PathBuf], id: &str, path: &Path) -> bool {
+    let suffix = format!("-import-{id}.events.jsonl");
+    for e in roots.iter().flat_map(|r| {
+        fs::read_dir(r.join("migrations"))
+            .into_iter()
+            .flatten()
+            .flatten()
+    }) {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.strip_suffix(&suffix).is_none_or(|d| d.len() != 10) {
+            continue;
+        }
+        let text = fs::read_to_string(e.path()).unwrap_or_default();
+        for ev in text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        {
+            let to = |k: &str| ev[k].as_str().map(Path::new) == Some(path);
+            let at = match ev["step"].as_str() {
+                Some("moved") => to("to"),
+                Some("swapped") => to("path"),
+                Some("merged") => ev["inputs"][0].as_str().map(Path::new) == Some(path),
+                _ => false,
+            };
+            if at {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A filing of a group: an import waiting in `.incoming/<id>`, or with
+/// `parent`, a provider batch bought as a list of that parent's contracts.
+pub struct Filing {
+    pub parts: Vec<Part>,
+    pub elsewhere: Vec<PathBuf>,
+    pub id: String,
+    pub today: String,
+    pub parent: Option<String>,
+}
+
+/// A filing whose checks passed, until it is finished.
+struct Member {
+    ledger: Ledger,
+    receipt_path: PathBuf,
+    summary: Value,
+    duplicates: Vec<(String, PathBuf, PathBuf)>,
+    done: Vec<Value>,
+    failed: Option<String>,
+}
+
+/// File a group of imports and batches together (decision 0024, section
+/// 8b), each answering for itself as if filed alone, one after the other:
+/// every filing's checks run first, each against the days held and what the
+/// filings before it will file; a filing refused is refused alone. Then each
+/// day the group touches is written once: the day held (or the first input,
+/// moved into place) and every input, merged in timestamp order.
+pub fn import_group(group: &[Filing]) -> Vec<Result<Value, String>> {
+    let mut days: BTreeMap<PathBuf, Day> = BTreeMap::new();
+    let mut members: Vec<Result<Member, String>> = Vec::new();
+    for (of, f) in group.iter().enumerate() {
+        let mut mine = days.clone();
+        let m = match &f.parent {
+            Some(p) => batch_receipt(&f.parts, &f.id, p),
+            None => Ok(()),
+        }
+        .and_then(|()| prepare(f, of, &mut mine));
+        if m.is_ok() {
+            days = mine;
+        }
+        members.push(m);
+    }
+    for d in days.into_values() {
+        let of: BTreeSet<usize> = d.inputs.iter().map(|i| i.of).collect();
+        if let Err(e) = file_day(d, group, &mut members) {
+            for i in of {
+                if let Ok(m) = &mut members[i] {
+                    m.failed.get_or_insert_with(|| e.clone());
+                }
+            }
+        }
+    }
+    members
+        .into_iter()
+        .zip(group)
+        .map(|(m, f)| finish(m?, f))
+        .collect()
+}
+
+/// A filing's checks: every file against its receipt and its own header,
+/// and each day against what is held and what the group files before it
+/// (`days`, to which its inputs are added).
 #[expect(
     clippy::too_many_lines,
-    reason = "one pass of checks, then one of moves, kept together so nothing moves before every check"
+    reason = "one pass of checks, kept together so nothing moves before every check"
 )]
-pub fn import(
-    parts: &[Part],
-    elsewhere: &[PathBuf],
-    id: &str,
-    today: &str,
-) -> Result<Value, String> {
+fn prepare(f: &Filing, of: usize, days: &mut BTreeMap<PathBuf, Day>) -> Result<Member, String> {
+    let (parts, id) = (&f.parts[..], f.id.as_str());
     let roots: Vec<&Path> = parts.iter().map(|p| p.root.as_path()).collect();
     let first = parts.first().ok_or("no part of the import was found")?;
     let holder = |name: &str| parts.iter().find(|p| p.inc.join(name).exists());
@@ -606,7 +706,7 @@ pub fn import(
     let level = PathBuf::from(dataset).join(parent).join(schema);
     let mut everywhere: Vec<PathBuf> = roots.iter().map(|r| r.to_path_buf()).collect();
     everywhere.extend(
-        elsewhere
+        f.elsewhere
             .iter()
             .filter(|e| !roots.contains(&e.as_path()))
             .cloned(),
@@ -617,7 +717,7 @@ pub fn import(
             .iter()
             .map(|r| {
                 r.join("migrations")
-                    .join(format!("{today}-import-{id}.events.jsonl"))
+                    .join(format!("{}-import-{id}.events.jsonl", f.today))
             })
             .collect::<Vec<_>>(),
     )?;
@@ -627,7 +727,7 @@ pub fn import(
         .as_array()
         .filter(|f| !f.is_empty())
         .ok_or_else(|| format!("{IMPORT} lists no files"))?;
-    let mut steps = Vec::new();
+    let mut duplicates = Vec::new();
     let mut problems = Vec::new();
     let mut check = |f: &Value| -> Result<(), String> {
         let name = f["filename"].as_str().unwrap_or_default();
@@ -660,11 +760,14 @@ pub fn import(
                 break;
             }
         }
+        let ours = |p: &Path| {
+            held_source == format!("import/{id}").as_str() || filed_by(&everywhere, id, p)
+        };
         let Ok(meta) = fs::metadata(&path) else {
             // Filed, or merged, by an earlier run of this import that stopped
             // after its incoming copy was gone?
             if let Some((p, _)) = &held
-                && (held_source == format!("import/{id}").as_str() || hash_file(p)? == want)
+                && (ours(p) || hash_file(p)? == want)
             {
                 return Ok(());
             }
@@ -691,23 +794,11 @@ pub fn import(
             Some((p, _)) => Some(hash_file(p)?),
             None => None,
         };
-        match held {
-            None => steps.push((
-                day,
-                Step::Place {
-                    from: path,
-                    to: part.root.join(&rel),
-                    entry,
-                },
-            )),
+        let (at, held) = match held {
+            None => (part.root.join(&rel), None),
             Some((existing, _)) if held_sha.as_deref() == Some(got.as_str()) => {
-                steps.push((
-                    day,
-                    Step::Duplicate {
-                        from: path,
-                        existing,
-                    },
-                ));
+                duplicates.push((day, path, existing));
+                return Ok(());
             }
             Some((existing, None)) => {
                 return Err(format!(
@@ -718,17 +809,14 @@ pub fn import(
             // Merged by an earlier run of this import that stopped before
             // removing its incoming copy.
             Some((existing, Some(e)))
-                if e["source"] == format!("import/{id}").as_str()
-                    && Coverage::from_json(&e["coverage"])
-                        .is_some_and(|h| cov.symbols().is_subset(&h.symbols())) =>
+                if Coverage::from_json(&e["coverage"]).is_some_and(|h| {
+                    cov.pieces
+                        .iter()
+                        .all(|p| p.symbols.iter().all(|s| h.covers(s, p.start, p.end)))
+                }) && ours(&existing) =>
             {
-                steps.push((
-                    day,
-                    Step::Duplicate {
-                        from: path,
-                        existing,
-                    },
-                ));
+                duplicates.push((day, path, existing));
+                return Ok(());
             }
             Some((existing, Some(e))) => {
                 let held_cov = Coverage::from_json(&e["coverage"])
@@ -746,27 +834,43 @@ pub fn import(
                         e["sha256"]
                     ));
                 }
-                let both = held_cov.overlap(&cov);
-                if let Some(s) = both.first() {
-                    return Err(format!(
-                        "{name}: {} already holds {} of these contracts over the same hours ({s}, …); only contracts not held are filed",
-                        existing.display(),
-                        both.len()
-                    ));
-                }
-                same_ids(&existing, &path).map_err(|e| format!("{name}: {e}"))?;
-                steps.push((
-                    day,
-                    Step::Merge {
-                        from: path,
-                        existing,
-                        held: held_cov,
-                        new: cov,
-                        counts: (e["records"].as_u64(), records),
-                    },
-                ));
+                (existing, Some((held_cov, e["records"].as_u64())))
             }
+        };
+        // The day as the group leaves it before this file: held, or filed
+        // by a filing before this one.
+        let key = PathBuf::from(first.root.file_name().unwrap_or_default()).join(&rel);
+        let d = days.entry(key).or_insert_with(|| Day {
+            day: day.clone(),
+            at,
+            cov: held
+                .as_ref()
+                .map_or(Coverage { pieces: Vec::new() }, |h| h.0.clone()),
+            held,
+            inputs: Vec::new(),
+            level: level.clone(),
+            everywhere: everywhere.clone(),
+        });
+        let both = d.cov.overlap(&cov);
+        if let Some(s) = both.first() {
+            return Err(format!(
+                "{name}: {} already holds {} of these contracts over the same hours ({s}, …); only contracts not held are filed",
+                d.at.display(),
+                both.len()
+            ));
         }
+        let others = d.held.as_ref().map(|_| &d.at).into_iter();
+        for other in others.chain(d.inputs.iter().map(|i| &i.from)) {
+            same_ids(other, &path).map_err(|e| format!("{name}: {e}"))?;
+        }
+        d.cov = d.cov.union(&cov);
+        d.inputs.push(Input {
+            of,
+            from: path,
+            cov,
+            records,
+            entry,
+        });
         Ok(())
     };
     for f in files {
@@ -778,89 +882,160 @@ pub fn import(
         ledger.record(json!({ "step": "refused", "problems": problems }))?;
         return Err(problems.join("; "));
     }
+    Ok(Member {
+        ledger,
+        receipt_path,
+        summary: json!({ "import": id, "dataset": dataset, "schema": schema, "symbol": parent }),
+        duplicates,
+        done: Vec::new(),
+        failed: None,
+    })
+}
 
-    // Every check passed: file each day, never over anything held.
-    let mut done = Vec::new();
-    for (day, step) in steps {
-        match step {
-            Step::Place { from, to, entry } => {
-                let cov = ledger_cov(&entry);
-                let dir = to.parent().ok_or("no folder")?.to_path_buf();
-                // The manifest first: a crash before the move leaves an entry
-                // for a missing file (filed again on a retry), never a
-                // partial file taken for a whole day.
-                set_entry(&dir, &day, Some(entry))?;
-                if let Err(e) = place_new(&from, &to) {
-                    let why = format!("{} -> {}: {e}", from.display(), to.display());
-                    ledger.record(json!({ "step": "stopped", "error": why }))?;
-                    return Err(why);
-                }
-                ledger.record(json!({ "step": "moved", "from": from, "to": to }))?;
-                let promoted = promote(&dir, &day, &everywhere, &level, &cov)?;
-                done.push(json!({ "day": day, "path": to, "filed": "new", "complete": promoted }));
-            }
-            Step::Duplicate { from, existing } => {
-                fs::remove_file(&from).map_err(|e| e.to_string())?;
-                ledger.record(
-                    json!({ "step": "duplicate-dropped", "file": from, "identical_to": existing }),
-                )?;
-                done.push(json!({ "day": day, "path": existing, "filed": "already present" }));
-            }
-            Step::Merge {
-                from,
-                existing,
-                held,
-                new,
-                counts,
-            } => {
-                let dir = existing.parent().ok_or("no folder")?.to_path_buf();
-                // Written beside the day's file, on its volume, so the swap is a rename.
-                let vol_root = everywhere
-                    .iter()
-                    .find(|r| existing.starts_with(r))
-                    .ok_or("the held day isn't under a provider folder")?;
-                let work = vol_root.join(INCOMING).join(id);
-                fs::create_dir_all(&work).map_err(|e| e.to_string())?;
-                let out = work.join(format!("merged-{day}.dbn.zst"));
-                let _ = fs::remove_file(&out);
-                // Partial days written before sidecars move to theirs, so the
-                // swap below touches only this day's.
-                crate::manifest::write_days(&dir, &[])?;
-                let records = merge(&existing, &from, &out, &held, &new)?;
-                // Every record of both, and nothing else.
-                if let (Some(h), n) = counts
-                    && h + n != records
-                {
-                    let _ = fs::remove_file(&out);
-                    return Err(format!(
-                        "{}: the merge holds {records} records, but the day held {h} and the file {n}; nothing was swapped in",
-                        existing.display()
-                    ));
-                }
-                let sha = hash_file(&out)?;
-                let size = fs::metadata(&out).map_err(|e| e.to_string())?.len();
-                let entry = read_day(&dir, &day)?.ok_or("the held day's entry vanished")?;
-                let union = held.union(&new);
-                let mut next = json!({ "file": format!("{day}.dbn.zst"), "size": size, "sha256": sha, "records": records, "coverage": union.to_json(), "source": format!("import/{id}") });
-                // The day's condition stays with it.
-                if let Some(c) = entry.get("condition").cloned() {
-                    next["condition"] = c;
-                }
-                crate::manifest::write_pending(&dir, &day, &next)?;
-                ledger.record(json!({ "step": "merged", "inputs": [existing, from], "output": out, "sha256": sha, "records": records }))?;
-                fs::rename(&out, &existing)
-                    .map_err(|e| format!("{} -> {}: {e}", out.display(), existing.display()))?;
-                sync_dir(&dir).map_err(|e| e.to_string())?;
-                crate::manifest::promote_pending(&dir, &day)?;
-                fs::remove_file(&from).map_err(|e| e.to_string())?;
-                let _ = fs::remove_dir(&work);
-                ledger.record(json!({ "step": "swapped", "path": existing, "sha256": sha }))?;
-                let promoted = promote(&dir, &day, &everywhere, &level, &union)?;
-                done.push(json!({ "day": day, "path": existing, "filed": "merged", "contracts": union.symbols().len(), "pieces": union.pieces.len(), "complete": promoted }));
-            }
+/// Write one day the group touches: its first input moved into place if
+/// nothing holds it, then every other input merged into it, in one write.
+fn file_day(
+    d: Day,
+    group: &[Filing],
+    members: &mut [Result<Member, String>],
+) -> Result<(), String> {
+    let dir = d.at.parent().ok_or("no folder")?.to_path_buf();
+    let mut log = |of: usize, ev: Value| match &mut members[of] {
+        Ok(m) => m.ledger.record(ev),
+        Err(_) => Ok(()),
+    };
+    let mut inputs = d.inputs.into_iter();
+    let mut filed = Vec::new();
+    let (held, held_n) = match d.held {
+        Some(h) => h,
+        None => {
+            let i = inputs.next().ok_or("nothing to file")?;
+            // The manifest first: a crash before the move leaves an entry
+            // for a missing file (filed again on a retry), never a partial
+            // file taken for a whole day.
+            set_entry(&dir, &d.day, Some(i.entry))?;
+            place_new(&i.from, &d.at)
+                .map_err(|e| format!("{} -> {}: {e}", i.from.display(), d.at.display()))?;
+            log(i.of, json!({ "step": "moved", "from": i.from, "to": d.at }))?;
+            filed.push((i.of, "new"));
+            (i.cov, Some(i.records))
+        }
+    };
+    let rest: Vec<Input> = inputs.collect();
+    let union = d.cov;
+    if let Some(lead) = rest.first() {
+        // Written beside the day's file, on its volume, so the swap is a rename.
+        let vol_root = d
+            .everywhere
+            .iter()
+            .find(|r| d.at.starts_with(r))
+            .ok_or("the held day isn't under a provider folder")?;
+        let work = vol_root.join(INCOMING).join(&group[lead.of].id);
+        fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+        let out = work.join(format!("merged-{}.dbn.zst", d.day));
+        // Left by an earlier run, whichever filing led it.
+        for i in &rest {
+            let id = &group[i.of].id;
+            let _ = fs::remove_file(
+                vol_root
+                    .join(INCOMING)
+                    .join(id)
+                    .join(out.file_name().unwrap_or_default()),
+            );
+        }
+        // Partial days written before sidecars move to theirs, so the
+        // swap below touches only this day's.
+        crate::manifest::write_days(&dir, &[])?;
+        let mut all = vec![(d.at.as_path(), &held)];
+        all.extend(rest.iter().map(|i| (i.from.as_path(), &i.cov)));
+        let records = merge(&all, &out).inspect_err(|_| {
+            let _ = fs::remove_file(&out);
+        })?;
+        crash("written")?;
+        // Every record of each, and nothing else.
+        let sum: u64 = rest.iter().map(|i| i.records).sum();
+        if let Some(h) = held_n
+            && h + sum != records
+        {
+            let _ = fs::remove_file(&out);
+            return Err(format!(
+                "{}: the merge holds {records} records, but the day held {h} and the files {sum}; nothing was swapped in",
+                d.at.display()
+            ));
+        }
+        let sha = hash_file(&out)?;
+        let size = fs::metadata(&out).map_err(|e| e.to_string())?.len();
+        let entry = read_day(&dir, &d.day)?.ok_or("the held day's entry vanished")?;
+        let mut next = json!({ "file": format!("{}.dbn.zst", d.day), "size": size, "sha256": sha, "records": records, "coverage": union.to_json(), "source": format!("import/{}", group[lead.of].id) });
+        // The day's condition stays with it.
+        if let Some(c) = entry.get("condition").cloned() {
+            next["condition"] = c;
+        }
+        crate::manifest::write_pending(&dir, &d.day, &next)?;
+        let froms: Vec<&PathBuf> = rest.iter().map(|i| &i.from).collect();
+        for i in &rest {
+            let mut inputs = vec![&d.at, &i.from];
+            inputs.extend(froms.iter().copied().filter(|f| **f != i.from));
+            log(
+                i.of,
+                json!({ "step": "merged", "inputs": inputs, "output": out, "sha256": sha, "records": records }),
+            )?;
+        }
+        crash("pending")?;
+        fs::rename(&out, &d.at)
+            .map_err(|e| format!("{} -> {}: {e}", out.display(), d.at.display()))?;
+        sync_dir(&dir).map_err(|e| e.to_string())?;
+        crash("swapped")?;
+        crate::manifest::promote_pending(&dir, &d.day)?;
+        for i in &rest {
+            fs::remove_file(&i.from).map_err(|e| e.to_string())?;
+            log(
+                i.of,
+                json!({ "step": "swapped", "path": d.at, "sha256": sha }),
+            )?;
+            filed.push((i.of, "merged"));
+        }
+        let _ = fs::remove_dir(&work);
+    }
+    let complete = promote(&dir, &d.day, &d.everywhere, &d.level, &union)?;
+    for (of, how) in filed {
+        if let Ok(m) = &mut members[of] {
+            m.done.push(json!({ "day": d.day, "path": d.at, "filed": how, "contracts": union.symbols().len(), "pieces": union.pieces.len(), "complete": complete }));
         }
     }
+    Ok(())
+}
 
+/// In tests, stop at `at` as a crash would, when told to.
+fn crash(at: &str) -> Result<(), String> {
+    #[cfg(test)]
+    if tests::CRASH.with(std::cell::Cell::get) == Some(at) {
+        return Err(format!("crashed {at}"));
+    }
+    let _ = at;
+    Ok(())
+}
+
+/// A filing's last steps once its days are filed: its duplicates dropped,
+/// its days' conditions, its receipts kept and its folders removed.
+fn finish(mut m: Member, f: &Filing) -> Result<Value, String> {
+    let (parts, id) = (&f.parts[..], f.id.as_str());
+    let roots: Vec<&Path> = parts.iter().map(|p| p.root.as_path()).collect();
+    if let Some(why) = m.failed {
+        m.ledger
+            .record(json!({ "step": "stopped", "error": why }))?;
+        return Err(why);
+    }
+    let mut done = m.done;
+    for (day, from, existing) in m.duplicates {
+        fs::remove_file(&from).map_err(|e| e.to_string())?;
+        m.ledger.record(
+            json!({ "step": "duplicate-dropped", "file": from, "identical_to": existing }),
+        )?;
+        done.push(json!({ "day": day, "path": existing, "filed": "already present" }));
+    }
+    let receipt_path = m.receipt_path;
+    let mut ledger = m.ledger;
     // The days' conditions, from a provider batch's condition.json.
     let mut dirs: Vec<PathBuf> = parts.iter().map(|p| p.inc.clone()).collect();
     dirs.extend(roots.iter().map(|r| r.join("provenance").join(id)));
@@ -919,18 +1094,19 @@ pub fn import(
         let _ = fs::remove_dir(&part.inc);
         let _ = fs::remove_dir(part.root.join(INCOMING));
     }
-    let summary = json!({
-        "import": id, "dataset": dataset, "schema": schema, "symbol": parent,
-        "days": done, "left_behind": left, "completed_at": tinytrader_observe::unix_seconds(),
-    });
+    let mut summary = m.summary;
+    summary["days"] = json!(done);
+    summary["left_behind"] = json!(left);
+    summary["completed_at"] = json!(tinytrader_observe::unix_seconds());
     let text = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
     for root in &roots {
         let mut out = root
             .join("migrations")
-            .join(format!("{today}-import-{id}.json"));
+            .join(format!("{}-import-{id}.json", f.today));
         if out.exists() {
             out = root.join("migrations").join(format!(
-                "{today}-import-{id}-{}.json",
+                "{}-import-{id}-{}.json",
+                f.today,
                 tinytrader_observe::unix_seconds() as u64
             ));
         }
@@ -940,21 +1116,9 @@ pub fn import(
     Ok(summary)
 }
 
-/// File a provider batch bought as a list of contracts of `parent` (such as
-/// `SPY.OPT`), waiting in `.incoming/<batch>` with the provider's
-/// `manifest.json` and `metadata.json`: as an import of its day files, each a
-/// partial day, with those receipts kept beside it.
-///
-/// # Errors
-/// If the batch isn't a daily DBN batch requested by contract
-/// (`stype_in = raw_symbol`), or as [`import`].
-pub fn import_batch(
-    parts: &[Part],
-    elsewhere: &[PathBuf],
-    batch: &str,
-    parent: &str,
-    today: &str,
-) -> Result<Value, String> {
+/// A batch's `import.json`, written from its receipts unless an earlier,
+/// interrupted run wrote it.
+fn batch_receipt(parts: &[Part], batch: &str, parent: &str) -> Result<(), String> {
     let read = |name: &str| -> Result<(Value, &Part), String> {
         let part = parts
             .iter()
@@ -967,8 +1131,7 @@ pub fn import_batch(
         ))
     };
     if parts.iter().any(|p| p.inc.join(IMPORT).exists()) {
-        // Written by an earlier, interrupted run: file it as it says.
-        return import(parts, elsewhere, batch, today);
+        return Ok(());
     }
     let (manifest, home) = read("manifest.json")?;
     let (metadata, _) = read("metadata.json")?;
@@ -1005,8 +1168,7 @@ pub fn import_batch(
         "files": files,
     });
     let text = serde_json::to_string_pretty(&receipt).map_err(|e| e.to_string())?;
-    write_new(&home.inc.join(IMPORT), text.as_bytes()).map_err(|e| format!("{IMPORT}: {e}"))?;
-    import(parts, elsewhere, batch, today)
+    write_new(&home.inc.join(IMPORT), text.as_bytes()).map_err(|e| format!("{IMPORT}: {e}"))
 }
 
 /// The part of a day's full entry that [`row`] reports, kept in memory for
@@ -1327,10 +1489,65 @@ pub(crate) mod tests {
 
     use super::*;
 
+    /// File an import waiting in `.incoming/<id>` on one or more volumes.
+    ///
+    /// # Errors
+    /// If `import.json` is missing or malformed, a file doesn't match it or its
+    /// own header, or a day can't be filed: held complete, held as a different
+    /// file, or held partly with some of the same contracts.
+    pub fn import(
+        parts: &[Part],
+        elsewhere: &[PathBuf],
+        id: &str,
+        today: &str,
+    ) -> Result<Value, String> {
+        one(parts, elsewhere, id, today, None)
+    }
+
+    fn one(
+        parts: &[Part],
+        elsewhere: &[PathBuf],
+        id: &str,
+        today: &str,
+        parent: Option<&str>,
+    ) -> Result<Value, String> {
+        let f = Filing {
+            parts: parts.to_vec(),
+            elsewhere: elsewhere.to_vec(),
+            id: id.to_owned(),
+            today: today.to_owned(),
+            parent: parent.map(str::to_owned),
+        };
+        import_group(&[f]).pop().ok_or("nothing was filed")?
+    }
+
+    /// File a provider batch bought as a list of contracts of `parent` (such as
+    /// `SPY.OPT`), waiting in `.incoming/<batch>` with the provider's
+    /// `manifest.json` and `metadata.json`: as an import of its day files, each a
+    /// partial day, with those receipts kept beside it.
+    ///
+    /// # Errors
+    /// If the batch isn't a daily DBN batch requested by contract
+    /// (`stype_in = raw_symbol`), or as [`import`].
+    pub fn import_batch(
+        parts: &[Part],
+        elsewhere: &[PathBuf],
+        batch: &str,
+        parent: &str,
+        today: &str,
+    ) -> Result<Value, String> {
+        one(parts, elsewhere, batch, today, Some(parent))
+    }
+
     pub(crate) const DAY: &str = "2026-10-02";
     pub(crate) const C1: &str = "SPY   261002C00728000";
     pub(crate) const C2: &str = "SPY   261002P00728000";
-    const C3: &str = "SPY   261002C00729000";
+    pub(crate) const C3: &str = "SPY   261002C00729000";
+
+    thread_local! {
+        /// Where a filing on this thread stops, as a crash would there.
+        pub(crate) static CRASH: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let d =
@@ -3154,5 +3371,336 @@ pub(crate) mod tests {
             }
         }
         eprintln!("{n} files inspected");
+    }
+
+    pub(crate) const C4: &str = "SPY   261002P00729000";
+
+    /// A group of imports staged in `root`, each of one day file.
+    fn group(root: &Path, files: &[(&str, &[u8])]) -> Vec<Filing> {
+        files
+            .iter()
+            .map(|(id, bytes)| Filing {
+                parts: vec![stage(root, id, &[(&name(), bytes.to_vec())])],
+                elsewhere: Vec::new(),
+                id: (*id).to_owned(),
+                today: "2026-10-19".into(),
+                parent: None,
+            })
+            .collect()
+    }
+
+    /// A held partial day (C1), and three jobs of other contracts for it.
+    fn held_and_three(root: &Path) -> (Vec<u8>, [Vec<u8>; 3]) {
+        let held = day_bytes(&[(C1, 11)], &[(11, 0), (11, 3), (11, 6)]);
+        file_one(root, "A", held.clone()).unwrap();
+        let three = [
+            day_bytes(&[(C2, 12)], &[(12, 1), (12, 3), (12, 7)]),
+            day_bytes(&[(C3, 13)], &[(13, 2), (13, 3)]),
+            day_bytes(&[(C4, 14)], &[(14, 0), (14, 5), (14, 8), (14, 9)]),
+        ];
+        (held, three)
+    }
+
+    /// The day holds every record of each input, in its order, and nothing else.
+    fn holds_each(root: &Path, inputs: &[&[u8]]) {
+        let (_, all) = read_all(&file(root)).unwrap();
+        let mut n = 0;
+        for (i, bytes) in inputs.iter().enumerate() {
+            let p = root.join(format!("input-{i}.dbn.zst"));
+            fs::write(&p, bytes).unwrap();
+            let (m, want) = read_all(&p).unwrap();
+            let id = ids(&m).unwrap().into_keys().next().unwrap();
+            let got: Vec<&[u8]> = all
+                .iter()
+                .filter(|r| r.header().instrument_id == id)
+                .map(AsRef::as_ref)
+                .collect();
+            assert_eq!(got, want.iter().map(AsRef::as_ref).collect::<Vec<_>>());
+            n += want.len();
+        }
+        assert_eq!(all.len(), n);
+    }
+
+    fn ledger(root: &Path, id: &str) -> Vec<Value> {
+        let p = root.join(format!("migrations/2026-10-19-import-{id}.events.jsonl"));
+        fs::read_to_string(p)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_group_merges_into_a_held_day_in_one_write() {
+        let root = scratch("group").join("Databento");
+        let (held, [b, c, d]) = held_and_three(&root);
+        let g = group(&root, &[("B", &b), ("C", &c), ("D", &d)]);
+        let done: Vec<Value> = import_group(&g).into_iter().map(Result::unwrap).collect();
+        assert!(done.iter().all(|s| s["days"][0]["filed"] == "merged"));
+        // One merge, of the day and all three, swapped in once.
+        let sha = hash_file(&file(&root)).unwrap();
+        let mut outputs = Vec::new();
+        for (id, bytes) in [("B", &b), ("C", &c), ("D", &d)] {
+            let events = ledger(&root, id);
+            let step = |s: &'static str| -> Vec<&Value> {
+                events.iter().filter(|e| e["step"] == s).collect()
+            };
+            let merged = step("merged");
+            assert_eq!(merged.len(), 1, "{id}");
+            assert_eq!(merged[0]["inputs"].as_array().unwrap().len(), 4);
+            assert_eq!(merged[0]["sha256"], sha.as_str());
+            outputs.push(merged[0]["output"].clone());
+            assert_eq!(step("swapped").len(), 1);
+            // Each input's SHA-256 and record count, on record.
+            let v = step("verified")[0];
+            let copy = root.join(format!("{id}.copy"));
+            fs::write(&copy, bytes).unwrap();
+            assert_eq!(v["sha256"], hash_file(&copy).unwrap().as_str());
+            assert!(v["records"].is_u64());
+        }
+        assert!(outputs.windows(2).all(|w| w[0] == w[1]));
+        let records: Vec<u64> = ["B", "C", "D"]
+            .iter()
+            .map(|id| {
+                ledger(&root, id)
+                    .iter()
+                    .find(|e| e["step"] == "verified")
+                    .unwrap()["records"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(records, [3, 2, 4]);
+        let entry = read_manifest(file(&root).parent().unwrap()).unwrap()[DAY].clone();
+        assert_eq!(entry["records"], 3 + 3 + 2 + 4);
+        assert_eq!(inspect(&file(&root)).unwrap().1, 12);
+        holds_each(&root, &[&held, &b, &c, &d]);
+        assert!(!root.join(INCOMING).exists(), "nothing left in incoming");
+    }
+
+    #[test]
+    fn a_crashed_group_merge_settles_whole_and_files_again() {
+        for at in ["written", "pending", "swapped"] {
+            let root = scratch(&format!("crash-{at}")).join("Databento");
+            let (held, [b, c, d]) = held_and_three(&root);
+            let before = hash_file(&file(&root)).unwrap();
+            let g = group(&root, &[("B", &b), ("C", &c), ("D", &d)]);
+            CRASH.with(|c| c.set(Some(at)));
+            let r = import_group(&g);
+            CRASH.with(|c| c.set(None));
+            assert!(
+                r.iter()
+                    .all(|r| r.as_ref().is_err_and(|e| e.contains("crashed"))),
+                "{at}: {r:?}"
+            );
+            // The next scan settles the day to before the group, or after all of it.
+            let dir = file(&root).parent().unwrap().to_path_buf();
+            let now = settle(&dir, DAY).unwrap().unwrap();
+            assert!(now.get("pending").is_none());
+            assert_eq!(now["sha256"], hash_file(&file(&root)).unwrap().as_str());
+            let n = inspect(&file(&root)).unwrap().1;
+            if at == "swapped" {
+                assert_eq!(n, 12, "{at}");
+                holds_each(&root, &[&held, &b, &c, &d]);
+            } else {
+                assert_eq!(
+                    (hash_file(&file(&root)).unwrap(), n),
+                    (before.clone(), 3),
+                    "{at}"
+                );
+            }
+            // Filing again completes it.
+            for r in import_group(&g) {
+                r.unwrap();
+            }
+            assert_eq!(inspect(&file(&root)).unwrap().1, 12, "{at}");
+            assert_eq!(read_manifest(&dir).unwrap()[DAY]["records"], 12);
+            holds_each(&root, &[&held, &b, &c, &d]);
+            assert!(
+                !root.join(INCOMING).exists(),
+                "{at}: nothing left in incoming"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retry_after_a_later_merge_into_its_day_is_a_duplicate() {
+        let root = scratch("retry-later").join("Databento");
+        let (held, [b, c, d]) = held_and_three(&root);
+        let g = group(&root, &[("B", &b), ("C", &c), ("D", &d)]);
+        CRASH.with(|x| x.set(Some("swapped")));
+        let _ = import_group(&g);
+        CRASH.with(|x| x.set(None));
+        // Another filing merges into the day before they are tried again.
+        let e = day_bytes(&[("SPY   261002C00730000", 15)], &[(15, 4)]);
+        file_one(&root, "E", e.clone()).unwrap();
+        for r in import_group(&g) {
+            assert_eq!(r.unwrap()["days"][0]["filed"], "already present");
+        }
+        holds_each(&root, &[&held, &b, &c, &d, &e]);
+        assert!(!root.join(INCOMING).exists());
+    }
+
+    #[test]
+    fn a_job_refused_in_a_group_is_refused_alone() {
+        let root = scratch("group-refused").join("Databento");
+        let (held, [b, _, d]) = held_and_three(&root);
+        // C1 over the hours held; and C3 on the held day's instrument ID.
+        let again = day_bytes(&[(C1, 11)], &[(11, 1)]);
+        let clash = day_bytes(&[(C3, 11)], &[(11, 2)]);
+        let alone: Vec<String> = group(&root, &[("R1", &again), ("R2", &clash)])
+            .into_iter()
+            .map(|f| import_group(&[f]).pop().unwrap().unwrap_err())
+            .collect();
+        assert!(
+            alone[0].contains("already holds 1 of these contracts"),
+            "{}",
+            alone[0]
+        );
+        assert!(alone[1].contains("instrument 11"), "{}", alone[1]);
+        let mut g = group(&root, &[("B", &b), ("D", &d)]);
+        let refused = group(&root, &[("R1", &again), ("R2", &clash)]);
+        g.splice(1..1, refused);
+        let r = import_group(&g);
+        assert_eq!(r[1].as_ref().unwrap_err(), &alone[0]);
+        assert_eq!(r[2].as_ref().unwrap_err(), &alone[1]);
+        assert!(r[0].is_ok() && r[3].is_ok(), "{r:?}");
+        holds_each(&root, &[&held, &b, &d]);
+        // Within a group too: a job of contracts an earlier one files.
+        let root = scratch("group-overlap").join("Databento");
+        let (_, [b, c, _]) = held_and_three(&root);
+        let r = import_group(&group(&root, &[("B", &b), ("B2", &b), ("C", &c)]));
+        assert!(
+            r[1].as_ref()
+                .is_err_and(|e| e.contains("already holds 1 of these contracts"))
+        );
+        assert!(r[0].is_ok() && r[2].is_ok());
+    }
+
+    #[test]
+    fn a_group_files_a_day_not_held_once() {
+        let root = scratch("group-new").join("Databento");
+        let (_, [b, c, d]) = held_and_three(&scratch("group-new-held").join("Databento"));
+        let r = import_group(&group(&root, &[("B", &b), ("C", &c), ("D", &d)]));
+        let filed: Vec<Value> = r
+            .into_iter()
+            .map(|r| r.unwrap()["days"][0]["filed"].clone())
+            .collect();
+        assert_eq!(filed, ["new", "merged", "merged"]);
+        holds_each(&root, &[&b, &c, &d]);
+        assert_eq!(
+            read_manifest(file(&root).parent().unwrap()).unwrap()[DAY]["records"],
+            9
+        );
+    }
+
+    /// About 5 MB of cbbo-1m on `day`: `n` contracts from instrument `first`,
+    /// a record each minute from 13:00 to 24:00 UTC, prices made up.
+    fn big_day(day: &str, first: u32, n: u32) -> Vec<u8> {
+        let start = ingest::day_ns(day).unwrap();
+        let fmt = time::macros::format_description!("[year]-[month]-[day]");
+        let date = time::Date::parse(day, fmt).unwrap();
+        let contracts: Vec<(String, u32)> = (first..first + n)
+            .map(|id| (format!("SPY   261002C{:08}", 100_000 + id), id))
+            .collect();
+        let m = Metadata::builder()
+            .dataset("OPRA.PILLAR")
+            .schema(Some(Schema::Cbbo1M))
+            .start(start + 13 * 3_600_000_000_000)
+            .end(NonZeroU64::new(start + 24 * 3_600_000_000_000))
+            .stype_in(Some(SType::RawSymbol))
+            .stype_out(SType::InstrumentId)
+            .symbols(contracts.iter().map(|(s, _)| s.clone()).collect())
+            .mappings(
+                contracts
+                    .iter()
+                    .map(|(s, id)| SymbolMapping {
+                        raw_symbol: s.clone(),
+                        intervals: vec![MappingInterval {
+                            start_date: date,
+                            end_date: date.next_day().unwrap(),
+                            symbol: id.to_string(),
+                        }],
+                    })
+                    .collect(),
+            )
+            .build();
+        let mut out = Vec::new();
+        let mut x = u64::from(first) | 1;
+        let mut enc = dbn::encode::dbn::Encoder::with_zstd(&mut out, &m).unwrap();
+        for minute in 0..660 {
+            for id in first..first + n {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                let mut r = CbboMsg::default_for_schema(Schema::Cbbo1M);
+                r.hd.instrument_id = id;
+                r.hd.ts_event = start + (13 * 60 + minute) * 60_000_000_000;
+                r.ts_recv = r.hd.ts_event;
+                r.price = (x % 100_000) as i64 * 10_000_000;
+                r.size = (x >> 20) as u32 % 500;
+                r.levels[0].bid_px = r.price - ((x >> 30) % 50) as i64 * 10_000_000;
+                r.levels[0].ask_px = r.price + ((x >> 36) % 50) as i64 * 10_000_000;
+                r.levels[0].bid_sz = (x >> 42) as u32 % 1000;
+                r.levels[0].ask_sz = (x >> 52) as u32 % 1000;
+                enc.encode_record(&r).unwrap();
+            }
+        }
+        enc.flush().unwrap();
+        drop(enc);
+        out
+    }
+
+    /// The filing rate of 50 jobs of about 5 MB, five into each of ten
+    /// partly held days: one at a time, in groups of four (as four downloads
+    /// at once deliver them), and in one group. In a temporary folder;
+    /// `cargo test -p store --release filing_rate -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement: about 1 GB written"]
+    fn filing_rate() {
+        let days: Vec<String> = (1..=10).map(|d| format!("2026-09-{d:02}")).collect();
+        for size in [1, 4, 50] {
+            let root = scratch(&format!("rate-{size}")).join("Databento");
+            for (i, day) in days.iter().enumerate() {
+                let held = big_day(day, 1, 280);
+                let id = format!("held-{i}");
+                import(
+                    &[stage(&root, &id, &[(&format!("{day}.dbn.zst"), held)])],
+                    &[],
+                    &id,
+                    "2026-10-19",
+                )
+                .unwrap();
+            }
+            let mut jobs = Vec::new();
+            let mut bytes = 0;
+            for (i, day) in days.iter().enumerate() {
+                for j in 0..5 {
+                    let b = big_day(day, 1_000 * (j + 1), 280);
+                    bytes += b.len();
+                    let id = format!("job-{i}-{j}");
+                    jobs.push(Filing {
+                        parts: vec![stage(&root, &id, &[(&format!("{day}.dbn.zst"), b)])],
+                        elsewhere: Vec::new(),
+                        id,
+                        today: "2026-10-19".into(),
+                        parent: None,
+                    });
+                }
+            }
+            let t = std::time::Instant::now();
+            let mut jobs = jobs.into_iter().peekable();
+            while jobs.peek().is_some() {
+                let g: Vec<Filing> = jobs.by_ref().take(size).collect();
+                assert!(import_group(&g).iter().all(Result::is_ok));
+            }
+            let secs = t.elapsed().as_secs_f64();
+            eprintln!(
+                "groups of {size}: 50 jobs, {:.1} MB each, in {secs:.1} s: {:.1} jobs a minute",
+                bytes as f64 / 50e6,
+                50.0 * 60.0 / secs
+            );
+            let _ = fs::remove_dir_all(root.parent().unwrap());
+        }
     }
 }
