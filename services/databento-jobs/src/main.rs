@@ -323,11 +323,11 @@ impl Quote {
                 v["requests"] = json!(rows);
                 v["notes"] = json!(p.notes);
                 v["needs_approval"] = json!(p.cost_usd != 0.0);
-                v["valid_seconds"] = json!(
-                    quote_ttl(p.cost_usd)
-                        .saturating_sub(self.at.elapsed())
-                        .as_secs()
-                );
+                let left = quote_ttl(p.cost_usd)
+                    .saturating_sub(self.at.elapsed())
+                    .as_secs();
+                v["valid_seconds"] = json!(left);
+                v["expires_at"] = json!(tinytrader_observe::unix_seconds() as u64 + left);
             }
         }
         v
@@ -341,6 +341,8 @@ struct Submitting {
     state: &'static str,
     submitted: usize,
     of: usize,
+    /// The jobs made so far, in order.
+    jobs: Vec<String>,
     error: Option<String>,
     at: Instant,
 }
@@ -351,6 +353,7 @@ impl Submitting {
         v["state"] = json!(self.state);
         v["submitted"] = json!(self.submitted);
         v["of"] = json!(self.of);
+        v["jobs"] = json!(self.jobs);
         if let Some(e) = &self.error {
             v["error"] = json!(e);
         }
@@ -2067,6 +2070,7 @@ async fn send_quote(
             state: "submitting",
             submitted: 0,
             of: priced.parts.len(),
+            jobs: Vec::new(),
             error: None,
             at: Instant::now(),
         },
@@ -2181,6 +2185,7 @@ async fn send_quote(
                 submitted.push(row);
                 if let Some(x) = lock(&jobs.submits).get_mut(&s.quote) {
                     x.submitted += 1;
+                    x.jobs.push(job.id.clone());
                 }
             }
             Err(e) => {

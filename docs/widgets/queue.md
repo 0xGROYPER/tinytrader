@@ -9,4 +9,4 @@ Work that runs later, or when the machine can spare it: research collectors, not
 - **Add a job:** pick a template, fill in its parameters (each must match the pattern shown), choose when it may run, and optionally a start time.
 - **Waiting jobs:** Run now (drops its conditions) or Edit (start time, condition).
 - **Running jobs:** Cancel stops them; Log shows their output as it comes.
-- From a terminal, `tt queue list`, `tt queue add TEMPLATE NAME=VALUE --when after-close`, `tt queue cancel ID`.
+- From a terminal, `tt-queue queue list`, `tt-queue queue add TEMPLATE NAME=VALUE --when after-close`, `tt-queue queue cancel ID`.
