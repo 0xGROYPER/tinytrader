@@ -24,6 +24,7 @@ use dbn::decode::DbnMetadata as _;
 use serde_json::{Value, json};
 
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Thresholds {
     pub warning: f64,
     pub critical: f64,
@@ -569,8 +570,10 @@ impl Scan {
 /// taken as still being written.
 const WRITING: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// A schema's files, days and bytes, as the catalog lists them.
 #[derive(Default)]
-struct Schema {
+#[cfg_attr(test, derive(schemars::JsonSchema), schemars(rename = "SchemaHeld"))]
+pub struct Schema {
     files: u64,
     bytes: u64,
     symbols: Vec<String>,

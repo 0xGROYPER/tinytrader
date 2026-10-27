@@ -1,0 +1,687 @@
+{
+  "components": {
+    "schemas": {
+      "Condition": {
+        "enum": [
+          "missing",
+          "pending",
+          "degraded"
+        ],
+        "type": "string"
+      },
+      "Error": {
+        "description": "Every error answer: `{\"error\": \"<one human-readable sentence>\"}`.",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "Hours": {
+        "description": "Wanted hours of each day, in a named time zone's wall clock. Only\n`America/New_York` (daylight saving from the second Sunday in March to the\nfirst Sunday in November).",
+        "properties": {
+          "end": {
+            "description": "`HH:MM`, exclusive.",
+            "type": "string"
+          },
+          "start": {
+            "description": "`HH:MM`.",
+            "type": "string"
+          },
+          "tz": {
+            "default": "America/New_York",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
+      "Kind": {
+        "enum": [
+          "whole",
+          "contracts"
+        ],
+        "type": "string"
+      },
+      "PriceRequest": {
+        "description": "What to price, and then buy: what's missing of one symbol over some days.",
+        "properties": {
+          "again": {
+            "default": null,
+            "description": "The expired (or no longer listed) jobs bought here whose contracts\nand days this buys again, by ID: `[\"OPRA-…\"]`."
+          },
+          "contracts": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "default": null,
+            "description": "For an option parent: exactly these contracts, by day.",
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "dataset": {
+            "type": "string"
+          },
+          "end": {
+            "description": "Last day, inclusive.",
+            "type": "string"
+          },
+          "hours": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Hours"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only these hours of each day."
+          },
+          "rule": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Rule"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For an option parent: the contracts wanted each day (decision 0018)."
+          },
+          "schema": {
+            "type": "string"
+          },
+          "start": {
+            "description": "First day, `YYYY-MM-DD`.",
+            "type": "string"
+          },
+          "stype_in": {
+            "default": null,
+            "description": "`parent` or `raw_symbol`; by default `parent` for a name with a dot.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "symbol": {
+            "description": "A parent (`SPY.OPT`: the whole chain) or a raw symbol.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dataset",
+          "schema",
+          "symbol",
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
+      "Quote": {
+        "description": "A quote, as `/price` and `/quotes` show it.",
+        "properties": {
+          "again": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "billable_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "contract_days": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "contracts": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cost_usd": {
+            "description": "Not a number (`null`) when a price wasn't one: never bought.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "dataset": {
+            "type": "string"
+          },
+          "end": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "description": "When the quote stops being good: Unix seconds, beside `valid_seconds`.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "hours": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Hours"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "jobs": {
+            "description": "Once submitting, the jobs made so far, in order.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "needs_approval": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "of": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "priced": {
+            "description": "Requests priced so far, of how many; once submitting, `submitted` of `of`.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "quote": {
+            "description": "`q-<random per start>-<n>`.",
+            "type": "string"
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/Request"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "rule": {
+            "description": "Whether a rule chose the contracts.",
+            "type": "boolean"
+          },
+          "schema": {
+            "type": "string"
+          },
+          "start": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/QuoteState"
+          },
+          "stype_in": {
+            "type": "string"
+          },
+          "submitted": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "valid_seconds": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "quote",
+          "state",
+          "priced",
+          "of",
+          "dataset",
+          "schema",
+          "symbol",
+          "stype_in",
+          "start",
+          "end",
+          "rule",
+          "again"
+        ],
+        "type": "object"
+      },
+      "QuoteState": {
+        "enum": [
+          "pricing",
+          "ready",
+          "failed",
+          "submitting",
+          "submitted"
+        ],
+        "type": "string"
+      },
+      "Quotes": {
+        "properties": {
+          "quotes": {
+            "items": {
+              "$ref": "#/components/schemas/Quote"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "quotes"
+        ],
+        "type": "object"
+      },
+      "Request": {
+        "description": "One request of a quote; once submitted, with its `job`.",
+        "properties": {
+          "billable_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "condition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Condition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "contracts": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cost_usd": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "first_day": {
+            "type": "string"
+          },
+          "hours": {
+            "type": "boolean"
+          },
+          "job": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/Kind"
+          },
+          "last_day": {
+            "type": "string"
+          },
+          "skipped_held": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "skipped_pending": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "window": {
+            "description": "A date (midnight UTC) or RFC 3339, each end.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "first_day",
+          "last_day",
+          "window",
+          "hours",
+          "billable_bytes"
+        ],
+        "type": "object"
+      },
+      "Rule": {
+        "description": "Which of a day's contracts are wanted. Every field is optional; none at\nall is the whole chain.",
+        "properties": {
+          "dte_max": {
+            "description": "Expiring at most this many calendar days after the day.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "expiries": {
+            "description": "The day's first N expiries, counting that day's own (1: same-day\nexpiry; 2: same day and the next).",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "strike_max": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "strike_min": {
+            "description": "Strikes within this range (dollars), inclusive.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "Submit": {
+        "properties": {
+          "again": {
+            "default": null,
+            "description": "When given, exactly the jobs the quote named in `again`."
+          },
+          "approved_by": {
+            "default": null,
+            "description": "Who approved a paid purchase (the console's login).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confirm_usd": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "quote": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "quote"
+        ],
+        "type": "object"
+      },
+      "SubmitRefused": {
+        "description": "A refused or failed submission: why, and for a quote whose submission\nhad begun, how far it got (`\"3 of 10\"`).",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "progress": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "Submitted": {
+        "properties": {
+          "cost_usd": {
+            "format": "double",
+            "type": "number"
+          },
+          "submitted": {
+            "items": {
+              "$ref": "#/components/schemas/Request"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "submitted",
+          "cost_usd"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "See docs/api/databento-jobs.md.",
+    "title": "databento-jobs",
+    "version": "0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/price": {
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PriceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quote"
+                }
+              }
+            },
+            "description": "the quote"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quote"
+                }
+              }
+            },
+            "description": "still pricing after 20 s: follow it at /quotes/{id}"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "refused or failed"
+          }
+        },
+        "summary": "Price what's missing"
+      }
+    },
+    "/quotes": {
+      "get": {
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quotes"
+                }
+              }
+            },
+            "description": "the quotes"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "refused or failed"
+          }
+        },
+        "summary": "Quotes still good, and submissions of a day"
+      }
+    },
+    "/quotes/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quote"
+                }
+              }
+            },
+            "description": "the quote"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "refused or failed"
+          }
+        },
+        "summary": "One quote"
+      }
+    },
+    "/submit": {
+      "post": {
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Submit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Submitted"
+                }
+              }
+            },
+            "description": "submitted"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmitRefused"
+                }
+              }
+            },
+            "description": "refused or failed"
+          }
+        },
+        "summary": "Buy a quote"
+      }
+    }
+  }
+}

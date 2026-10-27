@@ -131,6 +131,8 @@ mod delta;
 mod gateways;
 mod journal;
 mod notify;
+#[cfg(test)]
+mod openapi;
 mod prefs;
 mod profiles;
 mod reminders;
@@ -2559,6 +2561,31 @@ mod tests {
         .await;
         assert_eq!(status, 400, "not a quote id");
         let seen = seen.lock().unwrap().clone();
+        // What `tt` sends, and what the console sends on, fit the documents.
+        let fits = tinytrader_openapi::assert_conforms;
+        let quote = "/api/job-quotes/{id}";
+        let sent = serde_json::from_str(body).unwrap();
+        fits(
+            "console",
+            "post",
+            &format!("{quote}/approve"),
+            "request",
+            &sent,
+        );
+        fits(
+            "console",
+            "post",
+            &format!("{quote}/decline"),
+            "request",
+            &json!({}),
+        );
+        fits(
+            "databento-jobs",
+            "post",
+            "/submit",
+            "request",
+            &seen[0]["body"],
+        );
         assert_eq!(
             seen,
             [

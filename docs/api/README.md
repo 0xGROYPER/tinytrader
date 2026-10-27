@@ -27,6 +27,16 @@ tinytrader is the boundary layer between markets and your code: relays stream li
 
 Each reference follows one template: purpose, transport, versioning, auth, errors, health and stability up front, then configuration, shapes with examples, and limits.
 
+### OpenAPI documents
+
+The HTTP endpoints `tt` uses (decision 0021) are also described as OpenAPI 3.1, in [openapi/](openapi/): `databento-jobs.json` (`/price`, `/quotes`, `/submit`), `store.json` (`/catalog`, `/coverage`, `/files`) and `console.json` (`/api/job-quotes/{id}/approve` and `/decline`). They are generated from Rust types by each service's `openapi` test, never edited by hand: requests from the handlers' own types, answers from types describing them. `cargo test` fails when a document isn't what the code generates, and when it breaks the copy on `main` (a path, method, response field or enum value removed, or a request field or parameter made required). They change additively. After changing an endpoint, regenerate and review the diff:
+
+```sh
+OPENAPI_UPDATE=1 cargo test -p databento-jobs -p store -p console openapi
+```
+
+The breaking-change comparison reads `main`'s copy with git (`OPENAPI_BASE` names another base); where there's no git history (as in `nix flake check`, or a shallow checkout) it's skipped with a notice, unless `OPENAPI_REQUIRE_BASE` is set.
+
 ## Conventions
 
 ### Schema names

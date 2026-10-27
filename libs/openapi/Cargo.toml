@@ -1,0 +1,14 @@
+[package]
+name = "tinytrader-openapi"
+description = "The services' OpenAPI documents: built from Rust types in tests, compared with the committed copy and checked for breaking changes"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+schemars.workspace = true
+serde_json.workspace = true
