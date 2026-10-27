@@ -39,7 +39,7 @@ Every refusal by the gate carries the header `X-Write-Gate: refused` and `"gate"
 
 An account is live unless both the accounts service's `environment` for it and its gateway's welcome say `paper`; an account the accounts service doesn't report (or reports differently from two services) counts as live. A live account's flatten and resume also need `confirm` naming the account.
 
-The write routes: `POST /api/orders/{account}`, `POST /api/orders/{account}/{id}/cancel`, `POST /api/accounts/{account}/flatten` and `/resume`, `POST /api/jobs/...`, `POST /api/job-quotes/{id}/approve` and `/decline`, `POST` and `PATCH /api/queue/...`, `POST /api/store/volumes/approve`, `POST /api/reminders`, `PUT /api/prefs/{key}`, `POST /api/journal`, `PUT` and `DELETE /api/journal/{id}`, and `POST /api/profiles`.
+The write routes: `POST /api/orders/{account}`, `POST /api/orders/{account}/{id}/cancel`, `POST /api/accounts/{account}/flatten`, `/resume` and `/read`, `POST /api/jobs/...`, `POST /api/job-quotes/{id}/approve` and `/decline`, `POST` and `PATCH /api/queue/...`, `POST /api/store/volumes/approve`, `POST /api/reminders`, `PUT /api/prefs/{key}`, `POST /api/journal`, `PUT` and `DELETE /api/journal/{id}`, and `POST /api/profiles`.
 
 | Endpoint | |
 |---|---|
@@ -102,8 +102,9 @@ Names and prefix must match the gateway's `--client` options. Without the trade 
 | `POST /api/orders/{account}/{client_order_id}/cancel` | `{}`. One of the console's own orders. |
 | `POST /api/accounts/{account}/flatten` | `{"confirm": "<account>", "reason"?}`. Needs the order token (on a paper account, unless `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` is `false`). |
 | `POST /api/accounts/{account}/resume` | `{"confirm"?: "<account>", "reason"?}`: the gateway's `unkill`. A live account needs `confirm`. Needs the order token as flatten does. |
+| `POST /api/accounts/{account}/read` | `{}`. The account read from the broker now by the accounts service that serves it ([`alpaca-account`](alpaca-account.md)'s `POST /accounts/{name}/read`, which only reads): its `/accounts` entry with `age_ms`, as in `/api/state`. Needs only an allowed login, no order token. `404` when no service serves the account; Alpaca's failure comes back as the service's `502`. Liquidate reads this way before each order, rather than the polled copy in `/api/state`, whose positions are read only on order events and every `ALPACA_ACCOUNT_REFRESH` seconds. |
 
-All four are behind the [write gate](#the-write-gate). `404` when the account has no gateway; `400` for a bad or unconfirmed order; `401` or `403` when the write gate refuses; `502` when the gateway fails or can't be reached.
+All of these are behind the [write gate](#the-write-gate). `404` when the account has no gateway; `400` for a bad or unconfirmed order; `401` or `403` when the write gate refuses; `502` when the gateway fails or can't be reached.
 
 ## Jobs, queue and storage (experimental)
 

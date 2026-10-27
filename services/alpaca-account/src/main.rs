@@ -20,6 +20,9 @@
 //! console, another client, Alpaca's app), replacements included; `null`
 //! when they couldn't be read.
 //!
+//! `POST /accounts/{name}/read` reads that account from Alpaca now (only reads)
+//! and answers its entry; a read that finished within a second answers instead.
+//!
 //! Also serves `/calendar`, the US market clock and trading sessions from
 //! a week ago to six weeks ahead (`{ "clock": { "is_open", "next_open",
 //! "next_close", "timestamp" }, "days": [{ "date", "open", "close" }] }`,
@@ -42,11 +45,14 @@ use std::time::Duration;
 use tinytrader_observe::{lock, secret};
 
 use axum::Router;
-use axum::extract::Query;
+use axum::extract::{Path, Query};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use clap::{Parser, ValueEnum};
 use serde_json::{Map, Value, json};
+#[cfg(test)]
+#[path = "../../order-gateway/tests/fake_alpaca/mod.rs"]
+mod fake_alpaca;
 mod live;
 mod perf;
 
@@ -175,9 +181,16 @@ struct Account {
     name: String,
     label: String,
     env: Environment,
+    /// Alpaca's REST base URL for the environment.
+    base: String,
     key: String,
     secret: String,
     doc: Mutex<Value>,
+    /// Held across each read of the account, so reads never interleave; when
+    /// the latest successful one finished.
+    reading: tokio::sync::Mutex<Option<std::time::Instant>>,
+    /// Orders the stream said ended, and when (see `leave_out`).
+    ended: Mutex<HashMap<String, std::time::Instant>>,
     polls: AtomicU64,
     errors: AtomicU64,
     /// Whether the equity history has been loaded since start.
@@ -197,6 +210,9 @@ impl Account {
             label: label.to_owned(),
             env,
             doc: Mutex::new(json!({ "name": name, "label": label, "environment": env.name() })),
+            base: env.base().to_owned(),
+            reading: tokio::sync::Mutex::new(None),
+            ended: Mutex::default(),
             key,
             secret,
             polls: AtomicU64::new(0),
@@ -375,6 +391,13 @@ async fn main() {
             }),
         )
         .route(
+            "/accounts/{name}/read",
+            post({
+                let (s, h, o) = (shared.clone(), asked.clone(), observer.clone());
+                move |Path(name): Path<String>| async move { read_now(&s, &h, &o, &name).await }
+            }),
+        )
+        .route(
             "/calendar",
             get({
                 let s = shared.clone();
@@ -444,7 +467,7 @@ async fn main() {
         first = false;
         // The calendar is the same for every account; the first one reads it.
         let a = &shared.accounts[0];
-        match read_calendar(&http, a.env, &a.key, &a.secret).await {
+        match read_calendar(&http, a).await {
             Ok(c) => *lock(&shared.calendar) = c,
             Err(e) => eprintln!("alpaca-account: calendar: {e}"),
         }
@@ -484,8 +507,6 @@ async fn main() {
         // account is read again a few seconds later, and orders the stream
         // said ended are left out of reads that still list them, for a while.
         let mut again: HashMap<usize, std::time::Instant> = HashMap::new();
-        let mut ended: Vec<HashMap<String, std::time::Instant>> =
-            vec![HashMap::new(); shared.accounts.len()];
         loop {
             let now = (unix_seconds() * 1e9) as u64;
             if now >= end {
@@ -493,12 +514,11 @@ async fn main() {
             }
             tokio::select! {
                 Some((i, done)) = rx.recv() => {
-                    if let Some(id) = done {
-                        ended[i].insert(id, std::time::Instant::now());
-                    }
                     let a = &shared.accounts[i];
-                    read_one(&shared, a, &http, &observer).await;
-                    leave_out(&mut lock(&a.doc), &mut ended[i]);
+                    if let Some(id) = done {
+                        lock(&a.ended).insert(id, std::time::Instant::now());
+                    }
+                    let _ = read_one(&shared, a, &http, &observer, Duration::ZERO).await;
                     again.insert(i, std::time::Instant::now() + LAG);
                     feeds.want(&live::wanted(&docs(&shared), &relays));
                 }
@@ -507,14 +527,10 @@ async fn main() {
                     for i in due {
                         again.remove(&i);
                         let a = &shared.accounts[i];
-                        read_one(&shared, a, &http, &observer).await;
-                        leave_out(&mut lock(&a.doc), &mut ended[i]);
+                        let _ = read_one(&shared, a, &http, &observer, Duration::ZERO).await;
                     }
                     if last_full.elapsed() >= refresh {
                         read_all(&shared, &http, &observer).await;
-                        for (a, e) in shared.accounts.iter().zip(ended.iter_mut()) {
-                            leave_out(&mut lock(&a.doc), e);
-                        }
                         feeds.want(&live::wanted(&docs(&shared), &relays));
                         last_full = std::time::Instant::now();
                     }
@@ -544,16 +560,24 @@ fn docs(shared: &Shared) -> Vec<Value> {
         .collect()
 }
 
-/// Read one account's balances and positions from Alpaca.
+/// Read one account's balances, positions and open orders from Alpaca, leaving
+/// out orders the stream said ended. Reads of one account never interleave: a
+/// read waits for the one in progress, and a successful read that finished
+/// within `reuse` stands in for a new one.
 async fn read_one(
     shared: &Shared,
     a: &Account,
     http: &reqwest::Client,
     observer: &Observer,
-) -> bool {
+    reuse: Duration,
+) -> Result<(), String> {
+    let mut last = a.reading.lock().await;
+    if last.is_some_and(|t| t.elapsed() < reuse) {
+        return Ok(());
+    }
     let read = async {
-        let account = get_json(http, a.env, &a.key, &a.secret, "/v2/account").await?;
-        let positions = get_json(http, a.env, &a.key, &a.secret, "/v2/positions").await?;
+        let account = get_json(http, a, "/v2/account").await?;
+        let positions = get_json(http, a, "/v2/positions").await?;
         Ok::<_, String>((account, positions))
     };
     match read.await {
@@ -561,31 +585,26 @@ async fn read_one(
             a.polls.fetch_add(1, Ordering::Relaxed);
             update(shared, a, &account, &positions);
             // Open orders, however placed; a failure here leaves them unknown, not empty.
-            let orders = get_json(
-                http,
-                a.env,
-                &a.key,
-                &a.secret,
-                "/v2/orders?status=open&nested=true&limit=100",
-            )
-            .await;
+            let orders = get_json(http, a, "/v2/orders?status=open&nested=true&limit=100").await;
             if let Err(e) = &orders {
                 eprintln!("alpaca-account: {}: {e}", a.label);
             }
             lock(&a.doc)["orders"] = orders.map_or(Value::Null, |o| open_orders(&o));
+            leave_out(&mut lock(&a.doc), &mut lock(&a.ended));
             if !a.history.load(Ordering::Relaxed) {
                 load_history(shared, a, http).await;
             }
             if let Some(e) = lock(&a.doc)["account"]["equity"].as_f64() {
                 shared.series.push(&a.label, e);
             }
-            true
+            *last = Some(std::time::Instant::now());
+            Ok(())
         }
         Err(e) => {
             a.errors.fetch_add(1, Ordering::Relaxed);
             eprintln!("alpaca-account: {}: {e}", a.label);
             observer.record_error(&format!("{}: {e}", a.label));
-            false
+            Err(e)
         }
     }
 }
@@ -604,7 +623,7 @@ async fn load_history(shared: &Shared, a: &Account, http: &reqwest::Client) {
         ),
         None => "/v2/account/portfolio/history?period=1D&timeframe=1Min&intraday_reporting=extended_hours".to_owned(),
     };
-    match get_json(http, a.env, &a.key, &a.secret, &path).await {
+    match get_json(http, a, &path).await {
         Ok(h) => {
             let times = h["timestamp"].as_array().cloned().unwrap_or_default();
             let equity = h["equity"].as_array().cloned().unwrap_or_default();
@@ -638,7 +657,10 @@ fn rfc3339(secs: u64) -> String {
 async fn read_all(shared: &Shared, http: &reqwest::Client, observer: &Observer) {
     let mut failing = Vec::new();
     for a in &shared.accounts {
-        if !read_one(shared, a, http, observer).await {
+        if read_one(shared, a, http, observer, Duration::ZERO)
+            .await
+            .is_err()
+        {
             failing.push(a.label.clone());
         }
     }
@@ -656,17 +678,11 @@ async fn read_all(shared: &Shared, http: &reqwest::Client, observer: &Observer) 
     }
 }
 
-async fn get_json(
-    http: &reqwest::Client,
-    env: Environment,
-    key: &str,
-    secret: &str,
-    path: &str,
-) -> Result<Value, String> {
+async fn get_json(http: &reqwest::Client, a: &Account, path: &str) -> Result<Value, String> {
     let r = http
-        .get(format!("{}{path}", env.base()))
-        .header("APCA-API-KEY-ID", key)
-        .header("APCA-API-SECRET-KEY", secret)
+        .get(format!("{}{path}", a.base))
+        .header("APCA-API-KEY-ID", &a.key)
+        .header("APCA-API-SECRET-KEY", &a.secret)
         .send()
         .await
         .map_err(|e| format!("{path}: request failed: {e}"))?;
@@ -677,6 +693,29 @@ async fn get_json(
     r.json()
         .await
         .map_err(|e| format!("{path}: unreadable response: {e}"))
+}
+
+/// How long a finished read of an account stands in for one asked for
+/// (`POST /accounts/{name}/read`), so callers can't hammer Alpaca's API.
+const READ_REUSE: Duration = Duration::from_secs(1);
+
+/// `POST /accounts/{name}/read`: read the account from Alpaca now, as an order
+/// event does, and answer its fresh document. Only reads. It waits for a read
+/// in progress; one that finished within [`READ_REUSE`] answers instead.
+async fn read_now(
+    s: &Shared,
+    http: &reqwest::Client,
+    observer: &Observer,
+    name: &str,
+) -> (StatusCode, axum::Json<Value>) {
+    let Some(a) = s.accounts.iter().find(|a| a.name == name) else {
+        let why = "account: one of the service's accounts";
+        return (StatusCode::NOT_FOUND, axum::Json(json!({ "error": why })));
+    };
+    match read_one(s, a, http, observer, READ_REUSE).await {
+        Ok(()) => (StatusCode::OK, axum::Json(lock(&a.doc).clone())),
+        Err(e) => (StatusCode::BAD_GATEWAY, axum::Json(json!({ "error": e }))),
+    }
 }
 
 /// Answers kept a minute: (when, answer) by request.
@@ -722,7 +761,7 @@ async fn performance(
     {
         return (StatusCode::OK, axum::Json(v.clone()));
     }
-    let get = |path: String| async move { get_json(http, a.env, &a.key, &a.secret, &path).await };
+    let get = |path: String| async move { get_json(http, a, &path).await };
     // Fills, oldest first, from `query` (paged by the last id), at most `pages` pages of 100.
     let fills = |query: String, pages: usize| async move {
         let mut out: Vec<Value> = Vec::new();
@@ -828,20 +867,15 @@ fn unix_of(t: &str) -> Option<i64> {
 }
 
 /// The market clock, and trading sessions from a week ago to six weeks ahead.
-async fn read_calendar(
-    http: &reqwest::Client,
-    env: Environment,
-    key: &str,
-    secret: &str,
-) -> Result<Value, String> {
-    let clock = get_json(http, env, key, secret, "/v2/clock").await?;
+async fn read_calendar(http: &reqwest::Client, a: &Account) -> Result<Value, String> {
+    let clock = get_json(http, a, "/v2/clock").await?;
     let today = (unix_seconds() / 86_400.0) as i64;
     let path = format!(
         "/v2/calendar?start={}&end={}",
         civil_date(today - 7),
         civil_date(today + 400)
     );
-    let days = get_json(http, env, key, secret, &path).await?;
+    let days = get_json(http, a, &path).await?;
     let days: Vec<Value> = days
         .as_array()
         .into_iter()
@@ -1060,6 +1094,79 @@ mod tests {
         let mut unknown = json!({ "orders": null });
         leave_out(&mut unknown, &mut ended);
         assert!(unknown["orders"].is_null());
+    }
+
+    #[tokio::test]
+    async fn read_now_reads_fresh_after_the_read_in_progress() {
+        let fake = crate::fake_alpaca::Fake::start();
+        let key = crate::fake_alpaca::KEY.to_owned();
+        let mut a = Account::new("paper", "Paper", key, crate::fake_alpaca::SECRET.into());
+        a.base = format!("http://{}", fake.addr);
+        a.history.store(true, Ordering::Relaxed);
+        let s = Arc::new(Shared {
+            accounts: vec![a],
+            ..Shared::default()
+        });
+        let (http, o) = (
+            reqwest::Client::new(),
+            Observer::new("alpaca-account", "test"),
+        );
+        let positions = || fake.count("GET", "/v2/positions");
+
+        let (code, _) = read_now(&s, &http, &o, "other").await;
+        assert_eq!((code, positions()), (StatusCode::NOT_FOUND, 0));
+
+        // The session loop's read in progress is waited for, not interleaved with.
+        fake.hold(&[("SPY", 3)]);
+        for cid in ["tt-ended", "tt-open"] {
+            fake.appear(&format!(
+                r#"{{"client_order_id":"{cid}","symbol":"SPY","side":"sell","qty":"1","limit_price":"1.00"}}"#
+            ));
+        }
+        let ended = std::time::Instant::now();
+        lock(&s.accounts[0].ended).insert("tt-ended".into(), ended);
+        let loop_read = s.accounts[0].reading.lock().await;
+        let asked = tokio::spawn({
+            let (s, http, o) = (s.clone(), http.clone(), o.clone());
+            async move { read_now(&s, &http, &o, "paper").await }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!asked.is_finished());
+        assert_eq!(positions(), 0);
+        drop(loop_read);
+        let (code, doc) = asked.await.unwrap();
+        assert_eq!((code, positions()), (StatusCode::OK, 1));
+        assert_eq!(doc.0["positions"][0]["symbol"], "SPY");
+        assert_eq!(doc.0["positions"][0]["qty"], 3.0);
+        assert!(unix_seconds() - doc.0["updated_at"].as_f64().unwrap() < 5.0);
+        let ids: Vec<_> = doc.0["orders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["client_order_id"].clone())
+            .collect();
+        assert_eq!(ids, [json!("tt-open")], "ended orders are left out");
+
+        // Asked again at once: the read just made answers, Alpaca isn't called.
+        let (code, again) = read_now(&s, &http, &o, "paper").await;
+        assert_eq!((code, positions()), (StatusCode::OK, 1));
+        assert_eq!(again.0["updated_at"], doc.0["updated_at"]);
+
+        // Once that has passed, a broker error is a 502 with its reason.
+        *s.accounts[0].reading.lock().await = None;
+        fake.reply(
+            "GET",
+            "/v2/positions",
+            500,
+            r#"{"message":"internal error"}"#,
+        );
+        let (code, err) = read_now(&s, &http, &o, "paper").await;
+        assert_eq!((code, positions()), (StatusCode::BAD_GATEWAY, 2));
+        let why = err.0["error"].as_str().unwrap();
+        assert!(
+            why.contains("/v2/positions") && why.contains("500"),
+            "{why}"
+        );
     }
 
     #[test]

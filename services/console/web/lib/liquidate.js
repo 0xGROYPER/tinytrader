@@ -177,33 +177,32 @@ export async function cancelOurs(account, orders, live = false) {
 export const STALE_MS = 5000;
 
 /**
- * The account as the account service has it now, read the way the widget
- * refreshes (GET /api/state): `{ account }` with its positions and open orders,
- * or `{ account: null, why }` with a plain-text reason when they can't be read,
- * are older than STALE_MS, or (with `cancelledAt`, the updated_at the run saw
- * once its cancels were done) were read before that. Never the snapshot the page
- * already holds.
+ * The account read from the broker now (POST /api/accounts/{account}/read; the
+ * account service reads it from Alpaca, or answers a read it finished within a
+ * second): `{ account }` with its positions and open orders, or `{ account:
+ * null, why }` with a plain-text reason when they can't be read, are older than
+ * STALE_MS, or (with `cancelledAt`, the updated_at the run saw once its cancels
+ * were done) were read before that. Never the snapshot the page already holds,
+ * nor /api/state's polled copy, whose positions are read only on order events
+ * and every few minutes.
  * @param {string} account @param {number} [cancelledAt]
  * @returns {Promise<{ account: any | null, why?: string }>}
  */
 export async function reread(account, cancelledAt) {
   const none = why => ({ account: null, why });
+  const unread = why => none(`The positions could not be re-read from Alpaca: ${why}`);
   try {
-    const r = await fetch('/api/state', { cache: 'no-store' });
-    if (!r.ok) return none('The positions could not be re-read');
-    const v = await r.json();
-    for (const s of Object.values(v.services || {})) {
-      const a = (s?.accounts?.accounts || []).find(x => x?.name === account);
-      if (!a) continue;
-      if (!Array.isArray(a.positions) || !Array.isArray(a.orders)) return none('The positions could not be re-read');
-      // age_ms is null without the account's updated_at, so it can't be shown fresh.
-      if (typeof a.age_ms !== 'number') return none('The positions are stale: their reading time is unknown');
-      if (a.age_ms > STALE_MS) return none(`The positions are stale: last read ${Math.round(a.age_ms / 1000)} s ago (limit ${STALE_MS / 1000} s)`);
-      if (cancelledAt !== undefined && !(typeof cancelledAt === 'number' && a.updated_at >= cancelledAt)) return none('The positions were read before the run cancelled its orders');
-      return { account: a };
-    }
-    return none('The positions could not be re-read');
-  } catch (_) { return none('The positions could not be re-read'); }
+    const r = await orderFetch(`/api/accounts/${encodeURIComponent(account)}/read`, {});
+    const a = await r.json().catch(() => null);
+    if (!r.ok) return unread(refused(r) ? refusedText(r, a) : a?.error || `${r.status} ${r.statusText}`);
+    if (a?.name !== account) return none('The positions could not be re-read');
+    if (!Array.isArray(a.positions) || !Array.isArray(a.orders)) return none('The positions could not be re-read');
+    // age_ms is null without the account's updated_at, so it can't be shown fresh.
+    if (typeof a.age_ms !== 'number') return none('The positions are stale: their reading time is unknown');
+    if (a.age_ms > STALE_MS) return none(`The positions are stale: last read ${Math.round(a.age_ms / 1000)} s ago (limit ${STALE_MS / 1000} s)`);
+    if (cancelledAt !== undefined && !(typeof cancelledAt === 'number' && a.updated_at >= cancelledAt)) return none('The positions were read before the run cancelled its orders');
+    return { account: a };
+  } catch (e) { return unread(e?.message || 'no answer'); }
 }
 
 /**
