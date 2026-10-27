@@ -22,6 +22,7 @@ import { recommend } from '../lib/recommend.js';
 import { GROUPS, STRUCTURES, identify, whatIs } from '../lib/structures.js';
 import { createTicket } from '../lib/ticket.js';
 import { get, peek, stream } from '../lib/cache.js';
+import { analyse as analysePosition, bs, extent, linePath, midOf, num, priceLeg } from '../lib/payoff.js';
 
 const store = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (_) { /* private mode */ } return null; };
 // Each account's open orders as the broker has them (alpaca-account), however placed: null if unknown.
@@ -33,18 +34,6 @@ const openOrders = () => {
   return out;
 };
 const chainService = () => serviceFor('chain') || null;
-const N = x => 0.5 * (1 + erf(x / Math.SQRT2));
-function erf(x) {
-  const s = x < 0 ? -1 : 1, t = 1 / (1 + 0.3275911 * Math.abs(x));
-  return s * (1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x));
-}
-/** Black-Scholes value (zero rates). */
-function bs(type, S, K, t, v) {
-  if (t <= 0 || !(v > 0)) return Math.max(type === 'call' ? S - K : K - S, 0);
-  const d1 = (Math.log(S / K) + v * v * t / 2) / (v * Math.sqrt(t)), d2 = d1 - v * Math.sqrt(t);
-  const call = S * N(d1) - K * N(d2);
-  return type === 'call' ? call : call - S + K;
-}
 
 defineWidget('spreads', {
   title: 'Spread builder',
@@ -167,18 +156,12 @@ defineWidget('spreads', {
     // The shown expiry's measures (at-the-money IV, implied distribution) come with its prices.
     const stats = () => my.chain?.expiries?.find(x => x.expiry === my.expiry) || null;
     const atmIV = () => stats()?.atm_iv || null;
-    // A quote's mid; none when one-sided or too wide to say what the contract
-    // is worth (alpaca-data's rule: apart by more than half the mid and a dime).
-    const midOf = q => {
-      if (!q || !(q.bid > 0) || !(q.ask >= q.bid)) return null;
-      const m = (q.bid + q.ask) / 2, w = q.ask - q.bid;
-      return w <= 0.10 || w <= 0.5 * m ? m : null;
-    };
     // A strike's volatility from the out-of-the-money quotes that price (puts
     // below the underlying, calls at or above), straight between neighbours,
     // the nearest one past the ends; else the at-the-money one.
     const smileIV = strike => {
-      const pts = contracts().filter(c => c.iv && midOf(c) != null && (c.type === 'put' ? c.strike < my.spot : c.strike >= my.spot))
+      if (!my.spot) return atmIV();
+      const pts = contracts().filter(c => num(c.iv) > 0 && midOf(c) != null && (c.type === 'put' ? c.strike < my.spot : c.strike >= my.spot))
         .map(c => [c.strike, c.iv]).sort((a, b) => a[0] - b[0]);
       if (!pts.length) return atmIV();
       if (strike <= pts[0][0]) return pts[0][1];
@@ -187,13 +170,9 @@ defineWidget('spreads', {
       const [k0, v0] = pts[i - 1], [k1, v1] = pts[i];
       return v0 + (v1 - v0) * (strike - k0) / (k1 - k0);
     };
-    // A leg's price: its mid, else from its strike's volatility (null without one).
-    const priceOf = (type, strike) => {
-      const q = quote(type, strike), m = midOf(q);
-      if (m != null) return { px: m, est: false };
-      const v = smileIV(strike);
-      return v && my.spot ? { px: bs(type, my.spot, strike, years(), v), est: true } : { px: null, est: true };
-    };
+    // A leg's price: its mid, else from its strike's volatility, else its
+    // last trade, else the broker's mark for a leg held (lib/payoff.js); null without any.
+    const priceOf = l => priceLeg({ ...l, q: quote(l.type, l.strike) }, { spot: my.spot, t: years(), ivAt: smileIV });
     // Legs quoted against the strikes beside them: a call bid above a
     // lower-strike call's ask (or offered below a higher one's bid), puts the
     // other way. One of the two quotes is wrong; both prices are suspect.
@@ -217,45 +196,13 @@ defineWidget('spreads', {
       position.legs = make(my.width).map(([type, o, side, qty]) => ({ type, strike: ks[Math.max(0, Math.min(ks.length - 1, a + o))], side, qty }));
     }
 
+    // The position's payoff and prices (lib/payoff.js): the expiry curve from
+    // the strikes and what was paid alone; what needs a quote is left out per leg.
     function analyse() {
-      const spot = my.spot, t = years(), ls = legs().map(l => ({ ...l, q: quote(l.type, l.strike) }));
-      if (!spot || !ls.length) return null;
-      const mid = midOf;
-      // A leg without a quote that prices: at the volatility of the strikes around it.
-      const iv = l => (mid(l.q) != null && l.q?.iv) || smileIV(l.strike);
-      if (ls.some(l => l.cost == null && mid(l.q) == null && !iv(l))) return null;
-      // Signed per-share prices: + paid, - received; a held leg at what was paid for it.
-      const now = l => mid(l.q) ?? bs(l.type, spot, l.strike, t, iv(l));
-      const net = ls.reduce((s, l) => s + l.side * l.qty * (l.cost ?? now(l)), 0);
-      const worth = ls.reduce((s, l) => s + l.side * l.qty * now(l), 0), held = ls.some(l => l.cost != null);
-      const cross = ls.reduce((s, l) => s + l.side * l.qty * (l.side > 0 ? (l.q?.ask ?? mid(l.q) ?? 0) : (l.q?.bid ?? mid(l.q) ?? 0)), 0);
-      const pay = S => ls.reduce((s, l) => s + l.side * l.qty * Math.max(l.type === 'call' ? S - l.strike : l.strike - S, 0), 0) - net;
-      const hi = Math.max(spot * 3, ...ls.map(l => l.strike * 1.5)), n = 2400;
-      const grid = Array.from({ length: n + 1 }, (_, i) => hi * i / n), pv = grid.map(pay);
-      const slopeHi = pay(hi * 2) - pay(hi);
-      const maxP = slopeHi > 1e-9 ? Infinity : Math.max(...pv), maxL = slopeHi < -1e-9 ? -Infinity : Math.min(...pv);
-      const be = [];
-      for (let i = 1; i < pv.length; i++) if ((pv[i - 1] < 0) !== (pv[i] < 0)) be.push(grid[i - 1] + (grid[i] - grid[i - 1]) * (-pv[i - 1]) / (pv[i] - pv[i - 1]));
-      // Chance of profit at expiry: from the implied distribution when its fit
-      // is usable (linear between its CDF points), else lognormal at the
-      // at-the-money implied volatility.
-      const dist = stats()?.distribution;
-      const pts = dist && dist.quality !== 'poor' && Array.isArray(dist.cdf) && dist.cdf.length > 2 ? dist.cdf : null;
-      const sd = (atmIV() || 0.3) * Math.sqrt(t);
-      const cdf = pts ? x => {
-        if (x <= pts[0][0]) return pts[0][1] * Math.max(0, x / pts[0][0]);
-        const last = pts[pts.length - 1];
-        if (x >= last[0]) return 1 - (1 - last[1]) * Math.exp(-(x - last[0]) / Math.max(last[0] * 0.05, 1e-9));
-        let i = 1; while (pts[i][0] < x) i++;
-        const [k0, p0] = pts[i - 1], [k1, p1] = pts[i];
-        return p0 + (p1 - p0) * (x - k0) / (k1 - k0);
-      } : x => x <= 0 ? 0 : N((Math.log(x / spot) + sd * sd / 2) / sd);
-      let pop = 0;
-      for (let i = 1; i < grid.length; i++) if (pay((grid[i - 1] + grid[i]) / 2) > 0) pop += cdf(grid[i]) - cdf(grid[i - 1]);
-      // Worth today at an underlying price: each leg at its own implied volatility, less what was paid.
-      const today = S => ls.reduce((v, l) => v + l.side * l.qty * bs(l.type, S, l.strike, t, iv(l)), 0) - net;
-      return { net, worth, held, cross, pay, today, spot, sd: (atmIV() || 0.3) * Math.sqrt(t), strikes: ls.map(l => l.strike), maxP, maxL, be, pop, popFrom: pts ? `implied, ${dist.quality} fit` : 'lognormal', missing: ls.some(l => !l.q),
-        wide: ls.filter(l => l.q && l.cost == null && mid(l.q) == null), odd: ls.filter(l => l.cost == null && mid(l.q) != null && outOfLine(l)) };
+      const ls = legs().map(l => ({ ...l, q: quote(l.type, l.strike) }));
+      if (!ls.length) return null;
+      const a = analysePosition({ legs: ls, spot: my.spot, t: years(), ivAt: smileIV, atmIV: atmIV(), dist: stats()?.distribution });
+      return a && { ...a, odd: a.legs.filter(l => l.cost == null && l.from === 'mid' && outOfLine(l)) };
     }
 
     const money = v => !isFinite(v) ? 'unlimited' : `${v < 0 ? '−' : ''}$${Math.abs(v * 100).toFixed(0)}`;
@@ -263,7 +210,7 @@ defineWidget('spreads', {
     function render() {
       const a = analyse();
       // Publish first: Candles draws from it.
-      publish({ sym: my.sym, expiry: my.expiry, strikes: { call: strikesOf('call'), put: strikesOf('put') }, net: a?.net ?? 0, be: a?.be ?? [], pay: a?.pay ?? null, shown: my.onChart });
+      publish({ sym: my.sym, expiry: my.expiry, strikes: { call: strikesOf('call'), put: strikesOf('put') }, net: a?.net ?? 0, be: a?.net != null ? a.be : [], pay: a?.net != null ? a.pay : null, shown: my.onChart });
       // The box shows the underlying; typing replaces it.
       const tickerBox = /** @type {HTMLInputElement} */ ($('.sb-ticker'));
       if (document.activeElement !== tickerBox) tickerBox.placeholder = my.sym || 'Ticker';
@@ -291,19 +238,24 @@ defineWidget('spreads', {
       // signed quantity (− sells), market value and delta in shares; the strike
       // steps with ‹ ›, C/P switches type, the quantity steps through zero to flip side.
       const usd = v => `${v < 0 ? '−' : ''}$${Math.abs(v).toFixed(2)}`;
+      const q2 = x => num(x) == null ? '—' : num(x).toFixed(2);
       let mv = 0, dl = 0, known = true;
       const rows = legs().map((l, i) => {
-        const q = quote(l.type, l.strike), n = l.side * l.qty, { px: m, est } = priceOf(l.type, l.strike);
-        // An estimated leg's delta from the same volatility, by a cent either way.
-        const v = est && m != null ? smileIV(l.strike) : null, d1 = v ? (bs(l.type, my.spot + 0.01, l.strike, years(), v) - bs(l.type, my.spot - 0.01, l.strike, years(), v)) / 0.02 : null;
-        const value = m == null ? null : n * m * 100, delta = est ? (d1 == null ? null : n * d1 * 100) : q?.delta == null ? null : n * q.delta * 100;
+        const q = quote(l.type, l.strike), n = l.side * l.qty, { px: m, from } = priceOf(l), est = from !== 'mid';
+        // A leg not priced from its mid: its delta from its volatility (lib/payoff.js), by a cent either way.
+        const v = est && m != null && my.spot ? a?.legs[i]?.iv : null, d1 = v ? (bs(l.type, my.spot + 0.01, l.strike, years(), v) - bs(l.type, my.spot - 0.01, l.strike, years(), v)) / 0.02 : null;
+        const value = m == null ? null : n * m * 100, delta = est ? (d1 == null ? null : n * d1 * 100) : num(q?.delta) == null ? null : n * num(q.delta) * 100;
         if (value == null) known = false; else mv += value;
-        if (delta != null) dl += delta;
+        if (delta != null && Number.isFinite(delta)) dl += delta;
+        const side = num(q?.bid) != null || num(q?.ask) != null ? `${q2(q.bid)} × ${q2(q.ask)}` : '';
+        const why = { model: 'too wide to price or no quote; estimated from the volatility of the strikes around it', last: 'no usable bid and ask; its last trade', mark: "no usable bid and ask; the broker's mark" }[from] || '';
+        const shown = m == null ? '<span class="muted sb-noquote">no quote</span>' : from === 'mid' ? m.toFixed(2) : from === 'model' ? `<span class="muted">≈${m.toFixed(2)}</span>` : `<span class="muted">${m.toFixed(2)} ${from}</span>`;
+        const tip = m == null ? 'No bid or ask, last trade or mark' : [side, why].filter(Boolean).join(': ');
         return `<tr data-i="${i}">
           <td class="sb-asset"><div class="sb-asset-in">${q?.symbol
               ? `<button type="button" class="sb-occ mono" data-occ="${esc(q.symbol)}" title="Chart today's mid on Candles (options on the roots the OPRA relays carry)">${esc(q.symbol)}</button>`
               : `<span class="sb-occ mono">${esc(`${my.sym} ${l.strike}${l.type[0].toUpperCase()}`)}</span>`}<span class="sb-steps"><button type="button" class="sb-mini" data-act="down" aria-label="Lower strike" title="Lower strike">‹</button><button type="button" class="sb-mini sb-cp" data-act="type" title="Switch call / put">${l.type === 'call' ? 'C' : 'P'}</button><button type="button" class="sb-mini" data-act="up" aria-label="Higher strike" title="Higher strike">›</button></span></div></td>
-          <td class="num sb-c-price"${q?.bid != null ? ` title="${q.bid.toFixed(2)} × ${q.ask?.toFixed(2) ?? '—'}${est ? ': too wide to price; estimated from the volatility of the strikes around it' : ''}"` : ''}>${m == null ? '<span class="muted">—</span>' : est ? `<span class="muted">≈${m.toFixed(2)}</span>` : m.toFixed(2)}<small class="muted">${q?.bid != null ? `${q.bid.toFixed(2)}×${q.ask?.toFixed(2) ?? '—'}` : ''}</small></td>
+          <td class="num sb-c-price"${tip ? ` title="${esc(tip)}"` : ''}>${shown}<small class="muted">${side.replace(' × ', '×')}</small></td>
           <td class="num sb-c-qty"><span class="sb-qty-cell"><button type="button" class="sb-mini" data-act="less" aria-label="One fewer" title="One fewer (shift: the whole position one unit smaller)">−</button><b class="mono ${n < 0 ? 'sb-sell' : 'sb-buy'}">${n > 0 ? '+' : ''}${n}</b><button type="button" class="sb-mini" data-act="more" aria-label="One more" title="One more (shift: the whole position one unit bigger)">+</button></span></td>
           <td class="num sb-c-value">${value == null ? '—' : usd(value)}</td>
           <td class="num muted sb-c-delta">${delta == null ? '—' : `${est ? '≈' : ''}${delta.toFixed(0)}`}</td>
@@ -315,36 +267,42 @@ defineWidget('spreads', {
           <td class="num sb-c-value"><b>${known && legs().length ? usd(mv) : ''}</b></td><td class="num muted">${legs().length ? dl.toFixed(0) : ''}</td><td></td></tr>`;
       payoff(a);
       // The summary: what it costs, what it can lose and make, and the chance; the rest on hover.
-      const dollars = v => `$${Math.abs(v * 100).toFixed(0)}`, credit = a && a.net < 0;
-      $('.sb-sum').innerHTML = a ? [
-        a.held ? `Paid <b>${dollars(a.net)}</b> · now <b>${dollars(a.worth)}</b> <span class="${a.worth - a.net >= 0 ? 'sb-good' : 'sb-bad'}">(${a.worth - a.net >= 0 ? '+' : '−'}${dollars(a.worth - a.net)})</span>`
+      const dollars = v => `$${Math.abs(v * 100).toFixed(0)}`, credit = a && a.net != null && a.net < 0;
+      const label = l => `${l.strike}${l.type[0].toUpperCase()}`, labels = ls => ls.map(label).join(', ');
+      // Without a price for a leg: what it costs (a leg not held) or what it is worth now is said as unknown.
+      $('.sb-sum').innerHTML = a ? (a.net == null ? [`Price unknown <span class="muted">(${esc(labels(a.unpaid))}: no quote)</span>`] : [
+        a.held ? `Paid <b>${dollars(a.net)}</b> · now ${a.worth == null ? `<span class="muted" title="No bid or ask, last trade or mark for ${esc(labels(a.unpriced))}">no quote</span>` : `<b>${dollars(a.worth)}</b> <span class="${a.worth - a.net >= 0 ? 'sb-good' : 'sb-bad'}">(${a.worth - a.net >= 0 ? '+' : '−'}${dollars(a.worth - a.net)})</span>`}`
           : `${credit ? 'Credit' : 'Debit'} <b>${dollars(a.net)}</b>`,
         `risk <b>${isFinite(a.maxL) ? dollars(a.maxL) : 'unlimited'}</b>`,
         ...(credit && isFinite(a.maxP) && Math.abs(a.maxP + a.net) < 0.005 ? [] : [`up to <b>${isFinite(a.maxP) ? dollars(a.maxP) : 'unlimited'}</b>`]),
-        `<b>${(a.pop * 100).toFixed(0)}%</b>`,
-      ].join(' · ') : '';
+        ...(a.pop == null ? [] : [`<b>${(a.pop * 100).toFixed(0)}%</b>`]),
+      ]).join(' · ') : '';
       $('.sb-sum').title = a ? [
-        `${credit ? 'Credit' : 'Debit'} $${Math.abs(a.cross * 100).toFixed(0)} crossing the spread`,
-        `breakeven ${a.be.length ? a.be.map(b => b.toFixed(2)).join(' / ') : '—'}`,
+        ...(a.net == null ? [] : [`${credit ? 'Credit' : 'Debit'} $${Math.abs(a.cross * 100).toFixed(0)} crossing the spread`]),
+        `breakeven ${a.be.length && a.net != null ? a.be.map(b => b.toFixed(2)).join(' / ') : '—'}`,
         `delta ${dl.toFixed(0)} shares`,
         `chance of profit at expiry (${a.popFrom})`,
         `per position, 100 shares a contract; ${({ opra: 'Databento OPRA quotes', mixed: `Databento OPRA quotes for ${my.chain?.opra_quotes} contracts, Alpaca indicative for the rest` })[my.chain?.quotes] || 'Alpaca indicative quotes'}`,
       ].join('\n') : '';
       const tb = /** @type {HTMLButtonElement} */ ($('.sb-trade'));
-      tb.hidden = !a || !!a.held;
+      // A position that can't be priced (no cost, or no underlying price) has no Trade, as before.
+      const tradeable = !!a && !a.held && a.net != null && a.spot != null;
+      tb.hidden = !tradeable;
       tb.setAttribute('aria-expanded', String(tk.isOpen));
       const open = [...openOrders().values()].reduce((n, o) => n + (o?.length || 0), 0);
       tb.textContent = open ? `Trade · ${open} open` : 'Trade';
       tb.title = open ? `${open} open order${open > 1 ? 's' : ''} across the accounts (see Accounts)` : '';
-      if (tk.isOpen && (!a || a.held)) tk.close();
+      if (tk.isOpen && !tradeable) tk.close();
       // What the prices can't be trusted for: a quote too wide to price, quotes
       // out of line with their strikes, a shape whose prices say the opposite
       // of what it is (a credit spread costing money).
-      const label = l => `${l.strike}${l.type[0].toUpperCase()}`;
-      const expect = !a || a.held ? null : /Credit$|^Iron (condor|fly)$/.test(shape || '') ? 'credit' : /Debit$|^Reverse iron/.test(shape || '') ? 'debit' : null;
+      const expect = !a || a.held || a.net == null ? null : /Credit$|^Iron (condor|fly)$/.test(shape || '') ? 'credit' : /Debit$|^Reverse iron/.test(shape || '') ? 'debit' : null;
       const notes = a ? [
-        a.missing ? 'A leg has no quote on this expiry; it is priced from the volatility of the strikes around it.' : '',
-        a.wide.length ? `${a.wide.map(l => `${label(l)} (${l.q.bid.toFixed(2)} × ${l.q.ask.toFixed(2)})`).join(', ')}: too wide to price, so ≈ estimated from the strikes around it. A fill there is far from certain.` : '',
+        a.unpriced.length ? `${labels(a.unpriced)}: no quote (no bid or ask, last trade or mark).${a.net == null ? ' What the position costs is unknown, so the expiry curve leaves it out and no risk is given.' : ''}` : '',
+        a.net != null && !a.today ? (a.spot == null ? 'No price for the underlying, so no today curve.' : a.unpriced.length ? 'No today curve without a price for every leg.' : 'No today curve: a leg\'s price gives no volatility to value it.') : '',
+        a.missing.length ? `${labels(a.missing)}: no quote on this expiry; ≈ priced from the volatility of the strikes around it.` : '',
+        a.stale.length ? `${a.stale.map(l => `${label(l)} (${l.from === 'last' ? 'its last trade' : "the broker's mark"})`).join(', ')}: no usable bid and ask, so priced from ${a.stale.length > 1 ? 'those' : 'that'}.` : '',
+        a.wide.filter(l => l.from === 'model').length ? `${a.wide.filter(l => l.from === 'model').map(l => `${label(l)} (${q2(l.q.bid)} × ${q2(l.q.ask)})`).join(', ')}: too wide to price, so ≈ estimated from the strikes around it. A fill there is far from certain.` : '',
         a.odd.length ? `${a.odd.map(label).join(', ')}: quoted out of line with the strikes beside ${a.odd.length > 1 ? 'them, so their prices are' : 'it, so its price is'} suspect.` : '',
         expect && (expect === 'credit') !== (a.net < 0) ? `A ${shape.toLowerCase()} is a ${expect}, but these prices make it a ${expect === 'credit' ? 'debit' : 'credit'}: a quote is off. Check each leg's bid × ask.` : '',
       ].filter(Boolean).join(' ') : '';
@@ -362,44 +320,52 @@ defineWidget('spreads', {
       const box = /** @type {HTMLElement} */ ($('.sb-pay'));
       drawn = a;
       if (!a || !my.payoff) { box.innerHTML = ''; return; }
+      if (!a.strikes.length) { box.innerHTML = ''; return; }
       const W = Math.max(280, box.clientWidth || 600), w = W - PAD.l - PAD.r, h = PH - PAD.t - PAD.b;
-      // The strikes and the price, with a margin of 2.5 standard deviations or 60% of the strikes' spread.
-      const kLo = Math.min(a.spot, ...a.strikes), kHi = Math.max(a.spot, ...a.strikes);
-      const m = Math.max(a.spot * a.sd * 2.5, (kHi - kLo) * 0.6, a.spot * 0.004);
+      // The strikes and the price (when there is one), with a margin of 2.5
+      // standard deviations or 60% of the strikes' spread.
+      const spot = a.spot, ks = spot != null ? [spot, ...a.strikes] : a.strikes;
+      const kLo = Math.min(...ks), kHi = Math.max(...ks), ref = spot ?? (kLo + kHi) / 2;
+      const m = Math.max(spot != null ? spot * a.sd * 2.5 : 0, (kHi - kLo) * 0.6, ref * 0.004, 0.01);
       const lo = Math.max(0, kLo - m), hi = kHi + m;
       const n = 240, xs = Array.from({ length: n + 1 }, (_, i) => lo + (hi - lo) * i / n);
-      const ex = xs.map(a.pay), td = xs.map(a.today);
-      let yMin = Math.min(0, ...ex, ...td), yMax = Math.max(0, ...ex, ...td);
+      // Only finite values reach the scale and the paths (lib/payoff.js), so one bad point can't blank the plot.
+      const ex = xs.map(a.pay), td = a.today ? xs.map(a.today) : null;
+      let [yMin, yMax] = extent(ex, td);
       const pad = (yMax - yMin) * 0.08 || 1; yMin -= pad; yMax += pad;
       const X = v => PAD.l + (v - lo) / (hi - lo) * w, Y = v => PAD.t + (yMax - v) / (yMax - yMin) * h;
-      const line = ys => ys.map((y, i) => `${i ? 'L' : 'M'}${X(xs[i]).toFixed(1)},${Y(y).toFixed(1)}`).join('');
+      const fin = v => Number.isFinite(v) ? v : 0;
       // Profit and loss areas between the expiry line and zero.
-      const area = sign => `M${X(lo).toFixed(1)},${Y(0).toFixed(1)}` + ex.map((y, i) => `L${X(xs[i]).toFixed(1)},${Y(sign > 0 ? Math.max(y, 0) : Math.min(y, 0)).toFixed(1)}`).join('') + `L${X(hi).toFixed(1)},${Y(0).toFixed(1)}Z`;
+      const area = sign => `M${X(lo).toFixed(1)},${Y(0).toFixed(1)}` + ex.map((y, i) => `L${X(xs[i]).toFixed(1)},${Y(sign > 0 ? Math.max(fin(y), 0) : Math.min(fin(y), 0)).toFixed(1)}`).join('') + `L${X(hi).toFixed(1)},${Y(0).toFixed(1)}Z`;
       const money = v => `${v < 0 ? '−' : ''}$${Math.abs(v * 100) >= 1000 ? (Math.abs(v * 100) / 1000).toFixed(1) + 'k' : Math.abs(v * 100).toFixed(0)}`;
       // Zero, the best and the worst, unless too close to zero to read.
       const ticks = [0, ...[yMax - pad, yMin + pad].filter(v => Math.abs(Y(v) - Y(0)) > 14)];
-      const sd1 = [a.spot * Math.exp(-a.sd), a.spot * Math.exp(a.sd)];
-      box.innerHTML = `<svg class="sb-chart" viewBox="0 0 ${W} ${PH}" width="${W}" height="${PH}" role="img" aria-label="Profit and loss at expiry and today across underlying prices">
-        <rect x="${X(sd1[0]).toFixed(1)}" y="${PAD.t}" width="${(X(sd1[1]) - X(sd1[0])).toFixed(1)}" height="${h}" class="pc-band"/>
+      const sd1 = spot != null ? [spot * Math.exp(-a.sd), spot * Math.exp(a.sd)] : null;
+      const vline = (x, cls) => `<line x1="${X(x).toFixed(1)}" x2="${X(x).toFixed(1)}" y1="${PAD.t}" y2="${PAD.t + h}" class="${cls}"/>`;
+      // What is left out is said in the key instead of drawn.
+      const noToday = a.today || a.net == null ? '' : spot == null ? 'Today: no underlying price' : a.unpriced.length ? `Today: no quote for ${a.unpriced.map(l => `${l.strike}${l.type[0].toUpperCase()}`).join(', ')}` : 'Today: a leg has no volatility to value it';
+      box.innerHTML = `<svg class="sb-chart" viewBox="0 0 ${W} ${PH}" width="${W}" height="${PH}" role="img" aria-label="Profit and loss at expiry${td ? ' and today' : ''} across underlying prices">
+        ${sd1 ? `<rect x="${X(sd1[0]).toFixed(1)}" y="${PAD.t}" width="${Math.max(0, X(sd1[1]) - X(sd1[0])).toFixed(1)}" height="${h}" class="pc-band"/>` : ''}
         <path d="${area(1)}" class="pc-win"/><path d="${area(-1)}" class="pc-lose"/>
         <line x1="${PAD.l}" x2="${W - PAD.r}" y1="${Y(0).toFixed(1)}" y2="${Y(0).toFixed(1)}" class="pc-zero"/>
         ${ticks.map(v => `<text x="${PAD.l - 6}" y="${(Y(v) + 4).toFixed(1)}" class="pc-tick" text-anchor="end">${money(v)}</text>`).join('')}
-        ${[lo, a.spot, hi].map((v, i) => `<text x="${X(v).toFixed(1)}" y="${PH - 6}" class="pc-tick" text-anchor="${['start', 'middle', 'end'][i]}">${v.toFixed(v < 100 ? 2 : 0)}</text>`).join('')}
-        ${a.be.filter(b => b > lo && b < hi).map(b => `<line x1="${X(b).toFixed(1)}" x2="${X(b).toFixed(1)}" y1="${PAD.t}" y2="${PAD.t + h}" class="pc-be"/>`).join('')}
-        <line x1="${X(a.spot).toFixed(1)}" x2="${X(a.spot).toFixed(1)}" y1="${PAD.t}" y2="${PAD.t + h}" class="pc-spot"/>
-        <path d="${line(td)}" class="pc-today"/><path d="${line(ex)}" class="pc-expiry"/>
+        ${[[lo, 'start'], ...(spot != null ? [[spot, 'middle']] : []), [hi, 'end']].map(([v, at]) => `<text x="${X(v).toFixed(1)}" y="${PH - 6}" class="pc-tick" text-anchor="${at}">${v.toFixed(v < 100 ? 2 : 0)}</text>`).join('')}
+        ${a.net != null ? a.be.filter(b => b > lo && b < hi).map(b => vline(b, 'pc-be')).join('') : ''}
+        ${spot != null ? vline(spot, 'pc-spot') : ''}
+        ${td ? `<path d="${linePath(xs, td, X, Y)}" class="pc-today"/>` : ''}<path d="${linePath(xs, ex, X, Y)}" class="pc-expiry"/>
         <g class="pc-hover" hidden><line class="pc-cross" y1="${PAD.t}" y2="${PAD.t + h}"/><circle r="3.5" class="pc-dot"/></g>
       </svg>
-      <p class="sb-paykey muted"><span class="pc-k pc-k-exp"></span>At expiry <span class="pc-k pc-k-today"></span>Today <span class="pc-k pc-k-band"></span>±1 SD <span class="sb-payread mono"></span></p>`;
+      <p class="sb-paykey muted"><span class="pc-k pc-k-exp"></span>${a.net == null ? 'At expiry, before its unknown cost' : 'At expiry'} ${td ? '<span class="pc-k pc-k-today"></span>Today ' : noToday ? `<span class="sb-noquote">${esc(noToday)}</span> ` : ''}${sd1 ? '<span class="pc-k pc-k-band"></span>±1 SD ' : ''}<span class="sb-payread mono"></span></p>`;
       const svg = /** @type {SVGSVGElement} */ (box.querySelector('svg')), read = box.querySelector('.sb-payread'), hov = /** @type {SVGGElement} */ (box.querySelector('.pc-hover'));
       svg.onmousemove = e => {
         const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) * W / r.width;
         if (px < PAD.l || px > W - PAD.r) { hov.setAttribute('hidden', ''); read.textContent = ''; return; }
-        const S = lo + (px - PAD.l) / w * (hi - lo), pe = a.pay(S), pt = a.today(S);
+        const S = lo + (px - PAD.l) / w * (hi - lo), pe = a.pay(S), pt = a.today?.(S);
+        if (!Number.isFinite(pe)) { hov.setAttribute('hidden', ''); read.textContent = ''; return; }
         hov.removeAttribute('hidden');
         hov.querySelector('line').setAttribute('x1', px.toFixed(1)); hov.querySelector('line').setAttribute('x2', px.toFixed(1));
         hov.querySelector('circle').setAttribute('cx', px.toFixed(1)); hov.querySelector('circle').setAttribute('cy', Y(pe).toFixed(1));
-        read.textContent = `at ${S.toFixed(2)}: ${money(pe)} at expiry, ${money(pt)} today`;
+        read.textContent = `at ${S.toFixed(2)}: ${money(pe)} at expiry${Number.isFinite(pt) ? `, ${money(pt)} today` : ''}`;
       };
       svg.onmouseleave = () => { hov.setAttribute('hidden', ''); read.textContent = ''; };
     }
@@ -432,14 +398,14 @@ defineWidget('spreads', {
     const symbolOf = l => quote(l.type, l.strike)?.symbol || (listed() ? `${listed().root}${my.expiry.slice(2).replace(/-/g, '')}${l.type === 'call' ? 'C' : 'P'}${String(Math.round(l.strike * 1000)).padStart(8, '0')}` : null);
     function trade() {
       const a = analyse(), ls = legs();
-      if (!a || !ls.length || ls.some(l => !symbolOf(l))) return;
+      if (!a || a.held || a.net == null || a.spot == null || !ls.length || ls.some(l => !symbolOf(l))) return;
       const g = ls.reduce((x, l) => { let p = x, q = l.qty; while (q) [p, q] = [q, p % q]; return p; }, 0) || 1;
       const name = identify(ls) || my.structure;
       tk.open({
         title: `${name && name !== 'Custom' ? `${name}: ` : ''}${my.sym} ${new Date(my.expiry + 'T12:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC', month: 'short', day: 'numeric' })}`, acct: my.acct, effect: 'open', qty: g,
         legs: ls.map(l => ({ symbol: symbolOf(l), side: l.side > 0 ? 'buy' : 'sell', ratio: l.qty / g })),
         // The worst at expiry, at the limit rather than the mid (net per unit, signed).
-        risk: (net, qty) => { const b = analyse(); if (!b) return ''; if (!isFinite(b.maxL)) return 'Loss unlimited.'; const worst = b.maxL + b.net - net * qty; return worst < 0 ? `Max loss $${Math.abs(worst * 100).toFixed(0)}.` : 'No loss at expiry.'; },
+        risk: (net, qty) => { const b = analyse(); if (!b || b.net == null) return ''; if (!isFinite(b.maxL)) return 'Loss unlimited.'; const worst = b.maxL + b.net - net * qty; return worst < 0 ? `Max loss $${Math.abs(worst * 100).toFixed(0)}.` : 'No loss at expiry.'; },
       });
     }
     const switchTo = s => { my.sym = s; my.index = null; my.full = null; my.chain = null; my.spot = null; my.expiry = null; my.why = ''; my.held = null; tk.close(); my.structure = 'Custom'; position.legs = []; render(); loadIndex(); };
@@ -449,7 +415,7 @@ defineWidget('spreads', {
       tk.close();
       my.expiry = d;
       if (STRUCTURES[my.structure] && !my.why) build();
-      else for (const l of legs()) { l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike; delete l.cost; }
+      else for (const l of legs()) { l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike; delete l.cost; delete l.mark; }
       if (my.chain?.from !== d) my.chain = null;
       render(); loadPrices();
     };
@@ -483,7 +449,7 @@ defineWidget('spreads', {
         const had = out.find(l => l.type === type && l.strike === strike);
         if (!had) { out.push({ type, strike, side, qty }); continue; }
         const n = had.side * had.qty + side * qty;
-        had.side = n >= 0 ? 1 : -1; had.qty = Math.abs(n); delete had.cost;
+        had.side = n >= 0 ? 1 : -1; had.qty = Math.abs(n); delete had.cost; delete had.mark;
       }
       position.sym = my.sym; position.legs = out.filter(l => l.qty > 0);
       my.structure = 'Custom'; my.why = ''; tk.close();
@@ -526,8 +492,8 @@ defineWidget('spreads', {
           n = Math.max(-20, Math.min(20, n)); l.side = n > 0 ? 1 : -1; l.qty = Math.abs(n);
         }
         // A held leg moved to another contract is a what-if: priced at the market, not its entry.
-        if (act === 'type') { l.type = l.type === 'call' ? 'put' : 'call'; l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike; delete l.cost; }
-        if (act === 'up' || act === 'down') { const ks = strikesOf(l.type), j = ks.indexOf(l.strike) + (act === 'up' ? 1 : -1); if (ks[j] != null) { l.strike = ks[j]; delete l.cost; } }
+        if (act === 'type') { l.type = l.type === 'call' ? 'put' : 'call'; l.strike = nearest(strikesOf(l.type), l.strike) ?? l.strike; delete l.cost; delete l.mark; }
+        if (act === 'up' || act === 'down') { const ks = strikesOf(l.type), j = ks.indexOf(l.strike) + (act === 'up' ? 1 : -1); if (ks[j] != null) { l.strike = ks[j]; delete l.cost; delete l.mark; } }
         if (act === 'remove') legs().splice(i, 1);
       }
       my.structure = 'Custom'; my.why = ''; render();

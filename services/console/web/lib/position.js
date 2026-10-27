@@ -3,7 +3,7 @@
 // shown). The builder publishes it ('tt-position').
 
 /**
- * @typedef {{ type: 'call' | 'put', strike: number, side: 1 | -1, qty: number, cost?: number }} Leg (`cost`: the entry price of a leg held)
+ * @typedef {{ type: 'call' | 'put', strike: number, side: 1 | -1, qty: number, cost?: number, mark?: number }} Leg (`cost`: the entry price of a leg held; `mark`: the broker's current price for it)
  * @typedef {{ sym: string | null, expiry: string | null, legs: Leg[], strikes: { call: number[], put: number[] },
  *   shown: boolean, net: number, be: number[], pay: ((s: number) => number) | null }} Position
  */
