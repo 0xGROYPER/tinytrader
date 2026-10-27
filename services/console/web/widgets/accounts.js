@@ -23,7 +23,7 @@
 //
 // Positions (live accounts, no equity chart): totals of equity and value at
 // risk (one day, 95%; see bookView) above the same cards.
-import { defineWidget, paint } from '../lib/widgets.js';
+import { defineWidget, paint, pressHold } from '../lib/widgets.js';
 import { fleet, svcState } from '../lib/fleet.js';
 import { esc, duration } from '../lib/format.js';
 import { askHeld } from '../lib/position.js';
@@ -294,7 +294,7 @@ function accountCard(svc, a, pick, book = false) {
     <td class="${tone(p.change_today)} acct-today">${pct(p.change_today)}</td></tr>`).join('');
   return `<article class="${pick ? 'acct acct-one' : 'card acct'}">${head}${unresolvedNote}
     <div class="acct-stats">${stats.map(([k, v]) => `<span>${k} <b>${v}</b></span>`).join('')}</div>
-    ${book ? '' : `<div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2" data-height="${pick ? 90 : 56}"></div>`}
+    ${book ? '' : `<div class="chart" data-chart="${esc(svc.id)}|recent|${esc(a.label || 'equity')}" data-decimals="2" data-height="${pick ? 90 : 56}" style="min-height:${pick ? 90 : 56}px"></div>`}
     ${pos.length ? `<div class="scroll"><table class="pos-tbl"><thead><tr><th>Position</th><th>Qty</th>${pick ? '<th>Avg</th><th>Last</th>' : ''}<th>Value</th><th>P/L</th><th class="acct-today">Today</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}
     ${(() => { const g = optionGroups(a.name || a.label || svc.id, pos), can = tradable(a.name); return g.length || (can && !book) ? `<div class="acct-payoffs">${g.map(x => `<button type="button" class="chip-btn" data-held="${esc(x.key)}" title="Load these legs into the Spread builder at their entry prices">Payoff: ${esc(x.sym)} ${esc(dayLabel(x.expiry))} · ${x.legs.length} leg${x.legs.length > 1 ? 's' : ''}</button>${can ? `<button type="button" class="chip-btn" data-ot-close="${esc(x.key)}" title="An order closing these legs, at market or a limit">Close…</button>` : ''}`).join('')}${can && !book ? `<button type="button" class="chip-btn" data-sb-open="${esc(a.name)}" title="Build an order in the Spread builder, with this account picked for it">Spread builder</button>` : ''}</div>` : ''; })()}
     ${liquidatePanel(a)}
@@ -336,8 +336,11 @@ function drawOne(want) {
   return accountCard(one.svc, one.a, pick);
 }
 
-// Redraws on every update, keeping the scroll position, but not while the
-// operator is typing a confirmation. The ticket has its own box above.
+// Redraws on every update, keeping the panel's scroll position (paint), but
+// not while the operator is typing a confirmation, nor while a pointer is
+// pressed on it (pressHold: a click on a Liquidate box or button lands on
+// what was pressed). Ticks and typing are kept in liq and flat, so a redraw
+// shows them as they were. The ticket has its own box above.
 function mount(el, single = false, book = false) {
   // One account's view: which, kept with the panel.
   let want = '';
@@ -345,8 +348,9 @@ function mount(el, single = false, book = false) {
   el.innerHTML = '<div class="ot-box"></div><div class="acct-main"></div>';
   const box = /** @type {HTMLElement} */ (el.querySelector('.ot-box')), main = /** @type {HTMLElement} */ (el.querySelector('.acct-main'));
   const tk = createTicket(box);
+  const press = pressHold(el, () => update());
   const update = () => {
-    if (!(el.contains(document.activeElement) && document.activeElement.matches('.acct-flat-input, .acct-pick'))) paint(main, book ? bookView() : single ? drawOne(want) : draw());
+    if (!press.held() && !(el.contains(document.activeElement) && document.activeElement.matches('.acct-flat-input, .acct-pick'))) paint(main, book ? bookView() : single ? drawOne(want) : draw());
     if (book) readVols(update);
     tk.update();
     readGateways(update); routed(update);
@@ -493,7 +497,7 @@ function mount(el, single = false, book = false) {
   };
   el.addEventListener('click', click); el.addEventListener('input', input); el.addEventListener('change', change);
   update();
-  return { update, dispose: () => { tk.dispose(); el.removeEventListener('click', click); el.removeEventListener('input', input); el.removeEventListener('change', change); } };
+  return { update, dispose: () => { tk.dispose(); press.dispose(); el.removeEventListener('click', click); el.removeEventListener('input', input); el.removeEventListener('change', change); } };
 }
 
 defineWidget('accounts', { title: 'Accounts and equity', mount: el => mount(el) });
