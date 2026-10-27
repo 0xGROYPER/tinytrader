@@ -72,6 +72,9 @@ struct Dataset {
     id: String,
     symbol: Option<String>,
     filed: bool,
+    /// Held only in DBN files outside every provider's folder and every
+    /// layout: counted, but not a dataset the store keeps.
+    stray: bool,
     sources: Vec<String>,
     schemas: BTreeMap<String, Schema>,
 }
@@ -99,6 +102,9 @@ struct Day {
     sha256: Option<String>,
     coverage: Option<Held>,
     pending: Option<bool>,
+    /// The files that hold the day, by logical name, as `/files/{volume}/{path}`
+    /// serves them.
+    files: Vec<String>,
 }
 
 #[derive(JsonSchema)]
@@ -129,6 +135,10 @@ struct Piece {
 struct Files {
     files: Vec<File>,
     truncated: bool,
+    /// Seconds since the epoch: the scan listed from, and when a filing last
+    /// updated it.
+    scanned_at: f64,
+    updated_at: f64,
 }
 
 #[derive(JsonSchema)]

@@ -111,6 +111,10 @@
             },
             "type": "array"
           },
+          "stray": {
+            "description": "Held only in DBN files outside every provider's folder and every\nlayout: counted, but not a dataset the store keeps.",
+            "type": "boolean"
+          },
           "symbol": {
             "type": [
               "string",
@@ -121,6 +125,7 @@
         "required": [
           "id",
           "filed",
+          "stray",
           "sources",
           "schemas"
         ],
@@ -148,6 +153,13 @@
           },
           "filed": {
             "type": "boolean"
+          },
+          "files": {
+            "description": "The files that hold the day, by logical name, as `/files/{volume}/{path}`\nserves them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "kind": {
             "$ref": "#/components/schemas/DayKind"
@@ -196,7 +208,8 @@
           "volumes",
           "kind",
           "filed",
-          "conflict"
+          "conflict",
+          "files"
         ],
         "type": "object"
       },
@@ -253,13 +266,24 @@
             },
             "type": "array"
           },
+          "scanned_at": {
+            "description": "Seconds since the epoch: the scan listed from, and when a filing last\nupdated it.",
+            "format": "double",
+            "type": "number"
+          },
           "truncated": {
             "type": "boolean"
+          },
+          "updated_at": {
+            "format": "double",
+            "type": "number"
           }
         },
         "required": [
           "files",
-          "truncated"
+          "truncated",
+          "scanned_at",
+          "updated_at"
         ],
         "type": "object"
       },

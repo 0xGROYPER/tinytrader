@@ -183,6 +183,15 @@
               "null"
             ]
           },
+          "expires_at": {
+            "description": "When the quote stops being good: Unix seconds, beside `valid_seconds`.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "hours": {
             "anyOf": [
               {
@@ -191,6 +200,16 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "jobs": {
+            "description": "Once submitting, the jobs made so far, in order.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
             ]
           },
           "needs_approval": {

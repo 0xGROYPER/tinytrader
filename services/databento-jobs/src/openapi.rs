@@ -36,8 +36,12 @@ struct Quote {
     billable_bytes: Option<u64>,
     needs_approval: Option<bool>,
     valid_seconds: Option<u64>,
+    /// When the quote stops being good: Unix seconds, beside `valid_seconds`.
+    expires_at: Option<u64>,
     notes: Option<Vec<String>>,
     requests: Option<Vec<Request>>,
+    /// Once submitting, the jobs made so far, in order.
+    jobs: Option<Vec<String>>,
 }
 
 #[derive(JsonSchema)]
