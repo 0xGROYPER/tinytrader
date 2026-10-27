@@ -348,7 +348,33 @@ in `databento-jobs` adds nothing to it.
 - It is measured on the machine it was deferred for before it is turned
   on: the rate with one lock and with per-day locks, same backlog.
 
-### 9. Not taken
+### 9. Example notebooks, from Python
+
+`examples/python/` holds plain Jupyter notebooks (`.ipynb`, committed as
+they are, outputs included; no jupytext or marimo). Their dependencies
+(`databento`, `pandas`, `httpx`) are pinned in that folder's own
+`pyproject.toml`, apart from Cargo, the default build and the images.
+Python is a client here only: no service, image or build step uses it.
+
+1. **Read held days.** `/catalog` and `/files` from the store, then
+   `databento.DBNStore` into pandas: the same DBN the store holds, no
+   conversion.
+2. **Price and fetch.** Price a request at `databento-jobs`' `/price` and
+   show the quote. A notebook never approves: it prints the quote's ID and
+   hands approval to `tt approve <id>` in a terminal, then follows the job
+   to filing. So it needs `tt` (#64).
+3. **A small strategy over held days**, later, once replay (0022) runs.
+
+CI executes the notebooks against a small fixture store: a store started
+on a temporary root holding one small committed DBN day, and for (2) a
+stub `/price` answering a fixed quote. Nothing reaches a provider. The
+committed outputs pass the `generic` check like every other file: only
+`127.0.0.1` addresses, no host names, home paths or private addresses.
+
+The README gets a short "From Python" section after the CLI, TUI and
+console sections.
+
+### 10. Not taken
 
 Hyphae's slot transactions, page evidence and framed transport; Reactor's
 envelope and topic machinery and its DBN crate; the store as a library
@@ -381,12 +407,13 @@ Stop and report before going 30% over.
 | **R13.** `venues/coinbase` and a Coinbase relay source, ported from Hyphae's venue and live driver (public feed, no account); `ticker` retired, and everything that names it changed in the same step | ~1,800 / ~900; docs ~150 | ~430 (`ticker`) | needs Hyphae's crypto DBN records (`TradeWide`, `MboWide`, `Mbp10Wide`) in `libs/dbn` first, which is 0021's step 9a; see below |
 | **R14.** `tt sync` (section 6): newest first, `--max-days` and `--max-usd`, chunked pricing, quote reuse, the batch job's pricing and notice; the evening top-off as a batch job | 350 / 300; docs ~60 | ~60 | needs `tt` (0021 step 3, #64) and R6; the batch-job definition is in the site's repository |
 | **R15.** Nix out of tinytrader (section 7): modules, packages and image building to tinytrader-deploy; `generic` as a script and `tsc` as a job; CI and the required checks without Nix | moves ~1,500; docs ~40 | ~60 (flake, `.envrc`, CI jobs) | three PRs in strict order: tinytrader-deploy, then the site (hosts switched after hours), then tinytrader |
-| **Total** | ~5,930 / ~4,340 added; moves ~9,800; docs ~305; fixtures 0 bytes | ~3,870 Rust, ~1,350 JS | R4a and R4b are ~320 / ~550 of the added lines, ~55 of docs and ~50 removed |
+| **R16.** Example notebooks (section 9): (1) and (2) now, (3) after replay; `pyproject.toml`; one CI job over a fixture store; the README's "From Python" | notebooks ~250 lines; CI job ~50, the `/price` stub ~40; fixtures one DBN day, at most 64 KB; docs ~25 | – | (2) needs #64; (3) after 0022's replay; Python nowhere in the services or images |
+| **Total** | ~5,930 / ~4,340 added in Rust, plus R16's ~250 lines of notebooks and ~90 of CI and stub; moves ~9,800; docs ~330; fixtures at most 64 KB (R16) | ~3,870 Rust, ~1,350 JS | R4a and R4b are ~320 / ~550 of the added lines, ~55 of docs and ~50 removed |
 
 0021's steps 1 (`libs/net`) and 2 (`libs/store-client`) come before R3, R5
 and R6; R5 and R6 are 0021's 9c and 9b. Order: R0, R1, R2 any time; then
 R3; R4 and R5 any order; R4a after R4; R4b after R4a, deferred as above; R6 after R3; R7 after R3; R8 after R7; R9 and R10
-any time; R11 before 0021's store producer; R12 last; R13 after 0021's 9a (the crypto records), R3 and R7 (it uses `libs/service`'s supervised loop and the fan-out), and early among them; R14 after #64 and R6; R15 any time, its three PRs in section 7's order.
+any time; R11 before 0021's store producer; R12 last; R13 after 0021's 9a (the crypto records), R3 and R7 (it uses `libs/service`'s supervised loop and the fan-out), and early among them; R14 after #64 and R6; R16's first two notebooks after #64, its third after replay; R15 any time, its three PRs in section 7's order.
 
 **R13: what retiring `ticker` breaks**, all changed in the same step:
 
