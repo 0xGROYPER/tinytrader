@@ -12,6 +12,12 @@
 
 Shared conventions are in the [API overview](README.md).
 
+A store answers for its own volumes only. A deployment may run several
+(one per data node); `databento-jobs` asks every one it is given and merges
+their answers, and files each job on one of them
+([decision 0025](../decisions/0025-several-stores.md)). Nothing in this API
+changes for that.
+
 | Endpoint | | |
 |---|---|---|
 | `GET /catalog?fresh=` | read | Each volume's datasets by provider, their schemas and days, and how full it is. Each schema lists its `partial` and `unfiled` days ([below](#what-the-store-holds)). |

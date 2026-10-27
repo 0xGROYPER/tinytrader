@@ -100,9 +100,17 @@ pub async fn sync(jobs: &Jobs) -> Option<Synced> {
         return None;
     }
     let mut out = Synced::default();
+    for store in jobs.stores() {
+        sync_store(jobs, store, &mut out).await;
+    }
+    Some(out)
+}
+
+/// One store's pass (decision 0025: each store is told of its own days).
+async fn sync_store(jobs: &Jobs, store: &str, out: &mut Synced) {
     let catalog = match jobs
         .http
-        .get(format!("{}/catalog", jobs.store))
+        .get(format!("{store}/catalog"))
         .timeout(Duration::from_secs(120))
         .send()
         .await
@@ -111,11 +119,11 @@ pub async fn sync(jobs: &Jobs) -> Option<Synced> {
         Ok(r) => {
             out.failed
                 .push(format!("the store's catalog: HTTP {}", r.status()));
-            return Some(out);
+            return;
         }
         Err(e) => {
             out.failed.push(format!("the store's catalog: {e}"));
-            return Some(out);
+            return;
         }
     };
     for (dataset, (days, mut batch, filed)) in held(&catalog) {
@@ -165,7 +173,7 @@ pub async fn sync(jobs: &Jobs) -> Option<Synced> {
                 query.push(("symbol", s.as_str()));
             }
             let Ok(url) =
-                reqwest::Url::parse_with_params(&format!("{}/coverage", jobs.store), &query)
+                reqwest::Url::parse_with_params(&format!("{store}/coverage"), &query)
             else {
                 continue;
             };
@@ -205,7 +213,7 @@ pub async fn sync(jobs: &Jobs) -> Option<Synced> {
         let sent = jobs
             .store_write(
                 jobs.http
-                    .post(format!("{}/conditions/databento", jobs.store)),
+                    .post(format!("{store}/conditions/databento")),
             )
             .json(&rows)
             .timeout(Duration::from_secs(120))
@@ -246,7 +254,6 @@ pub async fn sync(jobs: &Jobs) -> Option<Synced> {
             out.changed.push(text);
         }
     }
-    Some(out)
 }
 
 /// Once at start, then once a day; while capture is live, it waits and
