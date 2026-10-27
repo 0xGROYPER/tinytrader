@@ -181,26 +181,57 @@ tt sync alpaca --feed iex --schema mbp-1 --symbols SPY --latest --write store   
 
 - **What it fetches:** every session day from `--from` through the latest
   complete day (its close plus 15 minutes, by the market calendar) that the
-  store doesn't hold in full, oldest first, with `--max-days` and the
-  provider's request budget bounding one run. Days held are skipped by
-  the store's coverage, not by a local record.
+  store doesn't hold in full, newest first, bounded by `--max-days`
+  (default 10, every source), `--max-usd` (paid sources only) and the
+  provider's request budget. Days held are skipped by the store's
+  coverage, not by a local record.
 - **`--latest`** instead of `--from`: start the day after the newest day
   the store holds for that dataset, symbol and schema, and fill through the
-  latest complete day. Holes before that newest day are left to an
-  explicit `--from` run.
+  latest complete day, newest first. Holes before that newest day are left
+  to an explicit `--from` run.
   - **If the store holds nothing**, `--latest` starts at the provider's
-    earliest day for the symbol (probed once; Hyphae's `--start earliest`).
-    For a free source that's a backfill that `--max-days` spreads over runs,
-    newest days first. For a paid source it prices the whole history and
-    asks, showing the total (0019): empty storage never buys on its own, and
-    a run without a person at a terminal leaves the quote and notifies.
+    earliest day for the symbol (probed once; Hyphae's `--start earliest`),
+    and the bounds still hold: a run takes the newest `--max-days` of it,
+    and later runs work back. Empty storage never buys on its own (0019).
+- **Paid and included sources.** A source is paid when its requests are
+  charged one by one: a Databento quote whose `cost_usd` is not 0 (its
+  `needs_approval`). Alpaca's feeds, SIP included, are a subscription:
+  included, not paid per request, so they are bounded by `--max-days` and
+  the rate limit and need no quote. A Databento request its plan covers
+  (cost 0) is included too.
+- **Pricing a paid source, in chunks.** The days are priced newest first in
+  chunks no longer than `/price` takes (1,500 days, `MAX_DAYS` in
+  `databento-jobs/src/main.rs:119`), and pricing stops at `--max-days` or
+  when the next chunk would pass `--max-usd` (default 0: price nothing
+  paid, say what is missing). It never prices a whole history in one
+  request and never shows a total it hasn't priced: it says how many days
+  are priced and how many are left.
+- **It never approves.** `sync` never calls `/submit`, never reads or
+  sends the order token, and has no `--yes`. A person approves with
+  `tt approve` at a terminal or in the console. With no TTY it leaves the
+  quote, notifies and exits 3 (refused: it needs a person), as `tt` does
+  (#64).
+- **A quote is reused while it is good.** Before pricing, `sync` looks for
+  a waiting quote for the same request (`GET /quotes`) and offers that one
+  instead of making another. Paid quotes are good for an hour
+  (`quote_ttl`, `databento-jobs/src/main.rs:107`), so a nightly run usually
+  finds last night's expired and prices again; a rerun within the hour
+  reuses it.
+- **Pricing from a batch job.** The console's write gate refuses
+  `/api/jobs/...` without a person's login, and a tagged node has none, so
+  a batch job doesn't go through the console. It prices at
+  `databento-jobs`' own `/price` on the service network (free, no token),
+  and the quote waits in `databento-jobs`' `/quotes`, where the console
+  shows it. The notice goes to the deployment's notification address (the
+  one the console's `CONSOLE_NOTIFY` uses), naming the quote, its days and
+  price, and how to approve it; the people in `CONSOLE_WRITE_LOGINS` are
+  the ones who can.
 - **One operation:** it plans the days and calls `fetch` for them, with the
-  same paging, pacing, retries and output. A paid provider prices the
-  missing days and asks as `fetch` does (0019): a scheduled `sync` of a
-  paid source leaves a quote and notifies.
+  same paging, pacing, retries and output.
 - **Run anywhere:** by hand, or nightly as a batch job behind the
   deployment's start gate (after the close, capture idle). The evening
-  top-off inside `alpaca-history` becomes that job.
+  top-off inside `alpaca-history` becomes that job; the job's definition
+  lives in the site's repository, not here.
 
 ### 7. Tinytrader is Cargo and Docker; deployment is elsewhere
 
@@ -211,6 +242,35 @@ NixOS and nix-darwin modules, the Nix packages and the image building in
 machine, Nomad for a network, Nix as the advanced path). The leak check
 (`generic`) becomes a plain script CI runs. A deployment's own repository is
 the site.
+
+It can't be one change on one day. A services host's auto-deploy runs
+`$TINYTRADER_SRC/nix/build-images.sh` every 5 minutes, and both
+tinytrader-deploy and a site take `nixpkgs.follows = "tinytrader/nixpkgs"`:
+deleting tinytrader's flake first breaks both. So, strictly in order:
+
+1. **tinytrader-deploy first.**
+   - Its own `nixpkgs`, `crane` and `rust-overlay` inputs, `nixpkgs`
+     pinned to tinytrader's current rev (825e2028 in `flake.lock`).
+   - tinytrader as a `flake = false` input: source, not a flake.
+   - In from tinytrader: `nix/rust.nix` (with `tt`), `nix/images.nix`,
+     `nix/build-images.sh`, `nix/watch*` and `infra/modules`, keeping the
+     `tinytrader.services` option name, so a site's configuration is
+     unchanged; its packages and modules point at itself.
+   - `scripts/deploy`, `scripts/local-up.sh` and `scripts/auto-deploy` run
+     its own `build-images.sh` over the tinytrader source, and
+     auto-deploy's path classifier (which today names `flake.nix`,
+     `nix/rust.nix`, `nix/images.nix` and `nix/build-images.sh` in
+     tinytrader) is updated to match.
+2. **Then the site.** Its `nixpkgs.follows` points at
+   `tinytrader-deploy/nixpkgs`, and its tinytrader input is dropped or made
+   `flake = false`. The machines' configuration is bumped and each host
+   switched, after hours.
+3. **Only then tinytrader.** `flake.nix`, `flake.lock`, `nix/`, `infra/`
+   and `.envrc` deleted; CI's `nix-linux` and `nix-macos` jobs replaced by
+   a `generic` check script and a `tsc` job for the console's types (today
+   `nix/web.nix`'s `console-types`); and the `main` ruleset's required
+   checks (today `nix-linux`, `nix-macos`, `cargo`) changed in the same
+   change, so no PR waits on a check that no longer runs.
 
 ### 8. Filing throughput
 
@@ -318,15 +378,28 @@ Stop and report before going 30% over.
 | **R10.** `libs/fleet` typed views for both front ends | 250 / 150 | ~150 JS, ~200 Rust | |
 | **R11.** DBN header reading and the merge into `libs/dbn` | moves ~500 | ~250 | the store producer (0021 step 5) needs the merge |
 | **R12.** `order-gateway` onto the shared crates (`libs/service`, and `venues/alpaca` with its `trading` client moved in); `session.rs` split by phase | moves ~3,000 | ~570 | under the trading hold, after a close |
-| **R13.** `venues/coinbase` and a Coinbase relay source, ported from Hyphae's venue and live driver (public feed, no account); `ticker` retired | ~1,800 / ~900 | ~430 (`ticker`) | the README's first live example; needs Hyphae's crypto DBN records (`TradeWide`, `MboWide`, `Mbp10Wide`) in `libs/dbn` first, which is 0021's step 9a |
-| **R14.** `tt sync` (section 6); the evening top-off as a batch job | 250 / 200 | ~60 | after 0021 step 3 and R6 |
-| **R15.** Nix out of tinytrader (section 7): modules, packages and image building to tinytrader-deploy; `generic` as a script; CI without Nix | moves ~1,500 | – | with a tinytrader-deploy PR, same day |
-| **Total** | ~5,830 / ~4,240 added; moves ~9,800; docs ~55 (R4a, R4b); fixtures 0 bytes | ~3,810 Rust, ~1,350 JS | R4a and R4b are ~320 / ~550 of the added lines, ~55 of docs and ~50 removed |
+| **R13.** `venues/coinbase` and a Coinbase relay source, ported from Hyphae's venue and live driver (public feed, no account); `ticker` retired, and everything that names it changed in the same step | ~1,800 / ~900; docs ~150 | ~430 (`ticker`) | needs Hyphae's crypto DBN records (`TradeWide`, `MboWide`, `Mbp10Wide`) in `libs/dbn` first, which is 0021's step 9a; see below |
+| **R14.** `tt sync` (section 6): newest first, `--max-days` and `--max-usd`, chunked pricing, quote reuse, the batch job's pricing and notice; the evening top-off as a batch job | 350 / 300; docs ~60 | ~60 | needs `tt` (0021 step 3, #64) and R6; the batch-job definition is in the site's repository |
+| **R15.** Nix out of tinytrader (section 7): modules, packages and image building to tinytrader-deploy; `generic` as a script and `tsc` as a job; CI and the required checks without Nix | moves ~1,500; docs ~40 | ~60 (flake, `.envrc`, CI jobs) | three PRs in strict order: tinytrader-deploy, then the site (hosts switched after hours), then tinytrader |
+| **Total** | ~5,930 / ~4,340 added; moves ~9,800; docs ~305; fixtures 0 bytes | ~3,870 Rust, ~1,350 JS | R4a and R4b are ~320 / ~550 of the added lines, ~55 of docs and ~50 removed |
 
 0021's steps 1 (`libs/net`) and 2 (`libs/store-client`) come before R3, R5
 and R6; R5 and R6 are 0021's 9c and 9b. Order: R0, R1, R2 any time; then
 R3; R4 and R5 any order; R4a after R4; R4b after R4a, deferred as above; R6 after R3; R7 after R3; R8 after R7; R9 and R10
-any time; R11 before 0021's store producer; R12 last; R13 after 0021's 9a (the crypto records), R3 and R7 (it uses `libs/service`'s supervised loop and the fan-out), and early among them; R14 after R6; R15 any time, with its deploy-repo PR.
+any time; R11 before 0021's store producer; R12 last; R13 after 0021's 9a (the crypto records), R3 and R7 (it uses `libs/service`'s supervised loop and the fan-out), and early among them; R14 after #64 and R6; R15 any time, its three PRs in section 7's order.
+
+**R13: what retiring `ticker` breaks**, all changed in the same step:
+
+- the quick starts: tinytrader-deploy #2's, and #65's quick start and its
+  Services table, both replaced by the Coinbase relay and the console, so
+  the first example still needs no account;
+- `docs/api/README.md:79` (its port, 9105), `docker-bake.hcl`'s `SERVICES`,
+  and `flake.nix`'s `nixosConfigurations.example` (if R15 hasn't removed
+  it);
+- the `ghcr.io/<owner>/tinytrader-ticker` image: no longer built or
+  published (`SERVICES` drives `images.yml`); its last tags stay, not
+  deleted, so a deployment that pins one still pulls, and the package's
+  description says it is retired for the Coinbase relay.
 
 ## Consequences
 
