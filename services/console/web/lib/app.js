@@ -38,6 +38,7 @@ import '../widgets/earningsweek.js';
 import '../widgets/spreads.js';
 import '../widgets/alerts.js';
 import '../widgets/tape.js';
+import '../widgets/lists.js';
 import { watch as watchAlerts, unseen, alerts as priceAlerts, describe as alertText, markSeen, alertForm, alertsFor } from './alerts.js';
 import '../widgets/screener.js';
 import '../widgets/day.js';

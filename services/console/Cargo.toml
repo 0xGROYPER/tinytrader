@@ -14,6 +14,7 @@ serde.workspace = true
 sha2 = "0.10"
 tinytrader-fleet.workspace = true
 axum.workspace = true
+futures-util.workspace = true
 tinytrader-observe.workspace = true
 reqwest.workspace = true
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

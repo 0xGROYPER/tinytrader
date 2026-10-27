@@ -44,6 +44,8 @@
 //! - `CONSOLE_COMPOSE_PROJECT`: only show containers from this Compose project (optional)
 //! - `CONSOLE_COLLECTIONS`: document collections shown in the sidebar, e.g.
 //!   `Docs=/srv/docs;Research=/srv/research` (optional; see `collections.rs`)
+//! - `CONSOLE_LISTS`: a JSON file of external lists, read-only tables whose
+//!   rows come from JSON endpoints (`/api/lists`; optional; see `lists.rs`).
 //! - `CONSOLE_NOTIFY`: a URL to POST a notice to when a service goes down or
 //!   comes back (ntfy-style: the body is the message, with `Title`, `Priority`
 //!   and `Tags` headers), or `CONSOLE_NOTIFY_FILE` naming a file holding it.
@@ -130,6 +132,7 @@ mod collections;
 mod delta;
 mod gateways;
 mod journal;
+mod lists;
 mod notify;
 #[cfg(test)]
 mod openapi;
@@ -185,6 +188,8 @@ struct App {
     /// Changes-only snapshots for pages that poll.
     delta: delta::Delta,
     collections: Vec<collections::Collection>,
+    /// External lists (`/api/lists`), none unless configured.
+    lists: lists::Lists,
 }
 
 #[tokio::main]
@@ -263,6 +268,18 @@ async fn main() {
                 .map_or(0, |d| d.as_millis() as u64),
         ),
         collections: collections::parse(&env("CONSOLE_COLLECTIONS", "")),
+        // Unreadable or invalid, the lists are off; the console still starts.
+        lists: std::env::var("CONSOLE_LISTS")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .and_then(|p| {
+                std::fs::read_to_string(&p)
+                    .map_err(|e| e.to_string())
+                    .and_then(|t| lists::Lists::parse(&t, lists::TIMEOUT, lists::FRESH))
+                    .map_err(|e| eprintln!("console: lists off: {p}: {e}"))
+                    .ok()
+            })
+            .unwrap_or_default(),
         store: std::env::var("CONSOLE_STORE")
             .ok()
             .filter(|s| !s.is_empty())
@@ -693,6 +710,26 @@ async fn stream(
             axum::Json(v),
         )),
         Err(e) => fleet_error(&e),
+    }
+}
+
+/// `GET /api/lists`: every external list (`lists.rs`).
+async fn lists_all(AxumState(app): AxumState<Arc<App>>) -> Response {
+    no_store(axum::Json(json!({ "lists": app.lists.all().await })))
+}
+
+/// `GET /api/lists/{id}`: one external list, or `404`.
+async fn lists_one(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    match app.lists.one(&id).await {
+        Some(list) => no_store(axum::Json(list)),
+        None => (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({ "error": "no such list" })),
+        )
+            .into_response(),
     }
 }
 
@@ -1161,6 +1198,8 @@ fn routes(write_gate: WriteGate) -> Router<Arc<App>> {
         .route("/api/stream/{service}/{stream}", get(stream))
         .route("/api/collections", get(list_collections))
         .route("/api/collections/{id}/{index}", get(collection_doc))
+        .route("/api/lists", get(lists_all))
+        .route("/api/lists/{id}", get(lists_one))
         .route("/api/jobs/{*rest}", get(jobs_proxy))
         .route("/api/queue/{*rest}", get(queue_proxy))
         .route("/api/reminders", get(reminders_get))
@@ -2146,6 +2185,10 @@ mod tests {
             polls: AtomicU64::new(0),
             delta: delta::Delta::new(0),
             collections: Vec::new(),
+            lists: LISTS
+                .with(|l| l.borrow_mut().take())
+                .map(test_lists)
+                .unwrap_or_default(),
         });
         if TOPOLOGY.with(|t| t.borrow().is_some()) {
             app.poller.poll().await;
@@ -2545,6 +2588,9 @@ mod tests {
         static APPROVE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
         /// The topology file of the consoles this thread serves (polled once at start).
         static TOPOLOGY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+        /// The external lists of the next console this thread serves: their
+        /// configuration, and how long an answer is kept.
+        static LISTS: std::cell::RefCell<Option<(String, Duration)>> = const { std::cell::RefCell::new(None) };
     }
 
     #[tokio::test]
@@ -3023,6 +3069,7 @@ mod tests {
             "/api/prefs",
             "/api/reminders",
             "/api/accounts/gateways",
+            "/api/lists",
             "/",
             "/lib/api.js",
         ] {
@@ -3219,5 +3266,143 @@ mod tests {
             assert_eq!(h["content-security-policy"], CSP, "{path}");
             assert_eq!(h["x-frame-options"], "DENY", "{path}");
         }
+    }
+
+    /// External lists from `LISTS`, whose sources get 300 ms to answer.
+    fn test_lists((config, fresh): (String, Duration)) -> lists::Lists {
+        lists::Lists::parse(&config, Duration::from_millis(300), fresh).unwrap()
+    }
+
+    fn columns() -> serde_json::Value {
+        json!([{ "key": "name", "label": "Name" }, { "key": "n", "label": "N" }])
+    }
+
+    /// The console with these external lists (id, url), each answer kept for `fresh`.
+    async fn serve_lists(lists: &[(&str, String)], fresh: Duration) -> String {
+        let config: Vec<_> = lists
+            .iter()
+            .map(|(id, url)| json!({ "id": id, "label": id, "url": url, "columns": columns() }))
+            .collect();
+        LISTS.with(|l| *l.borrow_mut() = Some((json!(config).to_string(), fresh)));
+        serve(gate(None)).await
+    }
+
+    /// A stand-in source on a free port: `/ok` lists two rows, `/count` the
+    /// number of times it was asked, `/once` a row the first time and `500`
+    /// after; `/fail` answers `500`, `/object` an object, and `/slow` takes
+    /// two seconds.
+    async fn source() -> String {
+        async fn count(AxumState(n): AxumState<Arc<AtomicU64>>) -> axum::Json<serde_json::Value> {
+            axum::Json(json!([{ "n": n.fetch_add(1, Ordering::Relaxed) + 1 }]))
+        }
+        async fn once(AxumState(n): AxumState<Arc<AtomicU64>>) -> Response {
+            match n.fetch_add(1, Ordering::Relaxed) {
+                0 => axum::Json(json!([{ "n": 1 }])).into_response(),
+                _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
+        async fn slow() -> axum::Json<serde_json::Value> {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            axum::Json(json!([]))
+        }
+        let rows = || async {
+            axum::Json(json!([{ "name": "a", "n": 1, "hidden": "x" }, { "name": "<b>" }]))
+        };
+        let router = Router::new()
+            .route("/ok", get(rows))
+            .route("/count", get(count))
+            .route("/once", get(once))
+            .route("/fail", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
+            .route("/object", get(|| async { axum::Json(json!({ "rows": [] })) }))
+            .route("/slow", get(slow))
+            .with_state(Arc::new(AtomicU64::new(0)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    async fn get_json(url: &str) -> (u16, serde_json::Value) {
+        let r = reqwest::get(url).await.unwrap();
+        (r.status().as_u16(), r.json().await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn without_lists_configured_there_are_none() {
+        let base = serve(gate(None)).await;
+        let (code, v) = get_json(&format!("{base}/api/lists")).await;
+        assert_eq!((code, v), (200, json!({ "lists": [] })));
+        let (code, v) = get_json(&format!("{base}/api/lists/any")).await;
+        assert_eq!((code, v["error"].as_str()), (404, Some("no such list")));
+    }
+
+    #[tokio::test]
+    async fn a_list_keeps_only_its_columns_and_says_when_it_was_read() {
+        let src = source().await;
+        let base = serve_lists(&[("ok", format!("{src}/ok"))], Duration::ZERO).await;
+        let (code, v) = get_json(&format!("{base}/api/lists/ok")).await;
+        assert_eq!(code, 200);
+        assert_eq!(v["rows"], json!([{ "name": "a", "n": 1 }, { "name": "<b>" }]));
+        assert_eq!((v["id"].as_str(), v["label"].as_str()), (Some("ok"), Some("ok")));
+        assert_eq!((v["columns"].clone(), v["error"].clone()), (columns(), json!(null)));
+        assert!(v["updated_at"].is_u64() && v["age_ms"].is_u64(), "{v}");
+        let (_, all) = get_json(&format!("{base}/api/lists")).await;
+        assert_eq!(all["lists"][0]["rows"], v["rows"]);
+    }
+
+    #[tokio::test]
+    async fn a_source_is_asked_once_while_its_answer_is_fresh() {
+        let src = source().await;
+        let fresh = Duration::from_secs(60);
+        let base = serve_lists(&[("n", format!("{src}/count"))], fresh).await;
+        for _ in 0..3 {
+            let (_, v) = get_json(&format!("{base}/api/lists/n")).await;
+            assert_eq!(v["rows"], json!([{ "n": 1 }]));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failing_source_is_reported_and_keeps_its_last_rows() {
+        let src = source().await;
+        let lists = [
+            ("fail", format!("{src}/fail")),
+            ("object", format!("{src}/object")),
+            ("refused", "http://127.0.0.1:1/".to_owned()),
+            ("once", format!("{src}/once")),
+        ];
+        let base = serve_lists(&lists, Duration::ZERO).await;
+        let (code, v) = get_json(&format!("{base}/api/lists")).await;
+        assert_eq!(code, 200);
+        let errors = [
+            "the source answered 500 Internal Server Error",
+            "the source didn't answer a JSON array of objects",
+            "connection refused or host unreachable",
+        ];
+        for (i, error) in errors.into_iter().enumerate() {
+            let l = &v["lists"][i];
+            assert_eq!(l["error"], error);
+            assert_eq!((l["rows"].clone(), l["updated_at"].clone()), (json!([]), json!(null)));
+        }
+        let first = &v["lists"][3];
+        assert_eq!(first["rows"], json!([{ "n": 1 }]));
+        assert_eq!(first["error"], json!(null));
+        // Asked again, it fails: the rows it last gave are kept, with when.
+        let (_, again) = get_json(&format!("{base}/api/lists/once")).await;
+        assert_eq!(again["error"], errors[0]);
+        assert_eq!(again["rows"], first["rows"]);
+        assert_eq!(again["updated_at"], first["updated_at"]);
+    }
+
+    #[tokio::test]
+    async fn a_source_that_does_not_answer_in_time_holds_up_nothing_else() {
+        let src = source().await;
+        let lists = [("slow", format!("{src}/slow")), ("ok", format!("{src}/ok"))];
+        let base = serve_lists(&lists, Duration::ZERO).await;
+        let started = std::time::Instant::now();
+        let (code, v) = get_json(&format!("{base}/api/lists")).await;
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        assert_eq!(code, 200);
+        assert_eq!(v["lists"][0]["error"], "no answer within 300 ms");
+        assert_eq!(v["lists"][1]["rows"].as_array().map(Vec::len), Some(2));
     }
 }
