@@ -102,6 +102,11 @@ struct Args {
     /// before it is sent. Without one, nothing is submitted.
     #[arg(long, env = "JOBS_LEDGER")]
     ledger: Option<std::path::PathBuf>,
+
+    /// Jobs downloaded at once (decision 0024). Filing is left to the
+    /// store, which files one at a time.
+    #[arg(long, env = "JOBS_DOWNLOADS", default_value_t = 4)]
+    downloads: usize,
 }
 
 /// How long a price stays good for submitting: an hour when it costs
@@ -429,7 +434,9 @@ struct Jobs {
     /// Bytes to download (compressed, as delivered) of done jobs.
     delivered: Mutex<HashMap<String, u64>>,
     listed: Mutex<Value>,
-    one_at_a_time: tokio::sync::Semaphore,
+    /// Downloads running at once (`--downloads`), each until its files and
+    /// manifest are in the store's incoming folder, not while it files.
+    downloads: tokio::sync::Semaphore,
     /// While in the pause window, when it ends (ns since the epoch); else 0.
     /// Nonzero while yielding to live capture.
     paused_until: AtomicU64,
@@ -477,7 +484,7 @@ impl Jobs {
             details: Mutex::default(),
             delivered: Mutex::default(),
             listed: Mutex::new(json!({ "jobs": [], "updated_at": null })),
-            one_at_a_time: tokio::sync::Semaphore::new(1),
+            downloads: tokio::sync::Semaphore::new(4),
             events: Events::default(),
             next_quote: AtomicU64::new(1),
             boot: {
@@ -590,6 +597,7 @@ async fn main() {
         })
         .collect();
     jobs.capture_hours = args.capture_hours;
+    jobs.downloads = tokio::sync::Semaphore::new(args.downloads.max(1));
     jobs.approve_token = match tinytrader_observe::optional_secret("JOBS_APPROVE_TOKEN") {
         Ok(t) => t,
         Err(e) => {
@@ -2370,13 +2378,13 @@ fn start_download(jobs: &Shared, job: String) {
     });
     let jobs = jobs.clone();
     tokio::spawn(async move {
-        let _turn = jobs.one_at_a_time.acquire().await;
+        let turn = jobs.downloads.acquire().await.ok();
         // Downloads wait while capture is live.
         while jobs.paused_until.load(Ordering::Relaxed) != 0 {
             set(&jobs, &job, |t| t.state = "waiting: capture is live".into());
             tokio::time::sleep(Duration::from_secs(15)).await;
         }
-        let result = fetch_and_file(&jobs, &job).await;
+        let result = fetch_and_file(&jobs, &job, turn).await;
         match result {
             Ok(n) => {
                 lock(&jobs.tries).remove(&job);
@@ -2431,9 +2439,14 @@ async fn filed(jobs: &Jobs, job: &str) -> bool {
     }
 }
 
-/// Stream every file of a done job into the store, then have it filed
-/// (none, `Ok(0)`, when the store already has).
-async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
+/// Stream every file of a done job into the store, then, its download's
+/// `turn` given back, have it filed (none, `Ok(0)`, when the store already
+/// has).
+async fn fetch_and_file(
+    jobs: &Jobs,
+    job: &str,
+    turn: Option<tokio::sync::SemaphorePermit<'_>>,
+) -> Result<usize, String> {
     if filed(jobs, job).await {
         return Ok(0);
     }
@@ -2582,6 +2595,7 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
             ));
         }
     }
+    drop(turn);
     set(jobs, job, |t| {
         t.state = "filing".into();
         t.file.clear();

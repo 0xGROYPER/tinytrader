@@ -149,7 +149,13 @@ struct Store {
     batches_in: AtomicU64,
     /// One batch is filed at a time.
     filing: tokio::sync::Mutex<()>,
+    /// Partial-day filings waiting for `filing`, each with the folders it
+    /// writes and where its answer goes: the one that takes the lock files
+    /// them all, as a group.
+    queue: Mutex<Vec<(partial::Filing, Vec<PathBuf>, Answer)>>,
 }
+
+type Answer = tokio::sync::oneshot::Sender<Result<Value, String>>;
 
 type Shared = Arc<Store>;
 
@@ -683,6 +689,61 @@ impl Store {
         }
     }
 
+    /// Run a filing alone, under the filing lock, then read again the
+    /// folders it wrote (`targets`, and those its summary names).
+    async fn file_alone(
+        &self,
+        targets: Vec<PathBuf>,
+        f: impl FnOnce() -> Result<Value, String> + Send + 'static,
+    ) -> Result<Result<Value, String>, String> {
+        let _one_at_a_time = self.filing.lock().await;
+        let r = tokio::task::spawn_blocking(f)
+            .await
+            .map_err(|e| e.to_string());
+        let mut dirs = targets;
+        if let Ok(Ok(summary)) = &r {
+            dirs.extend(Self::filed_folders(summary));
+        }
+        tokio::task::block_in_place(|| self.refresh(&dirs));
+        r
+    }
+
+    /// File a partial-day filing together with any others waiting for the
+    /// filing lock (decision 0024, section 8b): the one that takes the lock
+    /// files them all as a group, so each day they touch is written once,
+    /// and reads again the folders they wrote. Each gets its own answer.
+    async fn file_partial(
+        &self,
+        f: partial::Filing,
+        targets: Vec<PathBuf>,
+    ) -> Result<Result<Value, String>, String> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        lock(&self.queue).push((f, targets, tx));
+        {
+            let _one_at_a_time = self.filing.lock().await;
+            let queued = std::mem::take(&mut *lock(&self.queue));
+            // Empty if a filing before it took it into its group.
+            if !queued.is_empty() {
+                let (group, rest): (Vec<_>, Vec<_>) =
+                    queued.into_iter().map(|(f, t, tx)| (f, (t, tx))).unzip();
+                let done = tokio::task::spawn_blocking(move || partial::import_group(&group));
+                let (mut done, mut dirs) = (done.await.unwrap_or_default().into_iter(), vec![]);
+                for (targets, tx) in rest {
+                    dirs.extend(targets);
+                    if let Some(r) = done.next() {
+                        if let Ok(summary) = &r {
+                            dirs.extend(Self::filed_folders(summary));
+                        }
+                        let _ = tx.send(r);
+                    }
+                }
+                tokio::task::block_in_place(|| self.refresh(&dirs));
+            }
+        }
+        rx.await
+            .map_err(|_| "the filing stopped unexpectedly".to_owned())
+    }
+
     /// The schema folders of the day files a filing's summary names.
     fn filed_folders(summary: &Value) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = ["files", "days"]
@@ -779,6 +840,7 @@ impl Store {
             bytes_in: AtomicU64::new(0),
             batches_in: AtomicU64::new(0),
             filing: tokio::sync::Mutex::new(()),
+            queue: Mutex::default(),
         })
     }
 
@@ -995,15 +1057,25 @@ async fn incorporate(
         .map(|v| v.path.join(pdir))
         .filter(|p| !parts.iter().any(|x| x.root == *p))
         .collect();
-    let _one_at_a_time = store.filing.lock().await;
     let targets = target_folders(&parts, &elsewhere, q.parent.as_deref());
     let today = today();
     let b = batch.clone();
-    let result = tokio::task::spawn_blocking(move || match q.parent {
-        Some(parent) => partial::import_batch(&parts, &elsewhere, &b, &parent, &today),
-        None => ingest::incorporate(&parts, &elsewhere, &b, &today),
-    })
-    .await;
+    let result = match q.parent {
+        Some(parent) => {
+            let f = partial::Filing {
+                parts,
+                elsewhere,
+                id: b,
+                today,
+                parent: Some(parent),
+            };
+            store.file_partial(f, targets).await
+        }
+        None => {
+            let f = move || ingest::incorporate(&parts, &elsewhere, &b, &today);
+            store.file_alone(targets, f).await
+        }
+    };
     match result {
         Ok(Ok(summary)) => {
             store.batches_in.fetch_add(1, Ordering::Relaxed);
@@ -1015,23 +1087,15 @@ async fn incorporate(
                 format!("incorporated {pdir}/{batch}: {n} files"),
                 summary.to_string(),
             );
-            let mut dirs = Store::filed_folders(&summary);
-            dirs.extend(targets);
-            tokio::task::block_in_place(|| store.refresh(&dirs));
             reply(StatusCode::OK, summary)
         }
         Ok(Err(e)) => {
-            // What it filed before it stopped, if anything.
-            tokio::task::block_in_place(|| store.refresh(&targets));
             store
                 .events
                 .push(format!("refused {pdir}/{batch}: {e}"), e.clone());
             refused(StatusCode::CONFLICT, e)
         }
-        Err(e) => {
-            tokio::task::block_in_place(|| store.refresh(&targets));
-            refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-        }
+        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -1060,35 +1124,30 @@ async fn import(
         .map(|v| v.path.join(pdir))
         .filter(|p| !parts.iter().any(|x| x.root == *p))
         .collect();
-    let _one_at_a_time = store.filing.lock().await;
     let targets = target_folders(&parts, &elsewhere, None);
-    let today = today();
-    let i = id.clone();
-    let result =
-        tokio::task::spawn_blocking(move || partial::import(&parts, &elsewhere, &i, &today)).await;
-    match result {
+    let f = partial::Filing {
+        parts,
+        elsewhere,
+        id: id.clone(),
+        today: today(),
+        parent: None,
+    };
+    match store.file_partial(f, targets).await {
         Ok(Ok(summary)) => {
             let n = summary["days"].as_array().map_or(0, Vec::len);
             store.events.push(
                 format!("imported {pdir}/{id}: {n} days"),
                 summary.to_string(),
             );
-            let mut dirs = Store::filed_folders(&summary);
-            dirs.extend(targets);
-            tokio::task::block_in_place(|| store.refresh(&dirs));
             reply(StatusCode::OK, summary)
         }
         Ok(Err(e)) => {
-            tokio::task::block_in_place(|| store.refresh(&targets));
             store
                 .events
                 .push(format!("refused import {pdir}/{id}: {e}"), e.clone());
             refused(StatusCode::CONFLICT, e)
         }
-        Err(e) => {
-            tokio::task::block_in_place(|| store.refresh(&targets));
-            refused(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-        }
+        Err(e) => refused(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
 
@@ -2509,7 +2568,8 @@ mod tests {
         std::fs::create_dir_all(&day).unwrap();
         std::fs::write(day.join("2026-10-01.dbn.zst"), b"x").unwrap();
         let mut s = store(&[("v", &vol)], &dir.join("state.json"));
-        Arc::get_mut(&mut s).unwrap().wait = Duration::from_millis(300);
+        // Long enough for a scan on a slow runner: the wait ends when it does.
+        Arc::get_mut(&mut s).unwrap().wait = Duration::from_secs(30);
         scanned(&s).await;
         // Served without a rescan loop: rescans happen only as below.
         let app = router(s.clone(), WriteToken::open());
@@ -2562,7 +2622,14 @@ mod tests {
                 ]
             )
         );
-        // Not forever: no rescan comes, so 503.
+        // Not forever: no rescan comes, so 503 (a store that waits less).
+        let mut s = store(&[("v", &vol)], &dir.join("state.json"));
+        Arc::get_mut(&mut s).unwrap().wait = Duration::from_millis(300);
+        scanned(&s).await;
+        let app = router(s.clone(), WriteToken::open());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         s.request_rescan();
         let (code, body) = get(&addr, COVERAGE).await;
         assert_eq!(code, 503, "{body}");

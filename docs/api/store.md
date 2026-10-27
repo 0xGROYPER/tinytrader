@@ -438,6 +438,24 @@ records `completed: { by, pieces, at }`.
 Each file's coverage is recorded in its import's ledger (`verified`), so what
 went into a merged day can be rebuilt.
 
+**Filings are grouped** (decision 0024). The store files one batch at a
+time. Imports and batches filed as partial days that wait for the filing
+in progress are then filed together, as one group, and each day the group
+touches is written once: the day held and every file for it, merged in
+timestamp order (ties: the day held, then the files in the order they were
+asked), read back and checked input by input as above, its records the
+day's recorded count plus every file's. Each filing still answers for
+itself, as if filed alone after the ones asked before it: its checks run
+against the days held and what those will file, and one refused (say, for
+contracts held over the same hours, or an instrument ID that is another
+contract in the day) is refused with the same reason, the others filed
+without it. Every filing's ledger records the merge (`merged`, its
+`inputs` the day held, its own file, then the group's others) and the
+swap. A group's merge is swapped in as one, so an interrupted one settles
+to the day before the group or after all of it, and filing again finishes
+each filing: one whose file is already in the day (its ledger says so) is
+dropped as a duplicate.
+
 ### `POST /coverage/rebuild`
 
 Once, for days merged before pieces, whose coverage claims every contract
