@@ -450,8 +450,10 @@ pub fn merge(inputs: &[(&Path, &Coverage)], out: &Path) -> Result<u64, String> {
         let (w, s) = (w.finish(), s.finish());
         if w != s {
             return Err(format!(
-                "the merged file holds {} records of input {i} that read back differently ({} written)",
-                s.0, w.0
+                "the merged file holds {} records of {} that read back differently ({} written)",
+                s.0,
+                inputs[i].0.display(),
+                w.0
             ));
         }
     }
@@ -573,15 +575,11 @@ struct Input {
 }
 
 /// Did an earlier run of import `id` file into the day at `path`? Its
-/// ledger moved a file there, swapped a merge in, or recorded a merge whose
-/// output is the file there now (a merge of a group, swapped in before the
-/// run stopped).
-///
-/// # Errors
-/// If the day's file can't be read.
-fn filed_by(roots: &[PathBuf], id: &str, path: &Path) -> Result<bool, String> {
+/// ledger moved a file there, or merged or swapped one in (a merge whose
+/// swap was undone leaves the day without the file's coverage, which the
+/// caller checks).
+fn filed_by(roots: &[PathBuf], id: &str, path: &Path) -> bool {
     let suffix = format!("-import-{id}.events.jsonl");
-    let sha = hash_file(path)?;
     for e in roots.iter().flat_map(|r| {
         fs::read_dir(r.join("migrations"))
             .into_iter()
@@ -597,18 +595,19 @@ fn filed_by(roots: &[PathBuf], id: &str, path: &Path) -> Result<bool, String> {
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         {
-            let to = |k: &Value| k.as_str().map(Path::new) == Some(path);
-            match ev["step"].as_str() {
-                Some("moved") if to(&ev["to"]) => return Ok(true),
-                Some("swapped") if to(&ev["path"]) => return Ok(true),
-                Some("merged") if to(&ev["inputs"][0]) && ev["sha256"] == sha.as_str() => {
-                    return Ok(true);
-                }
-                _ => {}
+            let to = |k: &str| ev[k].as_str().map(Path::new) == Some(path);
+            let at = match ev["step"].as_str() {
+                Some("moved") => to("to"),
+                Some("swapped") => to("path"),
+                Some("merged") => ev["inputs"][0].as_str().map(Path::new) == Some(path),
+                _ => false,
+            };
+            if at {
+                return true;
             }
         }
     }
-    Ok(false)
+    false
 }
 
 /// A filing of a group: an import waiting in `.incoming/<id>`, or with
@@ -761,14 +760,14 @@ fn prepare(f: &Filing, of: usize, days: &mut BTreeMap<PathBuf, Day>) -> Result<M
                 break;
             }
         }
-        let ours = |p: &Path| -> Result<bool, String> {
-            Ok(held_source == format!("import/{id}").as_str() || filed_by(&everywhere, id, p)?)
+        let ours = |p: &Path| {
+            held_source == format!("import/{id}").as_str() || filed_by(&everywhere, id, p)
         };
         let Ok(meta) = fs::metadata(&path) else {
             // Filed, or merged, by an earlier run of this import that stopped
             // after its incoming copy was gone?
             if let Some((p, _)) = &held
-                && (ours(p)? || hash_file(p)? == want)
+                && (ours(p) || hash_file(p)? == want)
             {
                 return Ok(());
             }
@@ -810,9 +809,11 @@ fn prepare(f: &Filing, of: usize, days: &mut BTreeMap<PathBuf, Day>) -> Result<M
             // Merged by an earlier run of this import that stopped before
             // removing its incoming copy.
             Some((existing, Some(e)))
-                if Coverage::from_json(&e["coverage"])
-                    .is_some_and(|h| cov.symbols().is_subset(&h.symbols()))
-                    && ours(&existing)? =>
+                if Coverage::from_json(&e["coverage"]).is_some_and(|h| {
+                    cov.pieces
+                        .iter()
+                        .all(|p| p.symbols.iter().all(|s| h.covers(s, p.start, p.end)))
+                }) && ours(&existing) =>
             {
                 duplicates.push((day, path, existing));
                 return Ok(());
@@ -932,13 +933,24 @@ fn file_day(
         let work = vol_root.join(INCOMING).join(&group[lead.of].id);
         fs::create_dir_all(&work).map_err(|e| e.to_string())?;
         let out = work.join(format!("merged-{}.dbn.zst", d.day));
-        let _ = fs::remove_file(&out);
+        // Left by an earlier run, whichever filing led it.
+        for i in &rest {
+            let id = &group[i.of].id;
+            let _ = fs::remove_file(
+                vol_root
+                    .join(INCOMING)
+                    .join(id)
+                    .join(out.file_name().unwrap_or_default()),
+            );
+        }
         // Partial days written before sidecars move to theirs, so the
         // swap below touches only this day's.
         crate::manifest::write_days(&dir, &[])?;
         let mut all = vec![(d.at.as_path(), &held)];
         all.extend(rest.iter().map(|i| (i.from.as_path(), &i.cov)));
-        let records = merge(&all, &out)?;
+        let records = merge(&all, &out).inspect_err(|_| {
+            let _ = fs::remove_file(&out);
+        })?;
         crash("written")?;
         // Every record of each, and nothing else.
         let sum: u64 = rest.iter().map(|i| i.records).sum();
@@ -1530,7 +1542,7 @@ pub(crate) mod tests {
     pub(crate) const DAY: &str = "2026-10-02";
     pub(crate) const C1: &str = "SPY   261002C00728000";
     pub(crate) const C2: &str = "SPY   261002P00728000";
-    const C3: &str = "SPY   261002C00729000";
+    pub(crate) const C3: &str = "SPY   261002C00729000";
 
     thread_local! {
         /// Where a filing on this thread stops, as a crash would there.
@@ -3361,7 +3373,7 @@ pub(crate) mod tests {
         eprintln!("{n} files inspected");
     }
 
-    const C4: &str = "SPY   261002P00729000";
+    pub(crate) const C4: &str = "SPY   261002P00729000";
 
     /// A group of imports staged in `root`, each of one day file.
     fn group(root: &Path, files: &[(&str, &[u8])]) -> Vec<Filing> {
@@ -3509,6 +3521,24 @@ pub(crate) mod tests {
                 "{at}: nothing left in incoming"
             );
         }
+    }
+
+    #[test]
+    fn a_retry_after_a_later_merge_into_its_day_is_a_duplicate() {
+        let root = scratch("retry-later").join("Databento");
+        let (held, [b, c, d]) = held_and_three(&root);
+        let g = group(&root, &[("B", &b), ("C", &c), ("D", &d)]);
+        CRASH.with(|x| x.set(Some("swapped")));
+        let _ = import_group(&g);
+        CRASH.with(|x| x.set(None));
+        // Another filing merges into the day before they are tried again.
+        let e = day_bytes(&[("SPY   261002C00730000", 15)], &[(15, 4)]);
+        file_one(&root, "E", e.clone()).unwrap();
+        for r in import_group(&g) {
+            assert_eq!(r.unwrap()["days"][0]["filed"], "already present");
+        }
+        holds_each(&root, &[&held, &b, &c, &d, &e]);
+        assert!(!root.join(INCOMING).exists());
     }
 
     #[test]

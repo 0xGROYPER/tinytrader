@@ -2352,3 +2352,27 @@ async fn the_capture_live_pause_holds_every_download() {
         (4, 1)
     );
 }
+
+#[tokio::test]
+async fn downloads_in_flight_hold_their_room() {
+    let r = rig("room-in-flight").await;
+    let seen = slow_jobs(&r, &FIVE[..2], 500).await;
+    // Room for one 9-byte job, not two.
+    lock(&r.store).catalog.1["roots"][0]["volume"]["available_bytes"] = json!(1e11 + 15.0);
+    for id in &FIVE[..2] {
+        start_download(&r.jobs, (*id).to_owned());
+    }
+    let mut waited = false;
+    for _ in 0..500 {
+        waited |= lock(&r.jobs.transfers)
+            .values()
+            .any(|t| t.state.contains("downloads in flight hold the room"));
+        if lock(&r.jobs.in_flight).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(waited);
+    assert_eq!((lock(&seen).1, lock(&r.store).incorporated.len()), (1, 2));
+    assert!(lock(&r.jobs.reserved).is_empty(), "released once filed");
+}

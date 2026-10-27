@@ -148,7 +148,7 @@ struct Store {
     bytes_in: AtomicU64,
     batches_in: AtomicU64,
     /// One batch is filed at a time.
-    filing: tokio::sync::Mutex<()>,
+    filing: Arc<tokio::sync::Mutex<()>>,
     /// Partial-day filings waiting for `filing`, each with the folders it
     /// writes and where its answer goes: the one that takes the lock files
     /// them all, as a group.
@@ -156,6 +156,9 @@ struct Store {
 }
 
 type Answer = tokio::sync::oneshot::Sender<Result<Value, String>>;
+
+/// The most filings filed as one group; the rest wait for the next turn.
+const GROUP: usize = 16;
 
 type Shared = Arc<Store>;
 
@@ -689,57 +692,72 @@ impl Store {
         }
     }
 
+    /// Run `work` under the filing lock, in a task of its own, so a request
+    /// whose client goes away can't release the lock while it writes.
+    fn under_lock(self: &Arc<Self>, work: impl FnOnce(&Self) + Send + 'static) {
+        let (s, filing) = (self.clone(), self.filing.clone());
+        tokio::spawn(async move {
+            let _one_at_a_time = filing.lock_owned().await;
+            let _ = tokio::task::spawn_blocking(move || work(&s)).await;
+        });
+    }
+
     /// Run a filing alone, under the filing lock, then read again the
     /// folders it wrote (`targets`, and those its summary names).
     async fn file_alone(
-        &self,
+        self: &Arc<Self>,
         targets: Vec<PathBuf>,
         f: impl FnOnce() -> Result<Value, String> + Send + 'static,
     ) -> Result<Result<Value, String>, String> {
-        let _one_at_a_time = self.filing.lock().await;
-        let r = tokio::task::spawn_blocking(f)
-            .await
-            .map_err(|e| e.to_string());
-        let mut dirs = targets;
-        if let Ok(Ok(summary)) = &r {
-            dirs.extend(Self::filed_folders(summary));
-        }
-        tokio::task::block_in_place(|| self.refresh(&dirs));
-        r
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.under_lock(move |s| {
+            let r = f();
+            let mut dirs = targets;
+            dirs.extend(r.as_ref().map(Self::filed_folders).unwrap_or_default());
+            s.refresh(&dirs);
+            let _ = tx.send(r);
+        });
+        rx.await
+            .map_err(|_| "the filing stopped unexpectedly".to_owned())
     }
 
-    /// File a partial-day filing together with any others waiting for the
-    /// filing lock (decision 0024, section 8b): the one that takes the lock
-    /// files them all as a group, so each day they touch is written once,
-    /// and reads again the folders they wrote. Each gets its own answer.
+    /// File a partial-day filing together with others waiting for the
+    /// filing lock (decision 0024, section 8b), up to `GROUP` in the order
+    /// asked: they are filed as a group, so each day they touch is written
+    /// once, and the folders they wrote are read again. Each gets its own
+    /// answer.
     async fn file_partial(
-        &self,
+        self: &Arc<Self>,
         f: partial::Filing,
         targets: Vec<PathBuf>,
     ) -> Result<Result<Value, String>, String> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         lock(&self.queue).push((f, targets, tx));
-        {
-            let _one_at_a_time = self.filing.lock().await;
-            let queued = std::mem::take(&mut *lock(&self.queue));
-            // Empty if a filing before it took it into its group.
-            if !queued.is_empty() {
-                let (group, rest): (Vec<_>, Vec<_>) =
-                    queued.into_iter().map(|(f, t, tx)| (f, (t, tx))).unzip();
-                let done = tokio::task::spawn_blocking(move || partial::import_group(&group));
-                let (mut done, mut dirs) = (done.await.unwrap_or_default().into_iter(), vec![]);
-                for (targets, tx) in rest {
-                    dirs.extend(targets);
-                    if let Some(r) = done.next() {
-                        if let Ok(summary) = &r {
-                            dirs.extend(Self::filed_folders(summary));
-                        }
-                        let _ = tx.send(r);
-                    }
-                }
-                tokio::task::block_in_place(|| self.refresh(&dirs));
+        self.under_lock(|s| {
+            let queued: Vec<_> = {
+                let mut q = lock(&s.queue);
+                let n = q.len().min(GROUP);
+                q.drain(..n).collect()
+            };
+            // Empty if filings before it took this one into their group.
+            if queued.is_empty() {
+                return;
             }
-        }
+            let (group, rest): (Vec<_>, Vec<_>) =
+                queued.into_iter().map(|(f, t, tx)| (f, (t, tx))).unzip();
+            let done = partial::import_group(&group);
+            let mut answers = Vec::new();
+            let mut dirs = Vec::new();
+            for ((targets, tx), r) in rest.into_iter().zip(done) {
+                dirs.extend(targets);
+                dirs.extend(r.as_ref().map(Self::filed_folders).unwrap_or_default());
+                answers.push((tx, r));
+            }
+            s.refresh(&dirs);
+            for (tx, r) in answers {
+                let _ = tx.send(r);
+            }
+        });
         rx.await
             .map_err(|_| "the filing stopped unexpectedly".to_owned())
     }
@@ -839,7 +857,7 @@ impl Store {
             rescan: tokio::sync::Notify::new(),
             bytes_in: AtomicU64::new(0),
             batches_in: AtomicU64::new(0),
-            filing: tokio::sync::Mutex::new(()),
+            filing: Arc::default(),
             queue: Mutex::default(),
         })
     }
@@ -2829,6 +2847,59 @@ mod tests {
         std::fs::rename(folder.join("manifest.json"), dir.join("away.json")).unwrap();
         let (code, again) = get(&addr, COVERAGE).await;
         assert_eq!((code, &again["days"]), (200, &cov["days"]), "{again}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "the catalog held here stops the group at its last step"
+    )]
+    async fn a_group_finishes_when_a_request_is_dropped() {
+        use crate::partial::tests::{C1, C2, C3, C4, day_bytes, name, stage};
+        let dir = scratch("dropped");
+        let vol = dir.join("v");
+        let root = vol.join("Databento");
+        std::fs::create_dir_all(&vol).unwrap();
+        let s = store(&[("v", &vol)], &dir.join("state.json"));
+        scanned(&s).await;
+        let addr = serve_plain(&s).await;
+        for (id, c, n) in [
+            ("G1", C1, 11),
+            ("G2", C2, 12),
+            ("G3", C3, 13),
+            ("G4", C4, 14),
+        ] {
+            stage(&root, id, &[(&name(), day_bytes(&[(c, n)], &[(n, 0)]))]);
+        }
+        let post = |id: &str| {
+            let (a, p) = (addr.clone(), format!("/import/databento/{id}"));
+            tokio::spawn(async move { call(&a, "POST", &p, None, "").await })
+        };
+        // Three asked while a filing runs: one group.
+        let running = s.filing.clone().lock_owned().await;
+        let (lead, two, three) = (post("G1"), post("G2"), post("G3"));
+        while lock(&s.queue).len() < 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Held at its last step, reading its folders into the catalog.
+        let catalog = lock(&s.catalog);
+        drop(running);
+        while !lock(&s.queue).is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The lead's client goes away mid-group: the lock stays held.
+        lead.abort();
+        let four = post("G4");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(s.filing.try_lock().is_err() && !four.is_finished());
+        drop(catalog);
+        for r in [two, three, four] {
+            let (code, body) = r.await.unwrap();
+            assert_eq!(code, 200, "{body}");
+        }
+        let day = root.join("OPRA.PILLAR/SPY.OPT/cbbo-1m").join(name());
+        assert_eq!(partial::inspect(&day).unwrap().1, 4, "G1 filed too");
         let _ = std::fs::remove_dir_all(dir);
     }
 
