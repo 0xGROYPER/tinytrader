@@ -42,7 +42,9 @@ function optionGroups(account, pos) {
     if (!m || !qty || !isFinite(cost)) continue;
     const [, root, yy, mm, dd, cp, k] = m, expiry = `20${yy}-${mm}-${dd}`, key = `${account}|${root}|${expiry}`;
     if (!groups.has(key)) groups.set(key, { key, sym: root, expiry, account, legs: [] });
-    groups.get(key).legs.push({ type: cp === 'C' ? 'call' : 'put', strike: +k / 1000, side: qty > 0 ? 1 : -1, qty: Math.abs(qty), cost });
+    // The broker's mark (current price), for a leg with no quote to price it now.
+    const mark = p.current_price == null || p.current_price === '' ? NaN : +p.current_price;
+    groups.get(key).legs.push({ type: cp === 'C' ? 'call' : 'put', strike: +k / 1000, side: qty > 0 ? 1 : -1, qty: Math.abs(qty), cost, ...(isFinite(mark) ? { mark } : {}) });
   }
   for (const g of groups.values()) heldGroups.set(g.key, g);
   return [...groups.values()];
