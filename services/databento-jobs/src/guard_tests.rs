@@ -2242,6 +2242,18 @@ type Source = Arc<Mutex<(usize, usize, Vec<String>)>>;
 
 /// Contract jobs whose files a source serves, each taking `ms` to answer.
 async fn slow_jobs(r: &Rig, ids: &[&str], ms: u64) -> Source {
+    let (addr, seen) = source(ms).await;
+    for id in ids {
+        contract_job(r, id);
+        for f in lock(&r.fake.s).files.get_mut(*id).unwrap() {
+            f.urls = [("https".to_owned(), format!("{addr}/dl/{id}"))].into();
+        }
+    }
+    seen
+}
+
+/// A source of downloads, each taking `ms` to answer: its address.
+async fn source(ms: u64) -> (String, Source) {
     let seen = Source::default();
     let app = Router::new()
         .route(
@@ -2264,13 +2276,7 @@ async fn slow_jobs(r: &Rig, ids: &[&str], ms: u64) -> Source {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, app).await });
-    for id in ids {
-        contract_job(r, id);
-        for f in lock(&r.fake.s).files.get_mut(*id).unwrap() {
-            f.urls = [("https".to_owned(), format!("http://{addr}/dl/{id}"))].into();
-        }
-    }
-    seen
+    (format!("http://{addr}"), seen)
 }
 
 const FIVE: [&str; 5] = ["OPRA-D1", "OPRA-D2", "OPRA-D3", "OPRA-D4", "OPRA-D5"];
@@ -2375,4 +2381,59 @@ async fn downloads_in_flight_hold_their_room() {
     assert!(waited);
     assert_eq!((lock(&seen).1, lock(&r.store).incorporated.len()), (1, 2));
     assert!(lock(&r.jobs.reserved).is_empty(), "released once filed");
+}
+
+#[tokio::test]
+async fn bytes_landed_count_once() {
+    let r = rig("room-landed").await;
+    let ((fast, seen), (slow, _)) = (source(10).await, source(3_000).await);
+    // A: two 9-byte files, the second slow. B fits beside what A has left
+    // to land; C, 12 bytes, doesn't.
+    let file = |name: &str, size: u64, url: &str, id: &str| BatchFileDesc {
+        filename: format!("opra-pillar-{name}.cmbp-1.dbn.zst"),
+        size,
+        hash: "sha256:00".into(),
+        urls: [("https".to_owned(), format!("{url}/dl/{id}"))].into(),
+    };
+    for (id, files) in [
+        (
+            "OPRA-A",
+            vec![
+                file("20261002", 9, &fast, "A"),
+                file("20261005", 9, &slow, "A"),
+            ],
+        ),
+        ("OPRA-B", vec![file("20261002", 9, &fast, "B")]),
+        ("OPRA-C", vec![file("20261002", 12, &fast, "C")]),
+    ] {
+        contract_job(&r, id);
+        lock(&r.fake.s).files.insert(id.into(), files);
+    }
+    // 20 bytes free, A's first file in it already.
+    lock(&r.store).catalog.1["roots"][0]["volume"]["available_bytes"] = json!(1e11 + 20.0);
+    start_download(&r.jobs, "OPRA-A".into());
+    // Its first file landed: only the second is held.
+    for _ in 0..300 {
+        if lock(&r.jobs.reserved)
+            .get("OPRA-A")
+            .is_some_and(|a| a.0 == 9)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(lock(&r.jobs.reserved)["OPRA-A"].0, 9);
+    start_download(&r.jobs, "OPRA-B".into());
+    start_download(&r.jobs, "OPRA-C".into());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(lock(&seen).2.contains(&"B".to_owned()), "B went ahead");
+    assert!(!lock(&seen).2.contains(&"C".to_owned()));
+    let t = lock(&r.jobs.transfers);
+    assert!(
+        t["OPRA-C"]
+            .state
+            .contains("downloads in flight hold the room"),
+        "{}",
+        t["OPRA-C"].state
+    );
 }

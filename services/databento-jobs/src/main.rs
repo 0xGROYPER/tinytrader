@@ -438,7 +438,8 @@ struct Jobs {
     /// manifest are in the store's incoming folder, not while it files.
     downloads: tokio::sync::Semaphore,
     /// The room each job in flight holds until it files or fails: its
-    /// download's bytes, and its merges' by volume.
+    /// download's bytes not yet in the store (those that are count in its
+    /// free room), and its merges' by volume.
     reserved: Mutex<HashMap<String, (u64, ByVolume)>>,
     room_check: tokio::sync::Mutex<()>,
     /// While in the pause window, when it ends (ns since the epoch); else 0.
@@ -2586,7 +2587,12 @@ async fn fetch_and_file(
             loop {
                 attempt += 1;
                 match copy(jobs, job, &f.filename, url, f.size, &f.hash, done).await {
-                    Ok(()) => break,
+                    Ok(()) => {
+                        if let Some(r) = lock(&jobs.reserved).get_mut(job) {
+                            r.0 = r.0.saturating_sub(f.size);
+                        }
+                        break;
+                    }
                     Err(e) if attempt < 3 => {
                         eprintln!("databento-jobs: {job}/{}: {e}; retrying", f.filename);
                         tokio::time::sleep(Duration::from_secs(5 * attempt)).await;
