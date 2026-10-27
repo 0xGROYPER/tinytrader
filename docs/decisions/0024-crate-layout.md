@@ -34,7 +34,14 @@ than by concern. The numbers:
 - **Service lifecycle.** The same bind-and-serve block in 11 services; 24
   HTTP client set-ups; secret-or-exit handling repeated; three copies of
   "idle while capture is live" and two of the calendar fetch; 37 spawned
-  tasks, none supervised; only 2 of 12 services drain on SIGTERM.
+  tasks, none supervised. Of the 12 services none drains on SIGTERM: the
+  console drains its HTTP on ctrl-c only (`console/src/main.rs:393`); the
+  relay and `ticker` stop on SIGTERM without draining
+  (`relay/src/main.rs:459`, `ticker/src/main.rs:394`); `order-gateway`
+  stops its session cleanly on SIGTERM (`order-gateway/src/main.rs:340`);
+  the other eight handle no signal. The image runs each service as PID 1
+  (`Dockerfile`'s `ENTRYPOINT ["/app"]`), where an unhandled SIGTERM is
+  ignored, so `docker stop` waits its 10 s and kills.
 - **The relay** mixes fan-out with bars, quotes, tape and reference state
   in one 1,195-line `hub.rs`, and each source owns its reconnect loop.
   Hyphae's relay is better organised (one file per concern, byte-bounded
@@ -53,11 +60,13 @@ than by concern. The numbers:
 
 **Two bugs found:**
 
-1. `alpaca-data` turns an upstream `429` into a `502` (`main.rs:259`), so
+Both are fixed by R0 (#63); the lines are at 3f39ba0.
+
+1. `alpaca-data` turns an upstream `429` into a `502` (`main.rs:264`), so
    its own 429 handling never sees Alpaca's; a real rate limit ends the
    loop and the symbol is marked scanned.
 2. The relay's Alpaca `minute_bars` and `pages` loops have no bound and no
-   repeated-token check (`relay/src/alpaca.rs:521, 571`).
+   repeated-token check (`relay/src/alpaca.rs:383, 561`).
 
 ## Decision
 
@@ -67,15 +76,17 @@ than by concern. The numbers:
 
 | Tier | Crates | Depends on | Holds |
 |---|---|---|---|
-| Foundation | `dbn` (records, extensions, header reading, the merge), `schedule` (clock, calendar, civil dates: public), `instruments` (OCC contracts both forms, option parents, a symbol's dataset), `options` (pricing, greeks, payoffs, implied moves), `observe` | upstream and std | pure functions and types; no I/O |
+| Foundation | `dbn` (records, extensions, header reading, the merge), `schedule` (clock, calendar, civil dates: public), `instruments` (OCC contracts both forms, option parents, a symbol's dataset), `options` (pricing, greeks, payoffs, implied moves) | upstream and std | pure functions and types; no I/O |
 | Plumbing | `net` (retry, backoff, reconnect, the transport seam, a fake provider), `fanout` (byte-bounded fan-out, taps, the recorder hook), `relay-proto` (the join, markers, versioned) | foundation | mechanisms, no provider knowledge |
 | Venues | `venues/alpaca`, `venues/databento`, later `coinbase`, `kraken` | foundation, plumbing | each provider's wire format, auth, pagination, rate rules, streams and DBN mapping: the only place it is known |
 | Clients | `store-client`, generated clients (0021 section 5), `fleet` (and its typed views) | the above | how to talk to tinytrader's own services |
-| Runtime | `service` (the service skeleton) | the above | process lifecycle, for services only |
+| Runtime | `service` (the service skeleton), `observe` (the health, metrics and describe routes, the write guards; its secret and listen-address helpers move to `service`) | the above | process lifecycle and the HTTP surface every service shares, for services only |
 | Services and apps | every service, `tt`, the TUI, the console | any | configuration, wiring, an HTTP or TCP surface |
 
 `libs/README.md` says libraries hold "no process lifecycle"; that stays
-true for every tier but runtime, which exists to hold it, once.
+true for every tier but runtime, which exists to hold it, once. `observe`
+is runtime, not foundation: it serves axum routes and reads the
+environment.
 
 ### 2. Services become thin
 
@@ -91,7 +102,16 @@ in their own modules, tests beside them. `libs/service` gives every one:
   "idle while capture is live" with the calendar fetch.
 
 Secrets resolve one way everywhere: `NAME_FILE`, then `NAME`
-(`order-gateway` reads them the other way round today, and moves).
+(`order-gateway` reads them the other way round today, and moves in R12).
+
+`order-gateway` is not moved by R3 or R6: it is synchronous (threads and
+`signal-hook`, no tokio), already stops cleanly on SIGTERM, and is under
+the trading hold. It moves onto `libs/service` and `venues/alpaca` in R12.
+
+Until R3 lands, `init: true` on each service in the Compose files is the
+stopgap: an init process is PID 1 and forwards SIGTERM, so a service that
+handles no signal exits at once instead of after `docker stop`'s 10 s.
+That is a prompt exit, not a drain.
 
 ### 3. Each venue once
 
@@ -104,7 +124,7 @@ Secrets resolve one way everywhere: `NAME_FILE`, then `NAME`
   repeated tokens, rows out of order or out of day), `rate` (one status
   classifier, one rate-limit header parser, one pace), `stream` (both
   handshakes as a pure state machine, the frame decoder), `trading`
-  (moved from `order-gateway`).
+  (moved from `order-gateway` in R12, not R6).
 - Taken from Hyphae as is: its page-token validation and tests, the status
   classifier, the paced and budgeted transport shapes, the fake-clock and
   canned-transport tests. Not taken: its adaptive worker scaling, page
@@ -192,7 +212,83 @@ machine, Nomad for a network, Nix as the advanced path). The leak check
 (`generic`) becomes a plain script CI runs. A deployment's own repository is
 the site.
 
-### 8. Not taken
+### 8. Filing throughput
+
+Filing 680 small `cbbo-1m` jobs (about 5 MB each) ran at about one a
+minute (2026-10-26). Two things make it slow:
+
+- `databento-jobs` holds one semaphore, `one_at_a_time`
+  (`databento-jobs/src/main.rs:426`, taken at 2364), across both the
+  download and the filing, so no job downloads while another files.
+- The store rewrites a whole day file for each job that merges into it
+  (0018's merge). A job with nothing to merge files in about 6 s; one that
+  merges into a day the store partly holds takes 45 to 100 s.
+
+The store already has one global `filing` mutex
+(`store/src/main.rs:149`), taken by every write that files, imports,
+adopts or applies conditions; it is the one-writer rule, and a second one
+in `databento-jobs` adds nothing to it.
+
+- **(a) Downloads in parallel.** `databento-jobs` downloads up to N jobs at
+  once (`--downloads`, default 4) and no longer serializes filing itself:
+  each job files when its download is done, and the store's lock is the
+  only single-writer rule. The capture-live pause, the in-flight set (one
+  run per job), the retry schedule and the purchase guards (0019) are
+  unchanged.
+- **(b) One rewrite per day.** When several staged jobs touch the same
+  (dataset, symbol, schema, day), the store merges them into that day file
+  once: the held day and every incoming file, in timestamp order, in one
+  write. Each job's filing still answers for itself. What 0018's merge
+  guarantees still holds, input by input: every input's records are in the
+  merged file, all of them, in order (counts and running SHA-256 per
+  input, and the total is the sum); the ledger records each input's size,
+  SHA-256 and record count, and the merge step names every input; the
+  merged file is written beside the day, read back, recorded as pending
+  and swapped in by rename, so an interrupted merge settles from the hash
+  to before or after, never between. A job refused by the checks (headers
+  that can't merge, contracts already held for those hours) is refused
+  alone; the others in the group merge without it.
+- **(c) A lock per day.** The global `filing` mutex becomes a lock per
+  (dataset, symbol, schema, day) under a store-wide read-write lock, which
+  the whole-store writes (adopting, coverage rebuild, conditions, the
+  scan's settling) take exclusively. Deferred until the store runs on a
+  machine with more memory and I/O than the 8 GB M2 with USB disks: there,
+  parallel rewrites contend for the same disks and memory, and (a) and (b)
+  remove most of the wait.
+
+(a) and (b) are one PR (R4a); (c) is a later step (R4b).
+
+**R4a acceptance:**
+
+- With a fake provider, four downloads run at once and a fifth waits;
+  with `--downloads 1` the old order is kept. A filing in progress doesn't
+  hold a download back.
+- The capture-live pause holds every download; one job is never run twice
+  at once; a failed filing is retried on the same schedule as today.
+- `databento-jobs`' purchase-guard tests pass unchanged.
+- Three staged jobs into one partly held day: the day file is written
+  once (one rename), its record count is the held count plus the three
+  inputs', each input's records are found in order by its running hash,
+  and the ledger has each input's SHA-256 and count.
+- A crash injected after the write, after the pending record and after
+  the swap: the next scan settles each to the day before or after the
+  whole group, and filing again completes it.
+- One refused job in a group of three: it is refused with the same reason
+  as alone, and the other two are filed.
+- The PR reports the filing rate on a disposable store of 50 jobs of about
+  5 MB into partly held days, against the one a minute seen on 2026-10-26. Nothing runs
+  against the real volumes.
+
+**R4b acceptance:**
+
+- Two filings into different days run at once; two into the same day run
+  one after the other; adopting, a coverage rebuild, applying conditions
+  and the scan's settling wait for every filing and hold all of them off.
+- R4a's merge, crash and refusal tests pass unchanged.
+- It is measured on the machine it was deferred for before it is turned
+  on: the rate with one lock and with per-day locks, same backlog.
+
+### 9. Not taken
 
 Hyphae's slot transactions, page evidence and framed transport; Reactor's
 envelope and topic machinery and its DBN crate; the store as a library
@@ -201,31 +297,35 @@ envelope and topic machinery and its DBN crate; the store as a library
 ## Steps and budgets
 
 Each step is its own PR, built after hours, accepted on its own. Lines
-are production / tests added, then removed; a move counts once. Stop and
-report before going 30% over.
+are production / tests added, then removed; a move counts once. Fixtures
+and docs are counted where a step has them (R4a and R4b give all four).
+Stop and report before going 30% over.
 
 | Step | Adds | Removes | Notes |
 |---|---|---|---|
 | **R0.** The two bugs: `alpaca-data`'s 429, the relay's unbounded pages | 40 / 60 | – | first, small |
 | **R1.** `libs/schedule`'s civil dates public; the copies deleted (not `order-gateway`'s yet) | 20 / 30 | ~250 | pure |
 | **R2.** `libs/instruments`: both OCC forms, option parents; tests over today's behaviour first | 250 / 250 | ~300 | |
-| **R3.** `libs/service`: serve and drain, clients, secrets, `supervise`, `CaptureGate`; services moved onto it | 300 / 200 | ~500 | every service drains on SIGTERM |
+| **R3.** `libs/service`: serve and drain, clients, secrets, `supervise`, `CaptureGate`; the services but `order-gateway` moved onto it | 300 / 200 | ~500 | every service but `order-gateway` (R12) drains on SIGTERM; `init: true` in Compose until then |
 | **R4.** The store's `main.rs` split into modules (a pure move) | moves ~1,700 | – | no logic change |
+| **R4a.** Filing throughput (section 8, a and b): `databento-jobs` downloads N at once and leaves filing to the store's lock; the store merges each day once per group of jobs | 200 / 350; fixtures 0 bytes (generated in temporary roots); docs 40 | ~30 | one PR; after R4; the purchase guard tests pass unchanged |
+| **R4b.** The store's per-day filing locks (section 8, c) | 120 / 200; fixtures 0 bytes; docs 15 | ~20 | deferred until the store runs on a bigger machine than the 8 GB M2 with USB disks |
 | **R5.** `venues/databento` (0021 step 9c); `databento-jobs` split | moves ~1,400 | ~150 | the purchase path: its guard tests must pass unchanged |
-| **R6.** `venues/alpaca` (0021 step 9b); the six services onto it | moves ~2,700 | ~620 | |
+| **R6.** `venues/alpaca` (0021 step 9b); the five data services onto it (`alpaca-account`, `alpaca-data`, `alpaca-history`, `alpaca-news`, the relay) | moves ~1,700 | ~450 | not `order-gateway` (R12) |
 | **R7.** `libs/fanout`, `relay-proto`; the relay as sources and taps | 700 / 500 | ~600 | |
 | **R8.** The recorder and catch-up, ported from Hyphae | ~1,000 / ~800 | – | with 0013's capture sizing |
 | **R9.** `libs/options` and the console's analytics moved into the services | ~900 / ~600 | ~1,200 JS | |
 | **R10.** `libs/fleet` typed views for both front ends | 250 / 150 | ~150 JS, ~200 Rust | |
 | **R11.** DBN header reading and the merge into `libs/dbn` | moves ~500 | ~250 | the store producer (0021 step 5) needs the merge |
-| **R12.** `order-gateway` onto the shared crates; `session.rs` split by phase | moves ~2,000 | ~400 | under the trading hold, after a close |
+| **R12.** `order-gateway` onto the shared crates (`libs/service`, and `venues/alpaca` with its `trading` client moved in); `session.rs` split by phase | moves ~3,000 | ~570 | under the trading hold, after a close |
 | **R13.** `venues/coinbase` and a Coinbase relay source, ported from Hyphae's venue and live driver (public feed, no account); `ticker` retired | ~1,800 / ~900 | ~430 (`ticker`) | the README's first live example; needs Hyphae's crypto DBN records (`TradeWide`, `MboWide`, `Mbp10Wide`) in `libs/dbn` first, which is 0021's step 9a |
 | **R14.** `tt sync` (section 6); the evening top-off as a batch job | 250 / 200 | ~60 | after 0021 step 3 and R6 |
 | **R15.** Nix out of tinytrader (section 7): modules, packages and image building to tinytrader-deploy; `generic` as a script; CI without Nix | moves ~1,500 | – | with a tinytrader-deploy PR, same day |
+| **Total** | ~5,830 / ~4,240 added; moves ~9,800; docs ~55 (R4a, R4b); fixtures 0 bytes | ~3,810 Rust, ~1,350 JS | R4a and R4b are ~320 / ~550 of the added lines, ~55 of docs and ~50 removed |
 
 0021's steps 1 (`libs/net`) and 2 (`libs/store-client`) come before R3, R5
 and R6; R5 and R6 are 0021's 9c and 9b. Order: R0, R1, R2 any time; then
-R3; R4 and R5 any order; R6 after R3; R7 after R3; R8 after R7; R9 and R10
+R3; R4 and R5 any order; R4a after R4; R4b after R4a, deferred as above; R6 after R3; R7 after R3; R8 after R7; R9 and R10
 any time; R11 before 0021's store producer; R12 last; R13 after 0021's 9a (the crypto records), R3 and R7 (it uses `libs/service`'s supervised loop and the fan-out), and early among them; R14 after R6; R15 any time, with its deploy-repo PR.
 
 ## Consequences
