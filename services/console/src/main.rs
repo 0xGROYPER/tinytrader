@@ -102,8 +102,8 @@
 //!   account is paper only when both the accounts service's `environment` for
 //!   it (`alpaca-account`) and its gateway's welcome say `paper`.
 //!   `GET /api/write-gate` says whether writes are on for the viewer.
-//!   The write routes are the order routes (those, and an account's flatten
-//!   and resume), the jobs service's and the queue's POST (and the queue's
+//!   The write routes are the order routes (those, and an account's flatten,
+//!   resume and read), the jobs service's and the queue's POST (and the queue's
 //!   PATCH) routes, a quote's approve and decline, drive approval, POST `/api/reminders` and `/api/profiles`,
 //!   PUT `/api/prefs/{key}`, and the journal's POST, PUT and DELETE. Their GET
 //!   routes stay open.
@@ -566,15 +566,72 @@ fn add_account_ages(state: &mut serde_json::Value, now: f64) {
             continue;
         };
         for account in accounts {
-            let age = account
-                .get("updated_at")
-                .and_then(|t| t.as_f64())
-                .map(|at| ((now - at) * 1000.0).max(0.0).round() as i64);
-            if let Some(obj) = account.as_object_mut() {
-                obj.insert("age_ms".into(), json!(age));
-            }
+            add_age(account, now);
         }
     }
+}
+
+/// Adds `age_ms` to one account document (see [`add_account_ages`]).
+fn add_age(account: &mut serde_json::Value, now: f64) {
+    let age = account
+        .get("updated_at")
+        .and_then(|t| t.as_f64())
+        .map(|at| ((now - at) * 1000.0).max(0.0).round() as i64);
+    if let Some(obj) = account.as_object_mut() {
+        obj.insert("age_ms".into(), json!(age));
+    }
+}
+
+/// `POST /api/accounts/{account}/read`: the account read from the broker now
+/// by the accounts service that serves it (`alpaca-account`'s `POST
+/// /accounts/{name}/read`, which only reads), with `age_ms` as in `/api/state`.
+/// Its answer and status are passed on; `404` when no service serves the
+/// account, `502` when that service can't be reached.
+async fn account_read(
+    AxumState(app): AxumState<Arc<App>>,
+    axum::extract::Path(account): axum::extract::Path<String>,
+) -> Response {
+    let snapshot = app.poller.snapshot_json();
+    let serves = |id: &str| {
+        snapshot["services"][id]
+            .pointer("/accounts/accounts")
+            .and_then(|a| a.as_array())
+            .is_some_and(|l| l.iter().any(|a| a["name"].as_str() == Some(&account)))
+    };
+    let topology = app.poller.topology_json();
+    let Some(url) = topology["services"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|s| serves(s["id"].as_str().unwrap_or_default()))
+        .find_map(|s| s["accounts"].as_str())
+    else {
+        let why = "no accounts service serves this account";
+        return (StatusCode::NOT_FOUND, axum::Json(json!({ "error": why }))).into_response();
+    };
+    // The name is one the service listed, so it is passed on as it is.
+    let asked = reqwest::Client::new()
+        .post(format!("{url}/{account}/read"))
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await;
+    let (code, mut v) = match asked {
+        Ok(r) => (
+            r.status().as_u16(),
+            r.json::<serde_json::Value>().await.unwrap_or_default(),
+        ),
+        Err(e) => {
+            let why = format!("the accounts service didn't answer: {e}");
+            return gateway_failed(why);
+        }
+    };
+    if code == 200 {
+        add_age(&mut v, tinytrader_observe::unix_seconds());
+    }
+    no_store((
+        StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY),
+        axum::Json(v),
+    ))
 }
 
 /// A fleet lookup's failure as the API's error document: `404` for a stream
@@ -1563,7 +1620,7 @@ async fn write_gate(
 }
 
 /// The write routes, each behind the [`WriteGate`]: orders (submit, cancel,
-/// flatten, resume), the jobs service and the queue (POST, and PATCH for the
+/// flatten, resume), an account's read from the broker, the jobs service and the queue (POST, and PATCH for the
 /// queue), drive approval, reminders, profile recordings and settings (PUT).
 /// Their GET routes are merged in separately and stay open.
 fn write_routes(gate: WriteGate) -> Router<Arc<App>> {
@@ -1580,6 +1637,10 @@ fn write_routes(gate: WriteGate) -> Router<Arc<App>> {
         .route(
             "/api/accounts/{account}/resume",
             axum::routing::post(account_resume),
+        )
+        .route(
+            "/api/accounts/{account}/read",
+            axum::routing::post(account_read),
         )
         .route(
             "/api/jobs/{*rest}",
@@ -2065,7 +2126,9 @@ mod tests {
         let to = |u: &Option<String>| u.clone().map(|u| (u, reqwest::Client::new()));
         let app = Arc::new(App {
             poller: Poller::new(PollerConfig {
-                topology: "/nonexistent/topology.json".to_owned(),
+                topology: TOPOLOGY
+                    .with(|t| t.borrow().clone())
+                    .unwrap_or_else(|| "/nonexistent/topology.json".to_owned()),
                 docker: None,
                 project: None,
             }),
@@ -2084,6 +2147,9 @@ mod tests {
             delta: delta::Delta::new(0),
             collections: Vec::new(),
         });
+        if TOPOLOGY.with(|t| t.borrow().is_some()) {
+            app.poller.poll().await;
+        }
         let router = routes(gate).with_state(app);
         let mut bases = Vec::new();
         for router in [router.clone(), read_only(router)] {
@@ -2133,6 +2199,7 @@ mod tests {
         ("/api/orders/paper-1/tt-1/cancel", &["POST"]),
         ("/api/accounts/paper-1/flatten", &["POST"]),
         ("/api/accounts/paper-1/resume", &["POST"]),
+        ("/api/accounts/paper-1/read", &["POST"]),
         ("/api/jobs/submit", &["POST"]),
         ("/api/job-quotes/q1/approve", &["POST"]),
         ("/api/job-quotes/q1/decline", &["POST"]),
@@ -2476,6 +2543,72 @@ mod tests {
     thread_local! {
         /// The approval token of the consoles this thread serves.
         static APPROVE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+        /// The topology file of the consoles this thread serves (polled once at start).
+        static TOPOLOGY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[tokio::test]
+    async fn an_account_read_reaches_the_service_that_serves_it_behind_the_gate() {
+        // A stand-in for alpaca-account: two accounts, polled minutes ago; reading
+        // paper-1 now works, paper-2's broker fails.
+        let then = tinytrader_observe::unix_seconds() - 600.0;
+        let doc = |name: &str, at: f64| json!({ "name": name, "updated_at": at, "positions": [], "orders": [] });
+        let listed = json!({ "accounts": [doc("paper-1", then), doc("paper-2", then)] });
+        let fresh = || async {
+            let mut d = json!({ "name": "paper-1", "updated_at": tinytrader_observe::unix_seconds(), "orders": [] });
+            d["positions"] = json!([{ "symbol": "SPY", "qty": 1.0 }]);
+            axum::Json(d)
+        };
+        let failed = || async {
+            let why = "/v2/positions: Alpaca answered 500 Internal Server Error";
+            (StatusCode::BAD_GATEWAY, axum::Json(json!({ "error": why })))
+        };
+        let service = Router::new()
+            .route("/accounts", get(move || async move { axum::Json(listed) }))
+            .route("/accounts/paper-1/read", axum::routing::post(fresh))
+            .route("/accounts/paper-2/read", axum::routing::post(failed));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, service).await.unwrap() });
+        let file = std::env::temp_dir().join(format!("console-read-{}.json", std::process::id()));
+        let topology = json!({ "services": [{ "id": "accounts", "accounts": format!("http://{addr}/accounts") }] });
+        std::fs::write(&file, topology.to_string()).unwrap();
+        TOPOLOGY.with(|t| *t.borrow_mut() = Some(file.display().to_string()));
+        let base = serve(gate(None)).await;
+        TOPOLOGY.with(|t| *t.borrow_mut() = None);
+        let _ = std::fs::remove_file(&file);
+        let read = |name: &str| format!("{base}/api/accounts/{name}/read");
+
+        // Behind the gate: no login, nothing is read.
+        let (status, _, marked) =
+            ask_full(reqwest::Method::POST, &read("paper-1"), None, &[], "{}").await;
+        assert_eq!((status, marked), (403, true));
+        // An allowed login gets the fresh reading, aged by the console's clock.
+        let r = reqwest::Client::new()
+            .post(read("paper-1"))
+            .header("content-type", "application/json")
+            .header("tailscale-user-login", ME)
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["positions"][0]["symbol"], "SPY");
+        assert!(
+            v["age_ms"]
+                .as_i64()
+                .is_some_and(|ms| (0..5000).contains(&ms)),
+            "{v}"
+        );
+        // The broker's failure is passed on as the service's 502, not the gate's.
+        let (status, error, marked) =
+            ask_full(reqwest::Method::POST, &read("paper-2"), Some(ME), &[], "{}").await;
+        assert_eq!((status, marked), (502, false));
+        assert!(error.unwrap().contains("Alpaca answered 500"));
+        // An account no service serves is not forwarded anywhere.
+        let (status, _) = ask(reqwest::Method::POST, &read("paper-9"), Some(ME)).await;
+        assert_eq!(status, 404);
     }
 
     /// A stand-in for the jobs service that records each request (method,

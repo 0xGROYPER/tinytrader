@@ -5,10 +5,10 @@
 | **Purpose** | Read Alpaca brokerage accounts (paper or live) and serve their balances, positions, open orders, performance and round-trip trades. Read only: it never places orders (that's the [order gateway](order-gateway.md)). |
 | **Transport** | HTTP/1.1, JSON, on `ALPACA_ACCOUNT_LISTEN` (default `127.0.0.1:9107`). |
 | **Versioning** | Unversioned paths; additive changes only. |
-| **Auth** | None (all reads). Its Alpaca keys never leave it. Bind to loopback or a private network. |
+| **Auth** | None (all reads; `POST /accounts/{name}/read` too reads only). Its Alpaca keys never leave it. Bind to loopback or a private network. |
 | **Errors** | `{"error": "..."}`: `404` for an unknown or missing `account`, `400` for a bad `date`, `502` when Alpaca fails. |
 | **Health** | [Observe](observe.md) endpoints, plus `/events` (positions opened, changed, closed) and `/recent` (equity per account). `idle` outside `--hours`. |
-| **Stability** | `/accounts` and `/calendar` are **stable**; `/performance` and `/trades` are **experimental**. |
+| **Stability** | `/accounts` and `/calendar` are **stable**; `POST /accounts/{name}/read`, `/performance` and `/trades` are **experimental**. |
 
 ## Configuration
 
@@ -38,6 +38,11 @@ A key starting `PK` is a paper key; others are live. Account names are the deplo
 - `positions[]`: `symbol`, `asset_class`, `side`, `qty`, `avg_entry_price`, `current_price`, `lastday_price`, `market_value`, `cost_basis`, `unrealized_pl`, `unrealized_plpc` (a fraction), `unrealized_intraday_pl`, `unrealized_intraday_plpc`, `change_today` (a fraction); during a session also `priced_by` (`relay` or `alpaca`).
 - `orders`: open orders, oldest first, or `null` if they couldn't be read. Alpaca's order id and the account number are never served.
 - `updated_at` is Unix seconds; order times are RFC 3339.
+- `updated_at` moves on each read of the account from Alpaca: on an order event (and again 3 s later), every `ALPACA_ACCOUNT_REFRESH` seconds, and on `POST /accounts/{name}/read`. Revaluing positions from relays doesn't move it.
+
+## `POST /accounts/{name}/read`
+
+Reads that account from Alpaca now, as an order event does (balances, positions, open orders; orders the stream said ended are left out), and answers its `/accounts` entry, with a new `updated_at`. It only reads; the body is ignored. A read already in progress for the account is waited for, never interleaved with; one that finished less than a second ago answers instead of a new read, so callers can't hammer Alpaca's API. `404` for an unknown account; `502` with Alpaca's failure in `error` when the account or its positions can't be read (open orders that can't be read are `null`, as in `/accounts`). The console's Liquidate reads this way before each order (`POST /api/accounts/{account}/read`).
 
 ## `GET /calendar`
 

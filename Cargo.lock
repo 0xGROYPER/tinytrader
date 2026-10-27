@@ -38,6 +38,7 @@ dependencies = [
  "tinytrader-schedule",
  "tokio",
  "tokio-tungstenite",
+ "tungstenite 0.28.0",
 ]
 
 [[package]]

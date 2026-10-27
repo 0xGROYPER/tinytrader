@@ -21,3 +21,7 @@ rustls.workspace = true
 tokio-tungstenite.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+# The order gateway's fake Alpaca (services/order-gateway/tests/fake_alpaca) serves its stream with it.
+tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake"] }
