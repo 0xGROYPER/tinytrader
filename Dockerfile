@@ -54,8 +54,8 @@ COPY services services
 # JOBS caps the build's parallel jobs (default: every core), e.g. to leave
 # room for services running on the same machine.
 ARG JOBS
-RUN --mount=type=cache,id=tinytrader-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=tinytrader-cargo-git,target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=tinytrader-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=tinytrader-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=tinytrader-target-$TARGETARCH,target=/target \
     set -eu; \
     triple="$(cat /triple)"; \
