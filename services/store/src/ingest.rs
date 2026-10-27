@@ -14,6 +14,12 @@
 //! terms, and every step is recorded in `<Provider>/migrations/`. Filing can
 //! be repeated, so an interrupted run resumes. Nothing is deleted except a
 //! proven duplicate and the store's own incoming files.
+//!
+//! **One exception: a complete day supersedes a partial day** (decision
+//! 0018) of the same parent, when the batch is the parent's whole chain
+//! (`stype_in = parent`) and its day holds every record of the partial day,
+//! checked record by record. The partial day is kept, in
+//! `<Provider>/superseded/<batch>/`, never deleted.
 
 use std::fs;
 use std::io::{Read as _, Write as _};
@@ -184,6 +190,11 @@ impl Ledger {
         }
         Ok(Self { files })
     }
+    /// Keep a copy on one more volume too, from here on.
+    pub(crate) fn add(&mut self, path: PathBuf) -> Result<(), String> {
+        self.files.extend(Self::open(&[path])?.files);
+        Ok(())
+    }
     /// Append a step to every copy of the ledger, flushed. A filing whose
     /// record can't be written stops: what moved must always be on record.
     pub(crate) fn record(&mut self, mut event: Value) -> Result<(), String> {
@@ -332,7 +343,144 @@ enum Plan {
         from: PathBuf,
         existing: PathBuf,
         sha256: String,
+        entry: Option<Value>,
     },
+    /// A partial day of the parent is held, and this whole chain's day
+    /// holds every one of its records: it takes the partial day's place.
+    Supersede(Box<Supersede>),
+}
+
+/// A complete day to put in place of a partial day.
+struct Supersede {
+    from: PathBuf,
+    /// The partial day held, and the provider directory holding it.
+    at: PathBuf,
+    root: PathBuf,
+    day: String,
+    name: String,
+    size: u64,
+    sha256: String,
+    /// The partial day's SHA-256, its manifest entry, and what the check found.
+    old: String,
+    entry: Value,
+    held: crate::partial::Held,
+}
+
+/// Can the whole chain's day file `new` supersede the partial day held at
+/// `held` (SHA-256 `old`, manifest entry `entry`)? The day held must be the
+/// file its entry records, and every one of its records must be in `new`.
+fn supersedable(
+    held: &Path,
+    old: &str,
+    entry: &Value,
+    new: &Path,
+) -> Result<crate::partial::Held, String> {
+    let size = fs::metadata(held).map_err(|e| e.to_string())?.len();
+    if entry["size"].as_u64().is_some_and(|s| s != size)
+        || entry["sha256"].as_str().is_some_and(|h| h != old)
+    {
+        return Err(format!(
+            "{} is {size} bytes, SHA-256 {old}, but its manifest records {} bytes, SHA-256 {}; nothing supersedes it until that is looked at",
+            held.display(),
+            entry["size"],
+            entry["sha256"]
+        ));
+    }
+    let cov = crate::partial::Coverage::from_json(&entry["coverage"])
+        .ok_or_else(|| format!("{}: its coverage is unreadable", held.display()))?;
+    let found = crate::partial::holds_all(held, &cov, new)
+        .map_err(|e| format!("the partial day {} isn't superseded: {e}", held.display()))?;
+    if let Some(n) = entry["records"].as_u64().filter(|n| *n != found.records) {
+        return Err(format!(
+            "the partial day {} holds {} records, but its manifest records {n}",
+            held.display(),
+            found.records
+        ));
+    }
+    Ok(found)
+}
+
+/// Put a complete day in place of the partial day it holds every record of,
+/// as a merge is swapped in (decision 0018): the new file staged on the
+/// partial day's volume (so the swap is a rename), the entry it will have
+/// recorded as pending, the partial day kept (linked into
+/// `superseded/<batch>/`, with its entry), the new file renamed over it, and
+/// its entry made current. An interrupted one is settled from the day
+/// file's hash to before or after.
+fn supersede(
+    s: &Supersede,
+    batch: &str,
+    level: &Path,
+    ledger: &mut Ledger,
+) -> Result<Value, String> {
+    use crate::partial::crash;
+    fn io(p: &Path, e: std::io::Error) -> String {
+        format!("{}: {e}", p.display())
+    }
+    let dir = s.at.parent().ok_or("no folder")?;
+    let staged = s.root.join(INCOMING).join(batch).join(&s.name);
+    if staged != s.from && (!staged.exists() || hash_file(&staged)? != s.sha256) {
+        let tmp = staged.with_file_name(format!("{}.partial", s.name));
+        fs::create_dir_all(staged.parent().ok_or("no folder")?).map_err(|e| io(&staged, e))?;
+        fs::copy(&s.from, &tmp).map_err(|e| io(&tmp, e))?;
+        fs::File::open(&tmp)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| io(&tmp, e))?;
+        if hash_file(&tmp)? != s.sha256 {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("{}: copied with a different SHA-256", tmp.display()));
+        }
+        fs::rename(&tmp, &staged).map_err(|e| io(&staged, e))?;
+        ledger.record(json!({ "step": "copied", "from": s.from, "to": staged, "sha256": s.sha256 }))?;
+    }
+    crash("copied")?;
+    let kept = s
+        .root
+        .join(crate::catalog::SUPERSEDED)
+        .join(batch)
+        .join(level)
+        .join(format!("{}.dbn.zst", s.day));
+    let mut next = json!({ "file": format!("{}.dbn.zst", s.day), "size": s.size, "sha256": s.sha256, "records": s.held.total, "source": format!("batch/{batch}"), "superseded": { "path": kept, "sha256": s.old } });
+    if let Some(c) = s.entry.get("condition") {
+        next["condition"] = c.clone();
+    }
+    crate::manifest::write_pending(dir, &s.day, &next)?;
+    // The partial day is kept: its entry, and its file by a second name (a
+    // crash before the swap leaves only that name for the day as it was).
+    let kept_entry = kept.with_file_name(format!("{}.json", s.day));
+    if !kept_entry.exists() {
+        let text = serde_json::to_string_pretty(&s.entry).map_err(|e| e.to_string())?;
+        write_new(&kept_entry, text.as_bytes()).map_err(|e| io(&kept_entry, e))?;
+    }
+    match fs::hard_link(&s.at, &kept) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if hash_file(&kept)? != s.old {
+                return Err(format!(
+                    "{} already holds a different file; nothing was superseded",
+                    kept.display()
+                ));
+            }
+        }
+        r => r.map_err(|e| io(&kept, e))?,
+    }
+    sync_dir(kept.parent().ok_or("no folder")?).map_err(|e| io(&kept, e))?;
+    ledger.record(json!({ "step": "superseded", "day": s.day,
+        "old": { "path": s.at, "sha256": s.old, "kept": kept, "records": s.held.records, "contracts": s.held.contracts },
+        "new": { "path": s.at, "from": staged, "sha256": s.sha256, "records": s.held.total },
+        "matched": s.held.records }))?;
+    crash("pending")?;
+    fs::rename(&staged, &s.at).map_err(|e| io(&s.at, e))?;
+    sync_dir(dir).map_err(|e| io(dir, e))?;
+    crash("swapped")?;
+    crate::manifest::settle(dir, &s.day)?;
+    if staged != s.from {
+        // A proven duplicate: the copy just swapped in has its SHA-256.
+        fs::remove_file(&s.from).map_err(|e| io(&s.from, e))?;
+        let _ = fs::remove_dir(staged.parent().unwrap_or(dir));
+        let _ = fs::remove_dir(s.root.join(INCOMING));
+    }
+    ledger.record(json!({ "step": "swapped", "path": s.at, "sha256": s.sha256 }))?;
+    Ok(json!({ "path": s.at, "sha256": s.sha256, "superseded": { "path": kept, "sha256": s.old, "records": s.held.records } }))
 }
 
 /// One volume's share of a batch: the folder holding its files, and that
@@ -481,6 +629,8 @@ fn file_batch(
             ));
         }
     };
+    // A parent's whole chain, whose days may supersede partial days of it.
+    let whole = q["stype_in"] == "parent" && symbols != ["ALL_SYMBOLS"];
     let prov = |root: &Path| root.join("provenance").join(batch);
     let mut ledger = Ledger::open(
         &roots
@@ -561,24 +711,39 @@ fn file_batch(
             )
         };
         let rel = day.as_ref().map(|d| level.join(format!("{d}.dbn.zst")));
-        let existing: Vec<(PathBuf, String)> = match &rel {
-            Some(rel) => everywhere
+        // Each copy held, settled first if a merge or a supersede into it
+        // was interrupted, with its manifest entry.
+        let existing: Vec<(PathBuf, String, Option<Value>)> = match (&rel, &day) {
+            (Some(rel), Some(d)) => everywhere
                 .iter()
                 .map(|r| r.join(rel))
                 .filter(|p| p.exists())
-                .map(|p| hash_file(&p).map(|h| (p, h)))
-                .collect::<Result<_, _>>()?,
-            None => Vec::new(),
+                .map(|p| {
+                    let entry = crate::manifest::settle(p.parent().ok_or("no folder")?, d)?;
+                    hash_file(&p).map(|h| (p, h, entry))
+                })
+                .collect::<Result<_, String>>()?,
+            _ => Vec::new(),
         };
-        if let Some((p, h)) = existing.iter().find(|(_, h)| *h != want) {
-            return Err(format!(
-                "{name}: {} already holds a different file (SHA-256 {h}, this batch has {want})",
-                p.display()
-            ));
+        // A different file is refused, unless it is a partial day, held once,
+        // that this whole chain may supersede.
+        let mut partial_held = None;
+        if let Some((p, h, e)) = existing.iter().find(|(_, h, _)| *h != want) {
+            match e.as_ref().filter(|e| {
+                whole && existing.len() == 1 && crate::manifest::is_partial(e)
+            }) {
+                Some(e) => partial_held = Some((p.clone(), h.clone(), e.clone())),
+                None => {
+                    return Err(format!(
+                        "{name}: {} already holds a different file (SHA-256 {h}, this batch has {want})",
+                        p.display()
+                    ));
+                }
+            }
         }
         let Ok(meta) = fs::metadata(&path) else {
             // Moved by an earlier, interrupted run?
-            return if existing.is_empty() {
+            return if existing.is_empty() || partial_held.is_some() {
                 Err(format!("{name}: missing"))
             } else {
                 Ok(())
@@ -598,15 +763,40 @@ fn file_batch(
         if let Some(d) = &day {
             check_header(&path, dataset, schema, d).map_err(|e| format!("{name}: {e}"))?;
         }
-        ledger.record(
-            json!({ "step": "verified", "file": path, "bytes": meta.len(), "sha256": got }),
-        )?;
+        let mut verified =
+            json!({ "step": "verified", "file": path, "bytes": meta.len(), "sha256": got });
+        if let (Some((at, old, entry)), Some(day)) = (partial_held, &day) {
+            let held = supersedable(&at, &old, &entry, &path).map_err(|e| format!("{name}: {e}"))?;
+            verified["records"] = json!(held.total);
+            verified["supersedes"] = json!({ "path": at, "sha256": old, "records": held.records, "contracts": held.contracts });
+            ledger.record(verified)?;
+            let root = everywhere
+                .iter()
+                .find(|r| at.starts_with(r))
+                .ok_or("the partial day isn't under a provider folder")?
+                .clone();
+            plans.push(Plan::Supersede(Box::new(Supersede {
+                from: path,
+                at,
+                root,
+                day: day.clone(),
+                name: name.to_owned(),
+                size: meta.len(),
+                sha256: got,
+                old,
+                entry,
+                held,
+            })));
+            return Ok(());
+        }
+        ledger.record(verified)?;
         match (rel, existing.into_iter().next()) {
             (None, _) => receipts.push((name.to_owned(), path, part.root.clone())),
-            (Some(_), Some((p, _))) => plans.push(Plan::Duplicate {
+            (Some(_), Some((p, _, entry))) => plans.push(Plan::Duplicate {
                 from: path,
                 existing: p,
                 sha256: got,
+                entry,
             }),
             (Some(rel), None) => plans.push(Plan::Place {
                 from: path,
@@ -635,7 +825,28 @@ fn file_batch(
         return Err(problems.join("; "));
     }
 
-    // Every check passed: move the data into place, never over anything.
+    // A partial day superseded on a volume holding none of the batch gets
+    // the ledger and the receipts too.
+    let mut extra: Vec<PathBuf> = Vec::new();
+    for p in &plans {
+        if let Plan::Supersede(s) = p
+            && !roots.contains(&s.root.as_path())
+            && !extra.contains(&s.root)
+        {
+            ledger.add(
+                s.root
+                    .join("migrations")
+                    .join(format!("{today}-incorporate-{batch}.events.jsonl")),
+            )?;
+            extra.push(s.root.clone());
+        }
+    }
+    if !extra.is_empty() {
+        ledger.record(json!({ "step": "begin", "batch": batch, "also": extra }))?;
+    }
+
+    // Every check passed: move the data into place, never over anything
+    // but a partial day superseded.
     let mut placed = Vec::new();
     for plan in plans {
         match plan {
@@ -660,13 +871,31 @@ fn file_batch(
                 from,
                 existing,
                 sha256,
+                entry,
             } => {
                 fs::remove_file(&from).map_err(|e| e.to_string())?;
                 ledger.record(json!({ "step": "duplicate-dropped", "file": from, "identical_to": existing, "sha256": sha256 }))?;
-                placed.push(json!({ "path": existing, "sha256": sha256, "already_present": true }));
+                let mut f = json!({ "path": existing, "sha256": sha256, "already_present": true });
+                // Superseded by an earlier run of this batch?
+                if let Some(e) = entry.filter(|e| e["source"] == format!("batch/{batch}").as_str()) {
+                    f["superseded"] = e["superseded"].clone();
+                }
+                placed.push(f);
             }
+            Plan::Supersede(s) => match supersede(&s, batch, &level, &mut ledger) {
+                Ok(f) => placed.push(f),
+                Err(why) => {
+                    ledger.record(json!({ "step": "stopped", "error": why }))?;
+                    return Err(why);
+                }
+            },
         }
     }
+    let roots: Vec<&Path> = roots
+        .iter()
+        .copied()
+        .chain(extra.iter().map(PathBuf::as_path))
+        .collect();
 
     // Each filed day's condition, from the batch's condition.json.
     let mut dirs: Vec<PathBuf> = parts.iter().map(|p| p.inc.clone()).collect();
@@ -1194,6 +1423,272 @@ mod tests {
         );
         check_header(Path::new(&path), "OPRA.PILLAR", &schema, &day).unwrap();
         assert!(check_header(Path::new(&path), "OPRA.PILLAR", &schema, "2020-01-02").is_err());
+    }
+
+    mod supersede {
+        use super::*;
+        use crate::partial::tests::{
+            C1, C2, CRASH, DAY, at, day_bytes, import, name, stage, whole_bytes,
+        };
+
+        const WHOLE: &str = "opra-pillar-20261002.cbbo-1m.dbn.zst";
+        const AT: &str = "OPRA.PILLAR/SPY.OPT/cbbo-1m";
+
+        /// The partial day held: C1 (11) and C2 (12) from 13:00 UTC.
+        fn partial() -> Vec<u8> {
+            day_bytes(&[(C1, 11), (C2, 12)], &[(11, 0), (12, 0), (11, 1)])
+        }
+
+        /// The whole chain: the partial day's records, C1 before its hours,
+        /// and two other contracts.
+        fn chain() -> Vec<(u32, u64)> {
+            let early = day_ns(DAY).unwrap() + 3_600_000_000_000;
+            vec![
+                (11, early),
+                (11, at(0)),
+                (12, at(0)),
+                (13, at(0)),
+                (11, at(1)),
+                (14, at(2)),
+            ]
+        }
+
+        fn whole() -> Vec<u8> {
+            whole_bytes(&chain())
+        }
+
+        /// A volume holding the partial day, filed by import.
+        fn holding(root: &Path) {
+            let part = stage(root, "I1", &[(&name(), partial())]);
+            import(&[part], &[], "I1", "2026-10-19").unwrap();
+        }
+
+        /// A batch of `SPY.OPT`'s chain for `DAY`, requested by `stype_in`.
+        fn stage_whole(root: &Path, batch: &str, data: &[u8], stype_in: &str) -> Vec<Part> {
+            let inc = root.join(INCOMING).join(batch);
+            let sha = upload(&inc, WHOLE, data);
+            let metadata = json!({
+                "query": { "dataset": "OPRA.PILLAR", "schema": "cbbo-1m", "symbols": ["SPY.OPT"], "stype_in": stype_in, "encoding": "dbn", "compression": "zstd" },
+                "customizations": { "split_symbols": false, "split_duration": "day" },
+            })
+            .to_string();
+            let msha = upload(&inc, "metadata.json", metadata.as_bytes());
+            let manifest = json!({ "files": [
+                { "filename": WHOLE, "size": data.len(), "hash": format!("sha256:{sha}") },
+                { "filename": "metadata.json", "size": metadata.len(), "hash": format!("sha256:{msha}") },
+            ] })
+            .to_string();
+            upload(&inc, "manifest.json", manifest.as_bytes());
+            one(root, batch)
+        }
+
+        fn day(root: &Path) -> PathBuf {
+            root.join(AT).join(format!("{DAY}.dbn.zst"))
+        }
+
+        fn kept(root: &Path, batch: &str) -> PathBuf {
+            root.join("superseded")
+                .join(batch)
+                .join(AT)
+                .join(format!("{DAY}.dbn.zst"))
+        }
+
+        fn entry(root: &Path) -> Value {
+            crate::manifest::read_day(&root.join(AT), DAY)
+                .unwrap()
+                .unwrap()
+        }
+
+        fn steps(root: &Path, batch: &str) -> Vec<Value> {
+            let path = root.join(format!(
+                "migrations/2026-10-27-incorporate-{batch}.events.jsonl"
+            ));
+            fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
+
+        /// The day superseded on `held`, filed from `root`: the whole chain
+        /// in place, complete, and the partial day kept, readable, with its
+        /// entry.
+        fn superseded(root: &Path, held: &Path, batch: &str) {
+            assert_eq!(fs::read(day(held)).unwrap(), whole());
+            let e = entry(held);
+            assert!(!crate::manifest::is_partial(&e), "{e}");
+            assert_eq!(
+                (e["records"].clone(), e["source"].clone()),
+                (json!(6), json!(format!("batch/{batch}")))
+            );
+            assert!(
+                !held
+                    .join(AT)
+                    .join(format!("manifest.d/{DAY}.json"))
+                    .exists()
+            );
+            assert_eq!(fs::read(kept(held, batch)).unwrap(), partial());
+            let (cov, n) = crate::partial::inspect(&kept(held, batch)).unwrap();
+            assert_eq!(
+                (cov.symbols().len(), n),
+                (2, 3),
+                "the old file reads as it did"
+            );
+            let old: Value = serde_json::from_str(
+                &fs::read_to_string(kept(held, batch).with_file_name(format!("{DAY}.json")))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(old["source"], "import/I1");
+            assert!(root.join(format!("provenance/{batch}/manifest.json")).exists());
+            assert!(!root.join(INCOMING).exists());
+        }
+
+        #[test]
+        fn a_whole_chain_supersedes_a_partial_day() {
+            let root = scratch("supersede").join("Databento");
+            holding(&root);
+            let sha = hash_file(&day(&root)).unwrap();
+            let parts = stage_whole(&root, "OPRA-W", &whole(), "parent");
+            let s = incorporate(&parts, &[], "OPRA-W", "2026-10-27").unwrap();
+            superseded(&root, &root, "OPRA-W");
+            assert_eq!(s["files"][0]["superseded"]["sha256"], sha.as_str());
+            let step = steps(&root, "OPRA-W")
+                .into_iter()
+                .find(|e| e["step"] == "superseded")
+                .unwrap();
+            assert_eq!(
+                (
+                    step["old"]["sha256"].clone(),
+                    step["old"]["records"].clone(),
+                    step["new"]["records"].clone(),
+                    step["matched"].clone()
+                ),
+                (json!(sha), json!(3), json!(6), json!(3))
+            );
+            let vol = root.parent().unwrap();
+            let v = [("v".to_owned(), vol.to_path_buf())];
+            let cov = crate::partial::coverage(
+                &v,
+                "databento",
+                "OPRA.PILLAR",
+                Some("SPY.OPT"),
+                "cbbo-1m",
+                DAY,
+                DAY,
+            )
+            .unwrap();
+            assert_eq!(
+                (cov.len(), cov[0]["kind"].clone(), cov[0]["conflict"].clone()),
+                (1, json!("complete"), json!(false)),
+                "the kept file isn't counted"
+            );
+
+            // Again, after success: its own work, recognised.
+            let parts = stage_whole(&root, "OPRA-W", &whole(), "parent");
+            let s = incorporate(&parts, &[], "OPRA-W", "2026-10-27").unwrap();
+            assert_eq!(s["files"][0]["already_present"], true);
+            assert_eq!(s["files"][0]["superseded"]["sha256"], sha.as_str());
+            superseded(&root, &root, "OPRA-W");
+            let _ = fs::remove_dir_all(vol);
+        }
+
+        #[test]
+        fn refuses_a_chain_without_every_record_of_the_partial_day() {
+            let root = scratch("supersede-missing").join("Databento");
+            holding(&root);
+            let missing: Vec<_> = chain()
+                .into_iter()
+                .filter(|r| *r != (12, at(0)))
+                .collect();
+            let mut extra = chain();
+            extra.push((11, at(5)));
+            for (batch, bytes, stype, why) in [
+                (
+                    "OPRA-M",
+                    whole_bytes(&missing),
+                    "parent",
+                    format!("has 1 records of {C2} over its hours and this file 0"),
+                ),
+                (
+                    "OPRA-X",
+                    whole_bytes(&extra),
+                    "parent",
+                    format!("has 2 records of {C1} over its hours and this file 3"),
+                ),
+                // Not a parent's whole chain: refused as before.
+                (
+                    "OPRA-L",
+                    whole(),
+                    "raw_symbol",
+                    "already holds a different file".to_owned(),
+                ),
+            ] {
+                let parts = stage_whole(&root, batch, &bytes, stype);
+                let err = incorporate(&parts, &[], batch, "2026-10-27").unwrap_err();
+                assert!(err.contains(&why), "{err}");
+                assert_eq!(fs::read(day(&root)).unwrap(), partial(), "unchanged");
+                assert!(crate::manifest::is_partial(&entry(&root)));
+                assert!(
+                    root.join(INCOMING).join(batch).join(WHOLE).exists(),
+                    "nothing moved"
+                );
+            }
+            assert!(!root.join("superseded").exists());
+            let _ = fs::remove_dir_all(root.parent().unwrap());
+        }
+
+        #[test]
+        fn an_interrupted_supersede_settles_and_files_again() {
+            for (step, swapped) in [("copied", false), ("pending", false), ("swapped", true)] {
+                let root = scratch(&format!("supersede-crash-{step}")).join("Databento");
+                holding(&root);
+                let parts = stage_whole(&root, "OPRA-C", &whole(), "parent");
+                CRASH.with(|c| c.set(Some(step)));
+                let err = incorporate(&parts, &[], "OPRA-C", "2026-10-27").unwrap_err();
+                CRASH.with(|c| c.set(None));
+                assert_eq!(err, format!("crashed {step}"));
+                // As the next scan settles it: to before, or after.
+                crate::manifest::settle(&root.join(AT), DAY).unwrap();
+                let e = entry(&root);
+                assert_eq!(crate::manifest::is_partial(&e), !swapped, "{step}: {e}");
+                assert_eq!(
+                    fs::read(day(&root)).unwrap(),
+                    if swapped { whole() } else { partial() },
+                    "{step}"
+                );
+                assert_eq!(e["sha256"], hash_file(&day(&root)).unwrap().as_str());
+                incorporate(&parts, &[], "OPRA-C", "2026-10-27").unwrap();
+                superseded(&root, &root, "OPRA-C");
+                let _ = fs::remove_dir_all(root.parent().unwrap());
+            }
+        }
+
+        #[test]
+        fn supersedes_a_partial_day_on_another_volume() {
+            let d = scratch("supersede-volumes");
+            let (a, b) = (d.join("a/Databento"), d.join("b/Databento"));
+            holding(&b);
+            let parts = stage_whole(&a, "OPRA-V", &whole(), "parent");
+            let elsewhere = std::slice::from_ref(&b);
+            CRASH.with(|c| c.set(Some("copied")));
+            assert!(incorporate(&parts, elsewhere, "OPRA-V", "2026-10-27").is_err());
+            CRASH.with(|c| c.set(None));
+            assert_eq!(
+                fs::read(day(&b)).unwrap(),
+                partial(),
+                "a crash after the copy changes nothing"
+            );
+            incorporate(&parts, elsewhere, "OPRA-V", "2026-10-27").unwrap();
+            superseded(&a, &b, "OPRA-V");
+            assert!(!day(&a).exists() && !b.join(INCOMING).exists());
+            assert!(
+                steps(&b, "OPRA-V").iter().any(|e| e["step"] == "swapped"),
+                "b's ledger records it"
+            );
+            assert!(b.join("provenance/OPRA-V/metadata.json").exists());
+            let _ = fs::remove_dir_all(&d);
+        }
     }
 
     #[test]

@@ -548,9 +548,12 @@ struct Scan {
     served: Vec<Served>,
 }
 
-/// Folders the store writes in a provider's folder: receipts and its
-/// ledger, never data. (Uploads wait in the hidden `.incoming`.)
-const OWN: [&str; 2] = ["provenance", "migrations"];
+/// Folders the store writes in a provider's folder: receipts, its ledger
+/// and partial days a complete day superseded, none of it data held.
+/// (Uploads wait in the hidden `.incoming`.)
+const OWN: [&str; 3] = ["provenance", "migrations", SUPERSEDED];
+/// Where partial days a complete day superseded are kept (decision 0018).
+pub(crate) const SUPERSEDED: &str = "superseded";
 
 impl Scan {
     fn fail(&mut self, path: &Path, e: String) {

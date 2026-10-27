@@ -10,8 +10,9 @@
 //!   doesn't grow with the days the folder holds. An index written before
 //!   sidecars, with partial entries inline, is still read, and each such entry
 //!   moves to its sidecar the first time the index is written.
-//! - A merge in progress is `manifest.d/<day>.pending.json`: the entry the
-//!   day will have once the merged file is in place. It is made current by
+//! - A merge in progress, or a complete day superseding a partial one, is
+//!   `manifest.d/<day>.pending.json`: the entry the day will have once the
+//!   new file is in place. It is made current by
 //!   renaming it over `<day>.json`, or dropped, by [`settle`].
 //!
 //! Every file is written whole: beside it, flushed, renamed over it, and the
@@ -261,10 +262,11 @@ pub fn settle(dir: &Path, day: &str) -> Result<Option<Value>, String> {
         let stubbed = read_index(dir)?
             .get(day)
             .is_some_and(|e| e.get("sidecar").is_some());
-        if as_sidecar && stubbed {
+        if as_sidecar && stubbed && is_partial(&pending) {
             promote_pending(dir, day)?;
         } else {
-            // Recorded inline, before sidecars: written as an entry.
+            // Recorded inline, before sidecars, or a complete day superseding
+            // a partial one: written as an entry.
             set_entry(dir, day, Some(pending.clone()))?;
             let _ = fs::remove_file(pending_path(dir, day));
         }

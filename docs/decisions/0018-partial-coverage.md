@@ -20,6 +20,11 @@
 > file's hours; a day holding every contract of its definitions all day is
 > promoted to `complete`; merges stream; and partial days' entries are each
 > in their own file (`manifest.d/`). See the [store API](../api/store.md#partial-days).
+>
+> **Since (2026-10-27):** a batch of the parent's whole chain supersedes a
+> partial day of it when its day holds every one of the partial day's
+> records, checked record by record; the partial day is kept, in
+> `superseded/`. See the [store API](../api/store.md#a-complete-day-supersedes-a-partial-day).
 
 ## Context
 
