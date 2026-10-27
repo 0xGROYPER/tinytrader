@@ -1,4 +1,6 @@
-# Continuous integration: every push to any branch and every pull request.
+# Continuous integration: every pull request, and every push to main. Pushes to
+# other branches don't run it, since their pull request does (one run per
+# commit, not two); run it by hand on a branch without one (workflow_dispatch).
 #
 #   nix-linux   nix flake check on x86_64-linux: the generic (no-leaks) check,
 #               the console's type check, the Rust tests and clippy (crane), and
@@ -15,6 +17,7 @@
 name: ci
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 permissions:
