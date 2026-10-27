@@ -92,24 +92,48 @@ services and the order gateway take your keys from the environment; see
 
 ## The `tt` command line
 
-`tt` is tinytrader from the command line. Today it drives the
-[job queue](docs/api/queue.md):
+`tt` is tinytrader from a terminal. Today it buys historical data from
+Databento ([decision 0021](docs/decisions/0021-acquisition-verbs-and-shared-plumbing.md)):
+it prices a request, shows what it would cost, asks before anything is
+charged, then follows the jobs until the data is filed in the store. It is a
+front end only: every call goes to the console at `TT_CONSOLE`, which passes
+it to [databento-jobs](docs/api/databento-jobs.md) (`CONSOLE_JOBS`), so it
+needs both running and a Databento key.
 
 ```sh
-cargo run -p queue --bin tt -- queue templates     # what the queue can run
-cargo run -p queue --bin tt -- queue list          # jobs: waiting, running, done
-cargo run -p queue --bin tt -- queue add TEMPLATE NAME=VALUE --when after-close
+export TT_CONSOLE=http://127.0.0.1:8080
+cargo run -p tt -- fetch databento --dataset OPRA.PILLAR --schema cbbo-1m --symbols SPY.OPT \
+  --start 2026-09-01 --end 2026-09-30 --hours 09:30-16:01   # price it, then Buy? [y/N]
+cargo run -p tt -- quotes                     # waiting and recent quotes
+cargo run -p tt -- approve QUOTE              # or decline QUOTE
+cargo run -p tt -- jobs --follow QUOTE        # its jobs, until each is filed or failed
+cargo run -p tt -- api GET /api/jobs/quotes/QUOTE   # any console endpoint, same guards
 ```
 
-It finds the queue at `TT_QUEUE` (default `http://127.0.0.1:9123`). To try it,
-run a queue with a template file, such as the example in
+It prints a table at a terminal and JSON otherwise (`--format table|json`
+chooses). A paid purchase needs a person at a terminal and a `y`; there is no
+`--yes`. Buying (`fetch`'s Buy, or `approve`) and declining are writes, so
+the console's write gate must allow them. Exit codes: 0 done, 1 failed,
+2 usage, 3 refused. `cargo install --path apps/tt` puts `tt` on your `PATH`.
+
+The [job queue](docs/api/queue.md) has its own command line, `tt-queue`. It
+finds the queue at `TT_QUEUE` (default `http://127.0.0.1:9123`):
+
+```sh
+cargo run -p queue --bin tt-queue -- queue templates     # what the queue can run
+cargo run -p queue --bin tt-queue -- queue list          # jobs: waiting, running, done
+cargo run -p queue --bin tt-queue -- queue add TEMPLATE NAME=VALUE --when after-close
+```
+
+To try it, run a queue with a template file, such as the example in
 [docs/api/queue.md](docs/api/queue.md):
 
 ```sh
 QUEUE_TEMPLATES=templates.yaml QUEUE_STATE=queue-state cargo run -p queue --bin queue
 ```
 
-`cargo install --path services/queue --bin tt` puts `tt` on your `PATH`.
+`cargo install --path services/queue --bin tt-queue` puts `tt-queue` on your
+`PATH`.
 
 ## Coming
 
@@ -118,13 +142,12 @@ Planned and not on `main` yet; none of these commands works today:
 - **A live Coinbase stream through the relay**, the public feed with no
   account: the relay has no Coinbase source yet (it has Databento and Alpaca
   IEX).
-- **`tt` for acquisition** ([decision 0021](docs/decisions/0021-acquisition-verbs-and-shared-plumbing.md)):
-  Databento's `tt fetch`, `tt quotes`, `tt approve`, `tt decline` and `tt jobs`,
-  then `tt fetch alpaca` (historical data from Alpaca's free IEX feed into the
+- **More of `tt`** ([decision 0021](docs/decisions/0021-acquisition-verbs-and-shared-plumbing.md)):
+  `tt fetch alpaca` (historical data from Alpaca's free IEX feed into the
   store), `tt listen` (a live stream) and `tt store coverage`.
 
 Until then, the [store](docs/api/store.md) and
-[databento-jobs](docs/api/databento-jobs.md) HTTP endpoints do the same
+[alpaca-history](docs/api/alpaca-history.md) HTTP endpoints do the same
 work with `curl`.
 
 ## Services
@@ -142,7 +165,7 @@ default port on `127.0.0.1`. Every one serves `/health`, `/describe` and
 | tinytrader-tui | `cargo run -p tinytrader-tui -- --console URL` | `--console URL` or `--topology FILE` | (a terminal view) | [fleet](docs/api/fleet.md) |
 | store | `cargo run -p store -- --volume NAME=PATH` | `--volume` (repeatable), `STORE_STATE`, `STORE_WRITE_TOKEN` (or `_FILE`) | `:9120/catalog`, `:9120/coverage?...`, `:9120/files` | [store](docs/api/store.md) |
 | econ-calendar | `cargo run -p econ-calendar` | `ECON_CACHE`; optional `ECON_CONTACT` (BLS), `SEC_CONTACT`, earnings keys | `:9122/events`, `:9122/earnings` | [econ-calendar](docs/api/econ-calendar.md) |
-| queue | `cargo run -p queue --bin queue` | `QUEUE_TEMPLATES`, `QUEUE_STATE` (both required), `QUEUE_DOCKER` | `:9123/jobs`, or `tt queue` | [queue](docs/api/queue.md) |
+| queue | `cargo run -p queue --bin queue` | `QUEUE_TEMPLATES`, `QUEUE_STATE` (both required), `QUEUE_DOCKER` | `:9123/jobs`, or `tt-queue queue` | [queue](docs/api/queue.md) |
 | relay | `RELAY_SYMBOLS=SPY.OPT cargo run -p relay` | `DATABENTO_API_KEY`, or `RELAY_SOURCE=alpaca-iex` with `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY`; `RELAY_DATASET`, `RELAY_SCHEMA`, `RELAY_HOURS` | `:9110/describe`, `:9110/quotes`, `:9110/bars?symbol=...`; the stream on `:7600` | [relay](docs/api/relay.md) |
 | databento-jobs | `cargo run -p databento-jobs` | `DATABENTO_API_KEY`, `JOBS_STORE`, `JOBS_LEDGER`, `JOBS_APPROVE_TOKEN` | `:9121/jobs`, `POST :9121/price` | [databento-jobs](docs/api/databento-jobs.md) |
 | alpaca-history | `cargo run -p alpaca-history` | `ALPACA_HISTORY_KEY_ID`, `ALPACA_HISTORY_SECRET_KEY`, `HISTORY_STORE`, `HISTORY_STATE` | `POST :9124/runs` | [alpaca-history](docs/api/alpaca-history.md) |
@@ -160,6 +183,7 @@ are in [docs/api/](docs/api/README.md).
 | Path | Holds |
 |---|---|
 | `services/` | The services above ([services/README.md](services/README.md)) |
+| `apps/tt` | The `tt` command line |
 | `apps/tui` | The terminal view (Ratatui): overview, services, market chart, a live options book, data and hosts |
 | `libs/observe` | What every service serves: `/health`, `/metrics`, `/describe`, `/events`, `/recent` (`tinytrader.observe/1`), plus shared helpers (credentials, the write guard) |
 | `libs/fleet` | Discovers and polls a deployment; the data layer behind every front end |
@@ -200,12 +224,19 @@ docker buildx bake --load ticker console    # some
 
 #### Published images
 
-The `images` workflow builds every service's image on each pull request (for
-linux/arm64 only, without pushing), and on each push to `main` and each
-`vX.Y.Z` tag builds them for linux/amd64 and linux/arm64 and publishes them as
-`ghcr.io/<owner>/tinytrader-<service>`, tagged `main` and `latest` (the same
-image), `sha-<short commit>`, and `X.Y.Z` and `X.Y` for releases. It pushes
-with the workflow's own `GITHUB_TOKEN`, so no secrets are needed.
+The `images` workflow builds every service in `docker-bake.hcl`. On a pull
+request it builds them for linux/arm64 only and pushes nothing. Otherwise it
+builds them for linux/amd64 and linux/arm64 and publishes them as
+`ghcr.io/<owner>/tinytrader-<service>`, tagged:
+
+| Run | Tags |
+|---|---|
+| A push to `main` | `main` and `latest` (the same image), `sha-<short commit>` |
+| A `vX.Y.Z` tag | `X.Y.Z`, `X.Y`, `sha-<short commit>` |
+| A `vX.Y.Z-<pre-release>` tag | `X.Y.Z-<pre-release>`, `sha-<short commit>` |
+| A manual run of any other branch | `sha-<short commit>` |
+
+It pushes with the workflow's own `GITHUB_TOKEN`, so no secrets are needed.
 
 GitHub makes a package private when a workflow first pushes it. Once per
 package, after its first publish: open the package, then **Package
