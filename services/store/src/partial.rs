@@ -460,6 +460,84 @@ pub fn merge(inputs: &[(&Path, &Coverage)], out: &Path) -> Result<u64, String> {
     Ok(total)
 }
 
+/// What [`holds_all`] found: the partial day's records and contracts, every
+/// one of them in the complete day's file, and that file's records.
+pub(crate) struct Held {
+    pub records: u64,
+    pub contracts: usize,
+    pub total: u64,
+}
+
+/// Does `whole`, a complete day (a parent's whole chain), hold every record
+/// of `held`, a partial day of coverage `cov`, and nothing else over its
+/// hours? Restricted to `held`'s instruments, each over its contract's
+/// pieces, `whole`'s records must be `held`'s, contract by contract, in
+/// order: by count and a running SHA-256 of each record's bytes.
+///
+/// # Errors
+/// If not (naming a contract that differs), or a file can't be read.
+pub(crate) fn holds_all(held: &Path, cov: &Coverage, whole: &Path) -> Result<Held, String> {
+    let mut d = open(held)?;
+    let by_id = ids(d.metadata())?;
+    let mut hours: BTreeMap<&str, Vec<(u64, u64)>> = BTreeMap::new();
+    for p in &cov.pieces {
+        for s in &p.symbols {
+            hours.entry(s.as_str()).or_default().push((p.start, p.end));
+        }
+    }
+    let mut want: BTreeMap<&str, Tally> = BTreeMap::new();
+    let mut records = 0;
+    while let Some(r) = d.decode_record_ref().map_err(|e| e.to_string())? {
+        let id = r.header().instrument_id;
+        let s = by_id
+            .get(&id)
+            .ok_or_else(|| format!("the day held has instrument {id}, of none of its contracts"))?;
+        want.entry(s.as_str()).or_default().add(r.as_ref());
+        records += 1;
+    }
+    let mut d = open(whole)?;
+    if d.metadata().stype_in != Some(SType::Parent) {
+        return Err("its header isn't a parent symbol's whole chain (stype_in parent)".into());
+    }
+    let mut got: BTreeMap<&str, Tally> = BTreeMap::new();
+    let mut total = 0;
+    while let Some(r) = d.decode_record_ref().map_err(|e| e.to_string())? {
+        total += 1;
+        let t = r.raw_index_ts();
+        if let Some(s) = by_id.get(&r.header().instrument_id)
+            && hours
+                .get(s.as_str())
+                .is_some_and(|w| w.iter().any(|(a, b)| *a <= t && t < *b))
+        {
+            got.entry(s.as_str()).or_default().add(r.as_ref());
+        }
+    }
+    for s in want
+        .keys()
+        .chain(got.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+    {
+        let (w, g) = (
+            want.remove(s).unwrap_or_default().finish(),
+            got.remove(s).unwrap_or_default().finish(),
+        );
+        if w != g {
+            return Err(format!(
+                "the day held has {} records of {s} over its hours and this file {}{}; nothing is superseded",
+                w.0,
+                g.0,
+                if w.0 == g.0 { ", which differ" } else { "" }
+            ));
+        }
+    }
+    Ok(Held {
+        records,
+        contracts: cov.symbols().len(),
+        total,
+    })
+}
+
 /// Is this partial day now complete: does it hold every contract of the
 /// day's definitions (the `definition` day file of the same parent, on any of
 /// `roots`), each over the whole day? Returns that definition file if so.
@@ -1007,7 +1085,7 @@ fn file_day(
 }
 
 /// In tests, stop at `at` as a crash would, when told to.
-fn crash(at: &str) -> Result<(), String> {
+pub(crate) fn crash(at: &str) -> Result<(), String> {
     #[cfg(test)]
     if tests::CRASH.with(std::cell::Cell::get) == Some(at) {
         return Err(format!("crashed {at}"));
@@ -1557,7 +1635,7 @@ pub(crate) mod tests {
         d
     }
 
-    fn at(minute: u64) -> u64 {
+    pub(crate) fn at(minute: u64) -> u64 {
         ingest::day_ns(DAY).unwrap() + (13 * 60 + 30 + minute) * 60_000_000_000
     }
 
@@ -1601,20 +1679,41 @@ pub(crate) mod tests {
                     .collect(),
             )
             .build();
+        encode(&m, records.iter().map(|(id, minute)| (*id, at(*minute))))
+    }
+
+    /// A day file of header `m`, one cbbo-1m record per (instrument, time).
+    fn encode(m: &Metadata, records: impl Iterator<Item = (u32, u64)>) -> Vec<u8> {
         let mut out = Vec::new();
         {
-            let mut enc = dbn::encode::dbn::Encoder::with_zstd(&mut out, &m).unwrap();
-            for (id, minute) in records {
+            let mut enc = dbn::encode::dbn::Encoder::with_zstd(&mut out, m).unwrap();
+            for (id, t) in records {
                 let mut r = CbboMsg::default_for_schema(Schema::Cbbo1M);
-                r.hd.instrument_id = *id;
-                r.hd.ts_event = at(*minute);
-                r.ts_recv = at(*minute);
-                r.price = 1_000_000_000 + i64::from(*id);
+                r.hd.instrument_id = id;
+                r.hd.ts_event = t;
+                r.ts_recv = t;
+                r.price = 1_000_000_000 + i64::from(id);
                 enc.encode_record(&r).unwrap();
             }
             enc.flush().unwrap();
         }
         out
+    }
+
+    /// `SPY.OPT`'s whole chain on `DAY`, as a batch of the parent delivers it:
+    /// one record per (instrument, time in ns).
+    pub(crate) fn whole_bytes(records: &[(u32, u64)]) -> Vec<u8> {
+        let start = ingest::day_ns(DAY).unwrap();
+        let m = Metadata::builder()
+            .dataset("OPRA.PILLAR")
+            .schema(Some(Schema::Cbbo1M))
+            .start(start)
+            .end(NonZeroU64::new(start + 86_400_000_000_000))
+            .stype_in(Some(SType::Parent))
+            .stype_out(SType::InstrumentId)
+            .symbols(vec!["SPY.OPT".to_owned()])
+            .build();
+        encode(&m, records.iter().copied())
     }
 
     /// An import waiting in `<root>/.incoming/<id>/`: its files and receipt.

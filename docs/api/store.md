@@ -21,7 +21,7 @@ Shared conventions are in the [API overview](README.md).
 | `GET /incoming` | read | Batches uploaded and waiting to be filed. |
 | `GET /batches/{provider}` | read | Which batches the volumes hold, and how. |
 | `PUT /incoming/{provider}/{batch}/{file}?size=&sha256=` | write | Upload one file of a batch, verified on arrival. |
-| `POST /incorporate/{provider}/{batch}?parent=` | write | File a complete batch into the standard layout. With `parent` (such as `SPY.OPT`), a batch bought as a list of that parent's contracts is filed as partial days, as an import. |
+| `POST /incorporate/{provider}/{batch}?parent=` | write | File a complete batch into the standard layout; a parent's whole chain supersedes partial days of it ([below](#a-complete-day-supersedes-a-partial-day)). With `parent` (such as `SPY.OPT`), a batch bought as a list of that parent's contracts is filed as partial days, as an import. |
 | `POST /import/{provider}/{id}` | write | File DBN that didn't come from a provider batch, uploaded with an `import.json` ([below](#partial-days)). |
 | `POST /adopt/{provider}` | write | File a download folder already on a volume, where it is. |
 | `POST /volumes/approve` | write | Approve a drive found in the mount directory. |
@@ -144,8 +144,10 @@ bought again), so they say what the store holds or say they can't
   extracted by hand) counts by its files' headers, or, when it has no DBN
   files or has data in other encodings, by every day of its query. A folder
   with both and no data holds nothing.
-- The store's own folders in a provider's folder, `provenance/` (receipts)
-  and `migrations/` (its ledger), hold no data and are never counted.
+- The store's own folders in a provider's folder, `provenance/` (receipts),
+  `migrations/` (its ledger) and `superseded/` (partial days a complete day
+  [took the place of](#a-complete-day-supersedes-a-partial-day)), hold no
+  data and are never counted.
 - A volume is missing, with the reason in its root's `errors`, when a folder
   on it can't be read; when a DBN file's header, a manifest or a batch's
   `metadata.json` can't be read; when its path must be a mount point and
@@ -458,6 +460,59 @@ each filing: one whose ledger merged its file into the day, and whose
 coverage the day holds, is dropped as a duplicate. A filing runs to its
 end even if the request asking for it is dropped.
 
+### A complete day supersedes a partial day
+
+A batch of a parent's whole chain (`/incorporate` without `parent`, its
+`metadata.json` query `stype_in` `parent`, one symbol such as `SPY.OPT`)
+files a day the store holds as a partial day of that parent, schema and
+dataset in its place, when:
+
+1. Its day file passes every check a day not held passes (the manifest's
+   SHA-256, its own header), and its header is the parent's
+   (`stype_in parent`).
+2. It holds **every record of the partial day, and nothing else over its
+   hours.** Restricted to the partial day's instruments, each over its
+   contract's pieces, the new file's records must be the partial day's,
+   contract by contract, in order: by count and a running SHA-256. The
+   partial day must be the file its entry records (size, SHA-256, records),
+   held on one volume, and that volume writable.
+
+**A whole chain is filed day by day.** A day that can't be filed (one held
+complete as a different file, a partial day it doesn't hold every record
+of, naming the contract that differs, one on a read-only volume, a day
+file that fails its own checks) is refused alone and changes nothing; the
+others are filed. The answer lists each day under `files`, with `filed`
+`new`, `superseded` or `already present`, and each day refused under
+`refused` (`{ file, day, why }`). With any day refused it is a `409` (its
+`error` says how many), the batch stays in incoming with its receipts
+(copied to `provenance/` for the days filed), and filing it again after a
+fix files what is left and lists the days already done as `already
+present`. A problem with the batch itself (its receipts, its manifest)
+refuses the whole batch. Other batches, and `/adopt`, are still filed
+whole or not at all.
+
+The swap is a merge's: the new file is staged on the partial day's volume
+(copied there, and checked, if the batch arrived on another), the entry it
+will have recorded in `manifest.d/<day>.pending.json`, the partial day
+linked into `superseded/`, the new file renamed over the day's, and the
+entry made current: a complete day's, with `records`, `source` (`batch/<id>`)
+and `superseded: { path, sha256 }`. An interrupted one is settled by the
+next scan (or filing) from the day file's SHA-256, to before or after.
+
+**The partial day is kept, never deleted**, on its own volume:
+
+```text
+<Provider>/superseded/<batch>/<DATASET>/<symbol>/<schema>/<day>.dbn.zst   the file, as it was
+<Provider>/superseded/<batch>/<DATASET>/<symbol>/<schema>/<day>.json      its manifest entry
+```
+
+The batch's ledger (copied to the partial day's volume too, with its
+receipts) records `superseded`, before the swap: `old: { path, sha256,
+kept, records, contracts }`, `new: { path, from, sha256, records }` and
+`matched` (the partial day's records found), then `swapped`. Filing the
+batch again, after a crash or after success, finds its day in place by its
+SHA-256, and reports `superseded` from the day's entry.
+
 ### `POST /coverage/rebuild`
 
 Once, for days merged before pieces, whose coverage claims every contract
@@ -529,7 +584,7 @@ describes; a partial day held in copies that differ names every copy's. A
 batch download in CSV or JSON has no DBN files to name: its `files` is
 empty.
 
-`pending` is true while a merge into that day is unfinished. Each scan (and
+`pending` is true while a merge into that day (or a supersede) is unfinished. Each scan (and
 so the store's start) settles it, unless a filing is running (it may be
 between recording its merge and swapping it in; the next scan does): if the day's file is the merged one (by its
 SHA-256), the pending entry becomes current; if it is still the recorded
