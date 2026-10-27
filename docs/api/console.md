@@ -8,7 +8,7 @@
 | **Auth** | Reads are open: anyone who can reach the port can read, so bind to loopback or a private network. Every write goes through the [write gate](#the-write-gate): a `Host` and a login (set by an authenticating reverse proxy) on allowlists, and for a live account's orders (and any flatten or resume) also the order token, unless `CONSOLE_LIVE_NEEDS_TOKEN` is `false`. With either allowlist unconfigured, every write is refused. Writes must also be JSON and same-origin (a page on another site gets `403`). Tokens for the services behind it (gateways, store) stay in the console and are never returned. |
 | **Errors** | `{"error": "..."}` with a 4xx or 5xx status. Passed-through answers keep the upstream's status and body. |
 | **Health** | The console's own [observe](observe.md) endpoints. |
-| **Stability** | `/api/topology`, `/api/state`, `/api/events`, `/api/stream` are **stable**. The order, account, jobs and queue routes are **experimental**. Prefs, reminders and profiles are optional modules, **experimental**. |
+| **Stability** | `/api/topology`, `/api/state`, `/api/events`, `/api/stream` are **stable**. The order, account, jobs and queue routes are **experimental**. Prefs, reminders and profiles are optional modules, **experimental**; so are the external lists. |
 
 ## The deployment
 
@@ -125,6 +125,32 @@ All of these are behind the [write gate](#the-write-gate). `404` when the accoun
 | `GET /api/collections` | `[{id, name, docs: [{index, path, group, title}]}]`, from `CONSOLE_COLLECTIONS` (`Name=dir,dir;Name=dir`). |
 | `GET /api/collections/{id}/{index}` | `{index, path, title, html}`. |
 
+## External lists (experimental)
+
+Read-only tables whose rows come from JSON endpoints the deployment names, shown by the Lists widget. Off unless `CONSOLE_LISTS` names a JSON file of sources:
+
+```json
+[
+  {
+    "id": "builds",
+    "label": "Builds",
+    "url": "http://127.0.0.1:9300/builds.json",
+    "columns": [{ "key": "name", "label": "Name" }, { "key": "state", "label": "State" }]
+  }
+]
+```
+
+`id` is letters, digits, `-` and `_`, unique; `url` is `http://` or `https://`; `columns` (at least one) are shown in order. A file that can't be read or doesn't check out turns the lists off and says why in the log; the console still starts.
+
+Each source's URL must answer `200` with a JSON array of objects, at most 1 MiB. The console keeps each row's configured keys, values as they came, and drops the rest. A source is asked when its list is read, at most every 3 s whatever the number of readers, and has 3 s to answer. A failure (no answer, an error status, anything but an array of objects) keeps the rows of the last success and is reported with them.
+
+| Endpoint | |
+|---|---|
+| `GET /api/lists` | `{"lists": [list, ...]}`, in the file's order; `{"lists": []}` with none configured. A failing source never fails the request. |
+| `GET /api/lists/{id}` | One `list`. `404` for an id that isn't configured. |
+
+A `list` is `{id, label, columns: [{key, label}], rows: [{key: value}], updated_at, age_ms, error}`: `updated_at` is when the rows were read (Unix ms, the console's clock) and `age_ms` the console's clock now minus that, both `null` before any success; `error` is why the last attempt failed, or `null`. Rows with `error` set and an `age_ms` are the last success's, kept.
+
 ## Optional modules: prefs, reminders, profiles
 
 Each is off unless configured, and answers `404` then. They are per-deployment conveniences, not platform contracts ([decision 0017](../decisions/0017-client-contracts.md)).
@@ -155,6 +181,7 @@ Their writes are behind the [write gate](#the-write-gate) (the login only).
 | `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` | `true` (default) or `false`: whether a paper account's flatten and resume need the order token too. |
 | `CONSOLE_LIVE_NEEDS_TOKEN` | `true` (default) or `false`: whether a live account's order, cancel, flatten or resume needs the order token. `false` drops the token everywhere (a paper flatten too, whatever `CONSOLE_TOKEN_FOR_PAPER_FLATTEN` says); an allowed login, and the typed confirmation where asked, are enough. Safe only when `CONSOLE_LISTEN` is reachable solely through the authenticating proxy, so with `false` the console refuses to start unless `CONSOLE_LISTEN` is a loopback IP address (`127.0.0.1` or `[::1]`, not a host name); see [Behind a proxy in the console's namespace](#behind-a-proxy-in-the-consoles-namespace). |
 | `CONSOLE_TRUST_NETWORK` | `false` (default) or `true` (also `1`, `yes`, `on`): the operator trusts every network that can reach `CONSOLE_LISTEN`. With `true`, `CONSOLE_LIVE_NEEDS_TOKEN=false` no longer needs a loopback `CONSOLE_LISTEN`, and writes rely on the login header alone. |
+| `CONSOLE_LISTS` | A JSON file of [external lists](#external-lists-experimental). Optional. |
 | `CONSOLE_PAGE` | Serve the page from disk instead of the built-in copy. |
 
 The page's static files are `/`, `/lib/*`, `/widgets/*` and `/vendor/*`. They are sent with `Content-Security-Policy: script-src 'self'; frame-ancestors 'none'` and `X-Frame-Options: DENY`: scripts only from the console, and no other site can frame the page. Links and images in rendered documents lose `javascript:`, `data:` and `vbscript:` targets.
