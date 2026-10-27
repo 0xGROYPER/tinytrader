@@ -475,11 +475,21 @@ dataset in its place, when:
    contract's pieces, the new file's records must be the partial day's,
    contract by contract, in order: by count and a running SHA-256. The
    partial day must be the file its entry records (size, SHA-256, records),
-   held on one volume.
+   held on one volume, and that volume writable.
 
-Otherwise the batch is refused (`409`), as for any day held as a different
-file, naming the contract that differs; nothing changes. A day held
-complete is refused as before.
+**A whole chain is filed day by day.** A day that can't be filed (one held
+complete as a different file, a partial day it doesn't hold every record
+of, naming the contract that differs, one on a read-only volume, a day
+file that fails its own checks) is refused alone and changes nothing; the
+others are filed. The answer lists each day under `files`, with `filed`
+`new`, `superseded` or `already present`, and each day refused under
+`refused` (`{ file, day, why }`). With any day refused it is a `409` (its
+`error` says how many), the batch stays in incoming with its receipts
+(copied to `provenance/` for the days filed), and filing it again after a
+fix files what is left and lists the days already done as `already
+present`. A problem with the batch itself (its receipts, its manifest)
+refuses the whole batch. Other batches, and `/adopt`, are still filed
+whole or not at all.
 
 The swap is a merge's: the new file is staged on the partial day's volume
 (copied there, and checked, if the batch arrived on another), the entry it

@@ -1075,6 +1075,12 @@ async fn incorporate(
         .map(|v| v.path.join(pdir))
         .filter(|p| !parts.iter().any(|x| x.root == *p))
         .collect();
+    let read_only: Vec<PathBuf> = store
+        .volumes()
+        .iter()
+        .filter(|v| !v.writable)
+        .map(|v| v.path.join(pdir))
+        .collect();
     let targets = target_folders(&parts, &elsewhere, q.parent.as_deref());
     let today = today();
     let b = batch.clone();
@@ -1090,7 +1096,7 @@ async fn incorporate(
             store.file_partial(f, targets).await
         }
         None => {
-            let f = move || ingest::incorporate(&parts, &elsewhere, &b, &today);
+            let f = move || ingest::incorporate_on(&parts, &elsewhere, &read_only, &b, &today);
             store.file_alone(targets, f).await
         }
     };
@@ -1105,7 +1111,17 @@ async fn incorporate(
                 format!("incorporated {pdir}/{batch}: {n} files"),
                 summary.to_string(),
             );
-            reply(StatusCode::OK, summary)
+            // Days refused alone: the rest are filed, the batch waits.
+            match summary["refused"].as_array().map_or(0, Vec::len) {
+                0 => reply(StatusCode::OK, summary),
+                r => {
+                    let mut summary = summary;
+                    summary["error"] = json!(format!(
+                        "{r} days refused, {n} filed; the batch stays in incoming"
+                    ));
+                    reply(StatusCode::CONFLICT, summary)
+                }
+            }
         }
         Ok(Err(e)) => {
             store

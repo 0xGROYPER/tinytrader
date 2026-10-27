@@ -490,7 +490,7 @@ fn supersede(
     let _ = fs::remove_dir(s.root.join(INCOMING));
     ledger.record(json!({ "step": "swapped", "path": s.at, "sha256": s.sha256 }))?;
     Ok(
-        json!({ "path": s.at, "sha256": s.sha256, "superseded": { "path": kept, "sha256": s.old, "records": s.held.records } }),
+        json!({ "path": s.at, "sha256": s.sha256, "filed": "superseded", "superseded": { "path": kept, "sha256": s.old, "records": s.held.records } }),
     )
 }
 
@@ -519,13 +519,33 @@ pub struct Part {
 /// # Errors
 /// If the batch is incomplete, a file doesn't match the manifest, the
 /// request shape isn't supported, or a destination holds a different file.
+#[cfg(test)]
 pub fn incorporate(
     parts: &[Part],
     elsewhere: &[PathBuf],
     batch: &str,
     today: &str,
 ) -> Result<Value, String> {
-    file_batch(parts, elsewhere, batch, today)
+    incorporate_on(parts, elsewhere, &[], batch, today)
+}
+
+/// As [`incorporate`], `read_only` naming the provider directories that
+/// can't be written. A parent's whole chain is filed day by day: a day that
+/// can't be filed (held complete as a different file, a partial day it
+/// doesn't hold every record of, or one on a read-only volume) is refused
+/// alone, listed in the summary's `refused`, and changes nothing; the
+/// others are filed, and the batch stays in incoming to be filed again.
+///
+/// # Errors
+/// As [`incorporate`], for the batch as a whole.
+pub fn incorporate_on(
+    parts: &[Part],
+    elsewhere: &[PathBuf],
+    read_only: &[PathBuf],
+    batch: &str,
+    today: &str,
+) -> Result<Value, String> {
+    file_batch(parts, elsewhere, read_only, true, batch, today)
 }
 
 /// File a Databento download folder where it already is (`dir`, on the same
@@ -545,7 +565,7 @@ pub fn adopt(dir: &Path, root: &Path, elsewhere: &[PathBuf], today: &str) -> Res
         inc: dir.to_path_buf(),
         root: root.to_path_buf(),
     };
-    file_batch(&[part], elsewhere, batch, today)
+    file_batch(&[part], elsewhere, &[], false, batch, today)
 }
 
 /// Keep a receipt in `provenance/<batch>/` on every root: linked on its own
@@ -584,6 +604,8 @@ fn keep_receipt(
 fn file_batch(
     parts: &[Part],
     elsewhere: &[PathBuf],
+    read_only: &[PathBuf],
+    by_day: bool,
     batch: &str,
     today: &str,
 ) -> Result<Value, String> {
@@ -642,6 +664,8 @@ fn file_batch(
     };
     // A parent's whole chain, whose days may supersede partial days of it.
     let whole = q["stype_in"] == "parent" && symbols != ["ALL_SYMBOLS"];
+    // Its days are filed one by one, each refused alone.
+    let by_day = by_day && whole;
     let prov = |root: &Path| root.join("provenance").join(batch);
     let mut ledger = Ledger::open(
         &roots
@@ -677,6 +701,7 @@ fn file_batch(
         .as_array()
         .ok_or("manifest.json lists no files")?;
     let mut plans = Vec::new();
+    let mut earlier = Vec::new();
     let mut receipts: Vec<(String, PathBuf, PathBuf)> = Vec::new();
     let mut problems = Vec::new();
     let mut check = |f: &Value| -> Result<(), String> {
@@ -744,6 +769,12 @@ fn file_batch(
                 .as_ref()
                 .filter(|e| whole && existing.len() == 1 && crate::manifest::is_partial(e))
             {
+                Some(_) if read_only.iter().any(|r| p.starts_with(r)) => {
+                    return Err(format!(
+                        "{name}: the partial day {} is on a read-only volume; nothing supersedes it until that volume can be written",
+                        p.display()
+                    ));
+                }
                 Some(e) => partial_held = Some((p.clone(), h.clone(), e.clone())),
                 None => {
                     return Err(format!(
@@ -754,12 +785,12 @@ fn file_batch(
             }
         }
         let Ok(meta) = fs::metadata(&path) else {
-            // Moved by an earlier, interrupted run?
-            return if existing.is_empty() || partial_held.is_some() {
-                Err(format!("{name}: missing"))
-            } else {
-                Ok(())
-            };
+            // Filed by an earlier run, interrupted or with days refused?
+            if existing.is_empty() || partial_held.is_some() {
+                return Err(format!("{name}: missing"));
+            }
+            earlier.push(json!({ "path": existing[0].0, "sha256": want, "already_present": true, "filed": "already present" }));
+            return Ok(());
         };
         if f["size"].as_u64().is_some_and(|s| s != meta.len()) {
             return Err(format!(
@@ -824,9 +855,15 @@ fn file_batch(
         }
         Ok(())
     };
+    let mut refused = Vec::new();
     for f in files {
         if let Err(e) = check(f) {
-            problems.push(e);
+            let name = f["filename"].as_str().unwrap_or_default();
+            if by_day && !name.ends_with(".json") {
+                refused.push(json!({ "file": name, "day": databento_day(name, schema), "why": e }));
+            } else {
+                problems.push(e);
+            }
         }
     }
     for root in &roots {
@@ -841,6 +878,9 @@ fn file_batch(
     if !problems.is_empty() {
         ledger.record(json!({ "step": "refused", "problems": problems }))?;
         return Err(problems.join("; "));
+    }
+    for r in &refused {
+        ledger.record(json!({ "step": "refused-day", "file": r["file"], "why": r["why"] }))?;
     }
 
     // A partial day superseded on a volume holding none of the batch gets
@@ -878,12 +918,18 @@ fn file_batch(
                     } else {
                         format!("{} -> {}: {e}", from.display(), to.display())
                     };
+                    if by_day {
+                        ledger
+                            .record(json!({ "step": "refused-day", "file": from, "why": why }))?;
+                        refused.push(json!({ "file": from, "why": why }));
+                        continue;
+                    }
                     ledger.record(json!({ "step": "stopped", "error": why }))?;
                     return Err(why);
                 }
                 ledger
                     .record(json!({ "step": "moved", "from": from, "to": to, "sha256": sha256 }))?;
-                placed.push(json!({ "path": to, "sha256": sha256 }));
+                placed.push(json!({ "path": to, "sha256": sha256, "filed": "new" }));
             }
             Plan::Duplicate {
                 from,
@@ -893,7 +939,7 @@ fn file_batch(
             } => {
                 fs::remove_file(&from).map_err(|e| e.to_string())?;
                 ledger.record(json!({ "step": "duplicate-dropped", "file": from, "identical_to": existing, "sha256": sha256 }))?;
-                let mut f = json!({ "path": existing, "sha256": sha256, "already_present": true });
+                let mut f = json!({ "path": existing, "sha256": sha256, "already_present": true, "filed": "already present" });
                 // Superseded by an earlier run of this batch?
                 if let Some(e) = entry.filter(|e| e["source"] == format!("batch/{batch}").as_str())
                 {
@@ -903,6 +949,12 @@ fn file_batch(
             }
             Plan::Supersede(s) => match supersede(&s, batch, &level, &mut ledger) {
                 Ok(f) => placed.push(f),
+                // Settled back to the partial day, unless it was swapped in.
+                Err(why) if by_day && !(cfg!(test) && why.starts_with("crashed")) => {
+                    crate::manifest::settle(s.at.parent().ok_or("no folder")?, &s.day)?;
+                    ledger.record(json!({ "step": "refused-day", "file": s.from, "why": why }))?;
+                    refused.push(json!({ "file": s.name, "day": s.day, "why": why }));
+                }
                 Err(why) => {
                     ledger.record(json!({ "step": "stopped", "error": why }))?;
                     return Err(why);
@@ -910,6 +962,7 @@ fn file_batch(
             },
         }
     }
+    placed.extend(earlier);
     let roots: Vec<&Path> = roots
         .iter()
         .copied()
@@ -922,16 +975,29 @@ fn file_batch(
     crate::conditions::record_batch(&dirs, &json!({ "files": placed }), batch)?;
 
     // Receipts go to provenance on every volume holding part of the batch,
-    // never over a different one (checked above).
+    // never over a different one (checked above). With days refused, the
+    // batch stays in incoming to be filed again: its receipts are copied.
     let receipt_names: Vec<String> = receipts.iter().map(|(n, _, _)| n.clone()).collect();
     for (name, from, own) in receipts.iter().filter(|(n, _, _)| n != "manifest.json") {
+        if !refused.is_empty() {
+            let bytes = fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
+            for to in roots
+                .iter()
+                .map(|r| prov(r).join(name))
+                .filter(|t| !t.exists())
+            {
+                write_new(&to, &bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+                ledger.record(json!({ "step": "receipt", "file": to }))?;
+            }
+            continue;
+        }
         for to in keep_receipt(from, own, &roots, batch, name)? {
             ledger.record(json!({ "step": "receipt", "file": to }))?;
         }
     }
     // Other receipts left in a folder (such as a downloader's own listing)
     // are kept beside the provider's; anything else stays where it is.
-    for part in parts {
+    for part in parts.iter().filter(|_| refused.is_empty()) {
         for e in fs::read_dir(&part.inc).into_iter().flatten().flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if name == "manifest.json" || !name.ends_with(".json") || !safe(&name) {
@@ -961,7 +1027,7 @@ fn file_batch(
     // The folders are empty now; remove them (never recursively). Anything
     // the store didn't recognise keeps its folder there, and is reported.
     let mut left = Vec::new();
-    for part in parts {
+    for part in parts.iter().filter(|_| refused.is_empty()) {
         let _ = fs::remove_file(part.inc.join("manifest.json"));
         left.extend(
             fs::read_dir(&part.inc)
@@ -975,7 +1041,7 @@ fn file_batch(
     }
     let summary = json!({
         "batch": batch, "dataset": dataset, "schema": schema, "symbols": symbols,
-        "files": placed, "receipts": receipt_names,
+        "files": placed, "refused": refused, "receipts": receipt_names,
         "provenance": roots.iter().map(|r| prov(r)).collect::<Vec<_>>(),
         "from": parts.iter().map(|p| &p.inc).collect::<Vec<_>>(),
         "left_behind": left, "completed_at": tinytrader_observe::unix_seconds(),
@@ -1484,20 +1550,36 @@ mod tests {
 
         /// A batch of `SPY.OPT`'s chain for `DAY`, requested by `stype_in`.
         fn stage_whole(root: &Path, batch: &str, data: &[u8], stype_in: &str) -> Vec<Part> {
+            stage_days(root, batch, &[(WHOLE, data.to_vec())], stype_in)
+        }
+
+        /// A batch of `SPY.OPT`'s chain, its day files `(name, bytes)`.
+        fn stage_days(
+            root: &Path,
+            batch: &str,
+            days: &[(&str, Vec<u8>)],
+            stype_in: &str,
+        ) -> Vec<Part> {
             let inc = root.join(INCOMING).join(batch);
-            let sha = upload(&inc, WHOLE, data);
             let metadata = json!({
                 "query": { "dataset": "OPRA.PILLAR", "schema": "cbbo-1m", "symbols": ["SPY.OPT"], "stype_in": stype_in, "encoding": "dbn", "compression": "zstd" },
                 "customizations": { "split_symbols": false, "split_duration": "day" },
             })
             .to_string();
+            let mut files: Vec<Value> = days
+                .iter()
+                .map(|(name, data)| {
+                    let sha = upload(&inc, name, data);
+                    json!({ "filename": name, "size": data.len(), "hash": format!("sha256:{sha}") })
+                })
+                .collect();
             let msha = upload(&inc, "metadata.json", metadata.as_bytes());
-            let manifest = json!({ "files": [
-                { "filename": WHOLE, "size": data.len(), "hash": format!("sha256:{sha}") },
-                { "filename": "metadata.json", "size": metadata.len(), "hash": format!("sha256:{msha}") },
-            ] })
-            .to_string();
-            upload(&inc, "manifest.json", manifest.as_bytes());
+            files.push(json!({ "filename": "metadata.json", "size": metadata.len(), "hash": format!("sha256:{msha}") }));
+            upload(
+                &inc,
+                "manifest.json",
+                json!({ "files": files }).to_string().as_bytes(),
+            );
             one(root, batch)
         }
 
@@ -1648,7 +1730,14 @@ mod tests {
                 ),
             ] {
                 let parts = stage_whole(&root, batch, &bytes, stype);
-                let err = incorporate(&parts, &[], batch, "2026-10-27").unwrap_err();
+                // A whole chain's day is refused alone; any other batch whole.
+                let err = match incorporate(&parts, &[], batch, "2026-10-27") {
+                    Ok(s) => {
+                        assert_eq!(s["files"], json!([]), "{s}");
+                        s["refused"][0]["why"].as_str().unwrap().to_owned()
+                    }
+                    Err(e) => e,
+                };
                 assert!(err.contains(&why), "{err}");
                 assert_eq!(fs::read(day(&root)).unwrap(), partial(), "unchanged");
                 assert!(crate::manifest::is_partial(&entry(&root)));
@@ -1658,6 +1747,104 @@ mod tests {
                 );
             }
             assert!(!root.join("superseded").exists());
+            let _ = fs::remove_dir_all(root.parent().unwrap());
+        }
+
+        #[test]
+        fn a_whole_chain_refuses_its_days_one_by_one() {
+            let root = scratch("supersede-by-day").join("Databento");
+            holding(&root);
+            // 10-05 held complete, as an older route filed it; 10-06 not held.
+            let held = root.join(AT).join("2026-10-05.dbn.zst");
+            fs::write(&held, b"filed by an older route").unwrap();
+            let day_of = |d: &str| dbn_file("OPRA.PILLAR", dbn::Schema::Cbbo1M, d, b"chain");
+            let (five, six) = (
+                "opra-pillar-20261005.cbbo-1m.dbn.zst",
+                "opra-pillar-20261006.cbbo-1m.dbn.zst",
+            );
+            let days = [
+                (WHOLE, whole()),
+                (five, day_of("2026-10-05")),
+                (six, day_of("2026-10-06")),
+            ];
+            let parts = stage_days(&root, "OPRA-D", &days, "parent");
+            let filed = |s: &Value| -> Vec<(String, String)> {
+                let mut v: Vec<_> = s["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|f| {
+                        let p = f["path"].as_str().unwrap();
+                        (
+                            p[p.len() - 18..].to_owned(),
+                            f["filed"].as_str().unwrap().to_owned(),
+                        )
+                    })
+                    .collect();
+                v.sort();
+                v
+            };
+            let refused = |s: &Value| -> Vec<String> {
+                s["refused"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{} {}",
+                            r["day"].as_str().unwrap(),
+                            r["why"].as_str().unwrap()
+                        )
+                    })
+                    .collect()
+            };
+            // The partial day's volume read-only: refused up front, as is
+            // 10-05; 10-06 is filed, and the batch waits in incoming.
+            let s = incorporate_on(
+                &parts,
+                &[],
+                std::slice::from_ref(&root),
+                "OPRA-D",
+                "2026-10-27",
+            )
+            .unwrap();
+            assert_eq!(
+                filed(&s),
+                [("2026-10-06.dbn.zst".to_owned(), "new".to_owned())]
+            );
+            let r = refused(&s);
+            assert!(
+                r[0].starts_with("2026-10-02") && r[0].contains("read-only volume"),
+                "{r:?}"
+            );
+            assert!(
+                r[1].starts_with("2026-10-05") && r[1].contains("already holds a different file"),
+                "{r:?}"
+            );
+            assert_eq!(fs::read(day(&root)).unwrap(), partial(), "unchanged");
+            assert_eq!(fs::read(&held).unwrap(), b"filed by an older route");
+            let inc = root.join(INCOMING).join("OPRA-D");
+            assert!(inc.join(WHOLE).exists() && inc.join(five).exists() && !inc.join(six).exists());
+            assert!(inc.join("manifest.json").exists() && inc.join("metadata.json").exists());
+            assert!(root.join("provenance/OPRA-D/manifest.json").exists());
+            assert!(root.join("provenance/OPRA-D/metadata.json").exists());
+
+            // Again, writable: 10-02 superseded, 10-06 recognised, 10-05 still refused.
+            let s = incorporate_on(&parts, &[], &[], "OPRA-D", "2026-10-27").unwrap();
+            assert_eq!(
+                filed(&s),
+                [
+                    ("2026-10-02.dbn.zst".to_owned(), "superseded".to_owned()),
+                    (
+                        "2026-10-06.dbn.zst".to_owned(),
+                        "already present".to_owned()
+                    )
+                ]
+            );
+            assert_eq!(refused(&s).len(), 1);
+            assert_eq!(fs::read(day(&root)).unwrap(), whole());
+            assert_eq!(fs::read(kept(&root, "OPRA-D")).unwrap(), partial());
+            assert!(inc.join(five).exists() && !inc.join(WHOLE).exists());
             let _ = fs::remove_dir_all(root.parent().unwrap());
         }
 
