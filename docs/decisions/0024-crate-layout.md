@@ -394,7 +394,7 @@ Stop and report before going 30% over.
 | **R2.** `libs/instruments`: both OCC forms, option parents; tests over today's behaviour first | 250 / 250 | ~300 | |
 | **R3.** `libs/service`: serve and drain, clients, secrets, `supervise`, `CaptureGate`; the services but `order-gateway` moved onto it | 300 / 200 | ~500 | every service but `order-gateway` (R12) drains on SIGTERM; `init: true` in Compose until then |
 | **R4.** The store's `main.rs` split into modules (a pure move) | moves ~1,700 | – | no logic change |
-| **R4a.** Filing throughput (section 8, a and b): `databento-jobs` downloads N at once and leaves filing to the store's lock; the store merges each day once per group of jobs | 200 / 350; fixtures 0 bytes (generated in temporary roots); docs 40 | ~30 | one PR; after R4; the purchase guard tests pass unchanged |
+| **R4a.** Filing throughput (section 8, a and b): `databento-jobs` downloads N at once and leaves filing to the store's lock; the store merges each day once per group of jobs | 200 / 350; fixtures 0 bytes (generated in temporary roots); docs 40 | ~30 | one PR; before R4 (#67), which then moves it with the rest; the purchase guard tests pass unchanged |
 | **R4b.** The store's per-day filing locks (section 8, c) | 120 / 200; fixtures 0 bytes; docs 15 | ~20 | deferred until the store runs on a bigger machine than the 8 GB M2 with USB disks |
 | **R5.** `venues/databento` (0021 step 9c); `databento-jobs` split | moves ~1,400 | ~150 | the purchase path: its guard tests must pass unchanged |
 | **R6.** `venues/alpaca` (0021 step 9b); the five data services onto it (`alpaca-account`, `alpaca-data`, `alpaca-history`, `alpaca-news`, the relay) | moves ~1,700 | ~450 | not `order-gateway` (R12) |
@@ -412,7 +412,7 @@ Stop and report before going 30% over.
 
 0021's steps 1 (`libs/net`) and 2 (`libs/store-client`) come before R3, R5
 and R6; R5 and R6 are 0021's 9c and 9b. Order: R0, R1, R2 any time; then
-R3; R4 and R5 any order; R4a after R4; R4b after R4a, deferred as above; R6 after R3; R7 after R3; R8 after R7; R9 and R10
+R3; R4 and R5 any order; R4a before R4 (it landed first, #67); R4b after R4a, deferred as above; R6 after R3; R7 after R3; R8 after R7; R9 and R10
 any time; R11 before 0021's store producer; R12 last; R13 after 0021's 9a (the crypto records), R3 and R7 (it uses `libs/service`'s supervised loop and the fan-out), and early among them; R14 after #64 and R6; R16's first two notebooks after #64, its third after replay; R15 any time, its three PRs in section 7's order.
 
 **R13: what retiring `ticker` breaks**, all changed in the same step:
