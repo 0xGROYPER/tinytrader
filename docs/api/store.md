@@ -12,6 +12,12 @@
 
 Shared conventions are in the [API overview](README.md).
 
+A store answers for its own volumes only. A deployment may run several
+(one per data node); `databento-jobs` asks every one it is given and merges
+their answers, and files each job on one of them
+([decision 0025](../decisions/0025-several-stores.md)). Nothing in this API
+changes for that.
+
 | Endpoint | | |
 |---|---|---|
 | `GET /catalog?fresh=` | read | Each volume's datasets by provider, their schemas and days, and how full it is. Each schema lists its `partial` and `unfiled` days ([below](#what-the-store-holds)). |
@@ -437,6 +443,26 @@ records `completed: { by, pieces, at }`.
 
 Each file's coverage is recorded in its import's ledger (`verified`), so what
 went into a merged day can be rebuilt.
+
+**Filings are grouped** (decision 0024). The store files one batch at a
+time. Imports and batches filed as partial days that wait for the filing
+in progress are then filed together, up to 16 as one group (the rest in
+the next), and each day the group
+touches is written once: the day held and every file for it, merged in
+timestamp order (ties: the day held, then the files in the order they were
+asked), read back and checked input by input as above, its records the
+day's recorded count plus every file's. Each filing still answers for
+itself, as if filed alone after the ones asked before it: its checks run
+against the days held and what those will file, and one refused (say, for
+contracts held over the same hours, or an instrument ID that is another
+contract in the day) is refused with the same reason, the others filed
+without it. The day's entry names one `source`, the group's first merged
+filing; every filing's ledger records the merge (`merged`, its `inputs`
+the day held, its own file, then the group's others) and the swap. A group's merge is swapped in as one, so an interrupted one settles
+to the day before the group or after all of it, and filing again finishes
+each filing: one whose ledger merged its file into the day, and whose
+coverage the day holds, is dropped as a duplicate. A filing runs to its
+end even if the request asking for it is dropped.
 
 ### `POST /coverage/rebuild`
 

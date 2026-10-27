@@ -31,8 +31,15 @@
 //!   the batch. Jobs submitted here download by themselves once done.
 //!   Downloading an already purchased job never charges again.
 //!
+//! **Several stores** (decision 0025): `--store` repeated, the first the
+//! default. Every read of what's held or filed asks every store and merges
+//! the answers, and fails (a purchase is refused) unless every store
+//! answers. Each job is downloaded and filed whole on one store: the one
+//! already holding its files or the days it merges into, else the first
+//! with room for it, net of the downloads in flight.
+//!
 //! The API key comes from `DATABENTO_API_KEY` or `DATABENTO_API_KEY_FILE`.
-//! The store's write token, when the store requires one, from
+//! The stores' write token, when they require one, from
 //! `JOBS_STORE_TOKEN` or `JOBS_STORE_TOKEN_FILE`: sent, as a bearer token, on
 //! the uploads and filing only, never to Databento.
 
@@ -70,9 +77,11 @@ use tinytrader_observe::{Events, Observer, State, listen_address};
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
-    /// The store's address.
-    #[arg(long, env = "JOBS_STORE", default_value = "http://127.0.0.1:9120")]
-    store: String,
+    /// The stores' addresses, the first the default (decision 0025):
+    /// `--store` repeated, or separated by commas. Without any, the one
+    /// `JOBS_STORE` names, or `http://127.0.0.1:9120`.
+    #[arg(long = "store", env = "JOBS_STORES", value_delimiter = ',')]
+    stores: Vec<String>,
 
     /// How often to refresh the jobs list, in seconds.
     #[arg(long, env = "JOBS_REFRESH_SECONDS", default_value_t = 30)]
@@ -102,6 +111,11 @@ struct Args {
     /// before it is sent. Without one, nothing is submitted.
     #[arg(long, env = "JOBS_LEDGER")]
     ledger: Option<std::path::PathBuf>,
+
+    /// Jobs downloaded at once (decision 0024). Filing is left to the
+    /// store, which files one at a time.
+    #[arg(long, env = "JOBS_DOWNLOADS", default_value_t = 4)]
+    downloads: usize,
 }
 
 /// How long a price stays good for submitting: an hour when it costs
@@ -392,8 +406,10 @@ struct Jobs {
     checked_at: Mutex<Option<f64>>,
     key: String,
     http: reqwest::Client,
+    /// The default store, and the others (see [`Jobs::stores`]).
     store: String,
-    /// The store's write token, if it requires one.
+    others: Vec<String>,
+    /// The stores' write token, if they require one.
     store_token: Option<String>,
     quotes: Mutex<HashMap<String, Quote>>,
     /// The token a paid purchase's approval carries (`JOBS_APPROVE_TOKEN`);
@@ -429,7 +445,14 @@ struct Jobs {
     /// Bytes to download (compressed, as delivered) of done jobs.
     delivered: Mutex<HashMap<String, u64>>,
     listed: Mutex<Value>,
-    one_at_a_time: tokio::sync::Semaphore,
+    /// Downloads running at once (`--downloads`), each until its files and
+    /// manifest are in the store's incoming folder, not while it files.
+    downloads: tokio::sync::Semaphore,
+    /// The room each job in flight holds until it files or fails: its
+    /// download's bytes not yet in the store (those that are count in its
+    /// free room), its merges' by volume, and the store.
+    reserved: Mutex<HashMap<String, (u64, ByVolume, String)>>,
+    room_check: tokio::sync::Mutex<()>,
     /// While in the pause window, when it ends (ns since the epoch); else 0.
     /// Nonzero while yielding to live capture.
     paused_until: AtomicU64,
@@ -460,6 +483,7 @@ impl Jobs {
             key,
             http,
             store: store.trim_end_matches('/').to_owned(),
+            others: Vec::new(),
             store_token,
             quotes: Mutex::default(),
             approve_token: None,
@@ -477,7 +501,9 @@ impl Jobs {
             details: Mutex::default(),
             delivered: Mutex::default(),
             listed: Mutex::new(json!({ "jobs": [], "updated_at": null })),
-            one_at_a_time: tokio::sync::Semaphore::new(1),
+            downloads: tokio::sync::Semaphore::new(4),
+            reserved: Mutex::default(),
+            room_check: tokio::sync::Mutex::new(()),
             events: Events::default(),
             next_quote: AtomicU64::new(1),
             boot: {
@@ -499,6 +525,11 @@ impl Jobs {
         }
     }
 
+    /// Every store, the default first.
+    fn stores(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.store.as_str()).chain(self.others.iter().map(String::as_str))
+    }
+
     /// A write to the store, with its token when it requires one.
     fn store_write(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.store_token {
@@ -509,6 +540,8 @@ impl Jobs {
 }
 
 type Shared = Arc<Jobs>;
+/// Bytes by volume name.
+type ByVolume = HashMap<String, u64>;
 type Reply = (StatusCode, Json<Value>);
 
 fn refused(code: StatusCode, why: impl Into<String>) -> Reply {
@@ -566,10 +599,20 @@ async fn main() {
             );
         }
     }
+    let mut stores: Vec<String> = args
+        .stores
+        .iter()
+        .map(|s| s.trim().trim_end_matches('/').to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if stores.is_empty() {
+        let one = std::env::var("JOBS_STORE");
+        stores.push(one.unwrap_or_else(|_| "http://127.0.0.1:9120".into()));
+    }
     let mut jobs = Jobs::new(
         Arc::new(api::Live::new(db)),
         key,
-        &args.store,
+        &stores[0],
         store_token,
         ledger,
         reqwest::Client::builder()
@@ -589,7 +632,9 @@ async fn main() {
             })
         })
         .collect();
+    jobs.others = stores.split_off(1);
     jobs.capture_hours = args.capture_hours;
+    jobs.downloads = tokio::sync::Semaphore::new(args.downloads.max(1));
     jobs.approve_token = match tinytrader_observe::optional_secret("JOBS_APPROVE_TOKEN") {
         Ok(t) => t,
         Err(e) => {
@@ -658,8 +703,8 @@ async fn main() {
         }
     };
     eprintln!(
-        "databento-jobs: store at {}; endpoints on http://{listen}",
-        jobs.store
+        "databento-jobs: stores at {}; endpoints on http://{listen}",
+        jobs.stores().collect::<Vec<_>>().join(", ")
     );
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -804,21 +849,9 @@ async fn refresh(jobs: &Shared) -> Result<Refreshed, String> {
             .map(|e| l.attempt_at(e))
             .reduce(f64::min)
     });
-    // What the store already holds, first: only jobs not on disk need
+    // What the stores already hold, first: only jobs not on disk need
     // their file lists (for the size a download would take).
-    let held: Value = match jobs
-        .http
-        .get(format!("{}/batches/databento", jobs.store))
-        .send()
-        .await
-    {
-        Ok(r) => r
-            .json::<Value>()
-            .await
-            .map(|v| v["batches"].clone())
-            .unwrap_or(Value::Null),
-        Err(_) => Value::Null,
-    };
+    let held = held_batches(jobs).await.unwrap_or(Value::Null);
     let (mut out, mut expired) = (Vec::new(), Vec::new());
     // A finished job's details never change; others are read again each
     // round. When Databento can't answer for one, its last-known details
@@ -1157,9 +1190,29 @@ async fn availability(
 /// answers 503 until its first scan) and every volume the store knows is
 /// present: `missing_volumes` empty, where its absence means a store too old
 /// to say. `fresh`: from a full rescan begun after asking (`fresh=1`), which
-/// the store waits up to 120 s for.
+/// the store waits up to 120 s for. Asked of every store at once (decision
+/// 0025): their answers, in order, or the first refusal.
 async fn store_json(
     jobs: &Jobs,
+    path: &str,
+    query: &[(&str, &str)],
+    fresh: bool,
+) -> Result<Vec<Value>, String> {
+    let one = |store: &str| {
+        let named = !jobs.others.is_empty();
+        let store = store.to_owned();
+        async move {
+            store_json_at(jobs, &store, path, query, fresh)
+                .await
+                .map_err(|e| if named { format!("{store}: {e}") } else { e })
+        }
+    };
+    futures_util::future::try_join_all(jobs.stores().map(one)).await
+}
+
+async fn store_json_at(
+    jobs: &Jobs,
+    store: &str,
     path: &str,
     query: &[(&str, &str)],
     fresh: bool,
@@ -1168,7 +1221,7 @@ async fn store_json(
     if fresh {
         query.push(("fresh", "1"));
     }
-    let url = reqwest::Url::parse_with_params(&format!("{}{path}", jobs.store), &query)
+    let url = reqwest::Url::parse_with_params(&format!("{store}{path}"), &query)
         .map_err(|e| format!("the store's {path}: {e}"))?;
     let url = &url;
     let fail = |e: reqwest::Error| (!e.is_timeout(), format!("the store's {path}: {e}"));
@@ -1274,7 +1327,12 @@ async fn had(
         .unwrap_or_default();
     let range = (had::day_window(start).0, had::day_window(end).0);
     let schema = schema.as_str();
-    let mut pieces = had::store_pieces(&catalog, &coverage, dataset, schema, target, range);
+    // Each store's catalog is explained by its own coverage.
+    let mut pieces: Vec<had::Piece> = catalog
+        .iter()
+        .zip(&coverage)
+        .flat_map(|(c, v)| had::store_pieces(c, v, dataset, schema, target, range))
+        .collect();
     pieces.extend(had::job_pieces(&live, dataset, schema, target));
     pieces.extend(had::ledger_pieces(
         &purchases, dataset, schema, target, &ids,
@@ -1566,34 +1624,32 @@ fn overlap(parts: &[missing::Part]) -> Option<String> {
     None
 }
 
-/// The store's definition days of `parent`: day → (volume, path).
+/// The stores' definition days of `parent`: day → the file's URL, on the
+/// first store that has it.
 async fn definitions(
     jobs: &Jobs,
     dataset: &str,
     parent: &str,
-) -> Result<HashMap<String, (String, String)>, (StatusCode, String)> {
-    let listing: Value = store_get(
-        jobs,
-        &format!(
-            "{}/files?provider=databento&pattern=*/{dataset}/{parent}/definition/*",
-            jobs.store
-        ),
-        |body| serde_json::from_slice(body).map_err(|e| format!("store: {e}")),
-    )
-    .await?;
-    Ok(listing["files"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|f| {
-            let path = f["path"].as_str()?;
-            let day = path.rsplit('/').next()?.strip_suffix(".dbn.zst")?;
-            Some((
-                day.to_owned(),
-                (f["volume"].as_str()?.to_owned(), path.to_owned()),
-            ))
-        })
-        .collect())
+) -> Result<HashMap<String, String>, (StatusCode, String)> {
+    let mut out = HashMap::new();
+    for store in jobs.stores() {
+        let listing: Value = store_get(
+            jobs,
+            &format!("{store}/files?provider=databento&pattern=*/{dataset}/{parent}/definition/*"),
+            |body| serde_json::from_slice(body).map_err(|e| format!("store: {e}")),
+        )
+        .await?;
+        for f in listing["files"].as_array().into_iter().flatten() {
+            let (Some(volume), Some(path)) = (f["volume"].as_str(), f["path"].as_str()) else {
+                continue;
+            };
+            if let Some(day) = path.rsplit('/').next().and_then(|n| n.strip_suffix(".dbn.zst")) {
+                out.entry(day.to_owned())
+                    .or_insert_with(|| format!("{store}/files/{volume}/{path}"));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// A read of the store (120 s at most each try), its answer read by
@@ -1664,12 +1720,12 @@ async fn contract_day(
     jobs: &Jobs,
     a: &Asked,
     pieces: &[had::Piece],
-    defs: &HashMap<String, (String, String)>,
+    defs: &HashMap<String, String>,
     d: time::Date,
     window: had::Window,
 ) -> Result<(Vec<missing::Part>, Option<String>), (StatusCode, String)> {
     let key = d.to_string();
-    let Some((volume, path)) = defs.get(&key) else {
+    let Some(url) = defs.get(&key) else {
         let why = format!(
             "{key}: the store has no {} definitions for this day; buy those first",
             a.symbol
@@ -1680,8 +1736,7 @@ async fn contract_day(
         let weekend = matches!(d.weekday(), time::Weekday::Saturday | time::Weekday::Sunday);
         return Ok((Vec::new(), (!weekend).then_some(why)));
     };
-    let url = format!("{}/files/{volume}/{path}", jobs.store);
-    let all = store_get(jobs, &url, missing::contracts).await?;
+    let all = store_get(jobs, url, missing::contracts).await?;
     let wanted = match a.contracts.as_ref().and_then(|m| m.get(&d)) {
         Some(list) => {
             let known: HashSet<&str> = all.iter().map(|c| c.symbol.as_str()).collect();
@@ -2370,13 +2425,14 @@ fn start_download(jobs: &Shared, job: String) {
     });
     let jobs = jobs.clone();
     tokio::spawn(async move {
-        let _turn = jobs.one_at_a_time.acquire().await;
+        let turn = jobs.downloads.acquire().await.ok();
         // Downloads wait while capture is live.
         while jobs.paused_until.load(Ordering::Relaxed) != 0 {
             set(&jobs, &job, |t| t.state = "waiting: capture is live".into());
             tokio::time::sleep(Duration::from_secs(15)).await;
         }
-        let result = fetch_and_file(&jobs, &job).await;
+        let result = fetch_and_file(&jobs, &job, turn).await;
+        lock(&jobs.reserved).remove(&job);
         match result {
             Ok(n) => {
                 lock(&jobs.tries).remove(&job);
@@ -2414,27 +2470,59 @@ fn start_download(jobs: &Shared, job: String) {
     });
 }
 
-/// Whether the store has already filed this batch.
-async fn filed(jobs: &Jobs, job: &str) -> bool {
-    let r = jobs
-        .http
-        .get(format!("{}/batches/databento", jobs.store))
-        .timeout(Duration::from_secs(120))
-        .send()
-        .await;
-    match r {
-        Ok(r) if r.status().is_success() => r
-            .json::<Value>()
+/// Databento's batches as every store holds them, merged: a batch filed on
+/// any store is filed. Fails unless every store answers.
+async fn held_batches(jobs: &Jobs) -> Result<Value, String> {
+    let reads = jobs.stores().map(|s| async move {
+        let r = jobs
+            .http
+            .get(format!("{s}/batches/databento"))
+            .timeout(Duration::from_secs(120))
+            .send()
             .await
-            .is_ok_and(|v| v["batches"][job]["how"] == "filed"),
-        _ => false,
+            .map_err(|e| format!("{s}: {e}"))?;
+        if !r.status().is_success() {
+            return Err(format!("{s}/batches/databento: HTTP {}", r.status()));
+        }
+        let v: Value = r.json().await.map_err(|e| format!("{s}: {e}"))?;
+        Ok(v["batches"].clone())
+    });
+    let mut out = serde_json::Map::new();
+    for answer in futures_util::future::try_join_all(reads).await? {
+        for (id, b) in answer.as_object().into_iter().flatten() {
+            if out.get(id).is_none_or(|e| e["how"] != "filed" && b["how"] == "filed") {
+                out.insert(id.clone(), b.clone());
+            }
+        }
     }
+    Ok(Value::Object(out))
 }
 
-/// Stream every file of a done job into the store, then have it filed
-/// (none, `Ok(0)`, when the store already has).
-async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
-    if filed(jobs, job).await {
+/// Whether any store has filed this batch already.
+async fn filed(jobs: &Jobs, job: &str) -> Result<bool, String> {
+    Ok(held_batches(jobs).await?[job]["how"] == "filed")
+}
+
+/// Whether a store can take a job now, net of the room the downloads in
+/// flight hold (its room is then reserved for the job); or why not, and
+/// whether it could once they are filed.
+enum Fit {
+    Reserved,
+    Wait(String),
+    Never(String),
+}
+
+/// Stream every file of a done job into a store, then, its download's
+/// `turn` given back, have it filed there (none, `Ok(0)`, when a store
+/// already has). The store: one already holding the days it merges into, or
+/// some of its files, if one does; else the first with room for it.
+async fn fetch_and_file(
+    jobs: &Jobs,
+    job: &str,
+    turn: Option<tokio::sync::SemaphorePermit<'_>>,
+) -> Result<usize, String> {
+    // Not knowing for every store, it fails, and is tried again later.
+    if filed(jobs, job).await? {
         return Ok(0);
     }
     let files = jobs
@@ -2442,82 +2530,51 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
         .files(job)
         .await
         .map_err(|e| format!("list files: {e}"))?;
-    // What the store already has of this batch (verified on arrival).
-    let incoming: Value = store_read(jobs, "/incoming", Duration::from_secs(60))
-        .await?
-        .json()
-        .await
-        .map_err(|e| format!("store: {e}"))?;
-    let have: HashMap<String, u64> = incoming["batches"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|b| b["batch"] == job)
-        .flat_map(|b| b["files"].as_array().cloned().unwrap_or_default())
-        .filter_map(|f| Some((f["name"].as_str()?.to_owned(), f["bytes"].as_u64()?)))
-        .collect();
     let total: u64 = files.iter().map(|f| f.size).sum();
-    let needed = total
-        - files
-            .iter()
-            .filter(|f| have.get(&f.filename) == Some(&f.size))
-            .map(|f| f.size)
-            .sum::<u64>();
-    // Files are placed one by one on whichever drive has most room
-    // (decision 0007): the pool must hold them all, and a drive the largest.
-    let (pool, one, _) = room(jobs).await?;
-    if needed > pool {
-        return Err(format!(
-            "needs {}, but the store has room for {} across its drives",
-            gb(needed),
-            gb(pool)
-        ));
-    }
-    let largest = files
-        .iter()
-        .filter(|f| have.get(&f.filename) != Some(&f.size))
-        .map(|f| f.size)
-        .max()
-        .unwrap_or(0);
-    if largest > one {
-        return Err(format!(
-            "its largest file is {}, but no drive has room for more than {}",
-            gb(largest),
-            gb(one)
-        ));
-    }
-    // Merging into a day held takes room for both files on its volume:
-    // wait for it, saying so.
+    // Each store's share of it already: its files there (verified on
+    // arrival), and the room merging into the days it holds takes there.
     let details = lock(&jobs.details).get(job).cloned();
-    if let Some(j) = details
-        && let Some(parent) = contract_parent(&j)
-    {
-        let need = merge_room(jobs, &j, &parent, &files).await?;
-        let until = Instant::now() + jobs.merge_wait;
-        loop {
-            let (_, _, each) = room(jobs).await?;
-            let short: Vec<String> = need
-                .iter()
-                .filter(|(v, n)| each.get(*v).copied().unwrap_or(0) < **n)
-                .map(|(v, n)| {
-                    format!(
-                        "{v} needs {} to merge these days, and has room for {}",
-                        gb(*n),
-                        gb(each.get(v).copied().unwrap_or(0))
-                    )
-                })
-                .collect();
-            if short.is_empty() {
-                break;
-            }
-            let why = short.join("; ");
-            if Instant::now() >= until {
-                return Err(why);
-            }
-            set(jobs, job, |t| t.state = format!("waiting: {why}"));
-            tokio::time::sleep(Duration::from_millis(if cfg!(test) { 10 } else { 60_000 })).await;
-        }
+    let parent = details.and_then(|j| contract_parent(&j).map(|p| (j, p)));
+    let mut places = Vec::new();
+    for store in jobs.stores() {
+        let have = incoming(jobs, store, job).await?;
+        let merges = match &parent {
+            Some((j, p)) => merge_room(jobs, store, j, p, &files).await?,
+            None => HashMap::new(),
+        };
+        let holds = files.iter().any(|f| have.get(&f.filename) == Some(&f.size));
+        places.push((store.to_owned(), have, merges, holds));
     }
+    // A day merges where it's held.
+    if places.iter().any(|p| !p.2.is_empty()) {
+        places.retain(|p| !p.2.is_empty());
+    }
+    places.sort_by_key(|p| !p.3);
+    // Checked and reserved as one step; until a store has room, it waits,
+    // saying why.
+    let until = Instant::now() + jobs.merge_wait;
+    let (store, have) = 'found: loop {
+        let (mut whys, mut wait) = (Vec::new(), false);
+        for (store, have, merges, _) in &places {
+            let (why, later) = match reserve(jobs, store, job, &files, have, merges).await? {
+                Fit::Reserved => break 'found (store.as_str(), have),
+                Fit::Wait(w) => (w, true),
+                Fit::Never(w) => (w, false),
+            };
+            wait |= later;
+            whys.push(if jobs.others.is_empty() {
+                why
+            } else {
+                format!("{store}: {why}")
+            });
+        }
+        let why = whys.join("; ");
+        if !wait || Instant::now() >= until {
+            return Err(why);
+        }
+        set(jobs, job, |t| t.state = format!("waiting: {why}"));
+        tokio::time::sleep(Duration::from_millis(if cfg!(test) { 10 } else { 60_000 })).await;
+    };
     set(jobs, job, |t| {
         t.state = "downloading".into();
         t.total_bytes = total;
@@ -2547,8 +2604,13 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
             let mut attempt = 0;
             loop {
                 attempt += 1;
-                match copy(jobs, job, &f.filename, url, f.size, &f.hash, done).await {
-                    Ok(()) => break,
+                match copy(jobs, store, job, f, url, done).await {
+                    Ok(()) => {
+                        if let Some(r) = lock(&jobs.reserved).get_mut(job) {
+                            r.0 = r.0.saturating_sub(f.size);
+                        }
+                        break;
+                    }
                     Err(e) if attempt < 3 => {
                         eprintln!("databento-jobs: {job}/{}: {e}; retrying", f.filename);
                         tokio::time::sleep(Duration::from_secs(5 * attempt)).await;
@@ -2567,10 +2629,10 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
             "files": files.iter().map(|f| json!({ "filename": f.filename, "size": f.size, "hash": f.hash })).collect::<Vec<_>>(),
         });
         let r = jobs
-            .store_write(jobs.http.put(format!(
-                "{}/incoming/databento/{job}/manifest.json",
-                jobs.store
-            )))
+            .store_write(
+                jobs.http
+                    .put(format!("{store}/incoming/databento/{job}/manifest.json")),
+            )
             .body(manifest.to_string())
             .send()
             .await
@@ -2582,19 +2644,20 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
             ));
         }
     }
+    drop(turn);
     set(jobs, job, |t| {
         t.state = "filing".into();
         t.file.clear();
     });
     // A job bought as a list of one option parent's contracts is filed as
     // partial days of that parent (decision 0018).
-    if filed(jobs, job).await {
+    if filed(jobs, job).await.unwrap_or(false) {
         return Ok(0);
     }
     let parent = lock(&jobs.details).get(job).and_then(contract_parent);
     let url = match &parent {
-        Some(p) => format!("{}/incorporate/databento/{job}?parent={p}", jobs.store),
-        None => format!("{}/incorporate/databento/{job}", jobs.store),
+        Some(p) => format!("{store}/incorporate/databento/{job}?parent={p}"),
+        None => format!("{store}/incorporate/databento/{job}"),
     };
     let r = jobs
         .store_write(jobs.http.post(url))
@@ -2611,17 +2674,102 @@ async fn fetch_and_file(jobs: &Jobs, job: &str) -> Result<usize, String> {
     Ok(files.len())
 }
 
-/// What the store can take before its writable volumes reach the critical
-/// threshold, in bytes: across them all, and on the roomiest one.
-/// A read of the store for a download: while it rescans (it answers 503),
+/// What a store already has of a job, verified on arrival: each file's size.
+async fn incoming(jobs: &Jobs, store: &str, job: &str) -> Result<HashMap<String, u64>, String> {
+    let incoming: Value = store_read(jobs, store, "/incoming", Duration::from_secs(60))
+        .await?
+        .json()
+        .await
+        .map_err(|e| format!("store: {e}"))?;
+    Ok(incoming["batches"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| b["batch"] == job)
+        .flat_map(|b| b["files"].as_array().cloned().unwrap_or_default())
+        .filter_map(|f| Some((f["name"].as_str()?.to_owned(), f["bytes"].as_u64()?)))
+        .collect())
+}
+
+/// Whether `store` has room for a job's files it doesn't `have` yet, and
+/// for its `merges`, net of what the downloads in flight to it hold (each
+/// might land on any drive): reserved for the job if so.
+async fn reserve(
+    jobs: &Jobs,
+    store: &str,
+    job: &str,
+    files: &[databento::historical::batch::BatchFileDesc],
+    have: &HashMap<String, u64>,
+    merges: &ByVolume,
+) -> Result<Fit, String> {
+    // Files are placed one by one on whichever drive has most room
+    // (decision 0007): the pool must hold them all, and a drive the largest.
+    let missing = files.iter().filter(|f| have.get(&f.filename) != Some(&f.size));
+    let needed: u64 = missing.clone().map(|f| f.size).sum();
+    let largest = missing.map(|f| f.size).max().unwrap_or(0);
+    let _one_at_a_time = jobs.room_check.lock().await;
+    let (pool, one, each) = room(jobs, store).await?;
+    if needed > pool {
+        return Ok(Fit::Never(format!(
+            "needs {}, but the store has room for {} across its drives",
+            gb(needed),
+            gb(pool)
+        )));
+    }
+    if largest > one {
+        return Ok(Fit::Never(format!(
+            "its largest file is {}, but no drive has room for more than {}",
+            gb(largest),
+            gb(one)
+        )));
+    }
+    let mut held = lock(&jobs.reserved);
+    let here: Vec<&(u64, ByVolume, String)> = held.values().filter(|r| r.2 == store).collect();
+    let flight: u64 = here.iter().map(|r| r.0).sum();
+    let merging: u64 = here.iter().flat_map(|r| r.1.values()).sum();
+    let free = |v: &String| {
+        let m: u64 = here.iter().filter_map(|r| r.1.get(v)).sum();
+        each.get(v).copied().unwrap_or(0).saturating_sub(flight + m)
+    };
+    // Merging into a day held takes room for both files on its volume.
+    let mut short: Vec<String> = merges
+        .iter()
+        .filter(|(v, n)| free(v) < **n)
+        .map(|(v, n)| {
+            format!(
+                "{v} needs {} to merge these days, and has room for {}",
+                gb(*n),
+                gb(free(v))
+            )
+        })
+        .collect();
+    if needed > pool.saturating_sub(flight + merging)
+        || largest > each.keys().map(free).max().unwrap_or(0)
+    {
+        short.push("downloads in flight hold the room it needs".into());
+    }
+    if !short.is_empty() {
+        return Ok(Fit::Wait(short.join("; ")));
+    }
+    drop(here);
+    held.insert(job.to_owned(), (needed, merges.clone(), store.to_owned()));
+    Ok(Fit::Reserved)
+}
+
+/// A read of a store for a download: while it rescans (it answers 503),
 /// it waits, longer each time, up to `store_wait`.
-async fn store_read(jobs: &Jobs, path: &str, limit: Duration) -> Result<reqwest::Response, String> {
+async fn store_read(
+    jobs: &Jobs,
+    store: &str,
+    path: &str,
+    limit: Duration,
+) -> Result<reqwest::Response, String> {
     let until = Instant::now() + jobs.store_wait;
     let mut wait = Duration::from_millis(if cfg!(test) { 10 } else { 5_000 });
     let r = loop {
         let r = jobs
             .http
-            .get(format!("{}{path}", jobs.store))
+            .get(format!("{store}{path}"))
             .timeout(limit)
             .send()
             .await
@@ -2642,8 +2790,8 @@ async fn store_read(jobs: &Jobs, path: &str, limit: Duration) -> Result<reqwest:
 /// What the store can take before its writable volumes reach the critical
 /// threshold, in bytes: across them all, on the roomiest one, and on each
 /// by name.
-async fn room(jobs: &Jobs) -> Result<(u64, u64, HashMap<String, u64>), String> {
-    let c: Value = store_read(jobs, "/catalog", Duration::from_secs(120))
+async fn room(jobs: &Jobs, store: &str) -> Result<(u64, u64, HashMap<String, u64>), String> {
+    let c: Value = store_read(jobs, store, "/catalog", Duration::from_secs(120))
         .await?
         .json()
         .await
@@ -2674,6 +2822,7 @@ async fn room(jobs: &Jobs) -> Result<(u64, u64, HashMap<String, u64>), String> {
 /// file it is merged with, on each volume holding that day (`/coverage`).
 async fn merge_room(
     jobs: &Jobs,
+    store: &str,
     j: &BatchJob,
     parent: &str,
     files: &[databento::historical::batch::BatchFileDesc],
@@ -2702,7 +2851,7 @@ async fn merge_room(
     let path = reqwest::Url::parse_with_params("http://x/coverage", &query)
         .map(|u| format!("/coverage?{}", u.query().unwrap_or_default()))
         .map_err(|e| e.to_string())?;
-    let coverage: Value = store_read(jobs, &path, Duration::from_secs(120))
+    let coverage: Value = store_read(jobs, store, &path, Duration::from_secs(120))
         .await?
         .json()
         .await
@@ -2764,17 +2913,17 @@ fn gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1e9)
 }
 
-/// Stream one file from Databento into the store, which checks its size and
+/// Stream one file from Databento into a store, which checks its size and
 /// hash before keeping it.
 async fn copy(
     jobs: &Jobs,
+    store: &str,
     job: &str,
-    name: &str,
+    f: &databento::historical::batch::BatchFileDesc,
     url: &str,
-    size: u64,
-    hash: &str,
     before: u64,
 ) -> Result<(), String> {
+    let (name, size, hash) = (&f.filename, f.size, &f.hash);
     let resp = jobs
         .http
         .get(url)
@@ -2796,8 +2945,7 @@ async fn copy(
     let sha = hash.trim_start_matches("sha256:");
     let put = jobs
         .store_write(jobs.http.put(format!(
-            "{}/incoming/databento/{job}/{name}?size={size}&sha256={sha}",
-            jobs.store
+            "{store}/incoming/databento/{job}/{name}?size={size}&sha256={sha}"
         )))
         .body(reqwest::Body::wrap_stream(body))
         .send();

@@ -2235,3 +2235,328 @@ async fn store_reads_are_tried_again_after_a_dropped_answer() {
     assert_eq!((day.map(|c| c.len()), n), (Ok(1), 2));
     let _ = std::fs::remove_dir_all(&r.dir);
 }
+
+/// Downloads running now, the most at once, and each job's in the order
+/// they started.
+type Source = Arc<Mutex<(usize, usize, Vec<String>)>>;
+
+/// Contract jobs whose files a source serves, each taking `ms` to answer.
+async fn slow_jobs(r: &Rig, ids: &[&str], ms: u64) -> Source {
+    let (addr, seen) = source(ms).await;
+    for id in ids {
+        contract_job(r, id);
+        for f in lock(&r.fake.s).files.get_mut(*id).unwrap() {
+            f.urls = [("https".to_owned(), format!("{addr}/dl/{id}"))].into();
+        }
+    }
+    seen
+}
+
+/// A source of downloads, each taking `ms` to answer: its address.
+async fn source(ms: u64) -> (String, Source) {
+    let seen = Source::default();
+    let app = Router::new()
+        .route(
+            "/dl/{job}",
+            get(
+                move |AxState(s): AxState<Source>, UrlPath(job): UrlPath<String>| async move {
+                    {
+                        let mut s = lock(&s);
+                        s.0 += 1;
+                        s.1 = s.1.max(s.0);
+                        s.2.push(job);
+                    }
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                    lock(&s).0 -= 1;
+                    "dbn bytes"
+                },
+            ),
+        )
+        .with_state(seen.clone());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, app).await });
+    (format!("http://{addr}"), seen)
+}
+
+const FIVE: [&str; 5] = ["OPRA-D1", "OPRA-D2", "OPRA-D3", "OPRA-D4", "OPRA-D5"];
+
+#[tokio::test]
+async fn four_downloads_run_at_once_and_a_fifth_waits() {
+    let r = rig("four-at-once").await;
+    // Each download takes a second: had the fifth not waited, five would
+    // have run at once.
+    let seen = slow_jobs(&r, &FIVE, 1_000).await;
+    for id in FIVE.iter().chain(&FIVE) {
+        // Each job asked for twice: run once.
+        start_download(&r.jobs, (*id).to_owned());
+    }
+    for _ in 0..1_000 {
+        if lock(&r.jobs.in_flight).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (_, most, order) = lock(&seen).clone();
+    assert_eq!((most, order.len()), (4, 5));
+    assert_eq!(lock(&r.store).incorporated.len(), 5);
+}
+
+#[tokio::test]
+async fn with_one_download_at_a_time_they_keep_their_order() {
+    let r = rig_with("one-at-once", |j| {
+        j.downloads = tokio::sync::Semaphore::new(1)
+    })
+    .await;
+    let seen = slow_jobs(&r, &FIVE, 20).await;
+    for id in FIVE {
+        start_download(&r.jobs, id.to_owned());
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    settled(&r).await;
+    let (_, most, order) = lock(&seen).clone();
+    assert_eq!((most, order), (1, FIVE.map(str::to_owned).to_vec()));
+}
+
+#[tokio::test]
+async fn a_filing_in_progress_doesnt_hold_a_download_back() {
+    let r = rig_with("filing-apart", |j| {
+        j.downloads = tokio::sync::Semaphore::new(1)
+    })
+    .await;
+    let seen = slow_jobs(&r, &FIVE[..2], 10).await;
+    lock(&r.store).incorporate_delay_ms = 2_000;
+    start_download(&r.jobs, FIVE[0].to_owned());
+    start_download(&r.jobs, FIVE[1].to_owned());
+    for _ in 0..100 {
+        if lock(&seen).2.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // The second downloaded while the first was still filing.
+    assert_eq!(lock(&seen).2.len(), 2);
+    assert!(lock(&r.store).incorporated.is_empty());
+    assert_eq!(lock(&r.jobs.transfers)[FIVE[0]].state, "filing");
+}
+
+#[tokio::test]
+async fn the_capture_live_pause_holds_every_download() {
+    let r = rig("pause-all").await;
+    let seen = slow_jobs(&r, &FIVE, 10).await;
+    r.jobs.paused_until.store(1, Ordering::Relaxed);
+    for id in FIVE {
+        start_download(&r.jobs, id.to_owned());
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(lock(&seen).2.is_empty());
+    let t = lock(&r.jobs.transfers);
+    let count = |state: &str| FIVE.iter().filter(|id| t[**id].state == state).count();
+    // Four hold their turn, waiting out the capture; the fifth waits for a turn.
+    assert_eq!(
+        (count("waiting: capture is live"), count("waiting")),
+        (4, 1)
+    );
+}
+
+#[tokio::test]
+async fn downloads_in_flight_hold_their_room() {
+    let r = rig("room-in-flight").await;
+    let seen = slow_jobs(&r, &FIVE[..2], 500).await;
+    // Room for one 9-byte job, not two.
+    lock(&r.store).catalog.1["roots"][0]["volume"]["available_bytes"] = json!(1e11 + 15.0);
+    for id in &FIVE[..2] {
+        start_download(&r.jobs, (*id).to_owned());
+    }
+    let mut waited = false;
+    for _ in 0..500 {
+        waited |= lock(&r.jobs.transfers)
+            .values()
+            .any(|t| t.state.contains("downloads in flight hold the room"));
+        if lock(&r.jobs.in_flight).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(waited);
+    assert_eq!((lock(&seen).1, lock(&r.store).incorporated.len()), (1, 2));
+    assert!(lock(&r.jobs.reserved).is_empty(), "released once filed");
+}
+
+#[tokio::test]
+async fn bytes_landed_count_once() {
+    let r = rig("room-landed").await;
+    let ((fast, seen), (slow, _)) = (source(10).await, source(3_000).await);
+    // A: two 9-byte files, the second slow. B fits beside what A has left
+    // to land; C, 12 bytes, doesn't.
+    let file = |name: &str, size: u64, url: &str, id: &str| BatchFileDesc {
+        filename: format!("opra-pillar-{name}.cmbp-1.dbn.zst"),
+        size,
+        hash: "sha256:00".into(),
+        urls: [("https".to_owned(), format!("{url}/dl/{id}"))].into(),
+    };
+    for (id, files) in [
+        (
+            "OPRA-A",
+            vec![
+                file("20261002", 9, &fast, "A"),
+                file("20261005", 9, &slow, "A"),
+            ],
+        ),
+        ("OPRA-B", vec![file("20261002", 9, &fast, "B")]),
+        ("OPRA-C", vec![file("20261002", 12, &fast, "C")]),
+    ] {
+        contract_job(&r, id);
+        lock(&r.fake.s).files.insert(id.into(), files);
+    }
+    // 20 bytes free, A's first file in it already.
+    lock(&r.store).catalog.1["roots"][0]["volume"]["available_bytes"] = json!(1e11 + 20.0);
+    start_download(&r.jobs, "OPRA-A".into());
+    // Its first file landed: only the second is held.
+    for _ in 0..300 {
+        if lock(&r.jobs.reserved)
+            .get("OPRA-A")
+            .is_some_and(|a| a.0 == 9)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(lock(&r.jobs.reserved)["OPRA-A"].0, 9);
+    start_download(&r.jobs, "OPRA-B".into());
+    start_download(&r.jobs, "OPRA-C".into());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(lock(&seen).2.contains(&"B".to_owned()), "B went ahead");
+    assert!(!lock(&seen).2.contains(&"C".to_owned()));
+    let t = lock(&r.jobs.transfers);
+    assert!(
+        t["OPRA-C"]
+            .state
+            .contains("downloads in flight hold the room"),
+        "{}",
+        t["OPRA-C"].state
+    );
+}
+
+/// A rig with a second store (decision 0025) after its own, the default.
+async fn two_stores(name: &str) -> (Rig, StoreHandle) {
+    let b = Arc::new(Mutex::new(ready_store()));
+    let url = serve_store(b.clone()).await;
+    (rig_with(name, |j| j.others = vec![url]).await, b)
+}
+
+/// The address of a store that never answers: nothing listens there.
+async fn gone() -> String {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    format!("http://{}", l.local_addr().unwrap())
+}
+
+#[tokio::test]
+async fn any_store_that_cant_say_what_it_holds_refuses_every_purchase() {
+    let missing = (200, json!({ "roots": [], "missing_volumes": ["B-1"] }));
+    for n in 0..3 {
+        let (r, b) = two_stores(&format!("second-{n}")).await;
+        // Priced while both could say, submitted once the second can't.
+        let q = r.quote("SPY.OPT", DAY, DAY).await;
+        assert!(!q.is_empty());
+        match n {
+            0 => lock(&b).catalog = (503, json!({ "error": "first scan" })),
+            1 => lock(&b).catalog = missing.clone(),
+            _ => lock(&b).coverage = (503, json!({})),
+        }
+        let (code, v) = r.submit(&q, None).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{n}: {v}");
+        assert_eq!(r.price(json!({})).await.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(r.fake.submits(), 0);
+        assert!(!lock(&b).catalog_asked.is_empty(), "the second store was asked");
+    }
+    // Nor while one doesn't answer at all.
+    let url = gone().await;
+    let r = rig_with("second-gone", |j| j.others = vec![url]).await;
+    assert_eq!(r.price(json!({})).await.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(r.fake.submits(), 0);
+}
+
+#[tokio::test]
+async fn a_day_held_on_another_store_isnt_bought() {
+    let (r, b) = two_stores("held-elsewhere").await;
+    lock(&b).coverage.1 = json!({ "days": [
+        { "day": DAY, "kind": "complete", "volumes": ["v1"] },
+    ], "missing_volumes": [] });
+    let (_, v) = r
+        .price(json!({ "start": "2026-10-01", "end": "2026-10-05" }))
+        .await;
+    assert_eq!(
+        wholes(&v),
+        [
+            ("2026-10-01".to_owned(), "2026-10-01".to_owned()),
+            ("2026-10-03".to_owned(), "2026-10-05".to_owned())
+        ],
+        "{v}"
+    );
+    // A copy the second store's catalog shows and its coverage doesn't
+    // explain counts as held there too.
+    let (r, b) = two_stores("unexplained-elsewhere").await;
+    lock(&b).catalog.1 = json!({ "roots": [{ "name": "v1", "datasets": [{ "provider": "databento", "filed": true, "id": DS, "symbol": "SPY.OPT", "schemas": { SCHEMA: { "days": { DAY: {} } } } }] }], "missing_volumes": [] });
+    let (code, v) = r.submit(&r.quote("SPY.OPT", DAY, DAY).await, None).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+}
+
+#[tokio::test]
+async fn a_job_goes_to_the_first_store_with_room_for_it() {
+    let (r, b) = two_stores("routed").await;
+    contract_job(&r, "OPRA-C1");
+    // The default store has room for 5 bytes, the job is 9.
+    let room = lock(&r.store).catalog.1.clone();
+    lock(&r.store).catalog.1["roots"][0]["volume"]["available_bytes"] = json!(1e11 + 5.0);
+    lock(&b).catalog.1 = room;
+    refresh(&r.jobs).await.unwrap();
+    settled(&r).await;
+    let (a, b) = (lock(&r.store), lock(&b));
+    assert!(a.incorporated.is_empty() && a.uploaded.is_empty());
+    assert_eq!(b.incorporated, ["OPRA-C1?parent=SPY.OPT"]);
+    assert_eq!(b.uploaded.len(), 2, "the file and the manifest");
+}
+
+#[tokio::test]
+async fn a_job_waits_for_room_on_the_store_holding_its_days() {
+    let (r, b) = two_stores("merge-elsewhere").await;
+    contract_job(&r, "OPRA-C1");
+    // The second store holds the day it merges into, and has room; the
+    // default has room too, but doesn't hold the day.
+    let room = lock(&r.store).catalog.1.clone();
+    lock(&b).catalog.1 = room;
+    lock(&b).coverage.1 = json!({ "days": [
+        { "day": DAY, "kind": "partial", "volumes": ["v1"], "size": 100, "coverage": { "kind": "contracts", "symbols": [C1] } },
+    ], "missing_volumes": [] });
+    refresh(&r.jobs).await.unwrap();
+    settled(&r).await;
+    assert!(lock(&r.store).incorporated.is_empty());
+    assert_eq!(lock(&b).incorporated, ["OPRA-C1?parent=SPY.OPT"]);
+}
+
+#[tokio::test]
+async fn a_job_filed_on_any_store_isnt_downloaded_again() {
+    let (r, b) = two_stores("filed-elsewhere").await;
+    contract_job(&r, "OPRA-C1");
+    lock(&r.store).batches = json!({ "OPRA-C1": { "volume": "v1", "how": "incoming" } });
+    lock(&b).batches = json!({ "OPRA-C1": { "volume": "v1", "how": "filed" } });
+    refresh(&r.jobs).await.unwrap();
+    settled(&r).await;
+    let (code, _) = download(AxState(r.jobs.clone()), UrlPath("OPRA-C1".into())).await;
+    assert_eq!(code, StatusCode::ACCEPTED);
+    settled(&r).await;
+    for s in [&r.store, &b] {
+        let s = lock(s);
+        assert!(s.uploaded.is_empty() && s.incorporated.is_empty());
+    }
+    // While a store doesn't answer, nothing is downloaded: it fails, and is
+    // tried again later.
+    let url = gone().await;
+    let r = rig_with("filed-gone", |j| j.others = vec![url]).await;
+    contract_job(&r, "OPRA-C2");
+    start_download(&r.jobs, "OPRA-C2".into());
+    settled(&r).await;
+    assert!(lock(&r.store).uploaded.is_empty());
+    assert_eq!(lock(&r.jobs.transfers)["OPRA-C2"].state, "failed");
+}
