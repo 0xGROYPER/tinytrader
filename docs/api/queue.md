@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Purpose** | Run the deployment's own batch work (research scripts, collectors) from templates, in Docker or on a host runner, after dependencies, at a time, after the close, or only while capture is idle ([decision 0012](../decisions/0012-job-queue.md)). |
-| **Transport** | HTTP/1.1, JSON, on `QUEUE_LISTEN` (default `127.0.0.1:9123`). The `tt` command line is a client of it (`TT_QUEUE`). |
+| **Transport** | HTTP/1.1, JSON, on `QUEUE_LISTEN` (default `127.0.0.1:9123`). The `tt-queue` command line is a client of it (`TT_QUEUE`). |
 | **Versioning** | Templates are `apiVersion: tinytrader/v1`, `kind: JobTemplate`. Paths are unversioned; additive changes only. |
 | **Auth** | Writes are refused from a web page of another origin. No token yet: anyone who can reach the port can add jobs (from templates only) and act as a host runner, so bind it to loopback or a private network ([decision 0017](../decisions/0017-client-contracts.md)). |
 | **Errors** | `{"error": "..."}`: `404` unknown job or template, `409` the job's state doesn't allow it, `422` a parameter or dependency problem. |

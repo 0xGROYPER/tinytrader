@@ -31,6 +31,9 @@ struct Fake {
     /// The first approval finds the price expired.
     expire_first: bool,
     jobs: Value,
+    /// The jobs list is empty for this many requests (a job just submitted).
+    hide: usize,
+    listed: usize,
     /// The quotes bought.
     done: Vec<String>,
 }
@@ -112,6 +115,11 @@ async fn submit(State(f): State<Shared>, Json(body): Json<Value>) -> Json<Value>
 
 /// A fake console with these prices, changed by `with` before it serves.
 async fn serve(costs: &[f64], with: impl FnOnce(&mut Fake)) -> (String, Shared) {
+    let (addr, f) = listen(costs, with).await;
+    (format!("http://{addr}"), f)
+}
+
+async fn listen(costs: &[f64], with: impl FnOnce(&mut Fake)) -> (std::net::SocketAddr, Shared) {
     let mut f = Fake {
         costs: costs.to_vec(),
         ..Fake::default()
@@ -130,14 +138,22 @@ async fn serve(costs: &[f64], with: impl FnOnce(&mut Fake)) -> (String, Shared) 
         .route("/api/jobs/submit", post(submit))
         .route(
             "/api/jobs/jobs",
-            get(|State(f): State<Shared>| async move { Json(f.lock().unwrap().jobs.clone()) }),
+            get(|State(f): State<Shared>| async move {
+                let mut f = f.lock().unwrap();
+                f.listed += 1;
+                Json(if f.listed <= f.hide {
+                    json!({ "jobs": [] })
+                } else {
+                    f.jobs.clone()
+                })
+            }),
         )
         .route("/api/job-quotes/{id}/approve", post(approve))
         .with_state(f.clone());
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", l.local_addr().unwrap());
+    let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-    (base, f)
+    (addr, f)
 }
 
 /// A person at a terminal (or not), with their answers.
@@ -184,10 +200,21 @@ async fn tt(base: &str, args: &str, term: &mut Script) -> (u8, String) {
 
 /// `tt`, its stdout a terminal or not.
 async fn at(base: &str, args: &str, term: &mut Script, out_tty: bool) -> (u8, String) {
+    through(base, reqwest::Client::new(), args, term, out_tty).await
+}
+
+/// `tt` with this HTTP client.
+async fn through(
+    base: &str,
+    http: reqwest::Client,
+    args: &str,
+    term: &mut Script,
+    out_tty: bool,
+) -> (u8, String) {
     let cli = Cli::try_parse_from(std::iter::once("tt").chain(args.split_whitespace())).unwrap();
     let c = Console {
         base: base.into(),
-        http: reqwest::Client::new(),
+        http,
         token: Mutex::new(None),
         poll: Duration::from_millis(5),
     };
@@ -258,8 +285,15 @@ async fn only_y_or_yes_buys() {
 async fn without_a_terminal_a_paid_purchase_is_refused_and_a_free_one_goes_ahead() {
     let (base, f) = serve(&[COST], |_| {}).await;
     let mut t = Script::default();
-    assert_eq!(tt(&base, FETCH, &mut t).await.0, 3);
+    let (code, out) = tt(&base, FETCH, &mut t).await;
+    assert_eq!(code, 3);
     assert!(said(&t, "needs a person at a terminal"), "{:?}", t.said);
+    // The quote is the answer, for whoever approves it.
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        (&v["quote"], &v["cost_usd"]),
+        (&json!("q-t-1"), &json!(COST))
+    );
     assert!(t.asked.is_empty() && f.lock().unwrap().approves.is_empty());
     let (base, f) = serve(&[0.0], |_| {}).await;
     assert_eq!(tt(&base, FETCH, &mut Script::default()).await.0, 0);
@@ -380,13 +414,121 @@ async fn api_passes_through_with_the_same_guards() {
     .await;
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!((code, &v["cost_usd"]), (0, &json!(COST)));
+    // The gate's 403 on another write is still said, and exits 3.
     let mut t = Script::default();
-    let (code, _) = tt(&base, "api POST /api/job-quotes/q-t-1/approve", &mut t).await;
-    assert!(code == 3 && said(&t, PROXY_ONLY), "{:?}", t.said);
-    assert_eq!(
-        tt(&base, "api GET /elsewhere", &mut Script::default())
-            .await
-            .0,
-        2
+    let (code, _) = tt(&base, "api POST /api/jobs/price", &mut t).await;
+    assert!(code == 0, "{:?}", t.said);
+    let mut t = Script::default();
+    assert_eq!(tt(&base, "api GET /elsewhere", &mut t).await.0, 2);
+    assert!(t.said[0].starts_with("tt: "), "{:?}", t.said);
+}
+
+#[tokio::test]
+async fn api_never_approves_declines_or_submits() {
+    let (base, f) = serve(&[0.0], |_| {}).await;
+    for path in [
+        "/api/job-quotes/q-t-1/approve",
+        "/api/job-quotes/q-t-1/decline",
+        "/API/Job-Quotes/q-t-1/Approve/",
+        "/api//job-quotes//q-t-1/approve",
+        "/api/jobs/../job-quotes/q-t-1/approve",
+        "/api/jobs/%2e%2e/job-quotes/q-t-1/approve",
+        "/api/jobs/%252e%252e/job-quotes/q-t-1/approve",
+        "/api/job%2Dquotes/q-t-1/approve",
+        "/api/job-quotes%2Fq-t-1%2Fapprove",
+        "/api/jobs/submit",
+        "/api/jobs/submit/",
+        "/api/jobs/./submit?x=1",
+        "/api/jobs/sub%6Dit",
+        "/api/jobs/SUBMIT",
+        "/api/queue/../jobs/submit",
+        "/api/jobs\\submit",
+    ] {
+        let mut t = Script::default();
+        let (code, out) = tt(&base, &format!("api POST {path}"), &mut t).await;
+        assert!(
+            code == 3
+                && out.is_empty()
+                && said(&t, "`tt approve QUOTE`")
+                && said(&t, "`tt decline QUOTE`"),
+            "{path}: {code} {:?}",
+            t.said
+        );
+    }
+    {
+        let f = f.lock().unwrap();
+        assert_eq!((f.approves.len(), f.submits, f.prices), (0, 0, 0));
+    }
+    // Reads of the same places, and other writes, go through.
+    for (args, want) in [
+        ("api GET /api/jobs/quotes/q-t-1", 0),
+        ("api GET /api/jobs/jobs", 0),
+        ("api POST /api/jobs/price", 0),
+    ] {
+        let mut t = Script::default();
+        assert_eq!(
+            tt(&base, args, &mut t).await.0,
+            want,
+            "{args}: {:?}",
+            t.said
+        );
+    }
+    assert!(!buys("/api/jobs/submitted") && !buys("/api/jobs/quotes/q-1"));
+}
+
+#[tokio::test]
+async fn the_order_token_goes_only_over_https_or_to_this_machine() {
+    for (base, ok) in [
+        ("https://console.example", true),
+        ("http://127.0.0.1:9", true),
+        ("http://[::1]:9", true),
+        ("http://LocalHost:9", true),
+        ("http://console.example", false),
+        ("http://127.0.0.1.example", false),
+        ("ftp://127.0.0.1", false),
+    ] {
+        assert_eq!(private(base), ok, "{base}");
+    }
+    // A console asking for the token over plain http elsewhere isn't given it.
+    let (addr, f) = listen(&[COST], |f| f.token = Some("made-up-token")).await;
+    let http = reqwest::Client::builder()
+        .resolve("console.example", addr)
+        .build()
+        .unwrap();
+    let base = format!("http://console.example:{}", addr.port());
+    let mut t = person(&["y"]);
+    let (code, _) = through(&base, http, "approve q-t-1", &mut t, false).await;
+    assert!(code == 3 && said(&t, UNSEALED), "{code} {:?}", t.said);
+    assert_eq!(t.secrets, 0);
+    let tokens: Vec<_> = f
+        .lock()
+        .unwrap()
+        .approves
+        .iter()
+        .map(|a| a.1.clone())
+        .collect();
+    assert_eq!(tokens, [None]);
+}
+
+#[tokio::test]
+async fn following_a_job_that_isnt_listed_fails_after_a_grace() {
+    let jobs = json!({ "jobs": [{ "id": "J1", "state": "done", "held": { "how": "filed", "volume": "M1" } }] });
+    let (base, _) = serve(&[COST], |f| f.jobs = jobs.clone()).await;
+    let mut t = Script::default();
+    let (code, out) = tt(&base, "jobs --follow J1 J9", &mut t).await;
+    assert!(
+        code == 1 && out.is_empty() && said(&t, "no such job: J9"),
+        "{code} {:?}",
+        t.said
     );
+    // One just submitted, not listed at first, is waited for.
+    let (base, f) = serve(&[COST], |f| (f.jobs, f.hide) = (jobs, 2)).await;
+    let mut t = Script::default();
+    assert_eq!(
+        tt(&base, "jobs --follow J1", &mut t).await.0,
+        0,
+        "{:?}",
+        t.said
+    );
+    assert!(f.lock().unwrap().listed > 2);
 }

@@ -51,7 +51,9 @@ enum Command {
         ids: Vec<String>,
     },
     /// Any console endpoint, through the same guards: `GET|POST /api/…`, a
-    /// POST's JSON body read from stdin. The answer is printed as JSON.
+    /// POST's JSON body read from stdin. The answer is printed as JSON. It
+    /// never approves, declines or submits a purchase (exit 3): `tt approve`
+    /// and `tt decline` ask a person.
     Api {
         #[arg(value_parser = ["GET", "POST"])]
         method: String,
@@ -115,6 +117,16 @@ fn echo(on: bool) {
         quiet.local_modes.remove(LocalModes::ECHO);
         *saved = tcsetattr(&stdin, Now, &quiet).ok().map(|()| t);
     }
+}
+
+/// The quote being approved or submitted, to say on a signal what becomes of it.
+static SUBMITTING: Mutex<Option<String>> = Mutex::new(None);
+
+/// What a signal during a purchase leaves: the submission goes on without us.
+fn interrupted(id: &str) -> String {
+    format!(
+        "tt: stopped waiting, but a submission of {id} that the console has begun runs to its end there; `tt jobs --follow {id}` shows how it went"
+    )
 }
 
 struct Real;
@@ -195,11 +207,29 @@ fn why(a: &Answer) -> String {
 
 const PROXY_ONLY: &str = "approvals need the console's proxy address, where your tailnet login is attached; this machine may be tagged";
 
+const UNSEALED: &str = "TT_CONSOLE is plain http to another machine, so the order token isn't sent there: use the console's https address, or http on this machine (127.0.0.1, ::1, localhost)";
+
+/// Whether the order token may go to `base`: over https, or to this machine.
+fn private(base: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(base) else {
+        return false;
+    };
+    let host = u.host_str().unwrap_or_default();
+    let ip = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>();
+    match u.scheme() {
+        "https" => !host.is_empty(),
+        "http" => host.eq_ignore_ascii_case("localhost") || ip.is_ok_and(|ip| ip.is_loopback()),
+        _ => false,
+    }
+}
+
 impl Console {
     async fn send(&self, post: Option<&Value>, path: &str, wait: u64) -> Result<Answer, Fail> {
         let url = format!("{}{path}", self.base);
         let mut r = post.map_or_else(|| self.http.get(&url), |b| self.http.post(&url).json(b));
-        if let Some(t) = self.token.lock().unwrap().as_deref() {
+        if let Some(t) = self.token.lock().unwrap().as_deref()
+            && private(&self.base)
+        {
             r = r.header("X-Order-Token", t);
         }
         let r = r.timeout(Duration::from_secs(wait)).send().await;
@@ -250,6 +280,9 @@ impl Console {
                 }
             };
             if a.gate && a.code == 401 && self.token.lock().unwrap().is_none() && term.tty() {
+                if !private(&self.base) {
+                    return Err(Fail(3, format!("{}, but {UNSEALED}", why(&a))));
+                }
                 let t = term
                     .secret("The console's order token:")
                     .unwrap_or_default();
@@ -422,6 +455,9 @@ async fn purchase(
                     return no("its price isn't a number of dollars, so it can't be bought".into());
                 }
                 if !term.tty() {
+                    let row = [&*id, &what(&q), &dollars(&q["cost_usd"]), &until(&q)];
+                    let head = cells(&["QUOTE", "WHAT", "COST", "EXPIRES"]);
+                    emit(out, f, &q, &[head, cells(&row)]);
                     return Err(Fail(
                         3,
                         format!(
@@ -447,7 +483,10 @@ async fn purchase(
             } else {
                 ("/api/jobs/submit".to_owned(), json!({ "quote": id }))
             };
-            let a = c.write(term, &path, &body, Some(&id)).await?;
+            *SUBMITTING.lock().unwrap() = Some(id.clone());
+            let a = c.write(term, &path, &body, Some(&id)).await;
+            *SUBMITTING.lock().unwrap() = None;
+            let a = a?;
             if a.code == 200 {
                 let mut v = a.body;
                 v["quote"] = json!(id);
@@ -535,6 +574,9 @@ async fn jobs(
         Vec::new(),
         std::collections::HashMap::new(),
     );
+    // A job just submitted may not be listed yet; after this, an ID the
+    // list doesn't have is no job.
+    let (began, grace) = (std::time::Instant::now(), c.poll * 15);
     loop {
         let mut waiting = Vec::new();
         for id in quotes.drain(..) {
@@ -579,6 +621,18 @@ async fn jobs(
                 term.say(&format!("{}: {o} {d}", text(&j["id"])));
             }
         }
+        let unknown: Vec<&str> = wanted
+            .iter()
+            .filter(|w| !rows.iter().any(|j| text(&j["id"]) == **w))
+            .map(String::as_str)
+            .collect();
+        if follow && !unknown.is_empty() && began.elapsed() >= grace {
+            let secs = grace.as_secs();
+            return no(format!(
+                "no such job: {} (not in the jobs list after {secs} s)",
+                unknown.join(", ")
+            ));
+        }
         let pending = rows.iter().any(|j| j["outcome"] == "pending");
         if !follow || (!pending && rows.len() == wanted.len() && quotes.is_empty()) {
             rows.sort_by_key(|j| {
@@ -605,6 +659,61 @@ async fn jobs(
     }
 }
 
+/// A usage error, said with the `tt:` prefix: exit 2.
+fn usage(term: &mut dyn Term, why: &str) -> u8 {
+    term.say(&format!("tt: {why}"));
+    2
+}
+
+/// A path as a server could take it: query cut, percent-decoding undone
+/// (repeatedly), lowercased, `\` as `/`, empty and `.` segments dropped, `..`
+/// applied. Used only to refuse, never to send.
+fn canonical(path: &str) -> String {
+    let mut p = path.split(['?', '#']).next().unwrap_or_default().to_owned();
+    for _ in 0..8 {
+        let (b, mut d, mut i) = (p.as_bytes(), Vec::new(), 0);
+        while i < b.len() {
+            let hex = b
+                .get(i + 1..i + 3)
+                .and_then(|h| std::str::from_utf8(h).ok());
+            match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                Some(c) if b[i] == b'%' => {
+                    d.push(c);
+                    i += 3;
+                }
+                _ => {
+                    d.push(b[i]);
+                    i += 1;
+                }
+            }
+        }
+        let d = String::from_utf8_lossy(&d).into_owned();
+        if d == p {
+            break;
+        }
+        p = d;
+    }
+    let p = p.to_lowercase().replace('\\', "/");
+    let mut segs = Vec::new();
+    for s in p.split('/') {
+        match s.trim() {
+            "" | "." => {}
+            ".." => {
+                segs.pop();
+            }
+            s => segs.push(s),
+        }
+    }
+    format!("/{}", segs.join("/"))
+}
+
+/// A write that approves, declines or submits a purchase: only `tt approve`
+/// and `tt decline`, which ask a person, make those.
+fn buys(path: &str) -> bool {
+    let p = canonical(path);
+    p == "/api/job-quotes" || p.starts_with("/api/job-quotes/") || p == "/api/jobs/submit"
+}
+
 async fn run(cli: Cli, c: &Console, term: &mut dyn Term, out: &mut dyn Write) -> Result<u8, Fail> {
     let f = cli.format.unwrap_or(Format::Json);
     match cli.command {
@@ -612,14 +721,12 @@ async fn run(cli: Cli, c: &Console, term: &mut dyn Term, out: &mut dyn Write) ->
             source: Source::Databento(a),
         } => {
             if a.symbols.contains(',') {
-                term.say("one symbol per purchase (--symbols SPY.OPT)");
-                return Ok(2);
+                return Ok(usage(term, "one symbol per purchase (--symbols SPY.OPT)"));
             }
             let mut ask = json!({ "dataset": a.dataset, "schema": a.schema, "symbol": a.symbols, "start": a.start, "end": a.end });
             if let Some(h) = &a.hours {
                 let Some((s, e)) = h.split_once('-') else {
-                    term.say("--hours is HH:MM-HH:MM, New York time");
-                    return Ok(2);
+                    return Ok(usage(term, "--hours is HH:MM-HH:MM, New York time"));
                 };
                 ask["hours"] = json!({ "start": s, "end": e, "tz": "America/New_York" });
             }
@@ -690,9 +797,14 @@ async fn run(cli: Cli, c: &Console, term: &mut dyn Term, out: &mut dyn Write) ->
         }
         Command::Jobs { follow, ids } => jobs(c, term, out, f, follow, ids).await,
         Command::Api { method, path } => {
+            if method == "POST" && buys(&path) {
+                return Err(Fail(
+                    3,
+                    "`tt api` doesn't approve, decline or submit purchases: `tt approve QUOTE` and `tt decline QUOTE` ask a person first".into(),
+                ));
+            }
             if !path.starts_with("/api/") {
-                term.say("the path is a console endpoint: /api/…");
-                return Ok(2);
+                return Ok(usage(term, "the path is a console endpoint: /api/…"));
             }
             let a = if method == "GET" {
                 c.send(None, &path, 60).await?
@@ -737,7 +849,15 @@ async fn exit(
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> std::process::ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) if !e.use_stderr() => e.exit(), // --help, --version
+        Err(e) => {
+            let said = e.render().to_string();
+            eprint!("tt: {}", said.strip_prefix("error: ").unwrap_or(&said));
+            return 2.into();
+        }
+    };
     let base = std::env::var("TT_CONSOLE").unwrap_or_default();
     if !base.starts_with("http://") && !base.starts_with("https://") {
         eprintln!(
@@ -751,11 +871,17 @@ async fn main() -> std::process::ExitCode {
         let mut term = signal(SignalKind::terminate()).expect("a SIGTERM handler");
         let n = tokio::select! { _ = tokio::signal::ctrl_c() => 2, _ = term.recv() => 15 };
         echo(true);
+        let busy = SUBMITTING.lock().ok().and_then(|s| s.clone());
+        if let Some(id) = busy {
+            eprintln!("\n{}", interrupted(&id));
+        }
         std::process::exit(128 + n);
     });
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .user_agent("tinytrader-tt")
+        // Never carried elsewhere with the order token.
+        .redirect(reqwest::redirect::Policy::none())
         .build();
     let base = base.trim_end_matches('/').to_owned();
     let c = Console {
