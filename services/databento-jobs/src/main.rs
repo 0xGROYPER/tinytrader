@@ -32,6 +32,8 @@
 //!   checked against Databento's size and SHA-256, then has the store file
 //!   the batch. Jobs submitted here download by themselves once done.
 //!   Downloading an already purchased job never charges again.
+//! - `POST /cache/{job}` / `DELETE /cache/{job}`: a checked copy of a done
+//!   job's files in `JOBS_CACHE_DIR`, outside the store, and its removal.
 //!
 //! The API key comes from `DATABENTO_API_KEY` or `DATABENTO_API_KEY_FILE`.
 //! The store's write token, when the store requires one, from
@@ -109,6 +111,12 @@ struct Args {
     /// store, which files one at a time.
     #[arg(long, env = "JOBS_DOWNLOADS", default_value_t = 4)]
     downloads: usize,
+
+    /// Where `POST /cache/{job}` puts a done job's files, outside the store
+    /// (by default `cache/` beside the ledger). Readable by everyone: the
+    /// data is what research reads anyway; the key never goes there.
+    #[arg(long, env = "JOBS_CACHE_DIR")]
+    cache_dir: Option<std::path::PathBuf>,
 }
 
 /// How long a price stays good for submitting: an hour when it costs
@@ -412,6 +420,10 @@ struct Jobs {
     /// How long a price may take before it is given up as failed.
     pricing_cap: Duration,
     transfers: Mutex<HashMap<String, Transfer>>,
+    /// Where `POST /cache/{job}` downloads to; none, refused.
+    cache_dir: Option<std::path::PathBuf>,
+    /// Downloads into the cache, by job: their progress.
+    caching: Mutex<HashMap<String, Transfer>>,
     /// Jobs submitted here, downloaded once done.
     follow: Mutex<HashSet<String>>,
     /// Jobs whose download is queued or running: never a second.
@@ -479,6 +491,8 @@ impl Jobs {
             approve_token: None,
             price_wait: Duration::from_secs(20),
             transfers: Mutex::default(),
+            cache_dir: None,
+            caching: Mutex::default(),
             follow: Mutex::default(),
             in_flight: Mutex::default(),
             tries: Mutex::default(),
@@ -595,6 +609,12 @@ async fn main() {
             .build()
             .expect("http client"),
     );
+    jobs.cache_dir = args.cache_dir.clone().or_else(|| {
+        args.ledger
+            .as_ref()
+            .and_then(|l| l.parent())
+            .map(|d| d.join("cache"))
+    });
     jobs.yield_to = args
         .yield_to
         .iter()
@@ -663,6 +683,7 @@ async fn main() {
         .route("/ledger/unresolved", get(ledger_unresolved))
         .route("/ledger/resolve", post(resolve))
         .route("/download/{job}", post(download))
+        .route("/cache/{job}", post(cache).delete(uncache))
         // A web page of another origin can't submit (or pay for) anything.
         .layer(axum::middleware::from_fn(
             tinytrader_observe::guard::same_origin_writes,
@@ -1037,6 +1058,9 @@ fn jobs_view(jobs: &Jobs) -> Value {
             r["transfer"] = json!({ "state": t.state, "file": t.file, "done_bytes": t.done_bytes, "total_bytes": t.total_bytes, "error": t.error });
         }
         r["follow"] = json!(follow.contains(&id));
+        if let Some(t) = lock(&jobs.caching).get(&id) {
+            r["cache"] = json!({ "state": t.state, "file": t.file, "done_bytes": t.done_bytes, "total_bytes": t.total_bytes, "error": t.error });
+        }
     }
     v
 }
@@ -2391,6 +2415,262 @@ async fn download(AxState(jobs): AxState<Shared>, UrlPath(job): UrlPath<String>)
     }
     start_download(&jobs, job.clone());
     (StatusCode::ACCEPTED, Json(json!({ "job": job })))
+}
+
+/// Download a done job's files into the cache folder (`JOBS_CACHE_DIR`),
+/// not the store: a copy for reading while the store can't file it. The key
+/// stays here; each file is checked against Databento's size and SHA-256
+/// before it takes its name. Files already there and whole are kept.
+async fn cache(AxState(jobs): AxState<Shared>, UrlPath(job): UrlPath<String>) -> Reply {
+    let Some(root) = jobs.cache_dir.clone() else {
+        return refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no cache folder is configured (JOBS_CACHE_DIR)",
+        );
+    };
+    if !job.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') || job.is_empty() {
+        return refused(StatusCode::BAD_REQUEST, "not a job ID");
+    }
+    match jobs.db.job(&job).await {
+        Ok(j) if j.state != JobState::Done => {
+            return refused(StatusCode::CONFLICT, "the job isn't done yet");
+        }
+        Ok(_) => {}
+        Err(e) => return refused(StatusCode::BAD_GATEWAY, format!("job {job}: {e}")),
+    }
+    {
+        let mut c = lock(&jobs.caching);
+        if c.get(&job)
+            .is_some_and(|t| t.error.is_none() && t.state != "cached")
+        {
+            return refused(StatusCode::CONFLICT, "already caching");
+        }
+        c.insert(
+            job.clone(),
+            Transfer {
+                state: "waiting".into(),
+                ..Transfer::default()
+            },
+        );
+    }
+    let dir = root.join(&job);
+    let task = jobs.clone();
+    let id = job.clone();
+    tokio::spawn(async move {
+        let result = fetch_to_cache(&task, &id, &dir).await;
+        let mut c = lock(&task.caching);
+        let t = c.entry(id.clone()).or_default();
+        match result {
+            Ok(n) => {
+                t.state = "cached".into();
+                task.events.push(
+                    format!("cached {id} in {} ({n} files)", dir.display()),
+                    id.clone(),
+                );
+            }
+            Err(e) => {
+                t.state = "failed".into();
+                t.error = Some(e.clone());
+                task.events.push(format!("caching {id} failed: {e}"), e);
+            }
+        }
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "job": job, "folder": root.join(&job) })),
+    )
+}
+
+/// Delete a job's cache folder (refused while it is being filled).
+async fn uncache(AxState(jobs): AxState<Shared>, UrlPath(job): UrlPath<String>) -> Reply {
+    let Some(root) = jobs.cache_dir.clone() else {
+        return refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no cache folder is configured (JOBS_CACHE_DIR)",
+        );
+    };
+    if !job.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') || job.is_empty() {
+        return refused(StatusCode::BAD_REQUEST, "not a job ID");
+    }
+    if lock(&jobs.caching)
+        .get(&job)
+        .is_some_and(|t| t.error.is_none() && t.state != "cached")
+    {
+        return refused(StatusCode::CONFLICT, "still caching");
+    }
+    let dir = root.join(&job);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {
+            lock(&jobs.caching).remove(&job);
+            (StatusCode::OK, Json(json!({ "deleted": dir })))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            refused(StatusCode::NOT_FOUND, "nothing cached for that job")
+        }
+        Err(e) => refused(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{}: {e}", dir.display()),
+        ),
+    }
+}
+
+fn set_cache(jobs: &Jobs, job: &str, f: impl FnOnce(&mut Transfer)) {
+    f(lock(&jobs.caching).entry(job.to_owned()).or_default());
+}
+
+/// Every file of a done job into `dir`, then its manifest. Like the store's
+/// downloads it waits while capture is live. Returns how many files it
+/// downloaded (whole ones already there are kept).
+async fn fetch_to_cache(jobs: &Jobs, job: &str, dir: &std::path::Path) -> Result<usize, String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let files = jobs
+        .db
+        .files(job)
+        .await
+        .map_err(|e| format!("list files: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
+    let total: u64 = files.iter().map(|f| f.size).sum();
+    set_cache(jobs, job, |t| {
+        t.state = "downloading".into();
+        t.total_bytes = total;
+    });
+    let (mut done, mut fetched) = (0u64, 0usize);
+    for f in &files {
+        if f.filename.contains('/') || f.filename.starts_with('.') {
+            return Err(format!("{}: not a plain file name", f.filename));
+        }
+        set_cache(jobs, job, |t| t.file = f.filename.clone());
+        let path = dir.join(&f.filename);
+        let want = f.hash.trim_start_matches("sha256:").to_ascii_lowercase();
+        let whole = std::fs::metadata(&path).is_ok_and(|m| m.len() == f.size)
+            && sha256_file(&path).is_ok_and(|h| h == want);
+        if !whole {
+            loop {
+                let why = match live_capture(jobs).await {
+                    Some(who) => Some(format!("waiting: {who} is live")),
+                    None => capture_soon(jobs, f.size).map(|at| {
+                        format!("waiting: capture starts at {at}, before this file could finish")
+                    }),
+                };
+                let Some(why) = why else { break };
+                set_cache(jobs, job, |t| t.state = why.clone());
+                tokio::time::sleep(Duration::from_secs(15)).await;
+            }
+            set_cache(jobs, job, |t| t.state = "downloading".into());
+            let url = f
+                .urls
+                .get("https")
+                .ok_or_else(|| format!("{}: no https URL", f.filename))?;
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                match copy_to_file(jobs, job, url, &path, f.size, &want, done).await {
+                    Ok(()) => break,
+                    Err(e) if attempt < 3 => {
+                        eprintln!("databento-jobs: cache {job}/{}: {e}; retrying", f.filename);
+                        let wait = if cfg!(test) { 0 } else { 5 * attempt };
+                        tokio::time::sleep(Duration::from_secs(wait)).await;
+                    }
+                    Err(e) => return Err(format!("{}: {e}", f.filename)),
+                }
+            }
+            fetched += 1;
+        }
+        done += f.size;
+        set_cache(jobs, job, |t| t.done_bytes = done);
+    }
+    if !files.iter().any(|f| f.filename == "manifest.json") {
+        let manifest = json!({
+            "job_id": job,
+            "files": files.iter().map(|f| json!({ "filename": f.filename, "size": f.size, "hash": f.hash })).collect::<Vec<_>>(),
+        });
+        let path = dir.join("manifest.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+        )
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+    }
+    Ok(fetched)
+}
+
+/// One file into `path`: written to `<path>.part`, checked for its size
+/// and SHA-256, then renamed, readable by everyone.
+async fn copy_to_file(
+    jobs: &Jobs,
+    job: &str,
+    url: &str,
+    path: &std::path::Path,
+    size: u64,
+    sha256: &str,
+    before: u64,
+) -> Result<(), String> {
+    use sha2::Digest as _;
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let part = path.with_extension(format!(
+        "{}.part",
+        path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+    ));
+    let resp = jobs
+        .http
+        .get(url)
+        .basic_auth(&jobs.key, None::<&str>)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("Databento answered {}", resp.status()));
+    }
+    let mut out = std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut got = 0u64;
+    let mut stream = resp.bytes_stream();
+    let mut tick = Instant::now();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        out.write_all(&chunk)
+            .map_err(|e| format!("{}: {e}", part.display()))?;
+        hasher.update(&chunk);
+        got += chunk.len() as u64;
+        if tick.elapsed() >= Duration::from_secs(1) {
+            set_cache(jobs, job, |t| t.done_bytes = before + got);
+            tick = Instant::now();
+        }
+    }
+    out.sync_all()
+        .map_err(|e| format!("{}: {e}", part.display()))?;
+    drop(out);
+    let hash: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if got != size || (!sha256.is_empty() && hash != sha256) {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!(
+            "got {got} bytes with SHA-256 {hash}; Databento lists {size} bytes, {sha256}"
+        ));
+    }
+    let _ = std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o644));
+    std::fs::rename(&part, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The SHA-256 of a file, as lowercase hex.
+fn sha256_file(path: &std::path::Path) -> std::io::Result<String> {
+    use sha2::Digest as _;
+    let mut f = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut f, &mut hasher)?;
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 fn set(jobs: &Jobs, job: &str, f: impl FnOnce(&mut Transfer)) {

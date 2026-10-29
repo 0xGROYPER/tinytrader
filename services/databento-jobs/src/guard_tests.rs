@@ -2457,3 +2457,114 @@ async fn bytes_landed_count_once() {
         t["OPRA-C"].state
     );
 }
+
+/// A done job of one file at the fake store's `/dl/x` ("dbn bytes"), listed
+/// with `hash`, for the cache.
+fn cache_job(r: &Rig, id: &str, hash: &str) {
+    r.fake
+        .add(job(id, json!("SPY.OPT"), "parent", whole_day(), "done"));
+    let url = r.jobs.store.clone();
+    lock(&r.fake.s).files.insert(
+        id.into(),
+        vec![BatchFileDesc {
+            filename: format!("opra-pillar-{}.tcbbo.dbn.zst", DAY.replace('-', "")),
+            size: 9,
+            hash: hash.into(),
+            urls: [("https".to_owned(), format!("{url}/dl/x"))].into(),
+        }],
+    );
+}
+
+/// Until the job's cache download has ended; its last state.
+async fn cache_done(r: &Rig, id: &str) -> (String, Option<String>) {
+    for _ in 0..300 {
+        if let Some(t) = lock(&r.jobs.caching).get(id)
+            && (t.state == "cached" || t.state == "failed")
+        {
+            return (t.state.clone(), t.error.clone());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{id} never finished caching");
+}
+
+const DBN_BYTES_SHA256: &str =
+    "sha256:a0352b911ea12767c932c228fc48328dc31e7380cb49d20141d2d79712883079";
+
+#[tokio::test]
+async fn a_done_job_is_cached_whole_and_checked_outside_the_store() {
+    let folder = std::env::temp_dir().join(format!("tinytrader-jobs-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    let dir = folder.clone();
+    let r = rig_with("cache", move |j| j.cache_dir = Some(dir)).await;
+    cache_job(&r, "OPRA-K1", DBN_BYTES_SHA256);
+    let (code, Json(v)) = cache(AxState(r.jobs.clone()), UrlPath("OPRA-K1".into())).await;
+    assert_eq!(code, StatusCode::ACCEPTED, "{v}");
+    assert_eq!(cache_done(&r, "OPRA-K1").await, ("cached".into(), None));
+    let file = folder.join("OPRA-K1").join(format!(
+        "opra-pillar-{}.tcbbo.dbn.zst",
+        DAY.replace('-', "")
+    ));
+    assert_eq!(std::fs::read(&file).unwrap(), b"dbn bytes");
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(folder.join("OPRA-K1/manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["job_id"], "OPRA-K1");
+    // Nothing went to the store.
+    assert!(lock(&r.store).uploaded.is_empty());
+    // Again: the whole file is kept, not fetched again.
+    let before = std::fs::metadata(&file).unwrap().modified().unwrap();
+    let (code, _) = cache(AxState(r.jobs.clone()), UrlPath("OPRA-K1".into())).await;
+    assert_eq!(code, StatusCode::ACCEPTED);
+    assert_eq!(cache_done(&r, "OPRA-K1").await.0, "cached");
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+        before
+    );
+    // Deleted on request.
+    let (code, _) = uncache(AxState(r.jobs.clone()), UrlPath("OPRA-K1".into())).await;
+    assert_eq!(code, StatusCode::OK);
+    assert!(!folder.join("OPRA-K1").exists());
+    let (code, _) = uncache(AxState(r.jobs.clone()), UrlPath("OPRA-K1".into())).await;
+    assert_eq!(code, StatusCode::NOT_FOUND);
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[tokio::test]
+async fn a_cached_file_that_fails_its_checksum_is_not_kept() {
+    let folder =
+        std::env::temp_dir().join(format!("tinytrader-jobs-cache-bad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    let dir = folder.clone();
+    let r = rig_with("cache-bad", move |j| j.cache_dir = Some(dir)).await;
+    cache_job(&r, "OPRA-K2", "sha256:00");
+    let (code, _) = cache(AxState(r.jobs.clone()), UrlPath("OPRA-K2".into())).await;
+    assert_eq!(code, StatusCode::ACCEPTED);
+    let (state, err) = cache_done(&r, "OPRA-K2").await;
+    assert_eq!(state, "failed");
+    assert!(err.unwrap().contains("SHA-256"));
+    let left: Vec<_> = std::fs::read_dir(folder.join("OPRA-K2")).unwrap().collect();
+    assert!(left.is_empty(), "{left:?}");
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[tokio::test]
+async fn caching_needs_a_folder_a_done_job_and_a_job_id() {
+    let r = rig("cache-refused").await;
+    cache_job(&r, "OPRA-K3", DBN_BYTES_SHA256);
+    let (code, _) = cache(AxState(r.jobs.clone()), UrlPath("OPRA-K3".into())).await;
+    assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+    let dir = std::env::temp_dir().join(format!("tinytrader-jobs-cache-r-{}", std::process::id()));
+    let r = rig_with("cache-refused-2", move |j| j.cache_dir = Some(dir)).await;
+    r.fake.add(job(
+        "OPRA-K4",
+        json!("SPY.OPT"),
+        "parent",
+        whole_day(),
+        "processing",
+    ));
+    let (code, _) = cache(AxState(r.jobs.clone()), UrlPath("OPRA-K4".into())).await;
+    assert_eq!(code, StatusCode::CONFLICT);
+    let (code, _) = cache(AxState(r.jobs.clone()), UrlPath("../etc".into())).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+}
