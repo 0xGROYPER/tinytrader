@@ -164,7 +164,7 @@ mod tests {
         let tmp = std::env::temp_dir().canonicalize().unwrap();
         let code = tmp.join(format!("sbx-allow-{}", std::process::id()));
         std::fs::create_dir_all(code.join("cache")).unwrap();
-        assert!(check_allow_read(&[code.clone()], &[], None).is_ok());
+        assert!(check_allow_read(std::slice::from_ref(&code), &[], None).is_ok());
         assert!(check_allow_read(&[PathBuf::from("/")], &[], None).is_err());
         assert!(check_allow_read(&[PathBuf::from("/Users")], &[], None).is_err());
         let e = check_allow_read(&[code.clone()], &[code.join("cache")], None).unwrap_err();
