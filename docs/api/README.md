@@ -9,6 +9,7 @@ tinytrader is the boundary layer between markets and your code: relays stream li
 | [Market data relay](relay.md): the stream | `tinytrader.relay/1` | TCP: a JSON join line, then DBN v3 | network | **stable** |
 | [Market data relay](relay.md): HTTP | (unversioned) | HTTP JSON | network | stable; `/recent`, `/tape`, `/session` experimental |
 | [Order gateway](order-gateway.md) | `tinytrader.gateway/1` | TCP NDJSON, loopback | per-client token, role and prefix | **stable** |
+| [Sessions](session.md) | `tinytrader.session/1` | TCP NDJSON control, the relay stream, gateways | gateway tokens in `welcome` | experimental |
 | [Order gateway journal](order-gateway.md#11-order-journal) | `tinytrader.gateway-journal/1` | files | filesystem | stable |
 | [Observe endpoints](observe.md) (every service) | `tinytrader.observe/1` | HTTP JSON, Prometheus text | none (reads) | **stable** |
 | [Store](store.md) | (unversioned) | HTTP JSON, DBN files | bearer token on writes | reads stable; writes experimental |

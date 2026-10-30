@@ -39,6 +39,7 @@
           ../services/alpaca-data
           ../services/relay
           ../services/order-gateway
+          ../services/session
           ../services/queue
           (lib.fileset.fileFilter (f: f.hasExt "rs" || f.name == "Cargo.toml") ../services/console)
           ../services/console/web

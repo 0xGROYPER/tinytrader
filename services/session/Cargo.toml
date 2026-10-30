@@ -1,0 +1,31 @@
+[package]
+name = "session"
+description = "Sessions (decision 0022): one process per run that serves held days to a strategy over tinytrader.relay/1, hosts its simulated venues, and advances everything in lockstep on the strategy's ready"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lib]
+name = "session"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tinytrader-session"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+dbn = { version = "0.71", default-features = false }
+order-gateway = { path = "../order-gateway" }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+tinytrader-dbn.workspace = true
+tinytrader-producer = { path = "../../libs/producer" }
+toml = "0.8"
+
+[dev-dependencies]
+time = { version = "0.3", default-features = false }

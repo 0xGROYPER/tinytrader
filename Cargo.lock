@@ -2807,6 +2807,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "session"
+version = "0.1.0"
+dependencies = [
+ "dbn",
+ "order-gateway",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "time",
+ "tinytrader-dbn",
+ "tinytrader-producer",
+ "toml",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
