@@ -70,6 +70,10 @@ pub(crate) enum Action {
 pub(crate) struct Market {
     src: QuoteSource,
     book: HashMap<u32, Quote>,
+    /// Instruments a quote record other than `tcbbo` has given a book.
+    quoted: std::collections::HashSet<u32>,
+    /// Fed and clocked by a session in process.
+    fed: bool,
     ids: HashMap<String, u32>,
     actions: Vec<(u64, u64, Action)>,
     n: u64,
@@ -140,6 +144,8 @@ impl SimBroker {
         s.market = Some(Market {
             src,
             book: HashMap::new(),
+            quoted: std::collections::HashSet::new(),
+            fed: false,
             ids: HashMap::new(),
             actions: Vec::new(),
             n: 0,
@@ -160,6 +166,8 @@ impl SimBroker {
         s.market = Some(Market {
             src,
             book: HashMap::new(),
+            quoted: std::collections::HashSet::new(),
+            fed: true,
             ids: HashMap::new(),
             actions: Vec::new(),
             n: 0,
@@ -170,7 +178,8 @@ impl SimBroker {
     /// When a submit or cancel received at market time `t` takes effect: after the
     /// strategy's declared latency and then the venue's.
     fn effective(&self) -> u64 {
-        self.now + (self.s.strategy_latency_ms + self.s.latency_ms) * 1_000_000
+        let ms = self.s.strategy_latency_ms.saturating_add(self.s.latency_ms);
+        self.now.saturating_add(ms.saturating_mul(1_000_000))
     }
 
     fn new(script: &str) -> Result<Self, String> {
@@ -838,6 +847,10 @@ impl Broker for SimBroker {
         out.append(&mut self.updates);
     }
 
+    fn session_clocked(&self) -> bool {
+        self.market.as_ref().is_some_and(|m| m.fed)
+    }
+
     fn advance(&mut self, to_ts: u64) -> Result<u64, BrokerError> {
         if self.market.is_none() && self.s.clock_ts.is_none() {
             return Err(BrokerError::local(
@@ -870,21 +883,15 @@ impl SimBroker {
                     self.act(a);
                 }
                 (Some(_), _) => {
-                    // The records of one timestamp form one book before orders are
-                    // evaluated, so a combo never fills on some legs' new quotes and
-                    // others' old ones. A second quote for an instrument in the same
-                    // instant first lets orders see the one it replaces (rule 1).
+                    // Every record of one timestamp applies before orders are evaluated;
+                    // the last quote of an instrument in that instant is its book. A
+                    // combo never fills on some legs' new quotes and others' old ones,
+                    // nor on a quote replaced within the same instant.
                     let Some((t, r)) = m.src.next() else { break };
                     self.now = self.now.max(t);
                     let mut touched = Vec::new();
                     let mut next = Some(r);
                     while let Some(r) = next.take() {
-                        if let Rec::Quote { iid, .. } = &r
-                            && touched.contains(iid)
-                        {
-                            self.evaluate_touched(&touched);
-                            touched.clear();
-                        }
                         touched.extend(self.apply(r));
                         if let Some(m) = &mut self.market
                             && m.src.peek_ts()? == Some(t)
@@ -915,7 +922,16 @@ impl SimBroker {
                 ask,
                 bid_sz,
                 ask_sz,
+                trade,
             } => {
+                // A tcbbo quote is the book only where no quote record gives one: beside
+                // cmbp-1 it would put back a quote a trade may have consumed.
+                if trade && m.quoted.contains(&iid) {
+                    return None;
+                }
+                if !trade {
+                    m.quoted.insert(iid);
+                }
                 m.book.insert(
                     iid,
                     Quote {

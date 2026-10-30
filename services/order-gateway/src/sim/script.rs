@@ -181,6 +181,9 @@ impl Script {
             strategy_latency_ms: f.opt_int("strategy_latency_ms")?.unwrap_or(0),
             size_cap: false,
         };
+        if s.latency_ms > 3_600_000 || s.strategy_latency_ms > 3_600_000 {
+            return Err(invalid("latency_ms", "at most 3600000 (an hour)"));
+        }
         match f.map_entry("calendar") {
             None => {}
             Some(Value::Null) => s.calendar = None,

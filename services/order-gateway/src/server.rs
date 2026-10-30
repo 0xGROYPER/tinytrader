@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Client role (section 4).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -415,17 +415,19 @@ pub struct Clock {
 }
 
 impl Clock {
-    /// Advances the broker to `to` once `requests` requests from `client` (counted from
-    /// its first connection) have been handled, so an order sent before the strategy's
-    /// `ready` is always stamped before the clock moves. Returns the market time.
+    /// Advances the broker to `to` once `orders` order messages (submits and cancels,
+    /// valid or not, counted from the client's first connection) from `client` have been
+    /// handled, so an order sent before the strategy's `ready` is always stamped before
+    /// the clock moves. Queries don't count. Returns the market time. A wait that runs
+    /// past `wait` is dropped by the gateway and answered with an error, never run late.
     ///
     /// # Errors
-    /// An unknown client, the broker's refusal, no answer within `wait`, or a stopped
-    /// gateway.
+    /// An unknown client, the broker's refusal, the order messages not all arriving
+    /// within `wait`, or a stopped gateway.
     pub fn advance(
         &self,
         client: &str,
-        requests: u64,
+        orders: u64,
         to: u64,
         wait: Duration,
     ) -> Result<u64, String> {
@@ -433,16 +435,15 @@ impl Clock {
         self.tx
             .send(Input::Clock {
                 client: client.to_owned(),
-                requests,
+                orders,
                 to,
+                deadline: Instant::now() + wait,
                 reply,
             })
             .map_err(|_| "the gateway has stopped".to_owned())?;
-        rx.recv_timeout(wait).map_err(|_| {
-            format!(
-                "no advance to {to} within {wait:?}: waiting for {requests} requests from {client}"
-            )
-        })?
+        // The gateway answers at the deadline; the margin covers its tick.
+        rx.recv_timeout(wait + Duration::from_secs(5))
+            .map_err(|_| "the gateway has stopped answering".to_owned())?
     }
 }
 

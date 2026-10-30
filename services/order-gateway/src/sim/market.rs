@@ -11,6 +11,8 @@ use dbn::{
 use sha2::{Digest, Sha256};
 use std::io::{BufReader, Read};
 use std::net::TcpStream;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
 /// One applied input record.
@@ -26,6 +28,9 @@ pub(crate) enum Rec {
         ask: Option<i64>,
         bid_sz: u64,
         ask_sz: u64,
+        /// From a `tcbbo` record: the quote before a trade, used as a book only for an
+        /// instrument no other quote record has given one.
+        trade: bool,
     },
 }
 
@@ -47,14 +52,20 @@ pub(crate) struct QuoteSource {
 /// time before it advances the simulator to that time, so an empty feed means nothing
 /// more has happened yet: the simulator never waits on it.
 #[derive(Clone)]
-pub struct Feed(Sender<(u64, RecordBuf)>);
+pub struct Feed(Sender<(u64, RecordBuf)>, Arc<AtomicU64>);
 
 impl Feed {
     /// Pushes one record at `ts`.
     ///
     /// # Errors
-    /// The simulator has gone, or the record can't be copied.
+    /// The simulator has gone, the record can't be copied, or `ts` is earlier than a
+    /// record pushed before it.
     pub fn push(&self, ts: u64, rec: RecordRef<'_>) -> Result<(), String> {
+        // Records come in the session's order (rule 1); one going back is a session bug.
+        let last = self.1.fetch_max(ts, Ordering::SeqCst);
+        if ts < last {
+            return Err(format!("a record at {ts} after one at {last}"));
+        }
         let buf = RecordBuf::try_from(rec).map_err(|e| e.to_string())?;
         self.0
             .send((ts, buf))
@@ -71,6 +82,7 @@ fn decode(rec: &RecordRef<'_>) -> Option<(u64, Rec)> {
         ask: side(ask),
         bid_sz: u64::from(bid_sz),
         ask_sz: u64::from(ask_sz),
+        trade: false,
     };
     if let Some(d) = rec.get::<InstrumentDefMsg>() {
         Some((
@@ -90,12 +102,13 @@ fn decode(rec: &RecordRef<'_>) -> Option<(u64, Rec)> {
             },
         ))
     } else if let Some(q) = rec.get::<Cmbp1Msg>() {
-        // OPRA consolidated quotes (and tcbbo's quote before each trade) by receipt.
+        // OPRA consolidated quotes, and tcbbo's quote before each trade, by receipt.
         let l = &q.levels[0];
-        Some((
-            q.ts_recv,
-            quote(q.hd.instrument_id, l.bid_px, l.ask_px, l.bid_sz, l.ask_sz),
-        ))
+        let mut r = quote(q.hd.instrument_id, l.bid_px, l.ask_px, l.bid_sz, l.ask_sz);
+        if let Rec::Quote { trade, .. } = &mut r {
+            *trade = q.hd.rtype == dbn::rtype::TCBBO;
+        }
+        Some((q.ts_recv, r))
     } else if let Some(q) = rec.get::<CbboMsg>() {
         let l = &q.levels[0];
         Some((
@@ -171,7 +184,7 @@ impl QuoteSource {
             peeked: None,
             pin,
         };
-        (src, Feed(tx))
+        (src, Feed(tx, Arc::new(AtomicU64::new(0))))
     }
 
     /// Timestamp of the next applicable record, reading ahead as needed. A feed with

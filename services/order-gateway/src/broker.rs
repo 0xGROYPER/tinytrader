@@ -232,6 +232,11 @@ pub trait Broker {
             "advance needs a simulated broker",
         ))
     }
+    /// Whether a session owns this broker's clock in process, so a client's own
+    /// `advance` is refused.
+    fn session_clocked(&self) -> bool {
+        false
+    }
 }
 
 /// Normalized `event` vocabulary for a broker event string.

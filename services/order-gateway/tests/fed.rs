@@ -1,8 +1,10 @@
 //! A simulator fed in process and clocked by a session (decision 0022): records pushed
 //! through a `Feed`, symbols from symbol mappings, `cbbo-1m` and `bbo-1m` books, and a
-//! `Clock` that advances only once the client's requests have all been handled.
+//! `Clock` that advances only once the client's order messages have all been handled.
 mod support;
-use dbn::{BboMsg, CbboMsg, RecordHeader, RecordRef, SType, Schema, SymbolMappingMsg, rtype};
+use dbn::{
+    BboMsg, CbboMsg, Cmbp1Msg, RecordHeader, RecordRef, SType, Schema, SymbolMappingMsg, rtype,
+};
 use order_gateway::{Clock, Feed, Gateway, SimBroker, start};
 use serde_json::Value;
 use std::time::Duration;
@@ -167,7 +169,7 @@ fn a_clock_waiting_for_requests_never_sent_says_so() {
     let e = clock
         .advance("reactor", 3, T0, Duration::from_millis(200))
         .unwrap_err();
-    assert!(e.contains("waiting for 3 requests from reactor"), "{e}");
+    assert!(e.contains("waited for 3 order messages, 0 arrived"), "{e}");
     let e = clock.advance("nobody", 0, T0, WAIT).unwrap_err();
     assert!(e.contains("no client nobody"), "{e}");
     gw.stop().unwrap();
@@ -196,4 +198,129 @@ fn strategy_latency_delays_activation() {
         run("fed-lat-2s", r#"{"strategy_latency_ms":2000}"#),
         "filled"
     );
+}
+
+/// A wait that times out is dropped: it never holds up the advances behind it, and
+/// never runs late when the order it waited for arrives after all.
+#[test]
+fn a_timed_out_clock_never_wedges_or_runs_late() {
+    let (gw, feed, clock) = gateway("fed-wedge", "{}");
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 1, T0, 120, 130);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    let late = T0 + 60 * S;
+    cbbo(&feed, 1, late, 121, 124);
+    assert!(
+        clock
+            .advance("reactor", 1, late, Duration::from_millis(100))
+            .is_err()
+    );
+    // Not wedged: an advance that needs nothing more runs at once.
+    assert_eq!(clock.advance("reactor", 0, T0 + S, WAIT).unwrap(), T0 + S);
+    // The order the dropped wait wanted arrives now; the dropped advance to `late`
+    // doesn't run, so the order rests on the book of T0 + 1 s.
+    c.submit("r1", &buy("wse-late"));
+    std::thread::sleep(Duration::from_millis(100));
+    let (r, _) = c.req("order", "r2", r#""client_order_id":"wse-late""#);
+    assert_ne!(r["order"]["status"], "filled", "{r}");
+    gw.stop().unwrap();
+}
+
+/// Only order messages count: queries sent before an order don't release the clock
+/// before the order is handled.
+#[test]
+fn queries_never_count_as_order_messages() {
+    let (gw, feed, clock) = gateway("fed-queries", "{}");
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 1, T0, 120, 130);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.c.send("open_orders", r#"{"request_id":"q1"}"#).unwrap();
+    c.c.send("positions", r#"{"request_id":"q2"}"#).unwrap();
+    let body = format!(r#"{{"request_id":"r1","intent":{}}}"#, buy("wse-q"));
+    c.c.send("submit", &body).unwrap();
+    cbbo(&feed, 1, T0 + 60 * S, 121, 124);
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    assert_eq!(fill(&mut c, "wse-q")["ts_broker"], T0 + 60 * S);
+    gw.stop().unwrap();
+}
+
+#[test]
+fn a_client_cannot_move_a_session_clock() {
+    let (gw, feed, clock) = gateway("fed-own-advance", "{}");
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    let (r, _) = c.req("advance", "a1", &format!(r#""to_ts":{}"#, T0 + S));
+    assert_eq!(r["code"], "clocked_by_session", "{r}");
+    gw.stop().unwrap();
+}
+
+#[test]
+fn a_record_going_back_is_refused() {
+    let (gw, feed, _clock) = gateway("fed-back", "{}");
+    cbbo(&feed, 1, T0 + S, 120, 130);
+    let q = CbboMsg {
+        hd: RecordHeader::new::<CbboMsg>(rtype::CBBO_1M, 30, 1, u64::MAX),
+        ts_recv: T0,
+        ..CbboMsg::default_for_schema(Schema::Cbbo1M)
+    };
+    let e = feed.push(T0, RecordRef::from(&q)).unwrap_err();
+    assert!(e.contains("after one at"), "{e}");
+    gw.stop().unwrap();
+}
+
+/// Three updates in one instant, two of them for one contract: the order sees only
+/// the instant's last quote of each, never the replaced one.
+#[test]
+fn an_instant_is_one_book_with_the_last_quote_of_each() {
+    let (gw, feed, clock) = gateway("fed-instant", "{}");
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 51, 53);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &credit_spread("wse-cs", 1));
+    // A good enough with the old B, then B, then A replaced by a worse quote.
+    cbbo(&feed, 2, T0 + 60 * S, 99, 101);
+    cbbo(&feed, 3, T0 + 60 * S, 51, 53);
+    cbbo(&feed, 2, T0 + 60 * S, 92, 94);
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    let (r, _) = c.req("order", "r2", r#""client_order_id":"wse-cs""#);
+    assert_ne!(r["order"]["status"], "filled", "{r}");
+    gw.stop().unwrap();
+}
+
+/// A tcbbo quote (the one before a trade) doesn't replace a book that quote records
+/// give; alone, it is the book.
+#[test]
+fn tcbbo_is_a_book_only_where_nothing_else_is() {
+    let tcbbo = |feed: &Feed, iid: u32, ts: u64, bid: i64, ask: i64| {
+        let mut q = Cmbp1Msg {
+            hd: RecordHeader::new::<Cmbp1Msg>(rtype::TCBBO, 30, iid, ts),
+            ts_recv: ts,
+            ..Cmbp1Msg::default_for_schema(Schema::Tcbbo)
+        };
+        q.levels[0].bid_px = px(bid);
+        q.levels[0].ask_px = px(ask);
+        q.levels[0].bid_sz = 10;
+        q.levels[0].ask_sz = 10;
+        feed.push(ts, RecordRef::from(&q)).unwrap();
+    };
+    let (gw, feed, clock) = gateway("fed-tcbbo", "{}");
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 1, T0, 120, 130);
+    tcbbo(&feed, 2, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &buy("wse-q"));
+    c.submit("r2", &single("wse-t", PUT_A, "buy", "open", 1, "0.51"));
+    tcbbo(&feed, 1, T0 + S, 119, 121);
+    tcbbo(&feed, 2, T0 + S, 49, 51);
+    clock.advance("reactor", 2, T0 + 2 * S, WAIT).unwrap();
+    assert_eq!(fill(&mut c, "wse-t")["fill"]["price"], "0.51");
+    let (r, _) = c.req("order", "r3", r#""client_order_id":"wse-q""#);
+    assert_ne!(r["order"]["status"], "filled", "{r}");
+    gw.stop().unwrap();
 }

@@ -49,22 +49,25 @@ pub(crate) enum Input {
         request: Parsed,
     },
     Closed(u64),
-    /// An in-process clock (a session, decision 0022): once `requests` requests from
-    /// `client` have been handled, advance the broker to `to` and answer the market time.
+    /// An in-process clock (a session, decision 0022): once `orders` order messages
+    /// (submits and cancels) from `client` have been handled, advance the broker to `to`
+    /// and answer the market time; at `deadline`, give up and say so.
     Clock {
         client: String,
-        requests: u64,
+        orders: u64,
         to: u64,
+        deadline: Instant,
         reply: Sender<Result<u64, String>>,
     },
     Shutdown,
 }
 
-/// A clock advance waiting for a client's requests to arrive.
+/// A clock advance waiting for a client's order messages to arrive.
 struct ClockWait {
     client: usize,
-    requests: u64,
+    orders: u64,
     to: u64,
+    deadline: Instant,
     reply: Sender<Result<u64, String>>,
 }
 
@@ -533,7 +536,8 @@ pub(crate) struct Session<B: Broker> {
     reconcile: Option<Reconcile>,
     last_poll: Instant,
     last_seq: Arc<AtomicU64>,
-    /// Requests handled per client (by its index in the configuration), for clocks.
+    /// Order messages (submits and cancels, valid or not) handled per client, by its
+    /// index in the configuration, for clocks.
     handled: HashMap<usize, u64>,
     /// Clock advances waiting for requests, in arrival order.
     clocks: VecDeque<ClockWait>,
@@ -786,7 +790,13 @@ impl<B: Broker> Session<B> {
                     self.hello(id, client, outbox, resume, cancel_on_disconnect)?;
                 }
                 Ok(Input::Request { id, request }) => {
-                    if let Some(c) = self.conns.iter().find(|c| c.id == id) {
+                    let name = match &request {
+                        Ok((_, op)) => op_name(op),
+                        Err((_, op, _)) => op.as_str(),
+                    };
+                    if matches!(name, "submit" | "cancel")
+                        && let Some(c) = self.conns.iter().find(|c| c.id == id)
+                    {
                         *self.handled.entry(c.client).or_default() += 1;
                     }
                     self.request(id, request)?;
@@ -794,14 +804,16 @@ impl<B: Broker> Session<B> {
                 Ok(Input::Closed(id)) => self.closed(id)?,
                 Ok(Input::Clock {
                     client,
-                    requests,
+                    orders,
                     to,
+                    deadline,
                     reply,
                 }) => match self.cfg.clients.iter().position(|c| c.name == client) {
                     Some(client) => self.clocks.push_back(ClockWait {
                         client,
-                        requests,
+                        orders,
                         to,
+                        deadline,
                         reply,
                     }),
                     None => {
@@ -815,10 +827,25 @@ impl<B: Broker> Session<B> {
         }
     }
 
-    /// Runs the waiting clock advances whose requests have all been handled, in order.
+    /// Runs the waiting clock advances whose order messages have all been handled, in
+    /// order. One past its deadline is answered with an error and dropped, so it never
+    /// holds up the ones behind it nor runs after its caller has given up.
     fn clock(&mut self) -> Result<(), String> {
+        let now = Instant::now();
+        self.clocks.retain(|w| {
+            if now < w.deadline {
+                return true;
+            }
+            let _ = w.reply.send(Err(format!(
+                "no advance to {}: waited for {} order messages, {} arrived",
+                w.to,
+                w.orders,
+                self.handled.get(&w.client).copied().unwrap_or(0)
+            )));
+            false
+        });
         while let Some(w) = self.clocks.front() {
-            if self.handled.get(&w.client).copied().unwrap_or(0) < w.requests {
+            if self.handled.get(&w.client).copied().unwrap_or(0) < w.orders {
                 return Ok(());
             }
             let Some(w) = self.clocks.pop_front() else {
@@ -1055,6 +1082,11 @@ impl<B: Broker> Session<B> {
                 self.status(r#"{"kill":null}"#)?;
                 let o = outcome("ok").s("state", self.state()).done();
                 self.reply(ci, response(&rid, name, &o));
+            }
+            Op::Advance(_) if self.b.session_clocked() => {
+                // Time belongs to the session that clocks this simulator.
+                let line = request_error(&rid, name, "clocked_by_session", "null");
+                self.reply(ci, line);
             }
             Op::Advance(to) => {
                 let line = match self.b.advance(to) {
