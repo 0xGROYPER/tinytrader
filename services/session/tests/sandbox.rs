@@ -7,6 +7,32 @@ use session::Session;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
+/// Whether the probes can run here: they need bash and the base tools on the
+/// strategy's `PATH` (`/usr/bin:/bin`), which a Nix build sandbox doesn't have.
+fn probes_can_run() -> bool {
+    let ok = ["/bin/bash", "/bin/cat", "/bin/chmod"]
+        .iter()
+        .all(|p| Path::new(p).exists() || Path::new(&p.replace("/bin/", "/usr/bin/")).exists());
+    if !ok {
+        eprintln!("skipped: no bash and base tools under /usr/bin:/bin here");
+    }
+    ok
+}
+
+/// Whether `sandbox-exec` works here: it can't be nested in another sandbox (a Nix
+/// build's on macOS).
+#[cfg(target_os = "macos")]
+fn sandbox_exec_works() -> bool {
+    let ok = std::process::Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("skipped: sandbox-exec can't run here (inside another sandbox?)");
+    }
+    ok
+}
+
 fn root(name: &str) -> PathBuf {
     let p = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("sandbox-{name}-{}", std::process::id()));
@@ -27,11 +53,10 @@ fn run(name: &str, sandbox: &str, escapes: bool) -> (session::Outcome, String, V
     let marker = base.join("opened");
     let command = base.join("x.command");
     std::fs::write(&command, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
-    std::process::Command::new("/bin/chmod")
-        .arg("+x")
-        .arg(&command)
-        .status()
-        .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let store = TcpListener::bind("127.0.0.1:0").unwrap();
     store.set_nonblocking(true).unwrap();
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_tinytrader-session"));
@@ -90,6 +115,9 @@ fn run(name: &str, sandbox: &str, escapes: bool) -> (session::Outcome, String, V
 
 #[test]
 fn an_unsandboxed_strategy_can_read_and_connect() {
+    if !probes_can_run() {
+        return;
+    }
     let (o, out, rec, reached) = run("off", "off", false);
     assert_eq!(o.status, "complete", "{o:?} {out}");
     assert!(
@@ -104,6 +132,9 @@ fn an_unsandboxed_strategy_can_read_and_connect() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_sandboxed_strategy_can_only_reach_its_session() {
+    if !probes_can_run() || !sandbox_exec_works() {
+        return;
+    }
     let (o, out, rec, reached) = run("macos", "macos", true);
     assert_eq!(o.status, "complete", "{o:?} {out}");
     for want in [
