@@ -2236,7 +2236,7 @@ async fn store_reads_are_tried_again_after_a_dropped_answer() {
     for (script, works, tries) in cases {
         let (url, seen) = flaky_store(script, ok.clone()).await;
         let r = rig_with("flaky", |j| j.store = url).await;
-        let got = store_json(&r.jobs, "/coverage", &[], false, false).await;
+        let got = store_json(&r.jobs, "/coverage", &[], false).await;
         let n = seen.load(Ordering::SeqCst);
         assert_eq!((got.is_ok(), n), (works, tries), "{script:?}: {got:?}");
         let _ = std::fs::remove_dir_all(&r.dir);
@@ -2576,28 +2576,26 @@ async fn caching_needs_a_folder_a_done_job_and_a_job_id() {
 }
 
 #[tokio::test]
-async fn a_free_purchase_may_go_ahead_while_a_volume_is_missing_if_asked() {
-    let r = rig("free-missing").await;
-    lock(&r.store).catalog.1 = json!({ "roots": [], "missing_volumes": ["data"] });
-    lock(&r.store).coverage.1 = json!({ "days": [], "missing_volumes": ["data"] });
-    // Not asked: refused, as ever.
+async fn a_free_purchase_may_ignore_what_is_held_if_asked() {
+    let r = rig("free-ignore").await;
+    // A store that can't answer at all, and a day held: not asked, refused.
+    lock(&r.store).catalog = (503, json!({ "error": "rescanning" }));
     assert_eq!(r.price(json!({})).await.0, StatusCode::SERVICE_UNAVAILABLE);
-    // Asked, and free: priced and submitted.
-    let (code, v) = r.price(json!({ "free_while_volumes_missing": true })).await;
+    // Asked, and free: the whole day is priced and submitted, unasked.
+    let (code, v) = r.price(json!({ "free_ignore_held": true })).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert_eq!(v["cost_usd"], 0.0, "{v}");
+    assert_eq!(v["requests"][0]["kind"], "whole", "{v}");
     let (code, v) = r.submit(v["quote"].as_str().unwrap(), None).await;
     assert_eq!(code, StatusCode::OK, "{v}");
     assert_eq!(r.fake.submits(), 1);
 }
 
 #[tokio::test]
-async fn a_paid_purchase_is_never_made_while_a_volume_is_missing() {
-    let r = rig("paid-missing").await;
-    lock(&r.store).catalog.1 = json!({ "roots": [], "missing_volumes": ["data"] });
-    lock(&r.store).coverage.1 = json!({ "days": [], "missing_volumes": ["data"] });
+async fn a_paid_purchase_never_ignores_what_is_held() {
+    let r = rig("paid-ignore").await;
     lock(&r.fake.s).price = 2.5;
-    let (code, v) = r.price(json!({ "free_while_volumes_missing": true })).await;
+    let (code, v) = r.price(json!({ "free_ignore_held": true })).await;
     assert_eq!(code, StatusCode::CONFLICT, "{v}");
     assert!(
         v["error"]
@@ -2607,4 +2605,30 @@ async fn a_paid_purchase_is_never_made_while_a_volume_is_missing() {
         "{v}"
     );
     assert_eq!(r.fake.submits(), 0);
+}
+
+#[tokio::test]
+async fn a_free_purchase_ignoring_held_still_skips_a_whole_job_on_databentos_list() {
+    // A whole-chain job of the day on Databento's list: nothing to buy.
+    let r = rig("free-ignore-listed").await;
+    lock(&r.store).catalog = (503, json!({ "error": "rescanning" }));
+    r.fake.add(job(
+        "OPRA-W1",
+        json!("SPY.OPT"),
+        "parent",
+        whole_day(),
+        "done",
+    ));
+    let (code, v) = r.price(json!({ "free_ignore_held": true })).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert!(v["requests"].as_array().is_none_or(Vec::is_empty), "{v}");
+    assert!(v.to_string().contains("OPRA-W1"), "{v}");
+    // A job of some contracts only doesn't count: the day is bought whole.
+    let r = rig("free-ignore-contracts").await;
+    lock(&r.store).catalog = (503, json!({ "error": "rescanning" }));
+    r.fake
+        .add(job("OPRA-C9", json!(C1), "raw_symbol", whole_day(), "done"));
+    let (code, v) = r.price(json!({ "free_ignore_held": true })).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["requests"][0]["kind"], "whole", "{v}");
 }

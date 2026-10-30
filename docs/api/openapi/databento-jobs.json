@@ -78,9 +78,14 @@
             "description": "Last day, inclusive.",
             "type": "string"
           },
+          "free_ignore_held": {
+            "default": false,
+            "description": "Buy every day asked for whole without asking the store what it holds\n(it may buy again what the store has), skipping only the days a whole\njob of the symbol on Databento's list, or bought here, already\ncovers. Only a free ($0) quote can then be made or submitted. For the\nplan's free data while the store can't answer (a drive away).",
+            "type": "boolean"
+          },
           "free_while_volumes_missing": {
             "default": false,
-            "description": "Price it even while the store is missing a volume, taking what the\nmissing volumes hold as not held, so it may buy again what they\nhold. Only a free ($0) quote can then be made or submitted.",
+            "description": "Deprecated: the same as `free_ignore_held`.",
             "type": "boolean"
           },
           "hours": {

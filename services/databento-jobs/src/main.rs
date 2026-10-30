@@ -169,9 +169,14 @@ struct PriceRequest {
     /// and days this buys again, by ID: `["OPRA-…"]`.
     #[serde(default)]
     again: Option<Value>,
-    /// Price it even while the store is missing a volume, taking what the
-    /// missing volumes hold as not held, so it may buy again what they
-    /// hold. Only a free ($0) quote can then be made or submitted.
+    /// Buy every day asked for whole without asking the store what it holds
+    /// (it may buy again what the store has), skipping only the days a whole
+    /// job of the symbol on Databento's list, or bought here, already
+    /// covers. Only a free ($0) quote can then be made or submitted. For the
+    /// plan's free data while the store can't answer (a drive away).
+    #[serde(default)]
+    free_ignore_held: bool,
+    /// Deprecated: the same as `free_ignore_held`.
     #[serde(default)]
     free_while_volumes_missing: bool,
 }
@@ -188,8 +193,8 @@ struct Asked {
     rule: Option<missing::Rule>,
     contracts: Option<BTreeMap<time::Date, BTreeSet<String>>>,
     hours: Option<missing::Hours>,
-    /// `free_while_volumes_missing`.
-    free_while_volumes_missing: bool,
+    /// `free_ignore_held`.
+    free_ignore_held: bool,
 }
 
 impl PriceRequest {
@@ -264,7 +269,7 @@ impl PriceRequest {
             rule: self.rule.clone(),
             contracts,
             hours: self.hours.clone(),
-            free_while_volumes_missing: self.free_while_volumes_missing,
+            free_ignore_held: self.free_ignore_held || self.free_while_volumes_missing,
         })
     }
 }
@@ -1215,7 +1220,6 @@ async fn store_json(
     path: &str,
     query: &[(&str, &str)],
     fresh: bool,
-    volumes_missing_ok: bool,
 ) -> Result<Value, String> {
     let mut query = query.to_vec();
     if fresh {
@@ -1242,7 +1246,7 @@ async fn store_json(
     })
     .await?;
     match v["missing_volumes"].as_array() {
-        Some(m) if m.is_empty() || volumes_missing_ok => Ok(v),
+        Some(m) if m.is_empty() => Ok(v),
         Some(m) => Err(format!(
             "the store is missing volumes ({}), so what it holds isn't known",
             m.iter()
@@ -1295,8 +1299,7 @@ async fn live_jobs(jobs: &Jobs) -> Result<(Vec<BatchJob>, HashSet<String>), Stri
 /// holdings, Databento's jobs that aren't expired, and every purchase in the
 /// ledger, read now (see `had`). Fails when any of it can't be read in full.
 /// `fresh`: the store's answers from a rescan begun now (for a purchase),
-/// not its last scan (for a price). `volumes_missing_ok`: what the store's
-/// present volumes hold will do (`free_while_volumes_missing`).
+/// not its last scan (for a price).
 async fn had(
     jobs: &Jobs,
     dataset: &str,
@@ -1304,10 +1307,9 @@ async fn had(
     target: &str,
     (start, end): (time::Date, time::Date),
     fresh: bool,
-    volumes_missing_ok: bool,
 ) -> Result<Vec<had::Piece>, String> {
     let last = end.previous_day().unwrap_or(end).to_string();
-    let catalog = store_json(jobs, "/catalog", &[], fresh, volumes_missing_ok).await?;
+    let catalog = store_json(jobs, "/catalog", &[], fresh).await?;
     let coverage = store_json(
         jobs,
         "/coverage",
@@ -1320,7 +1322,6 @@ async fn had(
             ("end", &last),
         ],
         fresh,
-        volumes_missing_ok,
     )
     .await?;
     let (live, ids) = live_jobs(jobs).await?;
@@ -1332,6 +1333,27 @@ async fn had(
     let schema = schema.as_str();
     let mut pieces = had::store_pieces(&catalog, &coverage, dataset, schema, target, range);
     pieces.extend(had::job_pieces(&live, dataset, schema, target));
+    pieces.extend(had::ledger_pieces(
+        &purchases, dataset, schema, target, &ids,
+    ));
+    Ok(pieces)
+}
+
+/// What Databento's job list (jobs that aren't expired) and the ledger's
+/// purchases cover of `target`, without the store (`free_ignore_held`).
+async fn jobs_had(
+    jobs: &Jobs,
+    dataset: &str,
+    schema: Schema,
+    target: &str,
+) -> Result<Vec<had::Piece>, String> {
+    let (live, ids) = live_jobs(jobs).await?;
+    let purchases = lock(&jobs.ledger)
+        .as_ref()
+        .map(ledger::Ledger::purchases)
+        .unwrap_or_default();
+    let schema = schema.as_str();
+    let mut pieces = had::job_pieces(&live, dataset, schema, target);
     pieces.extend(had::ledger_pieces(
         &purchases, dataset, schema, target, &ids,
     ));
@@ -1480,17 +1502,21 @@ async fn plan(
     let bad = |e: String| (StatusCode::BAD_REQUEST, e);
     let down = |e: String| (StatusCode::SERVICE_UNAVAILABLE, e);
     let dataset = known_dataset(jobs, &a.dataset).await?;
-    let mut pieces = had(
-        jobs,
-        &dataset,
-        a.schema,
-        &a.symbol,
-        (a.start, a.end),
-        fresh,
-        a.free_while_volumes_missing,
-    )
-    .await
-    .map_err(down)?;
+    // With free_ignore_held the store isn't asked: only whole jobs of the
+    // symbol on Databento's list or bought here count, and every other day
+    // is bought whole.
+    let mut pieces = if a.free_ignore_held {
+        jobs_had(jobs, &dataset, a.schema, &a.symbol)
+            .await
+            .map_err(down)?
+            .into_iter()
+            .filter(|p| matches!(p.scope, had::Scope::All) && !matches!(p.kind, had::Kind::Gone(_)))
+            .collect()
+    } else {
+        had(jobs, &dataset, a.schema, &a.symbol, (a.start, a.end), fresh)
+            .await
+            .map_err(down)?
+    };
     let gone: BTreeSet<String> = pieces
         .iter()
         .filter_map(|p| match &p.kind {
@@ -1531,7 +1557,18 @@ async fn plan(
             .iter()
             .filter(|p| p.window.0 < window.1 && window.0 < p.window.1)
             .collect();
-        if !by_contract && touching.is_empty() {
+        if a.free_ignore_held && !by_contract {
+            // Only whole jobs count here: a day one covers is skipped, any
+            // other is bought whole (never by contract, which needs the
+            // store's definitions).
+            match touching
+                .iter()
+                .find(|p| p.window.0 <= window.0 && window.1 <= p.window.1)
+            {
+                Some(p) => notes.push(format!("{d}: not bought, {} covers it", p.what)),
+                None => whole.push((d, window)),
+            }
+        } else if !by_contract && touching.is_empty() {
             whole.push((d, window));
         } else if option {
             by_day.push((d, window));
@@ -1871,7 +1908,7 @@ async fn price(AxState(jobs): AxState<Shared>, Json(r): Json<PriceRequest>) -> R
                     ),
                 ))
             });
-            let free_only = asked.free_while_volumes_missing;
+            let free_only = asked.free_ignore_held;
             let result = planned
                 .map(|(parts, notes)| Priced {
                     cost_usd: price_of(&parts),
@@ -1884,7 +1921,7 @@ async fn price(AxState(jobs): AxState<Shared>, Json(r): Json<PriceRequest>) -> R
                         Err((
                             StatusCode::CONFLICT,
                             format!(
-                                "it costs ${:.2}; with free_while_volumes_missing only a free purchase is priced",
+                                "it costs ${:.2}; with free_ignore_held only a free purchase is priced",
                                 p.cost_usd
                             ),
                         ))
@@ -2183,11 +2220,11 @@ async fn send_quote(
             ),
         );
     }
-    if a.free_while_volumes_missing && now > 0.0 {
+    if a.free_ignore_held && now > 0.0 {
         return refused(
             StatusCode::CONFLICT,
             format!(
-                "it costs ${now:.2} now; with free_while_volumes_missing only a free purchase is submitted"
+                "it costs ${now:.2} now; with free_ignore_held only a free purchase is submitted"
             ),
         );
     }
