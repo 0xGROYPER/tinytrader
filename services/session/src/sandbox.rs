@@ -170,7 +170,7 @@ mod tests {
         let e =
             check_allow_read(std::slice::from_ref(&code), &[code.join("cache")], None).unwrap_err();
         assert!(e.contains("would let the strategy read"), "{e}");
-        let e = check_allow_read(&[tmp.clone()], &[], Some(&code)).unwrap_err();
+        let e = check_allow_read(std::slice::from_ref(&tmp), &[], Some(&code)).unwrap_err();
         assert!(e.contains("would let"), "{e}");
         assert!(check_allow_read(&[code.join("nope")], &[], None).is_err());
     }
