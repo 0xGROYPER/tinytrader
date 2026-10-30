@@ -89,6 +89,10 @@ the topology, not the external actor, decides how much reaches it:
   each answer line (a stated maximum size) have fixed capacities.
 - **Isolation:** the process holds no venue credentials and no store or
   relay connection of its own; everything reaches it through the runtime.
+  Sessions enforce the same rule for a strategy they start (0022, "as
+  built"): on macOS a deny-by-default profile lets it read only its own
+  code and connect only to the session's addresses. The runtime can start
+  external actors under the same profile.
 
 ### 6. One class, three places
 

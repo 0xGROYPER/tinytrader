@@ -57,6 +57,31 @@ fee_per_contract = "0.65"
 
 Sources are read through the store producer (`libs/producer`). A day not held is a `store-gap` message in the stream, never a skip. Each file read is pinned by SHA-256 in the run record.
 
+## Starting the strategy, and the sandbox
+
+With a `[strategy]` table the session starts the strategy itself, with `TT_SESSION` set to the control address and `TMPDIR` set to a scratch folder in the run folder. The strategy's output goes to `strategy.out` and `strategy.err` there. Without the table, nothing changes: start the strategy yourself from the `READY` line.
+
+```toml
+[strategy]
+command = ["python3", "-m", "my_strategy"]
+cwd = "/path/to/code"                    # optional
+env = { MY_SETTING = "1" }               # optional
+sandbox = "macos"                        # or "off", the default
+allow_read = ["/path/to/code", "/path/to/venv", "/path/to/python"]
+```
+
+`sandbox = "macos"` runs the strategy under `sandbox-exec` with a profile the session writes (`sandbox.sb` in the run folder). It denies by default, then allows:
+- reading the system's folders (`/System`, `/usr`, `/bin`, `/Library`, `/nix/store`, …) and the `allow_read` folders;
+- reading and writing its own scratch folder;
+- reading any file's metadata, though not its contents;
+- connecting to the session's control and data addresses and its venues' gateways, and nowhere else.
+
+Held data, caches, home and the store's API are off the list, so a sandboxed strategy can see the market only through the session, as decision 0026 §5 asks of an actor. `allow_read` must name everything the strategy loads: its code, and its interpreter and libraries when they live outside the system's folders.
+
+The run record says how the strategy ran: `strategy_process` holds the command, its exit status, and `sandbox` (`"off"`, or the kind, the profile's SHA-256 and `allow_read`). So a result shows whether it ran sealed off.
+
+`sandbox-exec` is deprecated by Apple but works on current macOS. On Linux a container with networking off can't reach the session's TCP addresses; that needs the session and its gateways on unix sockets, a later step. A strategy that exits before the run ends leaves the run incomplete.
+
 ## The control connection
 
 | Direction | Message |

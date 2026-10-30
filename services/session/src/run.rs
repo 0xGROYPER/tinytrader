@@ -22,7 +22,7 @@
 //! 4. After the last record, the venues are advanced to the end of the last day, so
 //!    day orders expire, and the session sends `end` with the outcome and the audit
 //!    hash, and writes the run record.
-use crate::config::Config;
+use crate::config::{Config, Sandbox};
 use crate::protocol::{self, FromStrategy};
 use dbn::encode::DbnMetadataEncoder;
 use dbn::{Metadata, SType, Schema};
@@ -262,6 +262,81 @@ impl Session {
         &self.ready
     }
 
+    /// Starts the strategy when the configuration names one, sandboxed if it says
+    /// so, with `TT_SESSION` set and its output in the run folder.
+    fn start_strategy(&self, st: &mut Run) -> Result<(), String> {
+        let Some(sp) = &self.cfg.strategy else {
+            return Ok(());
+        };
+        let scratch = self.dir.join("strategy-tmp");
+        std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+        let out = |name: &str| {
+            std::fs::File::create(self.dir.join(name)).map_err(|e| format!("{name}: {e}"))
+        };
+        let mut argv = sp.command.clone();
+        let sandbox = match sp.sandbox {
+            Sandbox::Off => json!("off"),
+            Sandbox::Macos => {
+                let mut ports = vec![self.ready.control, self.ready.data];
+                ports.extend(self.ready.orders.iter().map(|(_, a)| *a));
+                let scratch = scratch.canonicalize().map_err(|e| e.to_string())?;
+                let profile = crate::sandbox::profile(&sp.allow_read, &scratch, &ports);
+                let path = self.dir.join("sandbox.sb");
+                std::fs::write(&path, &profile).map_err(|e| format!("sandbox.sb: {e}"))?;
+                let mut wrapped = vec![
+                    "/usr/bin/sandbox-exec".to_owned(),
+                    "-f".to_owned(),
+                    path.to_string_lossy().into_owned(),
+                ];
+                wrapped.append(&mut argv);
+                argv = wrapped;
+                json!({"kind": "macos-sandbox-exec", "profile_sha256": hex(&Sha256::digest(profile.as_bytes())),
+                       "allow_read": sp.allow_read})
+            }
+        };
+        let mut cmd = std::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..])
+            .envs(&sp.env)
+            .env("TT_SESSION", self.ready.control.to_string())
+            .env("TMPDIR", &scratch)
+            .stdin(std::process::Stdio::null())
+            .stdout(out("strategy.out")?)
+            .stderr(out("strategy.err")?);
+        if let Some(cwd) = &sp.cwd {
+            cmd.current_dir(cwd);
+        }
+        st.process = Some(json!({"command": sp.command, "sandbox": sandbox}));
+        st.child = Some(
+            cmd.spawn()
+                .map_err(|e| format!("strategy {}: {e}", argv[0]))?,
+        );
+        Ok(())
+    }
+
+    /// Waits a moment for a started strategy to exit after the run, then stops it.
+    fn wait_strategy(&self, st: &mut Run) {
+        let Some(child) = &mut st.child else {
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break s.code().map_or_else(|| json!("signal"), |c| json!(c)),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break json!("killed");
+                }
+            }
+        };
+        if let Some(Value::Object(p)) = &mut st.process {
+            p.insert("exit".into(), status);
+        }
+    }
+
     /// Serves the run to one strategy, then writes the run record and stops the
     /// venues.
     ///
@@ -271,7 +346,8 @@ impl Session {
     pub fn run(mut self) -> Result<Outcome, String> {
         let mut audit = Audit::create(&self.dir.join("audit.log"))?;
         let mut state = Run::default();
-        let result = self.serve(&mut audit, &mut state);
+        let started = self.start_strategy(&mut state);
+        let result = started.and_then(|()| self.serve(&mut audit, &mut state));
         let flushed = audit.log.flush().map_err(|e| format!("audit.log: {e}"));
         let reason = result
             .err()
@@ -296,6 +372,7 @@ impl Session {
                         "reports": state.reports}),
             );
         }
+        self.wait_strategy(&mut state);
         // The venues stop whatever happens to the record.
         let recorded = self.record(&outcome, &state);
         let mut stopped = Ok(());
@@ -648,6 +725,7 @@ impl Session {
             "strategy": st.strategy.as_ref().map(|(s, r)| json!({"name": s, "revision": r})),
             "days": self.cfg.days,
             "seed": self.cfg.seed,
+            "strategy_process": st.process.clone().unwrap_or(Value::Null),
             "lockstep": {"batch": "instant", "strategy_latency_ms": self.cfg.strategy_latency_ms},
             "merge": {"order": "(ts, class, rank, position)", "ranks": self.cfg.sources.iter().map(|s| s.name.clone()).collect::<Vec<_>>()},
             "config_sha256": hex(&Sha256::digest(self.cfg_text.as_bytes())),
@@ -697,4 +775,7 @@ struct Run {
     sent: BTreeMap<String, u64>,
     /// Each venue's last event after the final advance.
     reports: Option<Value>,
+    /// The strategy process the session started, and what the record says of it.
+    child: Option<std::process::Child>,
+    process: Option<Value>,
 }

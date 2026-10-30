@@ -7,6 +7,11 @@
 //! ready_timeout_s = 60           # how long a step waits for the strategy's ready
 //! seed = 0                       # recorded; the first models use no randomness
 //!
+//! [strategy]                     # optional: the session starts the strategy itself
+//! command = ["python3", "-m", "my_strategy"]
+//! sandbox = "macos"              # or "off" (the default)
+//! allow_read = ["/path/to/code", "/path/to/venv"]
+//!
 //! [[sources]]
 //! name = "opra"
 //! holdings = "store:http://127.0.0.1:9120"   # or "job:DIR", "folder:DIR", or a list:
@@ -53,6 +58,42 @@ pub struct Config {
     pub sources: Vec<Source>,
     /// The simulated venues, one gateway each.
     pub venues: Vec<Venue>,
+    /// The strategy, when the session starts it itself.
+    #[serde(default)]
+    pub strategy: Option<StrategyProcess>,
+}
+
+/// A strategy the session starts, optionally sandboxed (decision 0022, section 1).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategyProcess {
+    /// The command and its arguments; `TT_SESSION` is set to the control address.
+    pub command: Vec<String>,
+    /// Its working folder.
+    #[serde(default)]
+    pub cwd: Option<std::path::PathBuf>,
+    /// More environment.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// `off` (the default) or `macos`: under `sandbox-exec`, reading only the
+    /// system's folders and `allow_read`, writing only its own scratch folder, and
+    /// connecting only to the session's own addresses.
+    #[serde(default)]
+    pub sandbox: Sandbox,
+    /// Folders a sandboxed strategy may read: its code, its interpreter.
+    #[serde(default)]
+    pub allow_read: Vec<std::path::PathBuf>,
+}
+
+/// How a started strategy is confined.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Sandbox {
+    /// An ordinary process of the user running the session.
+    #[default]
+    Off,
+    /// macOS `sandbox-exec` with a profile the session writes.
+    Macos,
 }
 
 fn ready_timeout() -> u64 {
@@ -147,6 +188,17 @@ impl Config {
         venues.sort_unstable();
         if venues.windows(2).any(|w| w[0] == w[1]) {
             return Err("venue names must differ".into());
+        }
+        if let Some(st) = &c.strategy {
+            if st.command.is_empty() {
+                return Err("strategy.command is empty".into());
+            }
+            if st.sandbox == Sandbox::Macos && !cfg!(target_os = "macos") {
+                return Err("strategy.sandbox = \"macos\" needs macOS".into());
+            }
+            if st.allow_read.iter().any(|p| !p.is_absolute()) {
+                return Err("strategy.allow_read takes absolute paths".into());
+            }
         }
         for v in &c.venues {
             if v.name.is_empty()

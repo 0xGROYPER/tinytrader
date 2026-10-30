@@ -25,7 +25,5 @@ serde_json.workspace = true
 sha2 = "0.10.9"
 tinytrader-dbn.workspace = true
 tinytrader-producer = { path = "../../libs/producer" }
-toml = "0.8"
-
-[dev-dependencies]
 time = { version = "0.3", default-features = false }
+toml = "0.8"
