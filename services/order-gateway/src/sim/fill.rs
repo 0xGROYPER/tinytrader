@@ -25,6 +25,11 @@ impl SimBroker {
             let Some(q) = m.ids.get(&l.symbol).and_then(|id| m.book.get(id)) else {
                 return;
             };
+            // fill_on = "next_quote": every leg on a quote after activation, never one
+            // leg's new quote beside another's from before.
+            if self.s.next_quote && q.ts <= o.t_act {
+                return;
+            }
             if matches!((q.bid, q.ask), (Some(b), Some(a)) if b > a) {
                 return; // crossed: unusable until a non-crossed quote
             }

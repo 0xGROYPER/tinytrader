@@ -587,3 +587,63 @@ fn a_contract_trades_on_its_expiry_day() {
     assert_eq!(fill(&mut c, "wse-0dte")["fill"]["price"], "0.07");
     gw.stop().unwrap();
 }
+
+/// fill_on = "next_quote" for a combo: one leg's new quote isn't enough; every leg
+/// must have quoted since the order activated.
+#[test]
+fn next_quote_waits_for_every_leg_of_a_combo() {
+    let (gw, feed, clock) = gateway(
+        "fed-nq-combo",
+        r#"{"fill_on":"next_quote","expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    let call2 = "SPY261005C00585000";
+    let m = SymbolMappingMsg::new(
+        5,
+        T0 - S / 2,
+        SType::Parent,
+        "SPY.OPT",
+        SType::RawSymbol,
+        "SPY   261005C00585000",
+        0,
+        0,
+    )
+    .unwrap();
+    feed.push(T0 - S / 2, RecordRef::from(&m)).unwrap();
+    let all = |t: u64| {
+        cbbo(&feed, 2, t, 92, 94); // PUT_A 570
+        cbbo(&feed, 3, t, 50, 52); // PUT_B 568
+        cbbo(&feed, 1, t, 120, 122); // CALL 580
+        cbbo(&feed, 5, t, 60, 62); // 585
+    };
+    all(T0);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    // An iron condor for a credit of at least 0.90: natural 0.92 − 0.52 + 1.20 − 0.62 = 0.98.
+    let condor = combo(
+        "wse-ic",
+        &[
+            (PUT_A, 1, "sell", "open"),
+            (PUT_B, 1, "buy", "open"),
+            (CALL, 1, "sell", "open"),
+            (call2, 1, "buy", "open"),
+        ],
+        1,
+        "-0.90",
+    );
+    assert_eq!(c.submit("r1", &condor)["outcome"], "accepted");
+    // A minute later only the short put quotes: no fill on the other legs' old quotes.
+    cbbo(&feed, 2, T0 + 60 * S, 92, 94);
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    let (r, _) = c.req("order", "r2", r#""client_order_id":"wse-ic""#);
+    assert_ne!(r["order"]["status"], "filled", "{r}");
+    // Then every leg: it fills on those quotes.
+    all(T0 + 120 * S);
+    clock.advance("reactor", 1, T0 + 120 * S, WAIT).unwrap();
+    let f = fill(&mut c, "wse-ic");
+    assert_eq!(
+        (f["fill"]["price"].as_str(), f["ts_broker"].as_u64()),
+        (Some("-0.98"), Some(T0 + 120 * S))
+    );
+    gw.stop().unwrap();
+}
