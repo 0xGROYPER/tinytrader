@@ -326,8 +326,10 @@ fn a_session_runs_a_strategy_in_lockstep() {
     assert_eq!(rec["strategy"]["name"], "toy");
     assert_eq!(rec["sources"][0]["days"][0]["files"][0]["verified"], true);
     assert_eq!(rec["venues"][0]["sent"], 1);
-    assert_eq!(rec["venues"][0]["model"], "tinytrader-sim/5");
+    assert_eq!(rec["venues"][0]["model"], "tinytrader-sim/6");
     assert_eq!(rec["seed"], 0);
+    // Each venue draws from its own seed, derived from the run's and its name.
+    assert!(rec["venues"][0]["script"]["seed"].as_u64().is_some());
     // The end names each venue's last event after the final advance.
     assert!(seen.end["reports"]["options"].as_u64().unwrap() > 0);
 }

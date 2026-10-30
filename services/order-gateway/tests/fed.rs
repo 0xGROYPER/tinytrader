@@ -105,7 +105,7 @@ fn options_and_shares_fill_from_minute_quotes() {
     let mut c = Conn::open(&gw, "reactor", None);
     let welcome = serde_json::from_str::<Value>(&c.lines[0]).unwrap();
     let pins = &welcome["pins"]["broker"];
-    assert_eq!(pins["model"], "tinytrader-sim/5");
+    assert_eq!(pins["model"], "tinytrader-sim/6");
     assert_eq!(pins["quotes"]["source"], "session");
     mappings(&feed);
     // At first neither fills: the spread's natural is 0.92 - 0.53 = 0.39 credit, short
@@ -703,6 +703,34 @@ fn working_orders_count_against_buying_power() {
     gw.stop().unwrap();
 }
 
+/// A resting order that closes doesn't free buying power before it fills.
+#[test]
+fn a_resting_close_frees_nothing() {
+    let (gw, feed, clock) = gateway(
+        "fed-bp-close",
+        r#"{"account":{"cash":"300.00"},"venue_rules":{"buying_power":"defined_risk"},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &credit_spread("wse-open", 1));
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    fill(&mut c, "wse-open");
+    let (a, _) = c.req("account", "r2", "");
+    let before = a["account"]["buying_power"].clone();
+    // A buy-to-close of the short put at 0.01, which won't fill.
+    c.submit("r3", &single("wse-close", PUT_A, "buy", "close", 1, "0.01"));
+    clock.advance("reactor", 2, T0 + 120 * S, WAIT).unwrap();
+    // Its own debit (0.01 × 100) is held as if paid; the risk it would remove isn't
+    // released until it fills.
+    let (a, _) = c.req("account", "r4", "");
+    assert_eq!(before, "139.96");
+    assert_eq!(a["account"]["buying_power"], "138.96", "{a}");
+    gw.stop().unwrap();
+}
+
 /// Defined-risk buying power: a spread whose worst loss cash can't cover is
 /// refused, never resized; the account reports what's left.
 #[test]
@@ -802,5 +830,63 @@ fn next_quote_waits_for_every_leg_of_a_combo() {
         (f["fill"]["price"].as_str(), f["ts_broker"].as_u64()),
         (Some("-0.98"), Some(T0 + 120 * S))
     );
+    gw.stop().unwrap();
+}
+
+/// Under report latency, queries answer at once by default (as a broker's REST
+/// runs ahead of its stream); with `report_latency_applies_to = "all"` they show
+/// the account as of the last released report.
+#[test]
+fn queries_in_the_report_latency_window() {
+    for (applies, shown) in [("stream", true), ("all", false)] {
+        let (gw, feed, clock) = gateway(
+            &format!("fed-latency-query-{applies}"),
+            &format!(
+                r#"{{"report_latency_ms":2000,"report_latency_applies_to":"{applies}","expiry":{{"settle":false}}}}"#
+            ),
+        );
+        let mut c = Conn::open(&gw, "reactor", None);
+        mappings(&feed);
+        cbbo(&feed, 1, T0, 120, 130);
+        clock.advance("reactor", 0, T0, WAIT).unwrap();
+        c.submit("r1", &buy("wse-q"));
+        cbbo(&feed, 1, T0 + 60 * S, 121, 124);
+        clock.advance("reactor", 1, T0 + 61 * S, WAIT).unwrap();
+        // Filled at 10:01, reported at 10:01:02: at 10:01:01 the fill is in the window.
+        let (p, _) = c.req("positions", "r2", "");
+        let held = p["positions"].as_array().is_some_and(|a| !a.is_empty());
+        assert_eq!(held, shown, "{applies}: {p}");
+        clock.advance("reactor", 0, T0 + 62 * S, WAIT).unwrap();
+        let (p, _) = c.req("positions", "r3", "");
+        assert!(
+            p["positions"].as_array().is_some_and(|a| !a.is_empty()),
+            "{applies}: {p}"
+        );
+        gw.stop().unwrap();
+    }
+}
+
+/// report_latency_ms: a fill happens at its time but reaches the client only once
+/// the market time has passed that time plus the latency; its stamp is the fill's.
+#[test]
+fn reports_arrive_after_the_report_latency() {
+    let (gw, feed, clock) = gateway(
+        "fed-report-latency",
+        r#"{"report_latency_ms":2000,"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 1, T0, 120, 130);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &buy("wse-late"));
+    cbbo(&feed, 1, T0 + 60 * S, 121, 124);
+    let a = clock.advance("reactor", 1, T0 + 61 * S, WAIT).unwrap();
+    // Every event up to the advance's last: no fill among them yet.
+    let seen = c.until(|v| v["seq"].as_u64() == Some(a.last_seq));
+    assert!(!seen.iter().any(|v| v["event"] == "fill"), "{seen:?}");
+    clock.advance("reactor", 1, T0 + 62 * S, WAIT).unwrap();
+    let f = fill(&mut c, "wse-late");
+    assert_eq!(f["ts_broker"], T0 + 60 * S);
+    assert_eq!(f["fill"]["price"], "1.24");
     gw.stop().unwrap();
 }

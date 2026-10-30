@@ -5,7 +5,7 @@
 //! days = ["2026-10-26", "2026-10-27"]
 //! strategy_latency_ms = 0        # the strategy's declared latency
 //! ready_timeout_s = 60           # how long a step waits for the strategy's ready
-//! seed = 0                       # recorded; the first models use no randomness
+//! seed = 0                       # each venue's seed derives from it and the venue's name
 //! calendar = "calendar.json"     # the market calendar for the venues (optional)
 //!
 //! [strategy]                     # optional: the session starts the strategy itself
@@ -22,6 +22,7 @@
 //! symbol = "SPY.OPT"
 //! schema = "cbbo-1m"
 //! latency_offset_ns = 0          # added to ts_event where F_BAD_TS_RECV is set
+//! expiries_within_days = 30      # options expiring later are left out (optional)
 //!
 //! [[venues]]
 //! name = "options"
@@ -57,8 +58,8 @@ pub struct Config {
     /// close early. Without it, venues assume every weekday from 09:30 to 16:00.
     #[serde(default)]
     pub calendar: Option<PathBuf>,
-    /// The seed of any declared randomness (decision 0022, section 6). The first
-    /// models use none; it is recorded so a later model can't change old runs.
+    /// The seed of any declared randomness (decision 0022, section 6): each venue's
+    /// profile gets one derived from it and the venue's name, unless it sets its own.
     #[serde(default)]
     pub seed: u64,
     /// The sources, in rank order: ties in time go to the earlier one.
@@ -133,6 +134,11 @@ pub struct Source {
     /// Added to `ts_event` for records flagged `F_BAD_TS_RECV`.
     #[serde(default)]
     pub latency_offset_ns: u64,
+    /// Options expiring more than this many calendar days (weekends included) after
+    /// each day, or before it, are left out, mappings and records: a subscription
+    /// to the near expiries.
+    #[serde(default)]
+    pub expiries_within_days: Option<u32>,
 }
 
 /// One holdings, or several in order.
@@ -293,13 +299,18 @@ impl Venue {
         &self,
         strategy_latency_ms: u64,
         calendar: Option<&serde_json::Value>,
+        seed: u64,
     ) -> Result<String, String> {
         let mut sim = self.sim.clone();
         let ms = i64::try_from(strategy_latency_ms).map_err(|e| e.to_string())?;
         sim.insert("strategy_latency_ms".into(), toml::Value::Integer(ms));
         let mut json = serde_json::to_value(&sim).map_err(|e| e.to_string())?;
-        if let (Some(days), Some(o)) = (calendar, json.as_object_mut()) {
-            o.entry("calendar").or_insert_with(|| days.clone());
+        if let Some(o) = json.as_object_mut() {
+            if let Some(days) = calendar {
+                o.entry("calendar").or_insert_with(|| days.clone());
+            }
+            // The venue's own seed, from the run's: each venue draws its own stream.
+            o.entry("seed").or_insert_with(|| serde_json::json!(seed));
         }
         serde_json::to_string(&json).map_err(|e| e.to_string())
     }

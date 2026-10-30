@@ -118,6 +118,16 @@ pub struct Session {
     merge: Merge<StoreProducer>,
 }
 
+/// A venue's seed: the run's, mixed with the venue's name (FNV-1a), so venues draw
+/// independent streams and the same run draws the same ones.
+fn venue_seed(seed: u64, venue: &str) -> u64 {
+    venue
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64 ^ seed, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        })
+}
+
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
@@ -186,8 +196,11 @@ impl Session {
             hex(&Sha256::digest(format!("{cfg_text}{}{}", wall_ns(), std::process::id()))[..6]);
         let mut sources = Vec::new();
         for s in &cfg.sources {
-            let p = StoreProducer::new(s.holdings()?, s.query(), &cfg.days)
+            let mut p = StoreProducer::new(s.holdings()?, s.query(), &cfg.days)
                 .map_err(|e| format!("source {}: {e}", s.name))?;
+            if let Some(n) = s.expiries_within_days {
+                p = p.expiries_within_days(n);
+            }
             sources.push(DbnSource::new(p, s.latency_offset_ns));
         }
         let pin = json!({"source": "session", "session": id}).to_string();
@@ -211,7 +224,11 @@ impl Session {
         };
         let mut venues = Vec::new();
         for v in &cfg.venues {
-            let script = v.script(cfg.strategy_latency_ms, calendar.as_ref().map(|c| &c.0))?;
+            let script = v.script(
+                cfg.strategy_latency_ms,
+                calendar.as_ref().map(|c| &c.0),
+                venue_seed(cfg.seed, &v.name),
+            )?;
             let (sim, feed) =
                 SimBroker::fed(&script, &pin).map_err(|e| format!("venue {}: {e}", v.name))?;
             let token = random_hex()?;
@@ -709,7 +726,10 @@ impl Session {
                 let Ok(mut v) = serde_json::from_str::<Value>(line) else {
                     return Err(format!("{}: a journal line isn't JSON", f.display()));
                 };
-                if !matches!(v["kind"].as_str(), Some("submit" | "cancel" | "order")) {
+                if !matches!(
+                    v["kind"].as_str(),
+                    Some("submit" | "cancel" | "order" | "activity")
+                ) {
                     continue;
                 }
                 if let Some(o) = v.as_object_mut() {
@@ -772,6 +792,7 @@ impl Session {
                     .collect();
                 json!({"name": s.name, "holdings": p.describe(), "reading": p.reading(), "dataset": s.dataset, "symbol": s.symbol,
                        "schema": s.schema, "latency_offset_ns": s.latency_offset_ns,
+                       "expiries_within_days": s.expiries_within_days,
                        "records": src.position(), "clamped": src.clamped(), "days": days})
             })
             .collect();

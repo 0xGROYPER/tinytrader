@@ -170,7 +170,9 @@ impl SimBroker {
             .map_or(0, |r| (self.cash - self.working_debits() - r).max(0))
     }
 
-    /// Working orders' unfilled option legs, signed, as positions they would add.
+    /// Working orders' unfilled opening legs, signed, as positions they would add. A
+    /// closing leg would lower the requirement only once it fills, so it counts
+    /// for nothing until then.
     fn working_legs(&self) -> Vec<(String, i64)> {
         let mut out = Vec::new();
         for (i, o) in self.orders.iter().enumerate() {
@@ -179,6 +181,9 @@ impl SimBroker {
             }
             let left = i64::try_from(o.qty - o.filled).unwrap_or(0);
             for l in &o.legs {
+                if !l.open {
+                    continue;
+                }
                 let sign = if l.buy { 1 } else { -1 };
                 out.push((
                     l.symbol.clone(),
@@ -276,11 +281,11 @@ impl SimBroker {
                 continue;
             };
             let Some(ask) = q.ask else { continue };
-            let qty = if q.ask_sz > 0 {
-                qty.min(i64::try_from(q.ask_sz).unwrap_or(qty))
-            } else {
-                qty
-            };
+            // No size shown, nothing bought back: it settles at the close.
+            if q.ask_sz == 0 {
+                continue;
+            }
+            let qty = qty.min(i64::try_from(q.ask_sz).unwrap_or(qty));
             let working: Vec<usize> = (0..self.orders.len())
                 .filter(|i| {
                     self.open(*i) && self.orders[*i].legs.iter().any(|l| l.symbol == symbol)
@@ -336,11 +341,8 @@ impl SimBroker {
             activity_type: "FILL".into(),
             raw,
         };
-        if self.down.is_some() {
-            self.held.push(update);
-        } else {
-            self.updates.push(update);
-        }
+        // While the stream is down it waits in the report queue, in time order.
+        self.report(update);
     }
 }
 

@@ -557,7 +557,7 @@ pub(crate) struct Session<B: Broker> {
     handled: HashMap<usize, u64>,
     /// Clock advances waiting for requests, in arrival order.
     clocks: VecDeque<ClockWait>,
-    /// Order events journaled (submit, cancel, order).
+    /// Order events journaled (submit, cancel, order, activity).
     order_events: u64,
 }
 
@@ -719,7 +719,7 @@ impl<B: Broker> Session<B> {
 
     fn emit(&mut self, ts: u64, kind: &str, body: &str, aud: Aud) -> Result<(), String> {
         let (seq, line) = self.j.append(ts, kind, body)?;
-        if matches!(kind, "submit" | "cancel" | "order") {
+        if matches!(kind, "submit" | "cancel" | "order" | "activity") {
             self.order_events += 1;
         }
         self.last_seq.store(seq, SeqCst);

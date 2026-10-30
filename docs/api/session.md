@@ -30,7 +30,7 @@ The strategy reads the control address (from the `READY` line, or `TT_SESSION` s
 days = ["2026-10-26", "2026-10-27"]   # in order
 strategy_latency_ms = 0               # the strategy's declared latency
 ready_timeout_s = 60                  # per step, for the first connections, and for every write
-seed = 0                              # recorded; the first models use no randomness
+seed = 0                              # each venue's seed derives from it and its name (latency jitter)
 calendar = "calendar.json"            # optional: the market calendar for the venues
 
 [[sources]]                           # in rank order: ties in time go to the earlier
@@ -42,6 +42,7 @@ dataset = "OPRA.PILLAR"
 symbol = "SPY.OPT"
 schema = "cbbo-1m"
 latency_offset_ns = 0                 # added to ts_event where F_BAD_TS_RECV is set
+expiries_within_days = 30             # optional: options expiring more than N calendar days later, or already expired, are left out
 
 [[venues]]                            # one simulated account, one gateway
 name = "options"

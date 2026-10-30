@@ -33,20 +33,27 @@ fn date(ns: u64) -> time::Date {
 /// One day's file: two contracts, a quote each at `minutes` past the day's
 /// 14:00Z, parent symbology, zstd when `zst`.
 fn day_file(day0: u64, minutes: &[u64], zst: bool) -> Vec<u8> {
-    let maps = [
-        ("SPY   261027C00580000", 11_u32),
-        ("SPY   261027P00570000", 12),
-    ]
-    .iter()
-    .map(|(raw, iid)| SymbolMapping {
-        raw_symbol: (*raw).into(),
-        intervals: vec![MappingInterval {
-            start_date: date(day0),
-            end_date: date(day0 + DAY),
-            symbol: iid.to_string(),
-        }],
-    })
-    .collect();
+    day_file_of(
+        day0,
+        minutes,
+        zst,
+        &[("SPY   261027C00580000", 11), ("SPY   261027P00570000", 12)],
+    )
+}
+
+/// As [`day_file`], of the contracts `contracts` (raw symbol, instrument id).
+fn day_file_of(day0: u64, minutes: &[u64], zst: bool, contracts: &[(&str, u32)]) -> Vec<u8> {
+    let maps = contracts
+        .iter()
+        .map(|(raw, iid)| SymbolMapping {
+            raw_symbol: (*raw).into(),
+            intervals: vec![MappingInterval {
+                start_date: date(day0),
+                end_date: date(day0 + DAY),
+                symbol: iid.to_string(),
+            }],
+        })
+        .collect();
     let meta = Metadata::builder()
         .dataset("OPRA.PILLAR")
         .schema(Some(Schema::Cbbo1M))
@@ -60,7 +67,7 @@ fn day_file(day0: u64, minutes: &[u64], zst: bool) -> Vec<u8> {
     {
         let write = |enc: &mut dyn FnMut(&CbboMsg)| {
             for m in minutes {
-                for iid in [11, 12] {
+                for &(_, iid) in contracts {
                     let ts = day0 + 14 * 3_600_000_000_000 + m * 60_000_000_000;
                     enc(&CbboMsg {
                         hd: RecordHeader::new::<CbboMsg>(rtype::CBBO_1M, 30, iid, u64::MAX),
@@ -995,4 +1002,56 @@ fn layered_holdings_prefer_a_whole_day_to_a_partial_one() {
     );
     assert_eq!(quotes(&got).len(), 4);
     assert!(!p.pins()[0].partial);
+}
+
+/// With an expiry horizon, a contract expiring after it, or before the day, is
+/// left out with its mapping; one inside passes.
+#[test]
+fn an_expiry_horizon_leaves_out_far_and_expired_contracts() {
+    let dir = tmp("horizon");
+    let contracts = [
+        ("SPY   261027C00580000", 11),
+        ("SPY   261120P00570000", 12),
+        ("SPY   261231C00600000", 13),
+    ];
+    let mut files = Vec::new();
+    for (day0, name) in [(D27, "20261027"), (D27 + DAY, "20261028")] {
+        let f = format!("opra-pillar-{name}.cbbo-1m.dbn");
+        let b = day_file_of(day0, &[0], false, &contracts);
+        files.push(format!(
+            r#"{{"filename":"{f}","hash":"sha256:{}"}}"#,
+            sha(&b)
+        ));
+        std::fs::write(dir.join(f), b).unwrap();
+    }
+    std::fs::write(
+        dir.join("manifest.json"),
+        format!(r#"{{"files":[{}]}}"#, files.join(",")),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("metadata.json"),
+        r#"{"query":{"dataset":"OPRA.PILLAR","schema":"cbbo-1m","symbols":["SPY.OPT"],"stype_in":"parent"}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("COMPLETE"), "").unwrap();
+    let mut p = StoreProducer::new(
+        Box::new(Folder::job(&dir).unwrap()),
+        query(),
+        &days(&["2026-10-27", "2026-10-28"]),
+    )
+    .unwrap()
+    .expiries_within_days(30);
+    let got = drain(&mut p).unwrap();
+    let want = vec![
+        // 10-27: the same-day and the 24-day contract; not the 65-day one.
+        Out::Map(11, "SPY.OPT".into(), "SPY   261027C00580000".into()),
+        Out::Map(12, "SPY.OPT".into(), "SPY   261120P00570000".into()),
+        q(D27, 0, 11),
+        q(D27, 0, 12),
+        // 10-28: the 10-27 contract has expired.
+        Out::Map(12, "SPY.OPT".into(), "SPY   261120P00570000".into()),
+        q(D27 + DAY, 0, 12),
+    ];
+    assert_eq!(got, want);
 }

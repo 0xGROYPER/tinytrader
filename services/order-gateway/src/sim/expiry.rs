@@ -367,11 +367,8 @@ impl SimBroker {
             raw,
         };
         // While the stream is down, held back and sent when it returns.
-        if self.down.is_some() {
-            self.held.push(update);
-        } else {
-            self.updates.push(update);
-        }
+        // While the stream is down it waits in the report queue, in time order.
+        self.report(update);
     }
 }
 
