@@ -167,7 +167,8 @@ mod tests {
         assert!(check_allow_read(std::slice::from_ref(&code), &[], None).is_ok());
         assert!(check_allow_read(&[PathBuf::from("/")], &[], None).is_err());
         assert!(check_allow_read(&[PathBuf::from("/Users")], &[], None).is_err());
-        let e = check_allow_read(&[code.clone()], &[code.join("cache")], None).unwrap_err();
+        let e =
+            check_allow_read(std::slice::from_ref(&code), &[code.join("cache")], None).unwrap_err();
         assert!(e.contains("would let the strategy read"), "{e}");
         let e = check_allow_read(&[tmp.clone()], &[], Some(&code)).unwrap_err();
         assert!(e.contains("would let"), "{e}");
