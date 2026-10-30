@@ -983,7 +983,7 @@ fn through_only_needs_a_print_through_the_price() {
 }
 
 /// A resting combo fills when every leg has cleared at its passive touch within
-/// the window, at its implied prices rounded in its favour; legs clearing further
+/// the window, at its implied prices, never worse than its limit; legs clearing further
 /// apart don't fill it.
 #[test]
 fn a_combo_fills_when_its_legs_clear_within_the_window() {
@@ -1016,8 +1016,9 @@ fn a_combo_fills_when_its_legs_clear_within_the_window() {
     clock.advance("reactor", 0, T0 + 179 * S, WAIT).unwrap();
     let f = fill(&mut c, "wse-qcb");
     let q = &f["broker_raw"]["order"]["queue"];
-    // Implied 0.9558 and 0.4958, rounded to 0.96 and 0.49: a 0.47 credit.
-    assert_eq!(q[0]["price"], "0.96", "{f}");
+    // Implied 0.9558 and 0.4958, rounded against it to 0.95 and 0.50 (0.45),
+    // then the last leg back to 0.49: the 0.46 limit.
+    assert_eq!(q[0]["price"], "0.95", "{f}");
     assert_eq!(q[1]["price"], "0.49", "{f}");
     assert_eq!(q[0]["queue_price"], "0.94", "{f}");
     gw.stop().unwrap();

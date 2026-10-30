@@ -25,8 +25,8 @@
 //!   fills when every leg has had size available within `combo_window_s` (60 s by
 //!   default, a rolling window), as many units as every leg allows, each leg at its
 //!   implied price: the net limit split over the legs in proportion to their mids,
-//!   rounded to the cent in the order's favour, so the net is never worse than the
-//!   limit. This is legging the spread, not trading in a complex book. What isn't
+//!   rounded to the cent against the order, the last leg then moved back so the net
+//!   is never worse than the limit. This is legging the spread, not trading in a complex book. What isn't
 //!   filled keeps its place, at the front.
 //! - Each leg's queue is in the order's `broker_raw.order.queue`.
 //! - Not modelled: trade conditions, market impact, orders joining behind.
@@ -230,9 +230,9 @@ impl SimBroker {
 }
 
 /// A combo's leg prices: the net limit split over the legs in proportion to their
-/// mids, each rounded to the cent in the order's favour (a buy down, a sell up), so
-/// the net is never worse than the limit. `None` if a leg would be priced at
-/// nothing.
+/// mids, each rounded to the cent against the order (a buy up, a sell down); if
+/// that nets worse than the limit, the last leg moves back so the net meets it.
+/// `None` if a leg would be priced at nothing.
 fn implied(o: &super::SimOrder, quotes: &[(i64, i64, u64, u64)], limit: i64) -> Option<Vec<i64>> {
     let mids: Vec<i128> = quotes
         .iter()
@@ -248,21 +248,30 @@ fn implied(o: &super::SimOrder, quotes: &[(i64, i64, u64, u64)], limit: i64) -> 
         return None;
     }
     let tick = i128::from(CENT);
+    let ceil = |p: i128| (p + tick - 1).div_euclid(tick) * tick;
     let mut net = 0_i128;
-    let mut out = Vec::new();
+    let mut out: Vec<i128> = Vec::new();
     for (l, mid) in o.legs.iter().zip(&mids) {
         let s: i128 = if l.buy { 1 } else { -1 };
         let p = mid + s * (i128::from(limit) - net_mid) * mid / weight;
         let p = if l.buy {
-            p.div_euclid(tick) * tick
+            ceil(p)
         } else {
-            (p + tick - 1).div_euclid(tick) * tick
+            p.div_euclid(tick) * tick
         };
-        if p <= 0 {
-            return None;
-        }
         net += s * i128::from(l.ratio) * p;
-        out.push(i64::try_from(p).ok()?);
+        out.push(p);
     }
-    (net <= i128::from(limit)).then_some(out)
+    // Worse than the limit by `over`: the last leg gives it back, to the tick.
+    let over = net - i128::from(limit);
+    if over > 0 {
+        let (l, p) = (o.legs.last()?, out.last_mut()?);
+        let r = i128::from(l.ratio);
+        let step = ceil((over + r - 1) / r);
+        *p += if l.buy { -step } else { step };
+    }
+    if out.iter().any(|p| *p <= 0) {
+        return None;
+    }
+    out.into_iter().map(|p| i64::try_from(p).ok()).collect()
 }
