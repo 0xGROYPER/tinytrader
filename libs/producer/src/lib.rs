@@ -112,8 +112,9 @@ pub trait Holdings: Send {
     }
 }
 
-/// Several holdings read as one: each day from the first that holds it, such as
-/// two cache jobs of consecutive ranges, or a local copy before the store.
+/// Several holdings read as one: each day from the first that holds it whole, or
+/// else the first that holds part of it, such as two cache jobs of consecutive
+/// ranges, or a local copy before the store.
 pub struct Layered {
     layers: Vec<Box<dyn Holdings>>,
     /// Which layer each planned file comes from.
@@ -146,23 +147,34 @@ impl Holdings for Layered {
         let mut owner = self.owner.lock().map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for i in 0..days.len() {
-            let mut reasons = Vec::new();
-            let mut held = None;
-            for (k, plan) in plans.iter().enumerate() {
-                match &plan[i] {
-                    Day::Held { files, .. } => {
+            // The first layer holding the day whole; failing that, the first holding
+            // part of it.
+            let whole = plans
+                .iter()
+                .position(|p| matches!(&p[i], Day::Held { partial: false, .. }));
+            let any = plans.iter().position(|p| matches!(&p[i], Day::Held { .. }));
+            match whole.or(any) {
+                Some(k) => {
+                    if let Day::Held { files, .. } = &plans[k][i] {
                         for f in files {
                             owner.insert(f.name.clone(), k);
                         }
-                        held = Some(plan[i].clone());
-                        break;
                     }
-                    Day::Missing { reason } => reasons.push(reason.clone()),
+                    out.push(plans[k][i].clone());
+                }
+                None => {
+                    let reasons: Vec<String> = plans
+                        .iter()
+                        .filter_map(|p| match &p[i] {
+                            Day::Missing { reason } => Some(reason.clone()),
+                            Day::Held { .. } => None,
+                        })
+                        .collect();
+                    out.push(Day::Missing {
+                        reason: reasons.join("; "),
+                    });
                 }
             }
-            out.push(held.unwrap_or(Day::Missing {
-                reason: reasons.join("; "),
-            }));
         }
         Ok(out)
     }

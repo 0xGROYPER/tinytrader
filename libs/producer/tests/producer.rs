@@ -959,3 +959,40 @@ fn layered_holdings_read_each_day_from_the_first_that_holds_it() {
     assert!(got.iter().any(|o| matches!(o, Out::Sys(s) if s.starts_with("store-gap day=2026-10-30") && s.contains("; "))));
     assert!(p.pins().iter().take(3).all(|d| d.files[0].verified));
 }
+
+/// A day partly held in the first holding but whole in a later one is read whole.
+#[test]
+fn layered_holdings_prefer_a_whole_day_to_a_partial_one() {
+    let a = tmp("layer-partial");
+    manifest_job(
+        &a,
+        &[(
+            "opra-pillar-20261027.cbbo-1m.dbn.zst",
+            day_file(D27, &[0], true),
+        )],
+        "raw_symbol",
+        true,
+    );
+    let b = tmp("layer-whole");
+    manifest_job(
+        &b,
+        &[(
+            "opra-pillar-20261027.cbbo-1m.dbn.zst",
+            day_file(D27, &[0, 1], true),
+        )],
+        "parent",
+        true,
+    );
+    let h = tinytrader_producer::Layered::new(vec![
+        Box::new(Folder::job(&a).unwrap()),
+        Box::new(Folder::job(&b).unwrap()),
+    ]);
+    let mut p = StoreProducer::new(Box::new(h), query(), &days(&["2026-10-27"])).unwrap();
+    let got = drain(&mut p).unwrap();
+    assert!(
+        !got.iter()
+            .any(|o| matches!(o, Out::Sys(s) if s.starts_with("store-partial")))
+    );
+    assert_eq!(quotes(&got).len(), 4);
+    assert!(!p.pins()[0].partial);
+}

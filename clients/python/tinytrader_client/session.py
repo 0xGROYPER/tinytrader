@@ -183,7 +183,10 @@ class Context:
             raise SessionError(f"submit {cid}: the gateway has this id for another order: {r}")
         if outcome in ("accepted", "unknown"):
             return cid
-        return None
+        if outcome in ("rejected", "not_sent"):
+            return None
+        # A malformed intent or another request error: a strategy bug, not a refusal.
+        raise SessionError(f"submit {cid}: {r}")
 
     def cancel(self, client_order_id: str, venue: str | None = None) -> dict:
         return self._venue(venue).request("cancel", client_order_id=client_order_id)
