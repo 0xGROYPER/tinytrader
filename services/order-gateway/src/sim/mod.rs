@@ -29,6 +29,7 @@ pub const MODEL: &str = "tinytrader-sim/6";
 /// Nanodollars per cent.
 const CENT: i64 = 10_000_000;
 
+#[derive(Clone)]
 pub(crate) struct SimLeg {
     symbol: String,
     ratio: u64,
@@ -38,6 +39,7 @@ pub(crate) struct SimLeg {
     cost: i128,
 }
 
+#[derive(Clone)]
 pub(crate) struct SimOrder {
     id: String,
     cid: String,
@@ -105,10 +107,12 @@ pub struct SimBroker {
     activities: Vec<String>,
     /// Non-trade activities so far, for their ids.
     acts: u64,
-    /// Activities held back while the stream is down, sent when it returns.
-    held: Vec<Update>,
     /// Reports waiting out the report latency: `(release time, update)`, in order.
     delayed: std::collections::VecDeque<(u64, Update)>,
+    /// Under `report_latency_applies_to = "all"`: the account as each delayed report
+    /// left it, by release time, and the account as of the last released one.
+    views: std::collections::VecDeque<(u64, View)>,
+    visible: View,
     /// The latency jitter's generator state (SplitMix64), from the profile's seed.
     rng: u64,
     /// The next session close at which options are settled, once known.
@@ -205,24 +209,27 @@ impl SimBroker {
 
     /// When a submit or cancel received at market time `t` takes effect: after the
     /// strategy's declared latency and then the venue's.
-    fn effective(&mut self) -> u64 {
+    fn effective(&mut self, key: &str) -> u64 {
         let ms = self.s.strategy_latency_ms.saturating_add(self.s.latency_ms);
-        let jitter = self.jitter();
+        let jitter = self.jitter(key);
         self.now
             .saturating_add(ms.saturating_mul(1_000_000))
             .saturating_add(jitter)
     }
 
-    /// The next of the profile's random latency jitter, ns: uniform over
-    /// `latency_jitter_ms`, drawn from the seed, in the order orders and cancels
-    /// arrive. Zero without jitter.
-    fn jitter(&mut self) -> u64 {
+    /// The profile's random latency jitter for `key` (an order's id, or its id and
+    /// a cancel's number), ns: uniform over `latency_jitter_ms`, from the seed and
+    /// the key alone, so it doesn't depend on the order requests arrive in. Zero
+    /// without jitter.
+    fn jitter(&mut self, key: &str) -> u64 {
         let Some((lo, hi)) = self.s.jitter_ms else {
             return 0;
         };
-        // SplitMix64: small, fast and the same everywhere.
-        self.rng = self.rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.rng;
+        // FNV-1a of the key, mixed into the seed; then SplitMix64's finaliser.
+        let h = key.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        });
+        let mut z = (self.rng ^ h).wrapping_add(0x9E37_79B9_7F4A_7C15);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^= z >> 31;
@@ -234,9 +241,13 @@ impl SimBroker {
     /// latency in market mode.
     pub(super) fn report(&mut self, update: Update) {
         let delay = self.s.report_latency_ms.saturating_mul(1_000_000);
-        if delay > 0 && self.market.is_some() {
-            self.delayed
-                .push_back((self.now.saturating_add(delay), update));
+        if (delay > 0 || self.down.is_some()) && self.market.is_some() {
+            let at = self.now.saturating_add(delay);
+            self.delayed.push_back((at, update));
+            if self.s.report_latency_all && delay > 0 {
+                let v = self.snapshot();
+                self.views.push_back((at, v));
+            }
         } else {
             self.updates.push(update);
         }
@@ -257,8 +268,9 @@ impl SimBroker {
             pos: BTreeMap::new(),
             activities: Vec::new(),
             acts: 0,
-            held: Vec::new(),
             delayed: std::collections::VecDeque::new(),
+            views: std::collections::VecDeque::new(),
+            visible: View::default(),
             rng: 0,
             settle_at: None,
             liquidate_at: None,
@@ -267,7 +279,6 @@ impl SimBroker {
             down: None,
             dropped: false,
         };
-        sim.rng = sim.s.seed;
         sim.rng = sim.s.seed;
         let preload: Vec<_> = sim.s.orders.drain(..).collect();
         for p in preload {
@@ -507,7 +518,8 @@ impl SimBroker {
                 return CancelResult::Rejected(error(422, "42210000", "order is not cancelable"));
             }
             OnCancel::Ok if self.market.is_some() => {
-                let t = self.effective();
+                let key = format!("{}#cancel{}", self.orders[i].cid, self.cancels);
+                let t = self.effective(&key);
                 self.schedule(t, Action::Cancel(i));
             }
             OnCancel::Ok => self.set_status(i, "canceled"),
@@ -567,6 +579,14 @@ impl Broker for SimBroker {
             .n("latency_ms", self.s.latency_ms)
             .n("strategy_latency_ms", self.s.strategy_latency_ms)
             .n("report_latency_ms", self.s.report_latency_ms)
+            .s(
+                "report_latency_applies_to",
+                if self.s.report_latency_all {
+                    "all"
+                } else {
+                    "stream"
+                },
+            )
             .raw(
                 "latency_jitter_ms",
                 &self
@@ -698,7 +718,7 @@ impl Broker for SimBroker {
             self.push(i, "new", None, None, None);
         }
         if self.market.is_some() {
-            let t = self.effective();
+            let t = self.effective(&intent.client_order_id);
             self.orders[i].t_act = t;
             self.schedule(t, Action::Activate(i));
         } else {
@@ -792,91 +812,38 @@ impl Broker for SimBroker {
     }
 
     fn order(&mut self, target: &OrderRef) -> Query<Option<BrokerOrder>> {
-        let Some(i) = self.find(target) else {
-            return Self::reply(None, error(404, "40410000", "order not found").raw);
-        };
-        if self.orders[i].rule.fill_on_query && self.open(i) {
-            let units = self.orders[i].qty - self.orders[i].filled;
-            self.execute(i, units, &self.script_prices(i));
-        }
-        let o = self.broker_order(i);
-        let raw = o.raw.clone();
-        Self::reply(Some(o), raw)
+        let saved = self.enter_view();
+        let r = self.order_now(target);
+        self.leave_view(saved);
+        r
     }
 
     fn open_orders(&mut self) -> Query<Vec<BrokerOrder>> {
-        let list: Vec<_> = (0..self.orders.len())
-            .filter(|i| self.open(*i))
-            .map(|i| self.broker_order(i))
-            .collect();
-        let raw = arr(list.iter().map(|o| o.raw.clone()));
-        Self::reply(list, raw)
+        let saved = self.enter_view();
+        let r = self.open_orders_now();
+        self.leave_view(saved);
+        r
     }
 
     fn orders_since(&mut self, after_ts: u64) -> Query<Vec<BrokerOrder>> {
-        let list: Vec<_> = (0..self.orders.len())
-            .filter(|i| self.orders[*i].updated >= after_ts)
-            .map(|i| self.broker_order(i))
-            .collect();
-        let raw = arr(list.iter().map(|o| o.raw.clone()));
-        Self::reply(list, raw)
+        let saved = self.enter_view();
+        let r = self.orders_since_now(after_ts);
+        self.leave_view(saved);
+        r
     }
 
     fn account(&mut self) -> Query<AccountInfo> {
-        let cash = fmt_nanos(self.cash);
-        let power = if self.s.venue.defined_risk {
-            fmt_nanos(self.buying_power())
-        } else {
-            cash.clone()
-        };
-        let raw = Obj::new()
-            .s("status", &self.s.status)
-            .n("options_trading_level", self.s.level)
-            .s("cash", &cash)
-            .s("buying_power", &power)
-            .b("trading_blocked", self.s.trading_blocked)
-            .raw(
-                "sim",
-                &Obj::new()
-                    .n("submits", self.submits)
-                    .n("cancels", self.cancels)
-                    .done(),
-            )
-            .done();
-        let info = AccountInfo {
-            status: self.s.status.clone(),
-            cash: cash.clone(),
-            buying_power: power,
-            options_trading_level: self.s.level,
-            blocked: self.s.trading_blocked,
-        };
-        Self::reply(info, raw)
+        let saved = self.enter_view();
+        let r = self.account_now();
+        self.leave_view(saved);
+        r
     }
 
     fn positions(&mut self) -> Query<Vec<Position>> {
-        let mut list: Vec<Position> = self
-            .pos
-            .iter()
-            .filter(|(_, p)| p.0 != 0)
-            .map(|(s, p)| Position {
-                symbol: s.clone(),
-                qty: p.0,
-                avg_entry_price: fmt_nanos((p.1 / i128::from(p.0)).abs()),
-            })
-            .collect();
-        list.extend(self.s.positions.iter().map(|(s, q)| Position {
-            symbol: s.clone(),
-            qty: *q,
-            avg_entry_price: "0.00".into(),
-        }));
-        let raw = arr(list.iter().map(|p| {
-            Obj::new()
-                .s("symbol", &p.symbol)
-                .s("qty", &p.qty.to_string())
-                .s("avg_entry_price", &p.avg_entry_price)
-                .done()
-        }));
-        Self::reply(list, raw)
+        let saved = self.enter_view();
+        let r = self.positions_now();
+        self.leave_view(saved);
+        r
     }
 
     fn activities(
@@ -885,18 +852,10 @@ impl Broker for SimBroker {
         _after: Option<&str>,
         page_token: Option<&str>,
     ) -> Query<(Vec<String>, Option<String>)> {
-        let start: usize = page_token.and_then(|t| t.parse().ok()).unwrap_or(0);
-        let wanted = |a: &&String| {
-            types.is_empty()
-                || types
-                    .iter()
-                    .any(|t| a.contains(&format!("\"activity_type\":{}", quote(t))))
-        };
-        let all: Vec<String> = self.activities.iter().filter(wanted).cloned().collect();
-        let page: Vec<String> = all.iter().skip(start).take(100).cloned().collect();
-        let next = (start + page.len() < all.len()).then(|| (start + page.len()).to_string());
-        let raw = arr(page.clone());
-        Self::reply((page, next), raw)
+        let saved = self.enter_view();
+        let r = self.activities_now(types, _after, page_token);
+        self.leave_view(saved);
+        r
     }
 
     fn clock(&mut self) -> Query<MarketClock> {
@@ -947,10 +906,10 @@ impl Broker for SimBroker {
         if self.down.is_some_and(|t| t.elapsed() >= down_for) {
             self.down = None;
             self.updates.push(Update::StreamUp);
-            self.updates.append(&mut self.held);
         }
-        // Reports whose latency has passed by the market time.
-        while self.delayed.front().is_some_and(|(t, _)| *t <= self.now) {
+        // Reports whose latency has passed by the market time, in time order; while
+        // the stream is down they wait.
+        while self.down.is_none() && self.delayed.front().is_some_and(|(t, _)| *t <= self.now) {
             if let Some((_, u)) = self.delayed.pop_front() {
                 self.updates.push(u);
             }
@@ -1225,13 +1184,199 @@ impl SimBroker {
     }
 }
 
+impl SimBroker {
+    fn order_now(&mut self, target: &OrderRef) -> Query<Option<BrokerOrder>> {
+        let Some(i) = self.find(target) else {
+            return Self::reply(None, error(404, "40410000", "order not found").raw);
+        };
+        if self.orders[i].rule.fill_on_query && self.open(i) {
+            let units = self.orders[i].qty - self.orders[i].filled;
+            self.execute(i, units, &self.script_prices(i));
+        }
+        let o = self.broker_order(i);
+        let raw = o.raw.clone();
+        Self::reply(Some(o), raw)
+    }
+
+    fn open_orders_now(&mut self) -> Query<Vec<BrokerOrder>> {
+        let list: Vec<_> = (0..self.orders.len())
+            .filter(|i| self.open(*i))
+            .map(|i| self.broker_order(i))
+            .collect();
+        let raw = arr(list.iter().map(|o| o.raw.clone()));
+        Self::reply(list, raw)
+    }
+
+    fn orders_since_now(&mut self, after_ts: u64) -> Query<Vec<BrokerOrder>> {
+        let list: Vec<_> = (0..self.orders.len())
+            .filter(|i| self.orders[*i].updated >= after_ts)
+            .map(|i| self.broker_order(i))
+            .collect();
+        let raw = arr(list.iter().map(|o| o.raw.clone()));
+        Self::reply(list, raw)
+    }
+
+    fn account_now(&mut self) -> Query<AccountInfo> {
+        let cash = fmt_nanos(self.cash);
+        let power = if self.s.venue.defined_risk {
+            fmt_nanos(self.buying_power())
+        } else {
+            cash.clone()
+        };
+        let raw = Obj::new()
+            .s("status", &self.s.status)
+            .n("options_trading_level", self.s.level)
+            .s("cash", &cash)
+            .s("buying_power", &power)
+            .b("trading_blocked", self.s.trading_blocked)
+            .raw(
+                "sim",
+                &Obj::new()
+                    .n("submits", self.submits)
+                    .n("cancels", self.cancels)
+                    .done(),
+            )
+            .done();
+        let info = AccountInfo {
+            status: self.s.status.clone(),
+            cash: cash.clone(),
+            buying_power: power,
+            options_trading_level: self.s.level,
+            blocked: self.s.trading_blocked,
+        };
+        Self::reply(info, raw)
+    }
+
+    fn positions_now(&mut self) -> Query<Vec<Position>> {
+        let mut list: Vec<Position> = self
+            .pos
+            .iter()
+            .filter(|(_, p)| p.0 != 0)
+            .map(|(s, p)| Position {
+                symbol: s.clone(),
+                qty: p.0,
+                avg_entry_price: fmt_nanos((p.1 / i128::from(p.0)).abs()),
+            })
+            .collect();
+        list.extend(self.s.positions.iter().map(|(s, q)| Position {
+            symbol: s.clone(),
+            qty: *q,
+            avg_entry_price: "0.00".into(),
+        }));
+        let raw = arr(list.iter().map(|p| {
+            Obj::new()
+                .s("symbol", &p.symbol)
+                .s("qty", &p.qty.to_string())
+                .s("avg_entry_price", &p.avg_entry_price)
+                .done()
+        }));
+        Self::reply(list, raw)
+    }
+
+    fn activities_now(
+        &mut self,
+        types: &[String],
+        _after: Option<&str>,
+        page_token: Option<&str>,
+    ) -> Query<(Vec<String>, Option<String>)> {
+        let start: usize = page_token.and_then(|t| t.parse().ok()).unwrap_or(0);
+        let wanted = |a: &&String| {
+            types.is_empty()
+                || types
+                    .iter()
+                    .any(|t| a.contains(&format!("\"activity_type\":{}", quote(t))))
+        };
+        let all: Vec<String> = self.activities.iter().filter(wanted).cloned().collect();
+        let page: Vec<String> = all.iter().skip(start).take(100).cloned().collect();
+        let next = (start + page.len() < all.len()).then(|| (start + page.len()).to_string());
+        let raw = arr(page.clone());
+        Self::reply((page, next), raw)
+    }
+}
+
+/// The account as a report left it: what `report_latency_applies_to = "all"` serves
+/// queries from until the report is released. Orders settled by then can't have
+/// changed since, so only the open ones are kept.
+#[derive(Clone, Default)]
+struct View {
+    orders: usize,
+    open: Vec<(usize, SimOrder)>,
+    cash: i128,
+    pos: BTreeMap<String, (i64, i128)>,
+    activities: usize,
+}
+
+/// The live state a view displaced, to put back.
+struct Displaced {
+    tail: Vec<SimOrder>,
+    open: Vec<(usize, SimOrder)>,
+    cash: i128,
+    pos: BTreeMap<String, (i64, i128)>,
+    activities: Vec<String>,
+}
+
+impl SimBroker {
+    fn snapshot(&self) -> View {
+        View {
+            orders: self.orders.len(),
+            open: (0..self.orders.len())
+                .filter(|i| self.open(*i))
+                .map(|i| (i, self.orders[i].clone()))
+                .collect(),
+            cash: self.cash,
+            pos: self.pos.clone(),
+            activities: self.activities.len(),
+        }
+    }
+
+    /// Serves queries from the account as of the last released report, while
+    /// reports are still delayed under `report_latency_applies_to = "all"`.
+    fn enter_view(&mut self) -> Option<Displaced> {
+        while self.views.front().is_some_and(|(t, _)| *t <= self.now) {
+            if let Some((_, v)) = self.views.pop_front() {
+                self.visible = v;
+            }
+        }
+        if self.views.is_empty() {
+            return None;
+        }
+        let v = self.visible.clone();
+        let tail = self.orders.split_off(v.orders.min(self.orders.len()));
+        let open = v
+            .open
+            .into_iter()
+            .map(|(i, o)| (i, std::mem::replace(&mut self.orders[i], o)))
+            .collect();
+        Some(Displaced {
+            tail,
+            open,
+            cash: std::mem::replace(&mut self.cash, v.cash),
+            pos: std::mem::replace(&mut self.pos, v.pos),
+            activities: self
+                .activities
+                .split_off(v.activities.min(self.activities.len())),
+        })
+    }
+
+    fn leave_view(&mut self, saved: Option<Displaced>) {
+        let Some(d) = saved else { return };
+        for (i, o) in d.open {
+            self.orders[i] = o;
+        }
+        self.orders.extend(d.tail);
+        self.cash = d.cash;
+        self.pos = d.pos;
+        self.activities.extend(d.activities);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::SimBroker;
 
     fn draws(script: &str) -> Vec<u64> {
         let (mut sim, _feed) = SimBroker::fed(script, "{}").unwrap();
-        (0..200).map(|_| sim.jitter()).collect()
+        (0..200).map(|k| sim.jitter(&format!("s-{k}"))).collect()
     }
 
     /// Jitter is uniform within its bounds, the same for the same seed, and

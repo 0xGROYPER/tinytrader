@@ -77,6 +77,8 @@ pub(crate) struct Script {
     pub(crate) strategy_latency_ms: u64,
     /// Reports reach the client this long after they happen.
     pub(crate) report_latency_ms: u64,
+    /// The report latency delays queries' answers too, not only the stream.
+    pub(crate) report_latency_all: bool,
     /// Random latency added to each order's activation and each cancel: uniform
     /// over `[min, max]` ms.
     pub(crate) jitter_ms: Option<(u64, u64)>,
@@ -203,6 +205,13 @@ impl Script {
             latency_ms: f.opt_int("latency_ms")?.unwrap_or(5),
             strategy_latency_ms: f.opt_int("strategy_latency_ms")?.unwrap_or(0),
             report_latency_ms: f.opt_int("report_latency_ms")?.unwrap_or(0),
+            report_latency_all: match f.opt_string("report_latency_applies_to")?.as_deref() {
+                None | Some("stream") => false,
+                Some("all") => true,
+                Some(_) => {
+                    return Err(invalid("report_latency_applies_to", "stream or all"));
+                }
+            },
             jitter_ms: None,
             seed: f.opt_int("seed")?.unwrap_or(0),
             size_cap: false,
@@ -217,11 +226,14 @@ impl Script {
             }
             s.jitter_ms = Some((lo, hi));
         }
-        if s.latency_ms > 3_600_000
-            || s.strategy_latency_ms > 3_600_000
-            || s.report_latency_ms > 3_600_000
-        {
-            return Err(invalid("latency_ms", "at most 3600000 (an hour)"));
+        for (k, v) in [
+            ("latency_ms", s.latency_ms),
+            ("strategy_latency_ms", s.strategy_latency_ms),
+            ("report_latency_ms", s.report_latency_ms),
+        ] {
+            if v > 3_600_000 {
+                return Err(invalid(k, "at most 3600000 (an hour)"));
+            }
         }
         match f.map_entry("calendar") {
             None => {}

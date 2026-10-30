@@ -285,11 +285,7 @@ impl SimBroker {
             if q.ask_sz == 0 {
                 continue;
             }
-            let qty = if q.ask_sz > 0 {
-                qty.min(i64::try_from(q.ask_sz).unwrap_or(qty))
-            } else {
-                qty
-            };
+            let qty = qty.min(i64::try_from(q.ask_sz).unwrap_or(qty));
             let working: Vec<usize> = (0..self.orders.len())
                 .filter(|i| {
                     self.open(*i) && self.orders[*i].legs.iter().any(|l| l.symbol == symbol)
@@ -345,11 +341,8 @@ impl SimBroker {
             activity_type: "FILL".into(),
             raw,
         };
-        if self.down.is_some() {
-            self.held.push(update);
-        } else {
-            self.report(update);
-        }
+        // While the stream is down it waits in the report queue, in time order.
+        self.report(update);
     }
 }
 

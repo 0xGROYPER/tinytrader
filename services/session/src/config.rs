@@ -5,7 +5,7 @@
 //! days = ["2026-10-26", "2026-10-27"]
 //! strategy_latency_ms = 0        # the strategy's declared latency
 //! ready_timeout_s = 60           # how long a step waits for the strategy's ready
-//! seed = 0                       # recorded; the first models use no randomness
+//! seed = 0                       # each venue's seed derives from it and the venue's name
 //! calendar = "calendar.json"     # the market calendar for the venues (optional)
 //!
 //! [[sources]]
@@ -52,8 +52,8 @@ pub struct Config {
     /// close early. Without it, venues assume every weekday from 09:30 to 16:00.
     #[serde(default)]
     pub calendar: Option<PathBuf>,
-    /// The seed of any declared randomness (decision 0022, section 6). The first
-    /// models use none; it is recorded so a later model can't change old runs.
+    /// The seed of any declared randomness (decision 0022, section 6): each venue's
+    /// profile gets one derived from it and the venue's name, unless it sets its own.
     #[serde(default)]
     pub seed: u64,
     /// The sources, in rank order: ties in time go to the earlier one.

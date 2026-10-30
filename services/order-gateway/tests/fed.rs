@@ -833,6 +833,39 @@ fn next_quote_waits_for_every_leg_of_a_combo() {
     gw.stop().unwrap();
 }
 
+/// Under report latency, queries answer at once by default (as a broker's REST
+/// runs ahead of its stream); with `report_latency_applies_to = "all"` they show
+/// the account as of the last released report.
+#[test]
+fn queries_in_the_report_latency_window() {
+    for (applies, shown) in [("stream", true), ("all", false)] {
+        let (gw, feed, clock) = gateway(
+            &format!("fed-latency-query-{applies}"),
+            &format!(
+                r#"{{"report_latency_ms":2000,"report_latency_applies_to":"{applies}","expiry":{{"settle":false}}}}"#
+            ),
+        );
+        let mut c = Conn::open(&gw, "reactor", None);
+        mappings(&feed);
+        cbbo(&feed, 1, T0, 120, 130);
+        clock.advance("reactor", 0, T0, WAIT).unwrap();
+        c.submit("r1", &buy("wse-q"));
+        cbbo(&feed, 1, T0 + 60 * S, 121, 124);
+        clock.advance("reactor", 1, T0 + 61 * S, WAIT).unwrap();
+        // Filled at 10:01, reported at 10:01:02: at 10:01:01 the fill is in the window.
+        let (p, _) = c.req("positions", "r2", "");
+        let held = p["positions"].as_array().is_some_and(|a| !a.is_empty());
+        assert_eq!(held, shown, "{applies}: {p}");
+        clock.advance("reactor", 0, T0 + 62 * S, WAIT).unwrap();
+        let (p, _) = c.req("positions", "r3", "");
+        assert!(
+            p["positions"].as_array().is_some_and(|a| !a.is_empty()),
+            "{applies}: {p}"
+        );
+        gw.stop().unwrap();
+    }
+}
+
 /// report_latency_ms: a fill happens at its time but reaches the client only once
 /// the market time has passed that time plus the latency; its stamp is the fill's.
 #[test]
