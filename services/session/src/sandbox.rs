@@ -48,6 +48,24 @@ pub const PROTECTED: &[&str] = &[
     "/private/var/lib/tinytrader",
 ];
 
+/// Per-user folders that hold caches, keys and configuration (and, in a
+/// research setup, copies of held data): always denied, and never allowed by an
+/// `allow_read` inside or containing them.
+pub const PRIVATE_IN_HOME: &[&str] = &[
+    ".cache", "Library", ".ssh", ".gnupg", ".config", ".aws", ".netrc",
+];
+
+/// The folders always denied: [`PRIVATE_IN_HOME`] under `home`, and the run's own.
+#[must_use]
+pub fn always_denied(home: Option<&Path>, deny_read: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = home
+        .into_iter()
+        .flat_map(|h| PRIVATE_IN_HOME.iter().map(move |p| h.join(p)))
+        .collect();
+    out.extend(deny_read.iter().cloned());
+    out
+}
+
 /// SBPL's string literal.
 fn quoted(p: &Path) -> String {
     format!("{:?}", p.to_string_lossy())
@@ -112,7 +130,11 @@ pub fn check_allow_read(
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_owned());
     let mut guarded: Vec<PathBuf> = PROTECTED.iter().map(PathBuf::from).collect();
     guarded.extend(home.map(canon));
-    guarded.extend(deny_read.iter().map(|d| canon(d)));
+    let denied: Vec<PathBuf> = always_denied(home.map(canon).as_deref(), deny_read)
+        .iter()
+        .map(|d| canon(d))
+        .collect();
+    guarded.extend(denied.iter().cloned());
     let mut out = Vec::new();
     for a in allow_read {
         let c = a
@@ -123,6 +145,14 @@ pub fn check_allow_read(
                 "allow_read {} would let the strategy read {}",
                 c.display(),
                 g.display()
+            ));
+        }
+        // Inside a denied folder, it would be denied anyway: say so now.
+        if let Some(d) = denied.iter().find(|d| c.starts_with(d)) {
+            return Err(format!(
+                "allow_read {} is inside {}, which a strategy may never read",
+                c.display(),
+                d.display()
             ));
         }
         out.push(c);
@@ -165,6 +195,15 @@ mod tests {
         let code = tmp.join(format!("sbx-allow-{}", std::process::id()));
         std::fs::create_dir_all(code.join("cache")).unwrap();
         assert!(check_allow_read(std::slice::from_ref(&code), &[], None).is_ok());
+        // A folder inside a home's caches is refused, as is the cache folder itself.
+        let home = tmp.join(format!("sbx-home-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".cache/uv")).unwrap();
+        std::fs::create_dir_all(home.join("code")).unwrap();
+        let e = check_allow_read(&[home.join(".cache")], &[], Some(&home)).unwrap_err();
+        assert!(e.contains("would let") || e.contains("inside"), "{e}");
+        let e = check_allow_read(&[home.join(".cache/uv")], &[], Some(&home)).unwrap_err();
+        assert!(e.contains("may never read"), "{e}");
+        assert!(check_allow_read(&[home.join("code")], &[], Some(&home)).is_ok());
         assert!(check_allow_read(&[PathBuf::from("/")], &[], None).is_err());
         assert!(check_allow_read(&[PathBuf::from("/Users")], &[], None).is_err());
         let e =

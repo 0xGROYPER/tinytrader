@@ -70,7 +70,7 @@ With a `[strategy]` table the session starts the strategy itself. Its output goe
 
 Nothing else of the session's environment reaches it: no keys, store addresses or agent sockets. The control connection must present the token in `hello`, so the record's claims are about the process the session started.
 
-**It runs in its own process group**, which is killed after the run, so nothing it started outlives it.
+**It runs in its own process group**, which is killed after the run, so nothing it started outlives it. A grandchild that calls `setsid` leaves the group and isn't killed, but it stays sandboxed.
 
 ```toml
 [strategy]
@@ -91,7 +91,7 @@ deny_read = ["/path/to/local/caches"]    # never readable, even inside allow_rea
 
 **What it denies:**
 - **Mach service lookups, all of them.** So the strategy can't ask an unsandboxed service (Launch Services' `open`, launchd's `launchctl submit`, background downloads, the DNS resolver) to act for it.
-- **The `deny_read` folders,** denied last, so they win over an `allow_read` that contains them.
+- **The `deny_read` folders,** denied last, so they win over an `allow_read` that contains them. So are the per-user folders that hold caches, keys and configuration: `~/.cache`, `~/Library`, `~/.ssh`, `~/.gnupg`, `~/.config`, `~/.aws` and `~/.netrc`. An `allow_read` inside or containing one is refused.
 - **Unsafe `allow_read` folders.** Each must exist (it's made canonical), and none may be or contain `/`, `/Users`, `/Volumes`, `/Library`, `/private`, `/var`, `/var/lib/tinytrader`, the user's home, or a `deny_read` folder. A folder inside home, such as a virtualenv, is fine.
 
 Held data, caches, home and the store's API are therefore out of reach: a sandboxed strategy sees the market only through the session, as decision 0026 §5 asks of an actor. `allow_read` must name everything the strategy loads: its code, and its interpreter and libraries when they live outside the system's folders. `/nix/store` is readable; it holds no plaintext secrets in a sops deployment.
@@ -99,7 +99,7 @@ Held data, caches, home and the store's API are therefore out of reach: a sandbo
 **The run record says how the strategy ran.** `strategy_process` holds:
 - the command;
 - its exit status;
-- what the record attests: the control connection presented the token only that process had;
+- what the record attests: the control connection presented the token only that process had. That assumes no other process of the same user read the token from the child's environment and connected first;
 - `sandbox`: `"off"`, or its kind, the profile's text and SHA-256, `allow_read` and `deny_read`.
 
 So a result shows whether its strategy could have read ahead.

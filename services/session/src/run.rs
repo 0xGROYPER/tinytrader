@@ -121,6 +121,15 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// 32 bytes of the OS's randomness, as hex: tokens nothing about the run predicts.
+fn random_hex() -> Result<String, String> {
+    let mut b = [0_u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b))
+        .map_err(|e| format!("/dev/urandom: {e}"))?;
+    Ok(hex(&b))
+}
+
 fn wall_ns() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -186,7 +195,7 @@ impl Session {
             let script = v.script(cfg.strategy_latency_ms)?;
             let (sim, feed) =
                 SimBroker::fed(&script, &pin).map_err(|e| format!("venue {}: {e}", v.name))?;
-            let token = hex(&Sha256::digest(format!("{id}{}{}", v.name, wall_ns())));
+            let token = random_hex()?;
             let d = Profile::default();
             let profile = Profile {
                 underlyings: v.underlyings.clone(),
@@ -277,11 +286,7 @@ impl Session {
         let out = |name: &str| {
             std::fs::File::create(self.dir.join(name)).map_err(|e| format!("{name}: {e}"))
         };
-        let token = hex(&Sha256::digest(format!(
-            "{}{}",
-            self.ready.session,
-            wall_ns()
-        )));
+        let token = random_hex()?;
         let mut argv = sp.command.clone();
         let sandbox = match sp.sandbox {
             Sandbox::Off => json!("off"),
@@ -302,7 +307,8 @@ impl Session {
                 }
                 let mut ports = vec![self.ready.control, self.ready.data];
                 ports.extend(self.ready.orders.iter().map(|(_, a)| *a));
-                let profile = crate::sandbox::profile(&allow, &sp.deny_read, &scratch, &ports);
+                let denied = crate::sandbox::always_denied(home.as_deref(), &sp.deny_read);
+                let profile = crate::sandbox::profile(&allow, &denied, &scratch, &ports);
                 let path = self.dir.join("sandbox.sb");
                 std::fs::write(&path, &profile).map_err(|e| format!("sandbox.sb: {e}"))?;
                 let mut wrapped = vec![
@@ -335,7 +341,7 @@ impl Session {
         st.process = Some(json!({
             "command": sp.command,
             "sandbox": sandbox,
-            "attests": "the control connection presented the token only this process was given; a process it starts inherits the sandbox",
+            "attests": "the control connection presented the token only this process was given (assuming no other process of the same user read it from the child's environment and connected first); a process it starts inherits the sandbox",
         }));
         st.token = Some(token);
         st.child = Some(
