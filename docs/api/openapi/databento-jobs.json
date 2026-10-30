@@ -78,6 +78,11 @@
             "description": "Last day, inclusive.",
             "type": "string"
           },
+          "free_while_volumes_missing": {
+            "default": false,
+            "description": "Price it even while the store is missing a volume, taking what the\nmissing volumes hold as not held, so it may buy again what they\nhold. Only a free ($0) quote can then be made or submitted.",
+            "type": "boolean"
+          },
           "hours": {
             "anyOf": [
               {
