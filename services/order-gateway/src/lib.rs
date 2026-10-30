@@ -23,7 +23,8 @@ pub use intent::{Intent, Leg, MaxLoss, max_loss};
 pub use protocol::{KillLevel, MAX_LINE, SCHEMA};
 pub use safety::Profile;
 pub use server::{
-    ClientSpec, Config, Gateway, Role, Timing, check_paths, check_state, check_state_under, start,
+    ClientSpec, Clock, Config, Gateway, Role, Timing, check_paths, check_state, check_state_under,
+    start,
 };
 pub use session::wall_ns;
-pub use sim::SimBroker;
+pub use sim::{Feed, SimBroker};

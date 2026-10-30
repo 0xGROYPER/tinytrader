@@ -70,6 +70,7 @@ pub(crate) struct Script {
     pub(crate) drop_after: Option<(u64, u64)>,
     pub(crate) fee_cents: i64,
     pub(crate) latency_ms: u64,
+    pub(crate) strategy_latency_ms: u64,
     pub(crate) size_cap: bool,
 }
 
@@ -177,6 +178,7 @@ impl Script {
             drop_after: None,
             fee_cents: 2,
             latency_ms: f.opt_int("latency_ms")?.unwrap_or(5),
+            strategy_latency_ms: f.opt_int("strategy_latency_ms")?.unwrap_or(0),
             size_cap: false,
         };
         match f.map_entry("calendar") {

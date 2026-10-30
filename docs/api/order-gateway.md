@@ -377,7 +377,7 @@ The script also sets the account fields (status, options level, cash, blocked fl
 
 ### Market mode (`--sim-quotes SOURCE`)
 
-**Sources.** A source is an uncompressed DBN file (decompress a store's `.dbn.zst` first), a DBN stream that needs no request (`tcp:HOST:PORT`, such as `replay dbn --listen`), or a market data relay, joined live with `tinytrader.relay/1` (`relay:HOST:PORT`). Records are `cmbp-1`, `mbp-1` or `bbo-*`, with definitions; the instrument is keyed by `raw_symbol` with spaces removed.
+**Sources.** A source is an uncompressed DBN file (decompress a store's `.dbn.zst` first), a DBN stream that needs no request (`tcp:HOST:PORT`, such as `replay dbn --listen`), a market data relay, joined live with `tinytrader.relay/1` (`relay:HOST:PORT`), or, in process, a session ([decision 0022](../decisions/0022-sessions.md)) that pushes records through a `Feed` (`SimBroker::fed`) each with its time in the session's order. Records are `cmbp-1`, `tcbbo`, `cbbo-*`, `bbo-*` or `mbp-1` (their top of book), with definitions or symbol mappings (a batch file's `SymbolMappingMsg`, whose `stype_out_symbol` is the raw symbol); the instrument is keyed by `raw_symbol` with spaces removed. A `tcbbo` record applies the quote it carries, the one before its trade.
 
 **Book state.** For each instrument the simulator keeps the last bid and ask price and size from `levels[0]`. Rules:
 - `UNDEF_PRICE` makes that side absent.
@@ -389,8 +389,9 @@ The script also sets the account fields (status, options level, cash, blocked fl
 - The simulator applies quote records only up to the most recent `advance{to_ts}` from the client.
 - A request is stamped with the `t_mkt` at the moment it is processed.
 - With a live relay source, the simulator advances as records arrive. That mode is **not** reproducible, and `pins` says so.
+- **Clocked by a session.** A session hosting the gateway in process advances it through `Gateway::clock()`, not a client connection: `Clock::advance(client, requests, to_ts)` waits until that many requests from the client have been handled, then advances. So an order the strategy sent before its `ready` is always stamped before the clock moves, however threads interleave. The session pushes every record up to `to_ts` before advancing to it, so the simulator never waits on its feed.
 
-**Latency.** An order activates at `t_act = t_submit + submit_latency`. A cancel takes effect at `t_cancel + cancel_latency`. Both are constants from the profile, 5 ms by default.
+**Latency.** An order activates at `t_act = t_submit + strategy_latency + submit_latency`. A cancel takes effect at `t_cancel + strategy_latency + cancel_latency`. `latency_ms` (5 ms by default) is the venue's; `strategy_latency_ms` (0 by default) is the strategy's declared latency, set by the session that clocks the simulator (decision 0022, section 2). Both are constants in the pin.
 
 **Fill model.**
 - *Single buy limit L:* fillable when the ask is present and ask ≤ L. It fills at the **ask**, which is the price improvement up to the touch.
@@ -407,15 +408,15 @@ The script also sets the account fields (status, options level, cash, blocked fl
 - A submit outside the session gets `rejected{code:"sim_market_closed"}`. This is a v1 simplification; Alpaca queues day orders submitted outside the session.
 
 **Deterministic ordering rules.**
-1. Quote records are applied in input order. Records with equal timestamps keep their input order.
+1. Quote records are applied in input order. Records with equal timestamps keep their input order, and together form the book of that instant: working orders are evaluated once all of them are applied, so a combo never fills on some legs' new quotes against others' old ones. A second quote for an instrument within one instant first lets orders be evaluated on the quote it replaces.
 2. An order action (activation or cancel effect) at time `t` is applied **after** every quote record with `ts ≤ t` and before any record with `ts > t`.
-3. On activation, an order is evaluated against the book as of `t_act`. After that it is re-evaluated after each quote record that touches one of its legs.
+3. On activation, an order is evaluated against the book as of `t_act`. After that it is re-evaluated after each instant whose quote records touch one of its legs (rule 1).
 4. When several working orders are fillable on the same record, they are evaluated in order of (`t_act`, admission `seq`). Under `size_cap: displayed` they consume the displayed size in that order.
 5. If a fill and a cancel take effect at the same time, the fill wins, because the cancel effect waits for rule 2. A cancel response is `accepted` whenever the order is open when the request arrives. The terminal event is `canceled`, or `fill` if a fill came first.
 
 **Reproducibility pin.** `pins` contains:
 - the quote source and its manifest sha256 or relay stream id
-- the simulator model version
+- the simulator model version (`tinytrader-sim/2`: definitions from symbol mappings, `cbbo`, `bbo` and `tcbbo` books, one book per instant, the strategy's latency)
 - the latencies
 - the fee profile
 - `size_cap`
@@ -621,10 +622,10 @@ order-gateway --account sim-1 --broker sim --listen 127.0.0.1:7601 --state /var/
 - Exit codes: 0 after SIGINT/SIGTERM (clients receive `shutting_down`), 1 for a runtime failure (lock held, journal chain broken, bind failure), 2 for usage (including a non-loopback `--listen`, a state root under `/tmp` or a `--forbid-state-under` directory, or a token file that is not mode 600 or is a symlink).
 - The process needs no feed, relay, replay or data-gateway process. Market mode reads only the quote source it is given.
 - To stop new orders without a client, create `<state>/KILL`; the gateway enters `halt_all` within a second. Only an admin `unkill` clears it, and the sentinel must be removed first.
-- `--sim-script` is JSON. Every key is optional: `clock_ts` (a fixed clock moved only by `advance`; omitted means the wall clock), `calendar` (omitted: weekdays 09:30 to 16:00 ET; `null`: none, so session checks fail closed; or a list of `{date, open, close}`), `account` (`status`, `options_trading_level`, `cash`, `blocked`), `positions`, `orders` (preloaded broker orders), `quotes` (scripted fill prices), `default` and `rules` (each matching `nth` or `client_order_id`, with `submit`, `cancel`, `fill_on_query` and `skew`), `stream` (`drop_after_events`, `down_ms`), `fee_per_contract`, `latency_ms` and `size_cap`.
+- `--sim-script` is JSON. Every key is optional: `clock_ts` (a fixed clock moved only by `advance`; omitted means the wall clock), `calendar` (omitted: weekdays 09:30 to 16:00 ET; `null`: none, so session checks fail closed; or a list of `{date, open, close}`), `account` (`status`, `options_trading_level`, `cash`, `blocked`), `positions`, `orders` (preloaded broker orders), `quotes` (scripted fill prices), `default` and `rules` (each matching `nth` or `client_order_id`, with `submit`, `cancel`, `fill_on_query` and `skew`), `stream` (`drop_after_events`, `down_ms`), `fee_per_contract`, `latency_ms`, `strategy_latency_ms` and `size_cap`.
 - `--broker alpaca-paper --credentials env` serves one Alpaca paper account with keys from `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY` (or their `*_FILE` forms), as a secrets manager or container secrets provide. `--credentials-file FILE` serves one from a file. The file is mode 600, a regular file, not a symlink, and holds `APCA_API_KEY_ID`/`APCA_API_SECRET_KEY` (or the `ALPACA_*` spellings); values are never printed. The endpoints are compiled in (`paper-api.alpaca.markets`); there is no URL option. `--sim-*` options are refused with it.
 - `--broker alpaca-live --allow-live --credentials env` serves the live account (real money) on `api.alpaca.markets`, the one live host compiled in (`trading.rs`, checked by a test). Give a live gateway small caps and few clients; whether to run one is the deployment's decision. Without `--allow-live`, `alpaca-live` is refused; `--allow-live` with any other broker is refused too.
-- `--sim-quotes` takes a DBN v1/v3 file, a `tcp:` stream such as `replay dbn --listen`, or `relay:HOST:PORT`, a relay's stream (live, so not reproducible). Definitions, `cmbp-1` and `mbp-1` are read; other records are skipped. Market time starts at the first record and moves only with `advance`.
+- `--sim-quotes` takes a DBN v1/v3 file, a `tcp:` stream such as `replay dbn --listen`, or `relay:HOST:PORT`, a relay's stream (live, so not reproducible). Definitions, symbol mappings and the top of book of `cmbp-1`, `tcbbo`, `cbbo-*`, `bbo-*` and `mbp-1` are read; other records are skipped. Market time starts at the first record and moves only with `advance`.
 
 ## Simulated stock orders
 

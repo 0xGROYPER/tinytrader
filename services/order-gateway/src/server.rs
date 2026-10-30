@@ -407,7 +407,54 @@ pub struct Gateway {
     session: JoinHandle<Result<(), String>>,
 }
 
+/// An in-process clock for a simulated account (decision 0022): the session that owns
+/// market time advances the broker through this, never through a client connection.
+#[derive(Clone)]
+pub struct Clock {
+    tx: Sender<Input>,
+}
+
+impl Clock {
+    /// Advances the broker to `to` once `requests` requests from `client` (counted from
+    /// its first connection) have been handled, so an order sent before the strategy's
+    /// `ready` is always stamped before the clock moves. Returns the market time.
+    ///
+    /// # Errors
+    /// An unknown client, the broker's refusal, no answer within `wait`, or a stopped
+    /// gateway.
+    pub fn advance(
+        &self,
+        client: &str,
+        requests: u64,
+        to: u64,
+        wait: Duration,
+    ) -> Result<u64, String> {
+        let (reply, rx) = channel();
+        self.tx
+            .send(Input::Clock {
+                client: client.to_owned(),
+                requests,
+                to,
+                reply,
+            })
+            .map_err(|_| "the gateway has stopped".to_owned())?;
+        rx.recv_timeout(wait).map_err(|_| {
+            format!(
+                "no advance to {to} within {wait:?}: waiting for {requests} requests from {client}"
+            )
+        })?
+    }
+}
+
 impl Gateway {
+    /// The account's clock, for a session that owns market time.
+    #[must_use]
+    pub fn clock(&self) -> Clock {
+        Clock {
+            tx: self.tx.clone(),
+        }
+    }
+
     /// The bound listen address.
     #[must_use]
     pub fn addr(&self) -> SocketAddr {

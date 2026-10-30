@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The requester recorded on a `cleared` line made by the gateway itself.
@@ -49,7 +49,23 @@ pub(crate) enum Input {
         request: Parsed,
     },
     Closed(u64),
+    /// An in-process clock (a session, decision 0022): once `requests` requests from
+    /// `client` have been handled, advance the broker to `to` and answer the market time.
+    Clock {
+        client: String,
+        requests: u64,
+        to: u64,
+        reply: Sender<Result<u64, String>>,
+    },
     Shutdown,
+}
+
+/// A clock advance waiting for a client's requests to arrive.
+struct ClockWait {
+    client: usize,
+    requests: u64,
+    to: u64,
+    reply: Sender<Result<u64, String>>,
 }
 
 struct Conn {
@@ -517,6 +533,10 @@ pub(crate) struct Session<B: Broker> {
     reconcile: Option<Reconcile>,
     last_poll: Instant,
     last_seq: Arc<AtomicU64>,
+    /// Requests handled per client (by its index in the configuration), for clocks.
+    handled: HashMap<usize, u64>,
+    /// Clock advances waiting for requests, in arrival order.
+    clocks: VecDeque<ClockWait>,
 }
 
 impl<B: Broker> Session<B> {
@@ -557,6 +577,8 @@ impl<B: Broker> Session<B> {
             reconcile: None,
             last_poll: Instant::now(),
             last_seq,
+            handled: HashMap::new(),
+            clocks: VecDeque::new(),
         };
         let today = utc_day(s.ts());
         for r in recovered {
@@ -763,12 +785,52 @@ impl<B: Broker> Session<B> {
                 }) => {
                     self.hello(id, client, outbox, resume, cancel_on_disconnect)?;
                 }
-                Ok(Input::Request { id, request }) => self.request(id, request)?,
+                Ok(Input::Request { id, request }) => {
+                    if let Some(c) = self.conns.iter().find(|c| c.id == id) {
+                        *self.handled.entry(c.client).or_default() += 1;
+                    }
+                    self.request(id, request)?;
+                }
                 Ok(Input::Closed(id)) => self.closed(id)?,
+                Ok(Input::Clock {
+                    client,
+                    requests,
+                    to,
+                    reply,
+                }) => match self.cfg.clients.iter().position(|c| c.name == client) {
+                    Some(client) => self.clocks.push_back(ClockWait {
+                        client,
+                        requests,
+                        to,
+                        reply,
+                    }),
+                    None => {
+                        let _ = reply.send(Err(format!("no client {client}")));
+                    }
+                },
                 Err(RecvTimeoutError::Timeout) => {}
             }
+            self.clock()?;
             self.tick()?;
         }
+    }
+
+    /// Runs the waiting clock advances whose requests have all been handled, in order.
+    fn clock(&mut self) -> Result<(), String> {
+        while let Some(w) = self.clocks.front() {
+            if self.handled.get(&w.client).copied().unwrap_or(0) < w.requests {
+                return Ok(());
+            }
+            let Some(w) = self.clocks.pop_front() else {
+                break;
+            };
+            let answer = self.b.advance(w.to).map_err(|e| e.message);
+            if answer.is_ok() {
+                self.drain()?;
+            }
+            let _ = w.reply.send(answer);
+        }
+        Ok(())
     }
 
     /// Runs the startup reconcile before the first request, so the gate opens as soon as the

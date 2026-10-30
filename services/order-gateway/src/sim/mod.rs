@@ -14,6 +14,7 @@ use crate::intent::{Intent, fmt_cents, hex};
 use crate::protocol::{Obj, arr, quote};
 use crate::safety::{date_string, et_day, et_ns, hhmm, parse_date};
 use crate::session::wall_ns;
+pub use market::Feed;
 use market::{QuoteSource, Rec};
 use script::{OnCancel, OnSubmit, Rule, Script};
 use sha2::{Digest, Sha256};
@@ -145,6 +146,31 @@ impl SimBroker {
         });
         s.run_to(first)?;
         Ok(s)
+    }
+
+    /// Market mode fed in process by the session that clocks it: records arrive through
+    /// the returned [`Feed`], and market time moves only with `advance`. `pin` says what
+    /// feeds it (the session's sources and their hashes), for `pins`.
+    ///
+    /// # Errors
+    /// An invalid script.
+    pub fn fed(script: &str, pin: &str) -> Result<(Self, Feed), String> {
+        let mut s = Self::new(script)?;
+        let (src, feed) = QuoteSource::feed(pin.to_owned());
+        s.market = Some(Market {
+            src,
+            book: HashMap::new(),
+            ids: HashMap::new(),
+            actions: Vec::new(),
+            n: 0,
+        });
+        Ok((s, feed))
+    }
+
+    /// When a submit or cancel received at market time `t` takes effect: after the
+    /// strategy's declared latency and then the venue's.
+    fn effective(&self) -> u64 {
+        self.now + (self.s.strategy_latency_ms + self.s.latency_ms) * 1_000_000
     }
 
     fn new(script: &str) -> Result<Self, String> {
@@ -404,7 +430,7 @@ impl SimBroker {
                 return CancelResult::Rejected(error(422, "42210000", "order is not cancelable"));
             }
             OnCancel::Ok if self.market.is_some() => {
-                let t = self.now + self.s.latency_ms * 1_000_000;
+                let t = self.effective();
                 self.schedule(t, Action::Cancel(i));
             }
             OnCancel::Ok => self.set_status(i, "canceled"),
@@ -447,7 +473,7 @@ impl Broker for SimBroker {
             (Some(_), false) => "script",
         };
         Obj::new()
-            .s("model", "tinytrader-sim/1")
+            .s("model", "tinytrader-sim/2")
             .s(
                 "mode",
                 if self.market.is_some() {
@@ -462,6 +488,7 @@ impl Broker for SimBroker {
                 self.market.as_ref().map_or("null", |m| m.src.pin.as_str()),
             )
             .n("latency_ms", self.s.latency_ms)
+            .n("strategy_latency_ms", self.s.strategy_latency_ms)
             .s("fee_per_contract", &fmt_cents(self.s.fee_cents))
             .s(
                 "size_cap",
@@ -563,7 +590,7 @@ impl Broker for SimBroker {
             self.push(i, "new", None, None, None);
         }
         if self.market.is_some() {
-            let t = self.now + self.s.latency_ms * 1_000_000;
+            let t = self.effective();
             self.orders[i].t_act = t;
             self.schedule(t, Action::Activate(i));
         } else {
@@ -843,9 +870,29 @@ impl SimBroker {
                     self.act(a);
                 }
                 (Some(_), _) => {
+                    // The records of one timestamp form one book before orders are
+                    // evaluated, so a combo never fills on some legs' new quotes and
+                    // others' old ones. A second quote for an instrument in the same
+                    // instant first lets orders see the one it replaces (rule 1).
                     let Some((t, r)) = m.src.next() else { break };
                     self.now = self.now.max(t);
-                    self.apply(r);
+                    let mut touched = Vec::new();
+                    let mut next = Some(r);
+                    while let Some(r) = next.take() {
+                        if let Rec::Quote { iid, .. } = &r
+                            && touched.contains(iid)
+                        {
+                            self.evaluate_touched(&touched);
+                            touched.clear();
+                        }
+                        touched.extend(self.apply(r));
+                        if let Some(m) = &mut self.market
+                            && m.src.peek_ts()? == Some(t)
+                        {
+                            next = m.src.next().map(|(_, r)| r);
+                        }
+                    }
+                    self.evaluate_touched(&touched);
                 }
                 _ => break,
             }
@@ -854,11 +901,13 @@ impl SimBroker {
         Ok(())
     }
 
-    fn apply(&mut self, r: Rec) {
-        let Some(m) = &mut self.market else { return };
+    /// Applies one record to the book; a quote returns its instrument id.
+    fn apply(&mut self, r: Rec) -> Option<u32> {
+        let m = self.market.as_mut()?;
         match r {
             Rec::Def { iid, symbol } => {
                 m.ids.insert(symbol, iid);
+                None
             }
             Rec::Quote {
                 iid,
@@ -878,20 +927,26 @@ impl SimBroker {
                         used_ask: 0,
                     },
                 );
-                let ids = &m.ids;
-                let mut touched: Vec<usize> = (0..self.orders.len())
-                    .filter(|i| {
-                        self.orders[*i]
-                            .legs
-                            .iter()
-                            .any(|l| ids.get(&l.symbol) == Some(&iid))
-                    })
-                    .collect();
-                touched.sort_by_key(|i| (self.orders[*i].t_act, self.orders[*i].seq));
-                for i in touched {
-                    self.evaluate(i);
-                }
+                Some(iid)
             }
+        }
+    }
+
+    /// Evaluates the working orders with a leg on any of `iids`, in (`t_act`, `seq`) order.
+    fn evaluate_touched(&mut self, iids: &[u32]) {
+        let Some(m) = &self.market else { return };
+        let ids = &m.ids;
+        let mut touched: Vec<usize> = (0..self.orders.len())
+            .filter(|i| {
+                self.orders[*i]
+                    .legs
+                    .iter()
+                    .any(|l| ids.get(&l.symbol).is_some_and(|id| iids.contains(id)))
+            })
+            .collect();
+        touched.sort_by_key(|i| (self.orders[*i].t_act, self.orders[*i].seq));
+        for i in touched {
+            self.evaluate(i);
         }
     }
 
