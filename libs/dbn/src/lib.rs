@@ -12,6 +12,8 @@
 
 pub use dbn;
 
+pub mod merge;
 pub mod trade_conditions;
 
+pub use merge::{Class, DbnSource, Delivery, Key, Merge, MergeError, index_ts};
 pub use trade_conditions::{TradeConditions, TradeUpdate};
