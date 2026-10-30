@@ -418,7 +418,8 @@ impl Clock {
     /// Advances the broker to `to` once `orders` order messages (submits and cancels,
     /// valid or not, counted from the client's first connection) from `client` have been
     /// handled, so an order sent before the strategy's `ready` is always stamped before
-    /// the clock moves. Queries don't count. Returns the market time. A wait that runs
+    /// the clock moves. Queries don't count. Returns the market time and the account's
+    /// last event sequence number after the advance's events. A wait that runs
     /// past `wait` is dropped by the gateway and answered with an error, never run late.
     ///
     /// # Errors
@@ -430,7 +431,7 @@ impl Clock {
         orders: u64,
         to: u64,
         wait: Duration,
-    ) -> Result<u64, String> {
+    ) -> Result<crate::session::Advanced, String> {
         let (reply, rx) = channel();
         self.tx
             .send(Input::Clock {

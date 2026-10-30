@@ -107,6 +107,25 @@ The strategy says how it keeps up:
 A strategy that stops answering in lockstep stops the run after a stated
 timeout, with the run marked incomplete, never silently advanced.
 
+**As built (step 1, `services/session`, [the API](../api/session.md)).**
+Three things the text above leaves open:
+
+- The strategy says it has joined the data stream and every venue with a
+  first `ready{as_of: 0}`, and nothing is stepped before it. Otherwise its
+  gateway connections land at different places in the venues' journals
+  from run to run.
+- Each `step` names every venue's last event sequence number after its
+  advance (`reports`). The strategy reads its gateway events up to it
+  before acting, so it always has the step's fills in hand.
+- `sent` counts order messages (submits and cancels, valid or not, never
+  queries) per venue since the strategy first connected. Each venue's
+  `Clock` waits for that count before advancing.
+
+Steps 1, 2 and part of 4 landed together: several sources and venues, the
+run record (`run.json`) and the audit log. The audit hashes each venue's
+journaled order events, not the journal's own chain, since that chain also
+covers connection and status events.
+
 **As built (the merge, `libs/dbn`).** Two cases the key above doesn't
 settle:
 

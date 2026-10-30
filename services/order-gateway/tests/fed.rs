@@ -106,7 +106,7 @@ fn options_and_shares_fill_from_minute_quotes() {
     cbbo(&feed, 2, T0, 92, 94);
     cbbo(&feed, 3, T0, 51, 53);
     bbo(&feed, 9, T0, 58_011, 58_012);
-    assert_eq!(clock.advance("reactor", 0, T0, WAIT).unwrap(), T0);
+    assert_eq!(clock.advance("reactor", 0, T0, WAIT).unwrap().market_ts, T0);
     assert_eq!(
         c.submit("r1", &credit_spread("wse-cs", 2))["outcome"],
         "accepted"
@@ -217,7 +217,10 @@ fn a_timed_out_clock_never_wedges_or_runs_late() {
             .is_err()
     );
     // Not wedged: an advance that needs nothing more runs at once.
-    assert_eq!(clock.advance("reactor", 0, T0 + S, WAIT).unwrap(), T0 + S);
+    assert_eq!(
+        clock.advance("reactor", 0, T0 + S, WAIT).unwrap().market_ts,
+        T0 + S
+    );
     // The order the dropped wait wanted arrives now; the dropped advance to `late`
     // doesn't run, so the order rests on the book of T0 + 1 s.
     c.submit("r1", &buy("wse-late"));
@@ -322,6 +325,23 @@ fn tcbbo_is_a_book_only_where_nothing_else_is() {
     assert_eq!(fill(&mut c, "wse-t")["fill"]["price"], "0.51");
     let (r, _) = c.req("order", "r3", r#""client_order_id":"wse-q""#);
     assert_ne!(r["order"]["status"], "filled", "{r}");
+    gw.stop().unwrap();
+}
+
+/// The clock's answer names the account's last event, so a strategy can read its
+/// reports up to it before acting on the step: here, the fill.
+#[test]
+fn an_advance_names_the_last_event_it_journaled() {
+    let (gw, feed, clock) = gateway("fed-seq", "{}");
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 1, T0, 120, 130);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &buy("wse-seq"));
+    cbbo(&feed, 1, T0 + 60 * S, 121, 124);
+    let a = clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    let f = fill(&mut c, "wse-seq");
+    assert_eq!(f["seq"], a.last_seq);
     gw.stop().unwrap();
 }
 

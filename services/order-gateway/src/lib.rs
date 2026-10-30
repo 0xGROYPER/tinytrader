@@ -26,5 +26,5 @@ pub use server::{
     ClientSpec, Clock, Config, Gateway, Role, Timing, check_paths, check_state, check_state_under,
     start,
 };
-pub use session::wall_ns;
-pub use sim::{Feed, SimBroker};
+pub use session::{Advanced, wall_ns};
+pub use sim::{Feed, MODEL as SIM_MODEL, SimBroker};

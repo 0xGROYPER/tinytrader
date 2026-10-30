@@ -20,6 +20,7 @@ members = [
     "services/alpaca-history",
     "services/econ-calendar",
     "services/order-gateway",
+    "services/session",
     "services/queue",
     "services/ticker",
 ]

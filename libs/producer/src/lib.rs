@@ -315,6 +315,15 @@ impl StoreProducer {
         &self.pins
     }
 
+    /// The files of the day being read, if one is: on a failed read, the file that
+    /// failed is among them.
+    pub fn reading(&self) -> Vec<String> {
+        self.reading
+            .iter()
+            .map(|(f, _, _)| f.name.clone())
+            .collect()
+    }
+
     /// Where the days come from.
     pub fn describe(&self) -> String {
         self.holdings.describe()

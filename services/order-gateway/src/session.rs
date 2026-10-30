@@ -57,9 +57,25 @@ pub(crate) enum Input {
         orders: u64,
         to: u64,
         deadline: Instant,
-        reply: Sender<Result<u64, String>>,
+        reply: Sender<Result<Advanced, String>>,
     },
     Shutdown,
+}
+
+/// What a clock advance did: the market time reached, and the account's last event
+/// sequence number once the advance's events were journaled. A strategy that has read
+/// its events up to `last_seq` has every report of the advance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Advanced {
+    /// Market time after the advance.
+    pub market_ts: u64,
+    /// The last event sequence number journaled.
+    pub last_seq: u64,
+    /// The client's order messages handled so far: at least the count waited for.
+    pub handled: u64,
+    /// Order events journaled so far (submits, cancels, broker order events), which,
+    /// unlike `last_seq`, connection and status events never move.
+    pub order_events: u64,
 }
 
 /// A clock advance waiting for a client's order messages to arrive.
@@ -68,7 +84,7 @@ struct ClockWait {
     orders: u64,
     to: u64,
     deadline: Instant,
-    reply: Sender<Result<u64, String>>,
+    reply: Sender<Result<Advanced, String>>,
 }
 
 struct Conn {
@@ -541,6 +557,8 @@ pub(crate) struct Session<B: Broker> {
     handled: HashMap<usize, u64>,
     /// Clock advances waiting for requests, in arrival order.
     clocks: VecDeque<ClockWait>,
+    /// Order events journaled (submit, cancel, order).
+    order_events: u64,
 }
 
 impl<B: Broker> Session<B> {
@@ -583,6 +601,7 @@ impl<B: Broker> Session<B> {
             last_seq,
             handled: HashMap::new(),
             clocks: VecDeque::new(),
+            order_events: 0,
         };
         let today = utc_day(s.ts());
         for r in recovered {
@@ -700,6 +719,9 @@ impl<B: Broker> Session<B> {
 
     fn emit(&mut self, ts: u64, kind: &str, body: &str, aud: Aud) -> Result<(), String> {
         let (seq, line) = self.j.append(ts, kind, body)?;
+        if matches!(kind, "submit" | "cancel" | "order") {
+            self.order_events += 1;
+        }
         self.last_seq.store(seq, SeqCst);
         match &mut self.hold {
             Some(h) => h.push((line, aud)),
@@ -853,10 +875,18 @@ impl<B: Broker> Session<B> {
             let Some(w) = self.clocks.pop_front() else {
                 break;
             };
-            let answer = self.b.advance(w.to).map_err(|e| e.message);
-            if answer.is_ok() {
-                self.drain()?;
-            }
+            let answer = match self.b.advance(w.to) {
+                Ok(market_ts) => {
+                    self.drain()?;
+                    Ok(Advanced {
+                        market_ts,
+                        last_seq: self.last_seq.load(SeqCst),
+                        handled: self.handled.get(&w.client).copied().unwrap_or(0),
+                        order_events: self.order_events,
+                    })
+                }
+                Err(e) => Err(e.message),
+            };
             let _ = w.reply.send(answer);
         }
         Ok(())
