@@ -9,11 +9,16 @@ use std::path::{Path, PathBuf};
 
 /// Whether the probes can run here: they need bash and the base tools on the
 /// strategy's `PATH` (`/usr/bin:/bin`), which a Nix build sandbox doesn't have.
+/// With `TT_REQUIRE_SANDBOX` set (CI's macOS job), they must.
 fn probes_can_run() -> bool {
     let ok = ["/bin/bash", "/bin/cat", "/bin/chmod"]
         .iter()
         .all(|p| Path::new(p).exists() || Path::new(&p.replace("/bin/", "/usr/bin/")).exists());
     if !ok {
+        assert!(
+            std::env::var_os("TT_REQUIRE_SANDBOX").is_none(),
+            "TT_REQUIRE_SANDBOX is set, but there are no bash and base tools under /usr/bin:/bin"
+        );
         eprintln!("skipped: no bash and base tools under /usr/bin:/bin here");
     }
     ok
@@ -28,6 +33,10 @@ fn sandbox_exec_works() -> bool {
         .status()
         .is_ok_and(|s| s.success());
     if !ok {
+        assert!(
+            std::env::var_os("TT_REQUIRE_SANDBOX").is_none(),
+            "TT_REQUIRE_SANDBOX is set, but sandbox-exec can't run here"
+        );
         eprintln!("skipped: sandbox-exec can't run here (inside another sandbox?)");
     }
     ok

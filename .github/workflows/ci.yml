@@ -94,6 +94,21 @@ jobs:
         working-directory: clients/python
         run: python -W error::ResourceWarning -m unittest discover -s tests -v
 
+  sandbox-macos:
+    # The strategy sandbox's escape probes need sandbox-exec, which can't run
+    # inside the Nix build sandbox (those jobs skip them). Here they must run.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc --version
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: The sandbox tests, required to run
+        env:
+          TT_REQUIRE_SANDBOX: "1"
+        run: cargo test -p session --test sandbox --locked -- --nocapture
+
   fmt:
     runs-on: ubuntu-latest
     timeout-minutes: 10
