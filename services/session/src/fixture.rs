@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 const D27: u64 = 1_793_059_200_000_000_000;
 const T0: u64 = D27 + 14 * 3_600_000_000_000;
 
-/// Writes `dir/job` and `dir/session.toml`.
+/// Writes `dir/job`, `dir/settlements.csv` and `dir/session.toml`.
 ///
 /// # Errors
 /// A file that can't be written.
@@ -69,9 +69,16 @@ pub fn write(dir: &Path) -> Result<(), String> {
         format!(r#"{{"files":[{{"filename":"{name}","hash":"sha256:{sha}"}}]}}"#).as_bytes(),
     )?;
     put(job.join("COMPLETE"), b"")?;
+    // SPY's close that day, for settling the call at its expiry: 579.00, so a
+    // 580 call expires worthless.
+    put(
+        dir.join("settlements.csv"),
+        b"root,date,kind,value\nSPY,2026-10-27,PM-close,579.00\n",
+    )?;
     let config = format!(
-        "days = [\"2026-10-27\"]\nready_timeout_s = 20\n\n[[sources]]\nname = \"opra\"\nholdings = \"job:{}\"\nprovider = \"databento\"\ndataset = \"OPRA.PILLAR\"\nsymbol = \"SPY.OPT\"\nschema = \"cbbo-1m\"\n\n[[venues]]\nname = \"options\"\nquotes = [\"opra\"]\nunderlyings = [\"SPY\"]\n",
-        job.display()
+        "days = [\"2026-10-27\"]\nready_timeout_s = 20\n\n[[sources]]\nname = \"opra\"\nholdings = \"job:{}\"\nprovider = \"databento\"\ndataset = \"OPRA.PILLAR\"\nsymbol = \"SPY.OPT\"\nschema = \"cbbo-1m\"\n\n[[venues]]\nname = \"options\"\nquotes = [\"opra\"]\nunderlyings = [\"SPY\"]\n\n[venues.sim.expiry]\nsettlement_file = \"{}\"\n",
+        job.display(),
+        dir.join("settlements.csv").display()
     );
     put(dir.join("session.toml"), config.as_bytes())?;
     Ok(())

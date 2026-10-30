@@ -105,7 +105,7 @@ fn options_and_shares_fill_from_minute_quotes() {
     let mut c = Conn::open(&gw, "reactor", None);
     let welcome = serde_json::from_str::<Value>(&c.lines[0]).unwrap();
     let pins = &welcome["pins"]["broker"];
-    assert_eq!(pins["model"], "tinytrader-sim/3");
+    assert_eq!(pins["model"], "tinytrader-sim/5");
     assert_eq!(pins["quotes"]["source"], "session");
     mappings(&feed);
     // At first neither fills: the spread's natural is 0.92 - 0.53 = 0.39 credit, short
@@ -399,12 +399,16 @@ fn an_expired_contract_never_fills_against_a_reused_id() {
     };
     // A weekly expiring later, as 4.
     map(4, T0 - S / 2, "SPY   261009P00570000");
+    // SPY itself, so the call held through its expiry settles at the close.
+    bbo(&feed, 9, T0, 57_000, 57_002);
     cbbo(&feed, 1, T0, 120, 125);
     cbbo(&feed, 4, T0, 80, 82);
     clock.advance("reactor", 0, T0, WAIT).unwrap();
     assert_eq!(c.submit("r1", &buy("wse-open"))["outcome"], "accepted");
     clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
     assert_eq!(fill(&mut c, "wse-open")["fill"]["price"], "1.25");
+    // SPY just before the close, to settle the call that expires today.
+    bbo(&feed, 9, T0 + 6 * 3_600 * S - 30 * S, 57_000, 57_002);
     // The next day: id 1 is a LEAP now, and id 4 another weekly.
     let t1 = T0 + day;
     map(1, t1 - 60 * S, "SPY   270115C00060000");
@@ -412,7 +416,9 @@ fn an_expired_contract_never_fills_against_a_reused_id() {
     cbbo(&feed, 1, t1, 70_700, 70_731);
     cbbo(&feed, 4, t1, 40, 42);
     clock.advance("reactor", 1, t1, WAIT).unwrap();
-    let r = c.submit("r2", &single("wse-close", CALL, "sell", "close", 1, "0.01"));
+    // Settled at its close (exercised against SPY's quote), nothing is left to
+    // close; an order on it is refused as expired, never priced at the LEAP's ask.
+    let r = c.submit("r2", &single("wse-again", CALL, "buy", "open", 1, "707.31"));
     assert_eq!(r["outcome"], "rejected", "{r}");
     assert_eq!(r["code"], "sim_expired_instrument", "{r}");
     // A contract not mapped today is unknown, never priced from yesterday's quote.
@@ -429,6 +435,40 @@ fn an_expired_contract_never_fills_against_a_reused_id() {
     assert_eq!(r["outcome"], "accepted", "{r}");
     clock.advance("reactor", 2, t1 + 60 * S, WAIT).unwrap();
     assert_eq!(fill(&mut c, "wse-leap")["fill"]["price"], "707.31");
+    gw.stop().unwrap();
+}
+
+/// End to end: a long call held to its expiry is exercised at the close against
+/// the venue's quote of the underlying, as an `activity` event the client sees,
+/// and the position becomes 100 shares at the strike.
+#[test]
+fn a_call_held_to_expiry_is_exercised_into_shares() {
+    let (gw, feed, clock) = gateway("fed-exercise", "{}");
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed); // CALL is SPY 2026-10-05 580 call, as 1; SPY shares as 9
+    cbbo(&feed, 1, T0, 1_000, 1_002);
+    bbo(&feed, 9, T0, 58_999, 59_001);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &single("wse-call", CALL, "buy", "open", 1, "10.02"));
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    assert_eq!(fill(&mut c, "wse-call")["fill"]["price"], "10.02");
+    // The close: SPY at 590.00, the call 10.00 in the money; a quote within the
+    // close's minute settles it.
+    let close = T0 + 6 * 3_600 * S;
+    bbo(&feed, 9, close - 30 * S, 58_999, 59_001);
+    clock.advance("reactor", 1, close + S, WAIT).unwrap();
+    let a = c.until(|v| v["kind"] == "activity").pop().unwrap();
+    assert_eq!(a["activity_type"], "OPEXC", "{a}");
+    assert_eq!(a["broker_raw"]["symbol"], CALL);
+    assert_eq!(a["broker_raw"]["price"], "590.00");
+    let (r, _) = c.req("positions", "r2", "");
+    let pos = r["positions"].as_array().unwrap();
+    assert_eq!(pos.len(), 1, "{r}");
+    assert_eq!(
+        (pos[0]["symbol"].as_str(), pos[0]["qty"].as_i64()),
+        (Some("SPY"), Some(100))
+    );
+    assert_eq!(pos[0]["avg_entry_price"], "580.00");
     gw.stop().unwrap();
 }
 
@@ -545,5 +585,222 @@ fn a_contract_trades_on_its_expiry_day() {
     cbbo(&feed, 1, t, 4, 6);
     clock.advance("reactor", 1, t, WAIT).unwrap();
     assert_eq!(fill(&mut c, "wse-0dte")["fill"]["price"], "0.07");
+    gw.stop().unwrap();
+}
+
+const H: u64 = 3_600 * S;
+
+/// Same-day openings are refused after the venue's time; other expiries, and the
+/// same contract before it, are not.
+#[test]
+fn same_day_openings_are_refused_late_in_the_day() {
+    let (gw, feed, clock) = gateway(
+        "fed-1530",
+        r#"{"venue_rules":{"no_same_day_opening_after":"15:30"},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    let weekly = "SPY261009P00570000";
+    let m = SymbolMappingMsg::new(
+        4,
+        T0 - S / 2,
+        SType::Parent,
+        "SPY.OPT",
+        SType::RawSymbol,
+        "SPY   261009P00570000",
+        0,
+        0,
+    )
+    .unwrap();
+    feed.push(T0 - S / 2, RecordRef::from(&m)).unwrap();
+    cbbo(&feed, 1, T0, 120, 125);
+    cbbo(&feed, 4, T0, 80, 82);
+    clock
+        .advance("reactor", 0, T0 + 5 * H + 29 * 60 * S, WAIT)
+        .unwrap(); // 15:29
+    assert_eq!(
+        c.submit("r1", &single("wse-early", CALL, "buy", "open", 1, "1.00"))["outcome"],
+        "accepted"
+    );
+    clock
+        .advance("reactor", 1, T0 + 5 * H + 31 * 60 * S, WAIT)
+        .unwrap(); // 15:31
+    let r = c.submit("r2", &single("wse-late", CALL, "buy", "open", 1, "1.00"));
+    assert_eq!(r["code"], "sim_same_day_opening", "{r}");
+    assert_eq!(
+        c.submit(
+            "r3",
+            &single("wse-weekly", weekly, "buy", "open", 1, "0.70")
+        )["outcome"],
+        "accepted"
+    );
+    gw.stop().unwrap();
+}
+
+/// At the venue's liquidation time, a short option expiring today is bought back
+/// at its ask, as a broker order the client sees with its fill; the long wing
+/// stays, as Alpaca left it.
+#[test]
+fn same_day_shorts_are_liquidated_at_the_venues_time() {
+    let (gw, feed, clock) = gateway(
+        "fed-1545",
+        r#"{"venue_rules":{"liquidate_same_day_shorts_at":"15:45"},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &credit_spread("wse-cs", 1));
+    cbbo(&feed, 2, T0 + 60 * S, 95, 97);
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    assert_eq!(fill(&mut c, "wse-cs")["fill"]["price"], "-0.40");
+    cbbo(&feed, 2, T0 + 5 * H + 44 * 60 * S, 30, 33);
+    clock
+        .advance("reactor", 1, T0 + 5 * H + 46 * 60 * S, WAIT)
+        .unwrap();
+    // The broker's order arrives as `foreign`; its fill as a FILL activity.
+    let f = c
+        .until(|v| v["kind"] == "activity" && v["activity_type"] == "FILL")
+        .pop()
+        .unwrap();
+    assert_eq!(f["broker_raw"]["price"], "0.33", "{f}");
+    assert_eq!(f["broker_raw"]["symbol"], PUT_A);
+    assert_eq!(
+        f["broker_raw"]["transaction_time_ns"],
+        T0 + 5 * H + 45 * 60 * S
+    );
+    let (r, _) = c.req("positions", "r2", "");
+    let syms: Vec<(&str, i64)> = r["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["symbol"].as_str().unwrap(), p["qty"].as_i64().unwrap()))
+        .collect();
+    assert_eq!(syms, [(PUT_B, 1)], "{r}");
+    gw.stop().unwrap();
+}
+
+/// Working orders count against buying power: two spreads sent in one step on
+/// cash for one, the second is refused.
+#[test]
+fn working_orders_count_against_buying_power() {
+    let (gw, feed, clock) = gateway(
+        "fed-bp-working",
+        r#"{"account":{"cash":"300.00"},"venue_rules":{"buying_power":"defined_risk"},"expiry":{"settle":false},"fill_on":"next_quote"}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    assert_eq!(
+        c.submit("r1", &credit_spread("wse-one", 1))["outcome"],
+        "accepted"
+    );
+    let r = c.submit("r2", &credit_spread("wse-two", 1));
+    assert_eq!(r["code"], "sim_insufficient_buying_power", "{r}");
+    gw.stop().unwrap();
+}
+
+/// Defined-risk buying power: a spread whose worst loss cash can't cover is
+/// refused, never resized; the account reports what's left.
+#[test]
+fn buying_power_refuses_what_cash_cant_cover() {
+    let (gw, feed, clock) = gateway(
+        "fed-bp",
+        r#"{"account":{"cash":"150.00"},"venue_rules":{"buying_power":"defined_risk"},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    // 570/568 for 0.40 credit: worst loss 2.00 × 100; cash 150 + 40 can't cover 200.
+    let r = c.submit("r1", &credit_spread("wse-big", 1));
+    assert_eq!(r["code"], "sim_insufficient_buying_power", "{r}");
+    let (a, _) = c.req("account", "r2", "");
+    assert_eq!(a["account"]["buying_power"], "150.00", "{a}");
+    gw.stop().unwrap();
+
+    let (gw, feed, clock) = gateway(
+        "fed-bp-ok",
+        r#"{"account":{"cash":"500.00"},"venue_rules":{"buying_power":"defined_risk"},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    assert_eq!(
+        c.submit("r1", &credit_spread("wse-ok", 1))["outcome"],
+        "accepted"
+    );
+    cbbo(&feed, 2, T0 + 60 * S, 95, 97);
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    fill(&mut c, "wse-ok");
+    // Cash 500 + 40 credit − 0.04 fees − 200 at risk.
+    let (a, _) = c.req("account", "r2", "");
+    assert_eq!(a["account"]["buying_power"], "339.96", "{a}");
+    gw.stop().unwrap();
+}
+
+/// fill_on = "next_quote" for a combo: one leg's new quote isn't enough; every leg
+/// must have quoted since the order activated.
+#[test]
+fn next_quote_waits_for_every_leg_of_a_combo() {
+    let (gw, feed, clock) = gateway(
+        "fed-nq-combo",
+        r#"{"fill_on":"next_quote","expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    let call2 = "SPY261005C00585000";
+    let m = SymbolMappingMsg::new(
+        5,
+        T0 - S / 2,
+        SType::Parent,
+        "SPY.OPT",
+        SType::RawSymbol,
+        "SPY   261005C00585000",
+        0,
+        0,
+    )
+    .unwrap();
+    feed.push(T0 - S / 2, RecordRef::from(&m)).unwrap();
+    let all = |t: u64| {
+        cbbo(&feed, 2, t, 92, 94); // PUT_A 570
+        cbbo(&feed, 3, t, 50, 52); // PUT_B 568
+        cbbo(&feed, 1, t, 120, 122); // CALL 580
+        cbbo(&feed, 5, t, 60, 62); // 585
+    };
+    all(T0);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    // An iron condor for a credit of at least 0.90: natural 0.92 − 0.52 + 1.20 − 0.62 = 0.98.
+    let condor = combo(
+        "wse-ic",
+        &[
+            (PUT_A, 1, "sell", "open"),
+            (PUT_B, 1, "buy", "open"),
+            (CALL, 1, "sell", "open"),
+            (call2, 1, "buy", "open"),
+        ],
+        1,
+        "-0.90",
+    );
+    assert_eq!(c.submit("r1", &condor)["outcome"], "accepted");
+    // A minute later only the short put quotes: no fill on the other legs' old quotes.
+    cbbo(&feed, 2, T0 + 60 * S, 92, 94);
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    let (r, _) = c.req("order", "r2", r#""client_order_id":"wse-ic""#);
+    assert_ne!(r["order"]["status"], "filled", "{r}");
+    // Then every leg: it fills on those quotes.
+    all(T0 + 120 * S);
+    clock.advance("reactor", 1, T0 + 120 * S, WAIT).unwrap();
+    let f = fill(&mut c, "wse-ic");
+    assert_eq!(
+        (f["fill"]["price"].as_str(), f["ts_broker"].as_u64()),
+        (Some("-0.98"), Some(T0 + 120 * S))
+    );
     gw.stop().unwrap();
 }

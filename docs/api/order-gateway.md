@@ -278,7 +278,7 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 | `cleared` | `client_order_id`, `requester` (the admin's client name, or `gateway` for the session-order rule), `reason`, `broker: {open_orders: {result: "absent", listed}, by_id: {result: "absent", broker_raw}}`. The two broker answers that cleared the order ([section 5](#5-requests-and-responses), item 6). Visible to the same clients as an `order` event. |
 | `clear_refused` | `client_order_id` (empty when the request had none), `requester` (the requesting client's name, admin or not), `request_reason` (the reason the request gave, possibly empty), `reason` and `detail` (the `not_cleared` outcome of the refused request, [section 12](#12-error-codes)), `broker?: {open_orders: {result: shows \| unreliable \| failed \| absent, listed, status?, code?}, by_id: {result, status?, code?, broker_raw}}`, present when the broker was consulted. Visible to the same clients as a `cleared` event. Recovery ignores it: it changes no order's state. |
 | `account` | `snapshot: account \| positions`, `broker_raw`. Derived from polling and emitted on change; Alpaca has no account stream. |
-| `activity` | `activity_type`, `broker_raw`, for example `OPEXP`, `OPASN`, `OPEXC`, `FILL` or `FEE` |
+| `activity` | `activity_type`, `broker_raw`, for example `OPEXP`, `OPASN`, `OPEXC`, `FILL` or `FEE`. The simulator sends `OPEXP`, `OPEXC` and `OPASN` at expiry, with `broker_raw{symbol, qty (signed), price (the settlement price), date}`. |
 | `status` | `state`, `broker_stream: up \| down{since}`, `resync?{from_ts, to_ts, orders_checked}`, `kill?{level, reason}`, `cap?{name}` |
 | `foreign` | `broker_raw`. A broker order with no journal entry, such as one placed in the dashboard. |
 | `client` | `client`, `phase: connected \| disconnected`, `resume_after_seq` |
@@ -402,7 +402,7 @@ The script also sets the account fields (status, options level, cash, blocked fl
   over the current state of every leg. Every needed side must be present and every leg usable. The combo is fillable when N ≤ `limit_price`; this one rule covers both debits and credits, because credits are negative. It fills **atomically**, with each leg at its touch and the parent `fill.price = N`. A market order is fillable whenever every needed side is present (in scripted mode it fills at its `ref_price`).
 - *Quantity:* the default is atomic full quantity. With `size_cap: displayed`, the fill is min(remaining, displayed size) for a single, or min over legs of ⌊size / ratio⌋ for a combo. The rest stays working. A displayed size, once consumed, is not consumed again until a new quote record arrives for that instrument.
 - *Expiry:* working `day` orders expire at the session close in the profile calendar, with an early close where the calendar lists one.
-- *Fees:* each fill carries `fees` from the fee profile. The default is $0 commission plus a configurable per-contract regulatory fee.
+- *Fees:* each fill carries `fees` from the fee profile: `fee_per_contract` on option legs (default $0.02) and `fee_per_share` on stock legs (default $0). It is in dollars for the fill, never folded into its price.
 
 **Rejects.**
 - An instrument with no definition seen gets `rejected{code:"sim_unknown_instrument"}`.
@@ -411,7 +411,7 @@ The script also sets the account fields (status, options level, cash, blocked fl
 - A client's `advance` to a simulator a session clocks gets `request_error{code:"clocked_by_session"}`.
 - A submit outside the session gets `rejected{code:"sim_market_closed"}`. This is a v1 simplification; Alpaca queues day orders submitted outside the session.
 
-**Instrument ids change daily, and books don't carry over.** OPRA assigns ids per day, so an id can name another contract tomorrow. A definition or mapping that gives an id to a new symbol makes the simulator forget the symbol it named before, quote included. A symbol given a new id loses the old id's quote. On the first market time of a day past an option's expiry, the contract and its book are forgotten. A contract not mapped on a later day therefore has no book (`sim_unknown_instrument`), never yesterday's quote. Positions in an expired contract stay as they were until expiry settlement is modelled. At the first market time of each new New York day every quote is cleared (mappings stay), so an order at the open fills only on that day's first quote, never on yesterday's book.
+**Instrument ids change daily, and books don't carry over.** OPRA assigns ids per day, so an id can name another contract tomorrow. A definition or mapping that gives an id to a new symbol makes the simulator forget the symbol it named before, quote included. A symbol given a new id loses the old id's quote. On the first market time of a day past an option's expiry, the contract and its book are forgotten. A contract not mapped on a later day therefore has no book (`sim_unknown_instrument`), never yesterday's quote. An expired contract's position is settled at its expiry's close, as below. At the first market time of each new New York day every quote is cleared (mappings stay), so an order at the open fills only on that day's first quote, never on yesterday's book.
 
 **Deterministic ordering rules.**
 1. Quote records are applied in input order. Records with equal timestamps keep their input order and together form the book of that instant: working orders are evaluated once all of them are applied, and an instrument's last quote in the instant is its book. So a combo never fills on some legs' new quotes against others' old ones, nor on a quote replaced within the same instant.
@@ -422,7 +422,7 @@ The script also sets the account fields (status, options level, cash, blocked fl
 
 **Reproducibility pin.** `pins` contains:
 - the quote source and its manifest sha256 or relay stream id
-- the simulator model version (`tinytrader-sim/3`; `/2` brought definitions from symbol mappings, `cbbo`, `bbo` and `tcbbo` books, one book per instant and the strategy's latency; `/3` forgets expired contracts and reused instrument ids)
+- the simulator model version (`tinytrader-sim/5`; `/5` adds the venue rules; `/4` settles expiries and charges stock its own fee; `/2` brought definitions from symbol mappings, `cbbo`, `bbo` and `tcbbo` books, one book per instant and the strategy's latency; `/3` forgets expired contracts and reused instrument ids)
 - the latencies
 - the fee profile
 - `size_cap`
@@ -431,7 +431,36 @@ The script also sets the account fields (status, options level, cash, blocked fl
 
 The same pin and the same request sequence produce a **byte-identical event transcript**.
 
-**Deferred:** expiry settlement (`OPEXP`, `OPASN`, `OPEXC`), queue and L2 models, and stochastic latency. Each one changes the pin, not the protocol.
+**Expiry, settlement and assignment** (market mode). At each session's close, after every record and order action at or before it, options expiring that day are settled as a broker would. Each result is an account activity, delivered as an `activity` event (section 7):
+- **Cash-settled roots** pay intrinsic value in cash: `OPEXC` for a long in the money, `OPASN` for a short, `OPEXP` out of the money.
+  - `cash-am` roots (SPX, NDX, RUT, VIX, DJX) settle against the AM special opening quotation.
+  - `cash-pm` roots (SPXW, XSP, NDXP, RUTW, VIXW, …) settle against the PM close.
+- **Every other root is physically settled.** A long call or short put in the money by at least `exercise_threshold` ($0.01) buys 100 shares per contract at the strike; a long put or short call sells them. Anything less expires (`OPEXP`).
+- **Settlement prices** come from `expiry.settlement_file`, a CSV of `root, date, kind (AM-SOQ | PM-close), value` pinned by SHA-256. It is read strictly: every row needs all four fields with a YYYY-MM-DD date and a known kind, and a row repeated for its root, date and kind is refused. Where `settle_from_quote` allows (the default), a physically settled root may instead use the venue's own quote of the underlying, its mid, if that quote is from within `quote_max_age_s` (60 s) of the close. A price that can't be had fails the advance with the reason, so a session ends the run incomplete. It is never guessed, and nothing of that close's settlements is applied.
+- **All or nothing.** A close's settlements and early assignments are all worked out, every price included, before any position, cash or share changes. Then their activities are sent; ones held back while the stream is down are sent when it returns.
+- **Last trading day.** An AM-settled root's options stop trading the session before their expiry date, whose morning gives the settlement value. From then on they're refused (`sim_expired_instrument`), never filled, and their book is dropped. VIX and VIXW settle that way too, on a Wednesday. Every other option trades through its expiry date's close.
+- **Early assignment** is opt-in (`early_assignment`). At the close of the day before an ex-dividend date, from `expiry.dividends` (root → CSV with `ex_date`, `dividend_usd`, read strictly), a physically settled short call in the money is assigned when its bid less its intrinsic value is below the dividend. When `put_assignment_extrinsic` is set, at any close a short put in the money is assigned when that is below it. Prices are looked up only where a rule applies, the option's bid only if fresh (within `quote_max_age_s`); without a fresh bid it isn't assigned.
+- **Contract size.** Settlement assumes 100 shares per contract. The gateway refuses non-standard (adjusted) OCC symbols, so no other deliverable reaches the simulator.
+- **Not modelled:** pin risk (a holder's choice not to exercise near the threshold) and assignment beyond these rules.
+- `expiry.settle = false` turns all of this off, for runs that hold nothing to expiry or quote no underlying.
+
+```json
+{"fee_per_contract": "0.65", "fee_per_share": "0",
+ "expiry": {"styles": {"XSP": "cash-am"}, "settlement_file": "/path/settlements.csv", "settle_from_quote": true,
+            "exercise_threshold": "0.01", "early_assignment": true, "dividends": {"SPY": "/path/SPY.csv"},
+            "put_assignment_extrinsic": "0.01", "quote_max_age_s": 60}}
+```
+
+**Venue rules** (`venue_rules`), each off unless set, as a broker applies them:
+- **`no_same_day_opening_after = "15:30"`.** After this New York time, an order opening an option on its last trading day is refused (`sim_same_day_opening`). That's Alpaca's rule.
+- **`liquidate_same_day_shorts_at = "15:45"`.** At this time, every short option position on its last trading day, in a physically settled root, is bought back at its ask as a broker order. Working orders on it are canceled first. The account's clients see the broker order as `foreign` events, its fill included. A short with no ask stays, to settle at the close. That's Alpaca's rule for accounts that can't cover exercise or assignment; the long wings stay.
+- **`buying_power = "defined_risk"`.** An opening order is refused (`sim_insufficient_buying_power`), never resized, when cash, less the order's premium, less the worst loss at expiry of each expiry's option positions with the order filled, would be negative. A position whose loss has no bound (more short calls than long in an expiry) is refused outright. `account` reports that buying power. It approximates a broker's options buying power for defined-risk spreads; margin on naked positions isn't modelled.
+
+```json
+{"venue_rules": {"no_same_day_opening_after": "15:30", "liquidate_same_day_shorts_at": "15:45", "buying_power": "defined_risk"}}
+```
+
+**Deferred:** queue and L2 models, and stochastic latency. Each one changes the pin, not the protocol.
 
 ## 11. Order journal
 

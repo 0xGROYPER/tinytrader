@@ -107,6 +107,7 @@ struct Venue {
 
 /// A session started and waiting for its strategy.
 pub struct Session {
+    calendar_sha: Option<String>,
     ready: Ready,
     cfg: Config,
     cfg_text: String,
@@ -190,9 +191,27 @@ impl Session {
             sources.push(DbnSource::new(p, s.latency_offset_ns));
         }
         let pin = json!({"source": "session", "session": id}).to_string();
+        // The venues' market calendar: its days, and its SHA-256 for the record.
+        let calendar = match &cfg.calendar {
+            None => None,
+            Some(path) => {
+                let bytes =
+                    std::fs::read(path).map_err(|e| format!("calendar {}: {e}", path.display()))?;
+                let v: Value = serde_json::from_slice(&bytes)
+                    .map_err(|e| format!("calendar {}: {e}", path.display()))?;
+                let days = v.get("days").cloned().unwrap_or(v);
+                if !days.is_array() {
+                    return Err(format!(
+                        "calendar {}: a list of days, or {{\"days\": [...]}}",
+                        path.display()
+                    ));
+                }
+                Some((days, hex(&Sha256::digest(&bytes))))
+            }
+        };
         let mut venues = Vec::new();
         for v in &cfg.venues {
-            let script = v.script(cfg.strategy_latency_ms)?;
+            let script = v.script(cfg.strategy_latency_ms, calendar.as_ref().map(|c| &c.0))?;
             let (sim, feed) =
                 SimBroker::fed(&script, &pin).map_err(|e| format!("venue {}: {e}", v.name))?;
             let token = random_hex()?;
@@ -254,6 +273,7 @@ impl Session {
                 .collect(),
         };
         Ok(Self {
+            calendar_sha: calendar.map(|c| c.1),
             ready,
             cfg,
             cfg_text: cfg_text.to_owned(),
@@ -777,6 +797,7 @@ impl Session {
             "days": self.cfg.days,
             "seed": self.cfg.seed,
             "strategy_process": st.process.clone().unwrap_or(Value::Null),
+            "calendar_sha256": self.calendar_sha,
             "lockstep": {"batch": "instant", "strategy_latency_ms": self.cfg.strategy_latency_ms},
             "merge": {"order": "(ts, class, rank, position)", "ranks": self.cfg.sources.iter().map(|s| s.name.clone()).collect::<Vec<_>>()},
             "config_sha256": hex(&Sha256::digest(self.cfg_text.as_bytes())),

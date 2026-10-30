@@ -31,6 +31,7 @@ days = ["2026-10-26", "2026-10-27"]   # in order
 strategy_latency_ms = 0               # the strategy's declared latency
 ready_timeout_s = 60                  # per step, for the first connections, and for every write
 seed = 0                              # recorded; the first models use no randomness
+calendar = "calendar.json"            # optional: the market calendar for the venues
 
 [[sources]]                           # in rank order: ties in time go to the earlier
 name = "opra"
@@ -54,6 +55,8 @@ allow_short = false
 latency_ms = 5
 fee_per_contract = "0.65"
 ```
+
+**`calendar`** is the market calendar: `{"days": [{"date", "open", "close"}]}` with times in New York, as the deployment's market calendar serves it (`alpaca-account`'s `/calendar`, say). It's given to every venue whose profile sets none, so holidays have no session and early closes close early, for orders, day-order expiry and option settlement. Its SHA-256 is in `run.json`. Without it, venues assume every weekday from 09:30 to 16:00, holidays included.
 
 Sources are read through the store producer (`libs/producer`). A day not held is a `store-gap` message in the stream, never a skip. Each file read is pinned by SHA-256 in the run record.
 

@@ -107,6 +107,12 @@ The strategy says how it keeps up:
 A strategy that stops answering in lockstep stops the run after a stated
 timeout, with the run marked incomplete, never silently advanced.
 
+**As built (step 5b, expiry in the simulator).**
+- **Settlement values** come from a CSV pinned by SHA-256 (root, date, AM-SOQ or PM-close, value) until the `settlement` dataset of 5a exists. A physically settled root may also use the venue's own quote of the underlying at the close.
+- **Settlement happens** at each session's close, and reports as `OPEXP`/`OPEXC`/`OPASN` activities.
+- **A missing value fails the run,** as section 5 says.
+- **Early assignment** is an opt-in profile rule, around ex-dividend dates from a pinned dividends file, plus a put rule.
+
 **As built (step 1, `services/session`, [the API](../api/session.md)).**
 Three things the text above leaves open:
 

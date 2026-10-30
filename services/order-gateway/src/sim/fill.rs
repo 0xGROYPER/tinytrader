@@ -16,7 +16,7 @@ impl SimBroker {
         // An expired contract has no book: nothing fills against it.
         if o.legs
             .iter()
-            .any(|l| super::expired(&l.symbol, crate::safety::et_day(self.now)))
+            .any(|l| self.expired(&l.symbol, crate::safety::et_day(self.now)))
         {
             return;
         }
@@ -25,6 +25,11 @@ impl SimBroker {
             let Some(q) = m.ids.get(&l.symbol).and_then(|id| m.book.get(id)) else {
                 return;
             };
+            // fill_on = "next_quote": every leg on a quote after activation, never one
+            // leg's new quote beside another's from before.
+            if self.s.next_quote && q.ts <= o.t_act {
+                return;
+            }
             if matches!((q.bid, q.ask), (Some(b), Some(a)) if b > a) {
                 return; // crossed: unusable until a non-crossed quote
             }
@@ -80,7 +85,7 @@ impl SimBroker {
         self.execute(i, units, &prices);
     }
 
-    fn book_position(&mut self, symbol: &str, delta: i64, px: i64) -> i64 {
+    pub(super) fn book_position(&mut self, symbol: &str, delta: i64, px: i64) -> i64 {
         let p = self.pos.entry(symbol.to_owned()).or_insert((0, 0));
         let next = p.0 + delta;
         p.1 = if p.0 == 0 || p.0.signum() == delta.signum() {
@@ -101,8 +106,11 @@ impl SimBroker {
         if units == 0 {
             return;
         }
-        let fee = i128::from(self.s.fee_cents) * i128::from(CENT);
-        let (mut net, mut legs, mut contracts, mut position) = (0_i128, Vec::new(), 0_u64, None);
+        // Options pay the per-contract fee; stock pays the per-share fee.
+        let option_fee = i128::from(self.s.fee_cents) * i128::from(CENT);
+        let share_fee = i128::from(self.s.fee_share);
+        let mut fees = 0_i128;
+        let (mut net, mut legs, mut position) = (0_i128, Vec::new(), None);
         for (k, px) in prices.iter().copied().enumerate() {
             let (symbol, ratio, buy) = {
                 let l = &self.orders[i].legs[k];
@@ -112,7 +120,6 @@ impl SimBroker {
             let n = (units * ratio).saturating_sub(skip);
             let sign: i64 = if buy { 1 } else { -1 };
             net += i128::from(sign) * i128::from(ratio) * i128::from(px);
-            contracts += n;
             let qty = i64::try_from(n).unwrap_or(0);
             position = Some(self.book_position(&symbol, sign * qty, px));
             // An option contract is 100 shares; a stock leg is one.
@@ -121,7 +128,13 @@ impl SimBroker {
             } else {
                 1
             };
-            self.cash -= i128::from(sign * qty) * i128::from(px) * multiplier + fee * i128::from(n);
+            let fee = if multiplier == 100 {
+                option_fee
+            } else {
+                share_fee
+            } * i128::from(n);
+            fees += fee;
+            self.cash -= i128::from(sign * qty) * i128::from(px) * multiplier + fee;
             let l = &mut self.orders[i].legs[k];
             l.filled += n;
             l.cost += i128::from(n) * i128::from(px);
@@ -158,7 +171,7 @@ impl SimBroker {
             .s("execution_id", &exec)
             .n("qty", units)
             .s("price", &fmt_nanos(parent))
-            .s("fees", &fmt_nanos(fee * i128::from(contracts)))
+            .s("fees", &fmt_nanos(fees))
             .done();
         self.activities.push(
             Obj::new()

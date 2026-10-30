@@ -84,6 +84,13 @@ pub enum Update {
     StreamDown,
     /// The update stream is back; the gateway resyncs through queries.
     StreamUp,
+    /// A non-trade account activity: an option expired, exercised or assigned.
+    Activity {
+        /// `OPEXP`, `OPEXC`, `OPASN`, …
+        activity_type: String,
+        /// The broker's JSON.
+        raw: String,
+    },
 }
 
 /// Submit result; at most one send attempt was made.
