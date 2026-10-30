@@ -56,6 +56,8 @@ pub(crate) struct SimOrder {
     seq: u64,
     active: bool,
     updated: u64,
+    /// Legs last filled at zero for want of a bid (`no_bid_combo_leg = "zero"`).
+    zero_legs: Vec<String>,
     /// Its legs' queues, once it rests under the queue model.
     queue: Option<Vec<queue::LegQueue>>,
 }
@@ -372,6 +374,7 @@ impl SimBroker {
             active: self.market.is_none(),
             updated: self.ts(),
             queue: None,
+            zero_legs: Vec::new(),
         });
         n - 1
     }
@@ -410,6 +413,10 @@ impl SimBroker {
                 .s("side", side(l))
                 .s("position_intent", &intent(l))
                 .raw("legs", "null");
+        }
+        if !o.zero_legs.is_empty() {
+            let list: Vec<String> = o.zero_legs.iter().map(|s| format!("{s:?}")).collect();
+            r = r.raw("no_bid_zero_legs", &format!("[{}]", list.join(",")));
         }
         if let Some(q) = &o.queue {
             r = r.raw("queue", &Self::queue_raw(q, &o.legs));
@@ -630,6 +637,10 @@ impl Broker for SimBroker {
                         .n("combo_window_s", q.window / 1_000_000_000)
                         .done()
                 }),
+            )
+            .s(
+                "no_bid_combo_leg",
+                if self.s.no_bid_zero { "zero" } else { "refuse" },
             )
             .s(
                 "fill_on",

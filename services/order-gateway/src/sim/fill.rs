@@ -21,6 +21,7 @@ impl SimBroker {
             return;
         }
         let (mut net, mut prices, mut avail) = (0_i128, Vec::new(), u64::MAX);
+        let mut zeroed = Vec::new();
         for l in &o.legs {
             let Some(q) = m.ids.get(&l.symbol).and_then(|id| m.book.get(id)) else {
                 return;
@@ -38,11 +39,20 @@ impl SimBroker {
             } else {
                 (q.bid, q.bid_sz, q.used_bid)
             };
-            let Some(px) = px else { return };
+            // no_bid_combo_leg = "zero": a combo's sold leg offered but not bid
+            // (worthless, as far-out options near expiry are) goes for nothing.
+            let zero = px.is_none() && !l.buy && o.combo && self.s.no_bid_zero && q.ask.is_some();
+            let Some(px) = px.or(zero.then_some(0)) else {
+                return;
+            };
             let sign = if l.buy { 1 } else { -1 };
             net += sign * i128::from(l.ratio) * i128::from(px);
             prices.push(px);
-            avail = avail.min(size.saturating_sub(used) / l.ratio);
+            if zero {
+                zeroed.push(l.symbol.clone());
+            } else {
+                avail = avail.min(size.saturating_sub(used) / l.ratio);
+            }
         }
         let limit = i128::from(o.limit_cents) * i128::from(CENT);
         // A single sell is fillable when bid >= L, i.e. -bid <= -L.
@@ -84,6 +94,7 @@ impl SimBroker {
                 }
             }
         }
+        self.orders[i].zero_legs = zeroed;
         self.execute(i, units, &prices);
     }
 
