@@ -187,8 +187,11 @@ impl Session {
             hex(&Sha256::digest(format!("{cfg_text}{}{}", wall_ns(), std::process::id()))[..6]);
         let mut sources = Vec::new();
         for s in &cfg.sources {
-            let p = StoreProducer::new(s.holdings()?, s.query(), &cfg.days)
+            let mut p = StoreProducer::new(s.holdings()?, s.query(), &cfg.days)
                 .map_err(|e| format!("source {}: {e}", s.name))?;
+            if let Some(n) = s.expiries_within_days {
+                p = p.expiries_within_days(n);
+            }
             sources.push(DbnSource::new(p, s.latency_offset_ns));
         }
         let pin = json!({"source": "session", "session": id}).to_string();
@@ -661,6 +664,7 @@ impl Session {
                     .collect();
                 json!({"name": s.name, "holdings": p.describe(), "reading": p.reading(), "dataset": s.dataset, "symbol": s.symbol,
                        "schema": s.schema, "latency_offset_ns": s.latency_offset_ns,
+                       "expiries_within_days": s.expiries_within_days,
                        "records": src.position(), "clamped": src.clamped(), "days": days})
             })
             .collect();
