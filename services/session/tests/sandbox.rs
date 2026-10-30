@@ -24,20 +24,23 @@ fn probes_can_run() -> bool {
     ok
 }
 
-/// Whether `sandbox-exec` works here: it can't be nested in another sandbox (a Nix
-/// build's on macOS).
+/// Whether `sandbox-exec` works here for the session's binary: it can't nest in
+/// another sandbox (a Nix build's, on a machine that sandboxes builds), and inside
+/// any Nix build the binary links libraries from the Nix store, which the
+/// strategy's profile doesn't let it read.
 #[cfg(target_os = "macos")]
 fn sandbox_exec_works() -> bool {
-    let ok = std::process::Command::new("/usr/bin/sandbox-exec")
-        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
-        .status()
-        .is_ok_and(|s| s.success());
+    let ok = std::env::var_os("NIX_BUILD_TOP").is_none()
+        && std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            .status()
+            .is_ok_and(|s| s.success());
     if !ok {
         assert!(
             std::env::var_os("TT_REQUIRE_SANDBOX").is_none(),
-            "TT_REQUIRE_SANDBOX is set, but sandbox-exec can't run here"
+            "TT_REQUIRE_SANDBOX is set, but sandbox-exec can't run the session here"
         );
-        eprintln!("skipped: sandbox-exec can't run here (inside another sandbox?)");
+        eprintln!("skipped: sandbox-exec can't run the session here (a Nix build?)");
     }
     ok
 }
