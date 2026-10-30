@@ -460,3 +460,371 @@ fn producers_merge_with_each_other() {
         [(t0, 0), (t0, 0), (t0, 1), (t0, 1), (t1, 0), (t1, 0)]
     );
 }
+
+/// A file of several days (`day0s`), each with two contracts mapped for that
+/// day only (ids `11 + 100k`, `12 + 100k`) and a quote each at `minutes` past
+/// 14:00Z, for `symbol`'s parent, zstd.
+fn days_file(day0s: &[u64], minutes: &[u64], symbol: &str) -> Vec<u8> {
+    let mut maps = Vec::new();
+    for (k, d) in day0s.iter().enumerate() {
+        let k = u32::try_from(k).unwrap();
+        for (raw, iid) in [("SPY   261027C00580000", 11), ("SPY   261027P00570000", 12)] {
+            maps.push(SymbolMapping {
+                raw_symbol: raw.into(),
+                intervals: vec![MappingInterval {
+                    start_date: date(*d),
+                    end_date: date(*d + DAY),
+                    symbol: (iid + 100 * k).to_string(),
+                }],
+            });
+        }
+    }
+    let meta = Metadata::builder()
+        .dataset("OPRA.PILLAR")
+        .schema(Some(Schema::Cbbo1M))
+        .start(day0s[0])
+        .stype_in(Some(SType::Parent))
+        .stype_out(SType::InstrumentId)
+        .symbols(vec![symbol.into()])
+        .mappings(maps)
+        .build();
+    let mut out = Vec::new();
+    let mut e = Encoder::with_zstd(&mut out, &meta).unwrap();
+    for (k, d) in day0s.iter().enumerate() {
+        let k = u32::try_from(k).unwrap();
+        for m in minutes {
+            for iid in [11 + 100 * k, 12 + 100 * k] {
+                e.encode_record(&CbboMsg {
+                    hd: RecordHeader::new::<CbboMsg>(rtype::CBBO_1M, 30, iid, u64::MAX),
+                    ts_recv: d + 14 * 3_600_000_000_000 + m * 60_000_000_000,
+                    ..CbboMsg::default_for_schema(Schema::Cbbo1M)
+                })
+                .unwrap();
+            }
+        }
+    }
+    drop(e);
+    out
+}
+
+/// A definitions sidecar: another schema, which the producer leaves out.
+fn sidecar(day0: u64) -> Vec<u8> {
+    let meta = Metadata::builder()
+        .dataset("OPRA.PILLAR")
+        .schema(Some(Schema::Definition))
+        .start(day0)
+        .stype_in(Some(SType::Parent))
+        .stype_out(SType::InstrumentId)
+        .symbols(vec!["SPY.OPT".into()])
+        .build();
+    let mut out = Vec::new();
+    Encoder::with_zstd(&mut out, &meta).unwrap();
+    out
+}
+
+/// A fake store over any `/coverage` answer and files.
+fn store_with(coverage: serde_json::Value, files: Vec<(&str, Vec<u8>)>) -> String {
+    use axum::extract::{Path as P, State};
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    type S = Arc<(
+        serde_json::Value,
+        std::collections::HashMap<String, Vec<u8>>,
+    )>;
+    let files = files.into_iter().map(|(n, b)| (n.to_owned(), b)).collect();
+    let app = axum::Router::new()
+        .route(
+            "/coverage",
+            get(|State(s): State<S>| async move { axum::Json(s.0.clone()) }),
+        )
+        .route(
+            "/files/{*name}",
+            get(|P(name): P<String>, State(s): State<S>| async move {
+                s.1.get(&name).cloned().ok_or(StatusCode::NOT_FOUND)
+            }),
+        )
+        .with_state(Arc::new((coverage, files)));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                tx.send(l.local_addr().unwrap()).unwrap();
+                axum::serve(l, app).await.unwrap();
+            });
+    });
+    format!("http://{}", rx.recv().unwrap())
+}
+
+fn quotes(got: &[Out]) -> Vec<(u64, u32)> {
+    got.iter()
+        .filter_map(|o| match o {
+            Out::Quote(t, i) => Some((*t, *i)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn mapped(got: &[Out]) -> Vec<u32> {
+    got.iter()
+        .filter_map(|o| match o {
+            Out::Map(i, ..) => Some(*i),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A range file listed on each of its days streams each day's own records once,
+/// in order, with that day's mappings only; a second copy on another volume is
+/// not merged in; a definitions sidecar listed beside the day is left out.
+#[test]
+fn the_store_reads_one_copy_of_each_day_inside_its_window() {
+    let range = days_file(&[D27, D27 + DAY], &[0], "SPY.OPT");
+    let r = "vol/Databento/OPRA.PILLAR/SPY.OPT/opra-pillar-20261027-20261028.cbbo-1m.dbn.zst";
+    let copy = "old/Databento/OPRA.PILLAR/SPY.OPT/opra-pillar-20261027-20261028.cbbo-1m.dbn.zst";
+    let side = "vol/Databento/OPRA.PILLAR/SPY.OPT/definition/2026-10-27.dbn.zst";
+    let cov = serde_json::json!({"days": [
+        {"day": "2026-10-27", "kind": "complete", "volume": "vol", "files": [r, copy, side]},
+        {"day": "2026-10-28", "kind": "complete", "volume": "vol", "files": [r, copy]},
+    ], "missing_volumes": []});
+    let base = store_with(
+        cov,
+        vec![(r, range.clone()), (copy, range), (side, sidecar(D27))],
+    );
+    let mut p = StoreProducer::new(
+        Box::new(StoreApi::with_retry(&base, quick(0))),
+        query(),
+        &days(&["2026-10-27", "2026-10-28"]),
+    )
+    .unwrap();
+    let got = drain(&mut p).unwrap();
+    let t = |d: u64| d + 14 * 3_600_000_000_000;
+    assert_eq!(
+        quotes(&got),
+        [
+            (t(D27), 11),
+            (t(D27), 12),
+            (t(D27 + DAY), 111),
+            (t(D27 + DAY), 112)
+        ]
+    );
+    assert_eq!(mapped(&got), [11, 12, 111, 112]);
+    let files: Vec<&str> = p.pins()[0].files.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(files, [r, side]);
+    assert!(p.pins()[0].files[0].used && !p.pins()[0].files[1].used);
+}
+
+#[test]
+fn the_store_refuses_a_day_whose_copies_differ() {
+    let cov = serde_json::json!({"days": [
+        {"day": "2026-10-27", "kind": "partial", "volume": "vol", "conflict": true, "files": ["vol/x.dbn.zst"]},
+    ], "missing_volumes": []});
+    let base = store_with(cov, Vec::new());
+    let e = StoreProducer::new(
+        Box::new(StoreApi::with_retry(&base, quick(0))),
+        query(),
+        &days(&["2026-10-27"]),
+    )
+    .err()
+    .unwrap();
+    assert!(e.contains("copies differ"), "{e}");
+}
+
+#[test]
+fn a_store_name_that_climbs_out_is_refused() {
+    let store = StoreApi::with_retry("http://127.0.0.1:9", quick(0));
+    let e = store
+        .open(&tinytrader_producer::FileRef {
+            name: "vol/../catalog".into(),
+            sha256: None,
+        })
+        .err()
+        .unwrap();
+    assert!(e.contains("not a store file name"), "{e}");
+}
+
+/// A cache job read by its manifest: a range file serves each of its days; a
+/// file split by symbol serves only its symbol; a job of a list of contracts
+/// holds partial days.
+fn manifest_job(dir: &Path, files: &[(&str, Vec<u8>)], stype_in: &str, hashes: bool) {
+    let mut list = Vec::new();
+    for (name, bytes) in files {
+        std::fs::write(dir.join(name), bytes).unwrap();
+        list.push(if hashes {
+            format!(r#"{{"filename":"{name}","hash":"sha256:{}"}}"#, sha(bytes))
+        } else {
+            format!(r#"{{"filename":"{name}"}}"#)
+        });
+    }
+    std::fs::write(
+        dir.join("metadata.json"),
+        format!(
+            r#"{{"query":{{"dataset":"OPRA.PILLAR","schema":"cbbo-1m","symbols":["SPY.OPT","QQQ.OPT"],"stype_in":"{stype_in}","start":{D27},"end":{}}}}}"#,
+            D27 + 2 * DAY
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("manifest.json"),
+        format!(r#"{{"files":[{}]}}"#, list.join(",")),
+    )
+    .unwrap();
+    std::fs::write(dir.join("COMPLETE"), "").unwrap();
+}
+
+#[test]
+fn a_job_serves_range_and_split_files_by_its_manifest() {
+    let dir = tmp("ranges");
+    manifest_job(
+        &dir,
+        &[
+            (
+                "opra-pillar-20261027-20261028.cbbo-1m.SPY.OPT.dbn.zst",
+                days_file(&[D27, D27 + DAY], &[0], "SPY.OPT"),
+            ),
+            (
+                "opra-pillar-20261027-20261028.cbbo-1m.QQQ.OPT.dbn.zst",
+                days_file(&[D27, D27 + DAY], &[1], "QQQ.OPT"),
+            ),
+        ],
+        "parent",
+        true,
+    );
+    let mut p = StoreProducer::new(
+        Box::new(Folder::job(&dir).unwrap()),
+        query(),
+        &days(&["2026-10-27", "2026-10-28"]),
+    )
+    .unwrap();
+    let got = drain(&mut p).unwrap();
+    let t = |d: u64| d + 14 * 3_600_000_000_000;
+    assert_eq!(
+        quotes(&got),
+        [
+            (t(D27), 11),
+            (t(D27), 12),
+            (t(D27 + DAY), 111),
+            (t(D27 + DAY), 112)
+        ]
+    );
+    assert!(
+        p.pins()
+            .iter()
+            .all(|d| d.files.len() == 1 && d.files[0].verified)
+    );
+}
+
+#[test]
+fn a_job_missing_a_file_or_a_hash_is_refused() {
+    let dir = tmp("nohash");
+    manifest_job(
+        &dir,
+        &[(
+            "opra-pillar-20261027.cbbo-1m.dbn.zst",
+            day_file(D27, &[0], true),
+        )],
+        "parent",
+        false,
+    );
+    let e = Folder::job(&dir).err().unwrap();
+    assert!(e.contains("no SHA-256"), "{e}");
+    let dir = tmp("nofile");
+    manifest_job(
+        &dir,
+        &[(
+            "opra-pillar-20261027.cbbo-1m.dbn.zst",
+            day_file(D27, &[0], true),
+        )],
+        "parent",
+        true,
+    );
+    std::fs::remove_file(dir.join("opra-pillar-20261027.cbbo-1m.dbn.zst")).unwrap();
+    let e = Folder::job(&dir).err().unwrap();
+    assert!(e.contains("not in the folder"), "{e}");
+}
+
+#[test]
+fn a_job_of_contracts_holds_partial_days() {
+    let dir = tmp("contracts");
+    manifest_job(
+        &dir,
+        &[(
+            "opra-pillar-20261027.cbbo-1m.dbn.zst",
+            day_file(D27, &[0], true),
+        )],
+        "raw_symbol",
+        true,
+    );
+    let mut p = StoreProducer::new(
+        Box::new(Folder::job(&dir).unwrap()),
+        query(),
+        &days(&["2026-10-27"]),
+    )
+    .unwrap();
+    let got = drain(&mut p).unwrap();
+    assert_eq!(got[0], Out::Sys("store-partial day=2026-10-27".into()));
+    assert!(p.pins()[0].partial);
+}
+
+/// A local file whose bytes don't match fails before any of its records is
+/// released.
+#[test]
+fn a_local_hash_mismatch_fails_before_any_record() {
+    let dir = tmp("early");
+    job(&dir, true, true);
+    let mut p = StoreProducer::new(
+        Box::new(Folder::job(&dir).unwrap()),
+        query(),
+        &days(&["2026-10-27"]),
+    )
+    .unwrap();
+    let e = p.decode_record_ref().err().unwrap().to_string();
+    assert!(e.contains("SHA-256"), "{e}");
+}
+
+/// A second run from the first's pins reads the same; a changed file, or a gap
+/// that is held now, fails.
+#[test]
+fn a_run_reproduced_from_its_pins_must_read_the_same() {
+    let root = tmp("pins");
+    let dir = root.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("2026-10-27.dbn"), day_file(D27, &[0], false)).unwrap();
+    let d = days(&["2026-10-27", "2026-10-28"]);
+    let mut first = StoreProducer::new(Box::new(Folder::layout(&root)), query(), &d).unwrap();
+    let a = drain(&mut first).unwrap();
+    let pins = first.pins().to_vec();
+    let mut again =
+        StoreProducer::pinned(Box::new(Folder::layout(&root)), query(), &d, &pins).unwrap();
+    assert_eq!(drain(&mut again).unwrap(), a);
+    assert!(again.pins()[0].files[0].verified);
+    std::fs::write(dir.join("2026-10-27.dbn"), day_file(D27, &[1], false)).unwrap();
+    let mut changed =
+        StoreProducer::pinned(Box::new(Folder::layout(&root)), query(), &d, &pins).unwrap();
+    assert!(drain(&mut changed).err().unwrap().contains("SHA-256"));
+    std::fs::write(dir.join("2026-10-28.dbn"), day_file(D27 + DAY, &[0], false)).unwrap();
+    let e = StoreProducer::pinned(Box::new(Folder::layout(&root)), query(), &d, &pins)
+        .err()
+        .unwrap();
+    assert!(e.contains("2026-10-28: a gap when pinned, held now"), "{e}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_never_follows_a_link_outside_it() {
+    let root = tmp("links");
+    let outside = tmp("links-outside");
+    std::fs::write(outside.join("2026-10-27.dbn"), day_file(D27, &[0], false)).unwrap();
+    let dir = root.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::os::unix::fs::symlink(outside.join("2026-10-27.dbn"), dir.join("2026-10-27.dbn")).unwrap();
+    let mut p = StoreProducer::new(
+        Box::new(Folder::layout(&root)),
+        query(),
+        &days(&["2026-10-27"]),
+    )
+    .unwrap();
+    let e = drain(&mut p).err().unwrap();
+    assert!(e.contains("outside the folder"), "{e}");
+}
