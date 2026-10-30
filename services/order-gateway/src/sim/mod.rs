@@ -518,7 +518,7 @@ impl SimBroker {
                 return CancelResult::Rejected(error(422, "42210000", "order is not cancelable"));
             }
             OnCancel::Ok if self.market.is_some() => {
-                let key = format!("{}#cancel{}", self.orders[i].cid, self.cancels);
+                let key = format!("{}#cancel", self.orders[i].cid);
                 let t = self.effective(&key);
                 self.schedule(t, Action::Cancel(i));
             }
