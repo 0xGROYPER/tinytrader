@@ -263,24 +263,46 @@ impl Session {
     }
 
     /// Starts the strategy when the configuration names one, sandboxed if it says
-    /// so, with `TT_SESSION` set and its output in the run folder.
+    /// so, from an empty environment plus `PATH`, `HOME` and `TMPDIR` (its scratch
+    /// folder), `TT_SESSION`, `TT_SESSION_TOKEN` and the configured variables, in
+    /// its own process group, with its output in the run folder.
     fn start_strategy(&self, st: &mut Run) -> Result<(), String> {
+        use std::os::unix::process::CommandExt as _;
         let Some(sp) = &self.cfg.strategy else {
             return Ok(());
         };
         let scratch = self.dir.join("strategy-tmp");
         std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+        let scratch = scratch.canonicalize().map_err(|e| e.to_string())?;
         let out = |name: &str| {
             std::fs::File::create(self.dir.join(name)).map_err(|e| format!("{name}: {e}"))
         };
+        let token = hex(&Sha256::digest(format!(
+            "{}{}",
+            self.ready.session,
+            wall_ns()
+        )));
         let mut argv = sp.command.clone();
         let sandbox = match sp.sandbox {
             Sandbox::Off => json!("off"),
             Sandbox::Macos => {
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let allow = crate::sandbox::check_allow_read(
+                    &sp.allow_read,
+                    &sp.deny_read,
+                    home.as_deref(),
+                )?;
+                if let Some(cwd) = &sp.cwd {
+                    let c = cwd
+                        .canonicalize()
+                        .map_err(|e| format!("strategy.cwd: {e}"))?;
+                    if !allow.iter().any(|a| c.starts_with(a)) {
+                        return Err(format!("strategy.cwd {} isn't in allow_read", c.display()));
+                    }
+                }
                 let mut ports = vec![self.ready.control, self.ready.data];
                 ports.extend(self.ready.orders.iter().map(|(_, a)| *a));
-                let scratch = scratch.canonicalize().map_err(|e| e.to_string())?;
-                let profile = crate::sandbox::profile(&sp.allow_read, &scratch, &ports);
+                let profile = crate::sandbox::profile(&allow, &sp.deny_read, &scratch, &ports);
                 let path = self.dir.join("sandbox.sb");
                 std::fs::write(&path, &profile).map_err(|e| format!("sandbox.sb: {e}"))?;
                 let mut wrapped = vec![
@@ -291,21 +313,31 @@ impl Session {
                 wrapped.append(&mut argv);
                 argv = wrapped;
                 json!({"kind": "macos-sandbox-exec", "profile_sha256": hex(&Sha256::digest(profile.as_bytes())),
-                       "allow_read": sp.allow_read})
+                       "profile": profile, "allow_read": allow, "deny_read": sp.deny_read})
             }
         };
         let mut cmd = std::process::Command::new(&argv[0]);
         cmd.args(&argv[1..])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &scratch)
+            .env("TMPDIR", &scratch)
             .envs(&sp.env)
             .env("TT_SESSION", self.ready.control.to_string())
-            .env("TMPDIR", &scratch)
+            .env("TT_SESSION_TOKEN", &token)
             .stdin(std::process::Stdio::null())
             .stdout(out("strategy.out")?)
-            .stderr(out("strategy.err")?);
+            .stderr(out("strategy.err")?)
+            .process_group(0);
         if let Some(cwd) = &sp.cwd {
             cmd.current_dir(cwd);
         }
-        st.process = Some(json!({"command": sp.command, "sandbox": sandbox}));
+        st.process = Some(json!({
+            "command": sp.command,
+            "sandbox": sandbox,
+            "attests": "the control connection presented the token only this process was given; a process it starts inherits the sandbox",
+        }));
+        st.token = Some(token);
         st.child = Some(
             cmd.spawn()
                 .map_err(|e| format!("strategy {}: {e}", argv[0]))?,
@@ -332,6 +364,11 @@ impl Session {
                 }
             }
         };
+        // Whatever it started too: its process group.
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-9", &format!("-{}", child.id())])
+            .stderr(std::process::Stdio::null())
+            .status();
         if let Some(Value::Object(p)) = &mut st.process {
             p.insert("exit".into(), status);
         }
@@ -455,9 +492,17 @@ impl Session {
         let mut reader = BufReader::new(ctl.try_clone().map_err(|e| e.to_string())?);
         st.control = Some(ctl);
         let hello = protocol::read(&mut reader)?;
-        let FromStrategy::Hello { strategy, revision } = hello else {
+        let FromStrategy::Hello {
+            strategy,
+            revision,
+            token,
+        } = hello
+        else {
             return Err("the strategy's first message must be hello".into());
         };
+        if st.token.is_some() && token != st.token {
+            return Err("the control connection isn't from the strategy the session started (no TT_SESSION_TOKEN)".into());
+        }
         st.strategy = Some((strategy.clone(), revision.clone()));
         audit.update(format!("hello {strategy} {revision}\n"));
         let w = self.welcome();
@@ -778,4 +823,6 @@ struct Run {
     /// The strategy process the session started, and what the record says of it.
     child: Option<std::process::Child>,
     process: Option<Value>,
+    /// The token a started strategy must present in its hello.
+    token: Option<String>,
 }

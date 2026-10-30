@@ -3,32 +3,49 @@
 //! own, made enforceable).
 //!
 //! The strategy may:
-//! - read the system's folders and the folders the run allows (its code, its
-//!   interpreter);
-//! - read and write its own scratch folder in the run folder (`TMPDIR`);
-//! - read any file's metadata, though not its contents;
+//! - read the system's own folders (not `/Library`, whose logs can carry market
+//!   data) and the folders the run allows (its code, its interpreter);
+//! - read and write its own scratch folder in the run folder (`TMPDIR`, `HOME`);
 //! - connect to the session's control and data addresses and its venues'
-//!   gateways, and nothing else.
+//!   gateways, and nothing else;
+//! - signal only processes in its own sandbox.
 //!
-//! Everything else is off the list: the store, the caches, home, other hosts.
+//! No Mach service lookups are allowed at all, so it can't ask an unsandboxed
+//! service (Launch Services, launchd, background downloads, the DNS resolver) to
+//! act for it. A run's `deny_read` folders are denied last, so they win over any
+//! allowed folder that contains them. `/nix/store` is readable: it holds no
+//! plaintext secrets in a sops deployment, but it is world-readable.
+//!
 //! `sandbox-exec` is deprecated by Apple but works on current macOS; a Linux
 //! container needs the session on unix sockets, a later step.
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-/// Read-only system folders every process needs.
+/// Read-only system folders a process needs.
 const SYSTEM: &[&str] = &[
     "/System",
     "/usr",
     "/bin",
     "/sbin",
-    "/Library",
     "/private/etc",
     "/private/var/db/dyld",
     "/private/var/db/timezone",
-    "/dev",
     "/nix/store",
+];
+
+/// Folders a run may never allow, nor any folder containing one: a strategy
+/// reading these could see held data or other runs.
+pub const PROTECTED: &[&str] = &[
+    "/",
+    "/Users",
+    "/Volumes",
+    "/Library",
+    "/private",
+    "/private/var",
+    "/var",
+    "/var/lib/tinytrader",
+    "/private/var/lib/tinytrader",
 ];
 
 /// SBPL's string literal.
@@ -36,13 +53,19 @@ fn quoted(p: &Path) -> String {
     format!("{:?}", p.to_string_lossy())
 }
 
-/// The profile for a strategy reading `allow_read`, writing `scratch`, and
-/// connecting to `ports` on loopback.
+/// The profile for a strategy reading `allow_read`, never `deny_read`, writing
+/// `scratch`, and connecting to `ports` on loopback.
 #[must_use]
-pub fn profile(allow_read: &[PathBuf], scratch: &Path, ports: &[SocketAddr]) -> String {
+pub fn profile(
+    allow_read: &[PathBuf],
+    deny_read: &[PathBuf],
+    scratch: &Path,
+    ports: &[SocketAddr],
+) -> String {
     let mut p = String::from(
         "(version 1)\n(deny default)\n\
-         (allow process-exec process-fork signal sysctl-read mach-lookup ipc-posix-shm file-read-metadata)\n\
+         (allow process-exec process-fork sysctl-read)\n\
+         (allow signal (target same-sandbox))\n\
          (allow file-read* (literal \"/\")",
     );
     for s in SYSTEM {
@@ -57,7 +80,11 @@ pub fn profile(allow_read: &[PathBuf], scratch: &Path, ports: &[SocketAddr]) -> 
         "(allow file-read* file-write* (subpath {}))",
         quoted(scratch)
     );
-    p.push_str("(allow file-write* (subpath \"/dev\"))\n");
+    p.push_str(
+        "(allow file-read* file-write* (literal \"/dev/null\") (literal \"/dev/zero\") \
+         (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/fd/\"))\n\
+         (allow file-read* (literal \"/dev/random\") (literal \"/dev/urandom\"))\n",
+    );
     for a in ports {
         let _ = writeln!(
             p,
@@ -65,18 +92,54 @@ pub fn profile(allow_read: &[PathBuf], scratch: &Path, ports: &[SocketAddr]) -> 
             a.port()
         );
     }
+    for d in deny_read {
+        let _ = writeln!(p, "(deny file-read* (subpath {}))", quoted(d));
+    }
     p
+}
+
+/// Checks the folders a run allows: each must exist (it is made canonical), and
+/// none may be or contain a protected folder, the user's home, or a `deny_read`
+/// folder.
+///
+/// # Errors
+/// The first folder that fails, and why.
+pub fn check_allow_read(
+    allow_read: &[PathBuf],
+    deny_read: &[PathBuf],
+    home: Option<&Path>,
+) -> Result<Vec<PathBuf>, String> {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_owned());
+    let mut guarded: Vec<PathBuf> = PROTECTED.iter().map(PathBuf::from).collect();
+    guarded.extend(home.map(canon));
+    guarded.extend(deny_read.iter().map(|d| canon(d)));
+    let mut out = Vec::new();
+    for a in allow_read {
+        let c = a
+            .canonicalize()
+            .map_err(|e| format!("allow_read {}: {e}", a.display()))?;
+        if let Some(g) = guarded.iter().find(|g| g.starts_with(&c)) {
+            return Err(format!(
+                "allow_read {} would let the strategy read {}",
+                c.display(),
+                g.display()
+            ));
+        }
+        out.push(c);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::profile;
+    use super::{check_allow_read, profile};
     use std::path::{Path, PathBuf};
 
     #[test]
     fn the_profile_lists_only_what_is_allowed() {
         let p = profile(
             &[PathBuf::from("/opt/strategy")],
+            &[PathBuf::from("/opt/strategy/cache")],
             Path::new("/runs/a/strategy-tmp"),
             &["127.0.0.1:5000".parse().unwrap()],
         );
@@ -84,6 +147,30 @@ mod tests {
         assert!(p.contains("(allow file-read* (subpath \"/opt/strategy\"))"));
         assert!(p.contains("(allow file-read* file-write* (subpath \"/runs/a/strategy-tmp\"))"));
         assert!(p.contains("(remote ip \"localhost:5000\")"));
-        assert!(!p.contains("network*"));
+        assert!(p.ends_with("(deny file-read* (subpath \"/opt/strategy/cache\"))\n"));
+        for never in [
+            "mach-lookup",
+            "network*",
+            "/Library",
+            "ipc-posix",
+            "file-read-metadata)",
+        ] {
+            assert!(!p.contains(never), "{never}");
+        }
+    }
+
+    #[test]
+    fn folders_that_contain_held_data_are_refused() {
+        let tmp = std::env::temp_dir().canonicalize().unwrap();
+        let code = tmp.join(format!("sbx-allow-{}", std::process::id()));
+        std::fs::create_dir_all(code.join("cache")).unwrap();
+        assert!(check_allow_read(&[code.clone()], &[], None).is_ok());
+        assert!(check_allow_read(&[PathBuf::from("/")], &[], None).is_err());
+        assert!(check_allow_read(&[PathBuf::from("/Users")], &[], None).is_err());
+        let e = check_allow_read(&[code.clone()], &[code.join("cache")], None).unwrap_err();
+        assert!(e.contains("would let the strategy read"), "{e}");
+        let e = check_allow_read(&[tmp.clone()], &[], Some(&code)).unwrap_err();
+        assert!(e.contains("would let"), "{e}");
+        assert!(check_allow_read(&[code.join("nope")], &[], None).is_err());
     }
 }

@@ -80,9 +80,14 @@ pub struct StrategyProcess {
     /// connecting only to the session's own addresses.
     #[serde(default)]
     pub sandbox: Sandbox,
-    /// Folders a sandboxed strategy may read: its code, its interpreter.
+    /// Folders a sandboxed strategy may read: its code, its interpreter. None may
+    /// be or contain `/`, the user's home, held data or a `deny_read` folder.
     #[serde(default)]
     pub allow_read: Vec<std::path::PathBuf>,
+    /// Folders a sandboxed strategy may never read, even inside `allow_read`: the
+    /// deployment's caches and copies of held data.
+    #[serde(default)]
+    pub deny_read: Vec<std::path::PathBuf>,
 }
 
 /// How a started strategy is confined.
@@ -196,8 +201,13 @@ impl Config {
             if st.sandbox == Sandbox::Macos && !cfg!(target_os = "macos") {
                 return Err("strategy.sandbox = \"macos\" needs macOS".into());
             }
-            if st.allow_read.iter().any(|p| !p.is_absolute()) {
-                return Err("strategy.allow_read takes absolute paths".into());
+            if st
+                .allow_read
+                .iter()
+                .chain(&st.deny_read)
+                .any(|p| !p.is_absolute())
+            {
+                return Err("strategy.allow_read and deny_read take absolute paths".into());
             }
         }
         for v in &c.venues {

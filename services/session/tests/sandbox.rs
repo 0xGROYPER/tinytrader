@@ -15,23 +15,47 @@ fn root(name: &str) -> PathBuf {
     p
 }
 
-/// Runs the fixture with `tinytrader-session watch` as the strategy behind the probes.
-fn run(name: &str, sandbox: &str) -> (session::Outcome, String, Value, bool) {
+/// Runs the fixture with `tinytrader-session watch` as the strategy behind the
+/// probes. `escapes` adds the probes that would act outside the sandbox if it
+/// failed (a launchd job, opening a file with Launch Services), each harmless.
+fn run(name: &str, sandbox: &str, escapes: bool) -> (session::Outcome, String, Value, bool) {
     let base = root(name);
     session::fixture::write(&base).unwrap();
+    let base = base.canonicalize().unwrap();
     let secret = base.join("secret.txt");
     std::fs::write(&secret, "the future").unwrap();
+    let marker = base.join("opened");
+    let command = base.join("x.command");
+    std::fs::write(&command, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+    std::process::Command::new("/bin/chmod")
+        .arg("+x")
+        .arg(&command)
+        .status()
+        .unwrap();
     let store = TcpListener::bind("127.0.0.1:0").unwrap();
     store.set_nonblocking(true).unwrap();
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_tinytrader-session"));
-    let script = format!(
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut script = format!(
         "cat {} >/dev/null 2>&1 && echo READ-SECRET || echo NO-SECRET; \
          (exec 3<>/dev/tcp/127.0.0.1/{}) 2>/dev/null && echo NET-STORE || echo NO-NET; \
-         exec {} watch",
+         [ -n \"$CARGO_MANIFEST_DIR\" ] && echo ENV-LEAK || echo NO-ENV-LEAK; ",
         secret.display(),
         store.local_addr().unwrap().port(),
-        bin.display()
     );
+    if escapes {
+        script.push_str(&format!(
+            "ls {home} >/dev/null 2>&1 && echo READ-HOME || echo NO-HOME; \
+             ls /Library/Logs >/dev/null 2>&1 && echo READ-LOGS || echo NO-LOGS; \
+             kill -0 {pid} 2>/dev/null && echo SIGNAL || echo NO-SIGNAL; \
+             [ -n \"$(dscacheutil -q host -a name localhost 2>/dev/null)\" ] && echo DNS || echo NO-DNS; \
+             launchctl submit -l tt-sandbox-probe -- /usr/bin/true >/dev/null 2>&1; \
+             /usr/bin/open -g {} >/dev/null 2>&1; ",
+            command.display(),
+            pid = std::process::id(),
+        ));
+    }
+    script.push_str(&format!("exec {} watch", bin.display()));
     let allow = bin.parent().unwrap().canonicalize().unwrap();
     let mut config = std::fs::read_to_string(base.join("session.toml")).unwrap();
     config.push_str(&format!(
@@ -41,16 +65,32 @@ fn run(name: &str, sandbox: &str) -> (session::Outcome, String, Value, bool) {
     let dir = base.join("run");
     let s = Session::start(&config, &dir, [127, 0, 0, 1].into()).unwrap();
     let o = s.run().unwrap();
-    let out = std::fs::read_to_string(dir.join("strategy.out")).unwrap();
+    let mut out = std::fs::read_to_string(dir.join("strategy.out")).unwrap();
     let rec: Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("run.json")).unwrap()).unwrap();
     let reached = store.accept().is_ok();
+    if escapes {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let job = std::process::Command::new("/bin/launchctl")
+            .args(["remove", "tt-sandbox-probe"])
+            .status();
+        out.push_str(if job.is_ok_and(|s| s.success()) {
+            "LAUNCHD-JOB\n"
+        } else {
+            "NO-LAUNCHD-JOB\n"
+        });
+        out.push_str(if marker.exists() {
+            "OPENED\n"
+        } else {
+            "NOT-OPENED\n"
+        });
+    }
     (o, out, rec, reached)
 }
 
 #[test]
 fn an_unsandboxed_strategy_can_read_and_connect() {
-    let (o, out, rec, reached) = run("off", "off");
+    let (o, out, rec, reached) = run("off", "off", false);
     assert_eq!(o.status, "complete", "{o:?} {out}");
     assert!(
         out.contains("READ-SECRET") && out.contains("NET-STORE"),
@@ -64,9 +104,21 @@ fn an_unsandboxed_strategy_can_read_and_connect() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_sandboxed_strategy_can_only_reach_its_session() {
-    let (o, out, rec, reached) = run("macos", "macos");
+    let (o, out, rec, reached) = run("macos", "macos", true);
     assert_eq!(o.status, "complete", "{o:?} {out}");
-    assert!(out.contains("NO-SECRET") && out.contains("NO-NET"), "{out}");
+    for want in [
+        "NO-SECRET",
+        "NO-NET",
+        "NO-ENV-LEAK",
+        "NO-HOME",
+        "NO-LOGS",
+        "NO-SIGNAL",
+        "NO-DNS",
+        "NO-LAUNCHD-JOB",
+        "NOT-OPENED",
+    ] {
+        assert!(out.contains(want), "{want} missing: {out}");
+    }
     assert!(
         !reached,
         "the sandboxed strategy reached the stand-in store"
@@ -75,6 +127,12 @@ fn a_sandboxed_strategy_can_only_reach_its_session() {
     let sb = &rec["strategy_process"]["sandbox"];
     assert_eq!(sb["kind"], "macos-sandbox-exec");
     assert_eq!(sb["profile_sha256"].as_str().unwrap().len(), 64);
+    assert!(
+        sb["profile"]
+            .as_str()
+            .unwrap()
+            .starts_with("(version 1)\n(deny default)")
+    );
     assert_eq!(rec["strategy_process"]["exit"], 0);
 }
 

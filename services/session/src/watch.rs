@@ -28,7 +28,8 @@ pub fn run(addr: &str) -> Result<String, String> {
     };
     send(
         &mut ctl,
-        json!({"type": "hello", "protocol": "tinytrader.session/1", "strategy": "watch", "revision": "example"}),
+        json!({"type": "hello", "protocol": "tinytrader.session/1", "strategy": "watch", "revision": "example",
+                "token": std::env::var("TT_SESSION_TOKEN").ok()}),
     )?;
     let w = recv(&mut cr)?;
     let mut data = TcpStream::connect(w["data"].as_str().ok_or("no data address")?).map_err(e)?;

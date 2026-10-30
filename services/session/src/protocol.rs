@@ -2,7 +2,7 @@
 //!
 //! | Direction | Message |
 //! |---|---|
-//! | strategy → session | `hello{protocol, strategy, revision}`, once, first |
+//! | strategy → session | `hello{protocol, strategy, revision, token?}`, once, first; `token` is `TT_SESSION_TOKEN` when the session started the strategy |
 //! | session → strategy | `welcome{session, mode, data, orders: {venue: {addr, client, token, prefix}}, days, strategy_latency_ms}` |
 //! | strategy → session | `ready{as_of: 0, timers}`, once joined to the data stream and every venue: its first timers |
 //! | session → strategy | `step{step, as_of, records, timers: [id], reports: {venue: last_seq}}` |
@@ -32,6 +32,8 @@ pub enum FromStrategy {
         strategy: String,
         /// Its code's revision.
         revision: String,
+        /// `TT_SESSION_TOKEN`, which a strategy the session started was given.
+        token: Option<String>,
     },
     /// Done with a step.
     Ready {
@@ -83,6 +85,7 @@ fn parse(line: &str) -> Result<FromStrategy, String> {
             Ok(FromStrategy::Hello {
                 strategy: text("strategy").ok_or("hello needs strategy")?,
                 revision: text("revision").unwrap_or_default(),
+                token: text("token"),
             })
         }
         Some("ready") => {
@@ -121,7 +124,8 @@ mod tests {
             ),
             Ok(FromStrategy::Hello {
                 strategy: "toy".into(),
-                revision: "abc".into()
+                revision: "abc".into(),
+                token: None
             })
         );
         assert_eq!(
