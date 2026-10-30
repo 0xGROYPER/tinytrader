@@ -179,6 +179,12 @@ struct PriceRequest {
     /// Deprecated: the same as `free_ignore_held`.
     #[serde(default)]
     free_while_volumes_missing: bool,
+    /// Only price it: every day asked for whole, without asking the store
+    /// what it holds (so it may include what the store has), at any price.
+    /// The quote can never be submitted. For an estimate while the store
+    /// can't answer; no rule or contract lists, which need its definitions.
+    #[serde(default)]
+    price_only: bool,
 }
 
 /// A request checked, in the API's terms.
@@ -195,6 +201,8 @@ struct Asked {
     hours: Option<missing::Hours>,
     /// `free_ignore_held`.
     free_ignore_held: bool,
+    /// `price_only`.
+    price_only: bool,
 }
 
 impl PriceRequest {
@@ -239,6 +247,9 @@ impl PriceRequest {
         if self.rule.is_some() && self.contracts.is_some() {
             return Err("name a rule or contract lists, not both".into());
         }
+        if self.price_only && (self.rule.is_some() || self.contracts.is_some()) {
+            return Err("price_only prices whole days: no rule or contract lists, which need the store's definitions".into());
+        }
         let contracts = match &self.contracts {
             None => None,
             Some(m) => {
@@ -270,6 +281,7 @@ impl PriceRequest {
             contracts,
             hours: self.hours.clone(),
             free_ignore_held: self.free_ignore_held || self.free_while_volumes_missing,
+            price_only: self.price_only,
         })
     }
 }
@@ -1505,7 +1517,9 @@ async fn plan(
     // With free_ignore_held the store isn't asked: only whole jobs of the
     // symbol on Databento's list or bought here count, and every other day
     // is bought whole.
-    let mut pieces = if a.free_ignore_held {
+    let mut pieces = if a.price_only {
+        Vec::new()
+    } else if a.free_ignore_held {
         jobs_had(jobs, &dataset, a.schema, &a.symbol)
             .await
             .map_err(down)?
@@ -1538,6 +1552,9 @@ async fn plan(
         .filter(|j| !again.contains(*j))
         .map(|j| format!("{j}: bought here, expired or no longer on Databento's list; what it bought stays subtracted unless named in \"again\""))
         .collect();
+    if a.price_only {
+        notes.push("price only: every day priced whole, without checking what the store, Databento's list or this service already holds; it can't be submitted".into());
+    }
 
     let option = a.stype == SType::Parent && a.symbol.ends_with(".OPT");
     let by_contract = a.rule.is_some() || a.contracts.is_some();
@@ -1557,7 +1574,9 @@ async fn plan(
             .iter()
             .filter(|p| p.window.0 < window.1 && window.0 < p.window.1)
             .collect();
-        if a.free_ignore_held && !by_contract {
+        if a.price_only {
+            whole.push((d, window));
+        } else if a.free_ignore_held && !by_contract {
             // Only whole jobs count here: a day one covers is skipped, any
             // other is bought whole (never by contract, which needs the
             // store's definitions).
@@ -2110,6 +2129,12 @@ async fn submit_quote(jobs: Shared, s: Submit, approval: Option<Reply>) -> Reply
             Some(q) if q.result.is_none() => {
                 return refused(StatusCode::CONFLICT, "that request is still being priced");
             }
+            Some(q) if q.request.price_only => {
+                return refused(
+                    StatusCode::CONFLICT,
+                    "a price-only quote can't be submitted; price the request without price_only",
+                );
+            }
             // A paid one is used up only by an approved, confirmed submission.
             Some(Quote {
                 result: Some(Ok(p)),
@@ -2154,6 +2179,12 @@ async fn send_quote(
     again: Option<HashSet<String>>,
     approval: Option<Reply>,
 ) -> Reply {
+    if quote.request.price_only {
+        return refused(
+            StatusCode::CONFLICT,
+            "a price-only quote can't be submitted; price the request without price_only",
+        );
+    }
     let priced = match quote.result {
         _ if quote.expired() => {
             return refused(

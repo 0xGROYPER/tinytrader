@@ -2632,3 +2632,39 @@ async fn a_free_purchase_ignoring_held_still_skips_a_whole_job_on_databentos_lis
     assert_eq!(code, StatusCode::OK, "{v}");
     assert_eq!(v["requests"][0]["kind"], "whole", "{v}");
 }
+
+#[tokio::test]
+async fn a_price_only_quote_prices_without_the_store_and_cant_be_submitted() {
+    let r = rig("price-only").await;
+    // A store that can't answer, and a paid price.
+    lock(&r.store).catalog = (503, json!({ "error": "rescanning" }));
+    lock(&r.fake.s).price = 2.5;
+    let (code, v) = r.price(json!({ "price_only": true })).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["cost_usd"], 2.5, "{v}");
+    assert_eq!(v["requests"][0]["kind"], "whole", "{v}");
+    assert!(v.to_string().contains("price only"), "{v}");
+    // Never submitted, approved or not.
+    let q = v["quote"].as_str().unwrap();
+    let (code, v) = r
+        .submit_as(q, None, Some(APPROVE), Some("test"), Some(2.5))
+        .await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("price-only"),
+        "{v}"
+    );
+    assert_eq!(r.fake.submits(), 0);
+}
+
+#[tokio::test]
+async fn price_only_takes_no_rule() {
+    let r = rig("price-only-rule").await;
+    let (code, v) = r
+        .price(json!({ "price_only": true, "rule": { "dte_max": 21 } }))
+        .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{v}");
+}

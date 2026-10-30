@@ -100,6 +100,11 @@
             "default": null,
             "description": "Only these hours of each day."
           },
+          "price_only": {
+            "default": false,
+            "description": "Only price it: every day asked for whole, without asking the store\nwhat it holds (so it may include what the store has), at any price.\nThe quote can never be submitted. For an estimate while the store\ncan't answer; no rule or contract lists, which need its definitions.",
+            "type": "boolean"
+          },
           "rule": {
             "anyOf": [
               {
