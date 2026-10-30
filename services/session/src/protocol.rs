@@ -4,7 +4,7 @@
 //! |---|---|
 //! | strategy → session | `hello{protocol, strategy, revision}`, once, first |
 //! | session → strategy | `welcome{session, mode, data, orders: {venue: {addr, client, token, prefix}}, days, strategy_latency_ms}` |
-//! | strategy → session | `ready{as_of: 0}`, once joined to the data stream and every venue |
+//! | strategy → session | `ready{as_of: 0, timers}`, once joined to the data stream and every venue: its first timers |
 //! | session → strategy | `step{step, as_of, records, timers: [id], reports: {venue: last_seq}}` |
 //! | strategy → session | `ready{as_of, sent: {venue: order messages sent}, timers: [{at, id}]}` |
 //! | session → strategy | `end{status, reason, audit, steps, records}` |

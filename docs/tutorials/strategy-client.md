@@ -179,6 +179,40 @@ class Gateway:
 
 ## 5. Paper and backtests with the sim broker
 
+### In a session, with the Python client
+
+A **session** ([docs/api/session.md](../api/session.md)) serves held days to a strategy, runs its simulated venues and keeps everyone on one clock. The Python client (`clients/python`, `pip install ./clients/python`) wraps the session, the data stream and the gateways in one class:
+
+```python
+from tinytrader_client import Strategy, run, single
+
+class Toy(Strategy):
+    name, revision = "toy", "v1"
+
+    def on_start(self, ctx):
+        ctx.every(60, start="10:00", end="15:55")          # a timer each minute, New York time
+
+    def on_timer(self, ctx, timer_id, ts):
+        q = ctx.book.quote("SPY   261027C00580000")       # the last quote, with its time
+        if q and q.usable and q.ask <= 1.25 and not ctx.open_orders():
+            ctx.submit(single("SPY261027C00580000", "buy", "open", 1, 1.25))
+
+    def on_report(self, ctx, venue, event):
+        if event.get("event") == "fill":
+            ctx.record("fill", event["fill"]["price"])
+
+run(Toy())   # the session's control address from TT_SESSION
+```
+
+```sh
+tinytrader-session run session.toml --dir runs/a &      # prints READY … control=ADDR …
+TT_SESSION=ADDR python toy.py
+```
+
+The strategy sees only records already delivered. An order takes effect after the step it is sent in. The step's fills reach `on_report` before its timers run. Two runs of the same configuration and strategy give the same audit hash. The class doesn't change between backtest, paper and live: only the session behind `TT_SESSION` does.
+
+### Directly against a sim gateway
+
 The same protocol runs against a simulated broker, so the strategy doesn't change: only `welcome.broker` (`"sim"`) and `pins` differ.
 
 - **Paper against live data:** `--broker sim --sim-quotes relay:HOST:PORT` fills your orders against a relay's live quotes, at the touch.

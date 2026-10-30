@@ -9,7 +9,8 @@
 //!
 //! [[sources]]
 //! name = "opra"
-//! holdings = "store:http://127.0.0.1:9120"   # or "job:DIR", "folder:DIR"
+//! holdings = "store:http://127.0.0.1:9120"   # or "job:DIR", "folder:DIR", or a list:
+//!                                            # each day from the first that holds it
 //! provider = "databento"
 //! dataset = "OPRA.PILLAR"
 //! symbol = "SPY.OPT"
@@ -28,7 +29,7 @@
 //! ```
 use serde::Deserialize;
 use std::path::PathBuf;
-use tinytrader_producer::{Folder, Holdings, Query, StoreApi};
+use tinytrader_producer::{Folder, Holdings, Layered, Query, StoreApi};
 
 /// A whole session.
 #[derive(Clone, Debug, Deserialize)]
@@ -65,8 +66,9 @@ pub struct Source {
     /// Its name, which venues refer to.
     pub name: String,
     /// `store:URL`, `job:DIR` (a databento-jobs cache job) or `folder:DIR` (the
-    /// store's layout).
-    pub holdings: String,
+    /// store's layout); or a list of them, each day read from the first that holds
+    /// it.
+    pub holdings: OneOrMany,
     /// The store's provider folder: `databento`, `alpaca`.
     pub provider: String,
     /// `OPRA.PILLAR`, `ALPACA.SIP`, …
@@ -78,6 +80,16 @@ pub struct Source {
     /// Added to `ts_event` for records flagged `F_BAD_TS_RECV`.
     #[serde(default)]
     pub latency_offset_ns: u64,
+}
+
+/// One holdings, or several in order.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum OneOrMany {
+    /// One.
+    One(String),
+    /// Several, asked in order.
+    Many(Vec<String>),
 }
 
 /// One simulated venue: an account at a broker, as its own gateway.
@@ -178,7 +190,17 @@ impl Source {
     /// # Errors
     /// An unknown kind, or a cache job that can't be read.
     pub fn holdings(&self) -> Result<Box<dyn Holdings>, String> {
-        let (kind, at) = self.holdings.split_once(':').ok_or_else(|| {
+        match &self.holdings {
+            OneOrMany::One(h) => self.one(h),
+            OneOrMany::Many(hs) if !hs.is_empty() => Ok(Box::new(Layered::new(
+                hs.iter().map(|h| self.one(h)).collect::<Result<_, _>>()?,
+            ))),
+            OneOrMany::Many(_) => Err(format!("source {}: no holdings", self.name)),
+        }
+    }
+
+    fn one(&self, holdings: &str) -> Result<Box<dyn Holdings>, String> {
+        let (kind, at) = holdings.split_once(':').ok_or_else(|| {
             format!(
                 "source {}: holdings is store:URL, job:DIR or folder:DIR",
                 self.name

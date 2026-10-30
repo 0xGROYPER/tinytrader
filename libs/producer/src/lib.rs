@@ -112,6 +112,88 @@ pub trait Holdings: Send {
     }
 }
 
+/// Several holdings read as one: each day from the first that holds it whole, or
+/// else the first that holds part of it, such as two cache jobs of consecutive
+/// ranges, or a local copy before the store.
+pub struct Layered {
+    layers: Vec<Box<dyn Holdings>>,
+    /// Which layer each planned file comes from.
+    owner: std::sync::Mutex<std::collections::HashMap<String, usize>>,
+}
+
+impl Layered {
+    /// `layers` in the order they're asked.
+    #[must_use]
+    pub fn new(layers: Vec<Box<dyn Holdings>>) -> Self {
+        Self {
+            layers,
+            owner: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl Holdings for Layered {
+    fn describe(&self) -> String {
+        let parts: Vec<String> = self.layers.iter().map(|h| h.describe()).collect();
+        format!("first of [{}]", parts.join("; "))
+    }
+
+    fn plan(&self, query: &Query, days: &[String]) -> Result<Vec<Day>, String> {
+        let plans = self
+            .layers
+            .iter()
+            .map(|h| h.plan(query, days))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut owner = self.owner.lock().map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for i in 0..days.len() {
+            // The first layer holding the day whole; failing that, the first holding
+            // part of it.
+            let whole = plans
+                .iter()
+                .position(|p| matches!(&p[i], Day::Held { partial: false, .. }));
+            let any = plans.iter().position(|p| matches!(&p[i], Day::Held { .. }));
+            match whole.or(any) {
+                Some(k) => {
+                    if let Day::Held { files, .. } = &plans[k][i] {
+                        for f in files {
+                            owner.insert(f.name.clone(), k);
+                        }
+                    }
+                    out.push(plans[k][i].clone());
+                }
+                None => {
+                    let reasons: Vec<String> = plans
+                        .iter()
+                        .filter_map(|p| match &p[i] {
+                            Day::Missing { reason } => Some(reason.clone()),
+                            Day::Held { .. } => None,
+                        })
+                        .collect();
+                    out.push(Day::Missing {
+                        reason: reasons.join("; "),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn open(&self, file: &FileRef) -> Result<Box<dyn Read + Send>, String> {
+        let k = *self
+            .owner
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get(&file.name)
+            .ok_or_else(|| format!("{}: not planned", file.name))?;
+        self.layers[k].open(file)
+    }
+
+    fn local(&self) -> bool {
+        self.layers.iter().all(|h| h.local())
+    }
+}
+
 /// One file read, for the manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FilePin {
