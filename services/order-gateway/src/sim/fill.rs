@@ -21,6 +21,7 @@ impl SimBroker {
             return;
         }
         let (mut net, mut prices, mut avail) = (0_i128, Vec::new(), u64::MAX);
+        let mut zeroed = Vec::new();
         for l in &o.legs {
             let Some(q) = m.ids.get(&l.symbol).and_then(|id| m.book.get(id)) else {
                 return;
@@ -47,7 +48,9 @@ impl SimBroker {
             let sign = if l.buy { 1 } else { -1 };
             net += sign * i128::from(l.ratio) * i128::from(px);
             prices.push(px);
-            if !zero {
+            if zero {
+                zeroed.push(l.symbol.clone());
+            } else {
                 avail = avail.min(size.saturating_sub(used) / l.ratio);
             }
         }
@@ -91,6 +94,7 @@ impl SimBroker {
                 }
             }
         }
+        self.orders[i].zero_legs = zeroed;
         self.execute(i, units, &prices);
     }
 

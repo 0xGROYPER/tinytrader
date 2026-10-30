@@ -1097,7 +1097,12 @@ fn a_sold_leg_without_a_bid() {
         clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
         if fills {
             // PUT_A at its 0.02 ask, PUT_B given away.
-            assert_eq!(fill(&mut c, "wse-nobid")["fill"]["price"], "0.02");
+            let f = fill(&mut c, "wse-nobid");
+            assert_eq!(f["fill"]["price"], "0.02");
+            assert_eq!(
+                f["broker_raw"]["order"]["no_bid_zero_legs"][0], PUT_B,
+                "{f}"
+            );
         } else {
             let (r, _) = c.req("order", "r2", r#""client_order_id":"wse-nobid""#);
             assert_ne!(r["order"]["status"], "filled", "{setting}: {r}");
