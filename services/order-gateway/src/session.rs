@@ -1552,7 +1552,12 @@ impl<B: Broker> Session<B> {
                     .done()
             }
             SubmitResult::Rejected(e) => {
-                self.rejects += 1;
+                // An order on a contract that has expired is the strategy's mistake about
+                // the calendar, not a sign the broker is refusing it: it doesn't count
+                // toward halting opens.
+                if e.code != "sim_expired_instrument" {
+                    self.rejects += 1;
+                }
                 st.phase = Phase::Done;
                 "rejected".clone_into(&mut st.status);
                 if e.http_status == 429 {

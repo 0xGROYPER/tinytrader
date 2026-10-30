@@ -394,6 +394,7 @@ The script also sets the account fields (status, options level, cash, blocked fl
 **Latency.** An order activates at `t_act = t_submit + strategy_latency + submit_latency`. A cancel takes effect at `t_cancel + strategy_latency + cancel_latency`. `latency_ms` (5 ms by default) is the venue's; `strategy_latency_ms` (0 by default) is the strategy's declared latency, set by the session that clocks the simulator (decision 0022, section 2). Both are constants in the pin, at most an hour each. Scripted mode pins `strategy_latency_ms` but has no clock for it to delay.
 
 **Fill model.**
+- *When an order may fill:* with `fill_on = "book"` (the default), an order is evaluated against the book standing when it activates, then after each instant that touches it. With `fill_on = "next_quote"`, it waits for the first quote after it activates. That suits bar data (`cbbo-1m`): a bar's quotes are what the strategy decided on, already in the past when the order arrives, so the fill comes from the next bar.
 - *Single buy limit L:* fillable when the ask is present and ask ≤ L. It fills at the **ask**, which is the price improvement up to the touch.
 - *Single sell:* fillable when the bid is present and bid ≥ L, at the bid.
 - *Combo:* the net cost per unit is
@@ -407,9 +408,10 @@ The script also sets the account fields (status, options level, cash, blocked fl
 - An instrument with no definition seen gets `rejected{code:"sim_unknown_instrument"}`.
 - An option past its expiry date (New York) gets `rejected{code:"sim_expired_instrument"}`, and nothing fills against an expired contract.
 
-**Instrument ids change daily.** OPRA assigns ids per day, so an id can name another contract tomorrow. A definition or mapping that gives an id to a new symbol makes the simulator forget the symbol it named before, quote included. A symbol given a new id loses the old id's quote. On the first market time of a day past an option's expiry, the contract and its book are forgotten. A contract not mapped on a later day therefore has no book (`sim_unknown_instrument`), never yesterday's quote. An expired contract's position is settled at its expiry's close, as below.
 - A client's `advance` to a simulator a session clocks gets `request_error{code:"clocked_by_session"}`.
 - A submit outside the session gets `rejected{code:"sim_market_closed"}`. This is a v1 simplification; Alpaca queues day orders submitted outside the session.
+
+**Instrument ids change daily, and books don't carry over.** OPRA assigns ids per day, so an id can name another contract tomorrow. A definition or mapping that gives an id to a new symbol makes the simulator forget the symbol it named before, quote included. A symbol given a new id loses the old id's quote. On the first market time of a day past an option's expiry, the contract and its book are forgotten. A contract not mapped on a later day therefore has no book (`sim_unknown_instrument`), never yesterday's quote. An expired contract's position is settled at its expiry's close, as below. At the first market time of each new New York day every quote is cleared (mappings stay), so an order at the open fills only on that day's first quote, never on yesterday's book.
 
 **Deterministic ordering rules.**
 1. Quote records are applied in input order. Records with equal timestamps keep their input order and together form the book of that instant: working orders are evaluated once all of them are applied, and an instrument's last quote in the instant is its book. So a combo never fills on some legs' new quotes against others' old ones, nor on a quote replaced within the same instant.

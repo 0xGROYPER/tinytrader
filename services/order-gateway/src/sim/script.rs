@@ -75,6 +75,8 @@ pub(crate) struct Script {
     pub(crate) latency_ms: u64,
     pub(crate) strategy_latency_ms: u64,
     pub(crate) size_cap: bool,
+    /// Fill only on quotes after an order's activation, never the book standing then.
+    pub(crate) next_quote: bool,
 }
 
 fn price(v: &Value, path: &str) -> Result<i64, Invalid> {
@@ -191,6 +193,7 @@ impl Script {
             latency_ms: f.opt_int("latency_ms")?.unwrap_or(5),
             strategy_latency_ms: f.opt_int("strategy_latency_ms")?.unwrap_or(0),
             size_cap: false,
+            next_quote: false,
         };
         if s.latency_ms > 3_600_000 || s.strategy_latency_ms > 3_600_000 {
             return Err(invalid("latency_ms", "at most 3600000 (an hour)"));
@@ -291,6 +294,11 @@ impl Script {
         if let Some(e) = f.take("expiry") {
             parse_expiry(&mut s.expiry, e)?;
         }
+        s.next_quote = match f.opt_string("fill_on")?.as_deref() {
+            None | Some("book") => false,
+            Some("next_quote") => true,
+            Some(_) => return Err(invalid("fill_on", "book or next_quote")),
+        };
         s.size_cap = match f.opt_string("size_cap")?.as_deref() {
             None | Some("none") => false,
             Some("displayed") => true,

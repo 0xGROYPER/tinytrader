@@ -526,6 +526,14 @@ impl Broker for SimBroker {
             .s("fee_per_share", &fmt_nanos(i128::from(self.s.fee_share)))
             .raw("expiry", &self.expiry_pin())
             .s(
+                "fill_on",
+                if self.s.next_quote {
+                    "next_quote"
+                } else {
+                    "book"
+                },
+            )
+            .s(
                 "size_cap",
                 if self.s.size_cap { "displayed" } else { "none" },
             )
@@ -930,6 +938,7 @@ impl SimBroker {
             match (rec, act) {
                 (_, Some((k, t))) if rec.is_none_or(|r| t < r) => {
                     let (_, _, a) = m.actions.remove(k);
+                    self.roll_day(t);
                     self.now = self.now.max(t);
                     self.act(a);
                 }
@@ -939,6 +948,7 @@ impl SimBroker {
                     // combo never fills on some legs' new quotes and others' old ones,
                     // nor on a quote replaced within the same instant.
                     let Some((t, r)) = m.src.next() else { break };
+                    self.roll_day(t);
                     self.now = self.now.max(t);
                     let mut touched = Vec::new();
                     let mut next = Some(r);
@@ -955,8 +965,8 @@ impl SimBroker {
                 _ => break,
             }
         }
+        self.roll_day(to);
         self.now = self.now.max(to);
-        self.forget_expired();
         if let Some(floor) = self.market.as_ref().and_then(|m| m.fed.as_ref()) {
             floor.store(self.now, std::sync::atomic::Ordering::SeqCst);
         }
@@ -971,13 +981,20 @@ impl SimBroker {
             .find(|c| *c >= self.now)
     }
 
-    /// Once a day has passed an option's expiry, forgets the contract and its book:
-    /// it can't be quoted, and its id may name another contract by now.
-    fn forget_expired(&mut self) {
-        let today = et_day(self.now);
+    /// At the first market time of a new ET day, before anything of that day is
+    /// applied: every quote is cleared, so nothing fills on yesterday's book before
+    /// today's first quote; and contracts past their expiry are forgotten, as their
+    /// ids may name other contracts by now. Mappings stay: they arrive the evening
+    /// before.
+    fn roll_day(&mut self, t: u64) {
+        let today = et_day(t);
         let Some(m) = &mut self.market else { return };
-        if m.day == today {
+        if m.day >= today {
             return;
+        }
+        if m.day != 0 {
+            m.book.clear();
+            m.quoted.clear();
         }
         m.day = today;
         let gone: Vec<(String, u32)> = m
@@ -1106,7 +1123,11 @@ impl SimBroker {
                 if let Some((_, close)) = self.session(et_day(self.now)) {
                     self.schedule(close.max(self.now), Action::Expire(i));
                 }
-                self.evaluate(i);
+                // fill_on = "next_quote": wait for the first quote after activation, as
+                // a bar's quotes are the past by the time an order reaches the venue.
+                if !self.s.next_quote {
+                    self.evaluate(i);
+                }
             }
             Action::Cancel(i) if self.open(i) => self.set_status(i, "canceled"),
             Action::Expire(i) if self.open(i) => self.set_status(i, "expired"),

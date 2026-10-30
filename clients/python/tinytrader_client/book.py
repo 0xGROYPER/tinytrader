@@ -92,8 +92,14 @@ class Book:
         self.today: dt.date | None = None
 
     def set_now(self, ns: int) -> None:
-        """The session's time, so expired contracts drop out."""
-        self.today = dt.datetime.fromtimestamp(ns / 1e9, NEW_YORK).date()
+        """The session's time. At a new New York day every quote is cleared, as in the
+        simulator, so nothing is served from yesterday's book; and expired contracts
+        drop out."""
+        today = dt.datetime.fromtimestamp(ns / 1e9, NEW_YORK).date()
+        if self.today is not None and today > self.today:
+            self._quotes.clear()
+            self._quoted.clear()
+        self.today = today
 
     def apply(self, rec) -> None:
         """Takes one delivered record (a ``databento_dbn`` record)."""
@@ -124,7 +130,8 @@ class Book:
 
     def _map(self, iid: int, symbol: str) -> None:
         key = compact(symbol)
-        if self.symbols.get(iid) not in (None, symbol):
+        was = self.symbols.get(iid)
+        if was is not None and compact(was) != key:
             self._forget(iid)  # the id named another contract
         prev = self._ids.get(key)
         if prev is not None and prev != iid:
