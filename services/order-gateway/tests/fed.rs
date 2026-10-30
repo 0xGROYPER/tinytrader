@@ -105,7 +105,7 @@ fn options_and_shares_fill_from_minute_quotes() {
     let mut c = Conn::open(&gw, "reactor", None);
     let welcome = serde_json::from_str::<Value>(&c.lines[0]).unwrap();
     let pins = &welcome["pins"]["broker"];
-    assert_eq!(pins["model"], "tinytrader-sim/4");
+    assert_eq!(pins["model"], "tinytrader-sim/5");
     assert_eq!(pins["quotes"]["source"], "session");
     mappings(&feed);
     // At first neither fills: the spread's natural is 0.92 - 0.53 = 0.39 credit, short
@@ -585,6 +585,163 @@ fn a_contract_trades_on_its_expiry_day() {
     cbbo(&feed, 1, t, 4, 6);
     clock.advance("reactor", 1, t, WAIT).unwrap();
     assert_eq!(fill(&mut c, "wse-0dte")["fill"]["price"], "0.07");
+    gw.stop().unwrap();
+}
+
+const H: u64 = 3_600 * S;
+
+/// Same-day openings are refused after the venue's time; other expiries, and the
+/// same contract before it, are not.
+#[test]
+fn same_day_openings_are_refused_late_in_the_day() {
+    let (gw, feed, clock) = gateway(
+        "fed-1530",
+        r#"{"venue_rules":{"no_same_day_opening_after":"15:30"},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    let weekly = "SPY261009P00570000";
+    let m = SymbolMappingMsg::new(
+        4,
+        T0 - S / 2,
+        SType::Parent,
+        "SPY.OPT",
+        SType::RawSymbol,
+        "SPY   261009P00570000",
+        0,
+        0,
+    )
+    .unwrap();
+    feed.push(T0 - S / 2, RecordRef::from(&m)).unwrap();
+    cbbo(&feed, 1, T0, 120, 125);
+    cbbo(&feed, 4, T0, 80, 82);
+    clock
+        .advance("reactor", 0, T0 + 5 * H + 29 * 60 * S, WAIT)
+        .unwrap(); // 15:29
+    assert_eq!(
+        c.submit("r1", &single("wse-early", CALL, "buy", "open", 1, "1.00"))["outcome"],
+        "accepted"
+    );
+    clock
+        .advance("reactor", 1, T0 + 5 * H + 31 * 60 * S, WAIT)
+        .unwrap(); // 15:31
+    let r = c.submit("r2", &single("wse-late", CALL, "buy", "open", 1, "1.00"));
+    assert_eq!(r["code"], "sim_same_day_opening", "{r}");
+    assert_eq!(
+        c.submit(
+            "r3",
+            &single("wse-weekly", weekly, "buy", "open", 1, "0.70")
+        )["outcome"],
+        "accepted"
+    );
+    gw.stop().unwrap();
+}
+
+/// At the venue's liquidation time, a short option expiring today is bought back
+/// at its ask, as a broker order the client sees with its fill; the long wing
+/// stays, as Alpaca left it.
+#[test]
+fn same_day_shorts_are_liquidated_at_the_venues_time() {
+    let (gw, feed, clock) = gateway(
+        "fed-1545",
+        r#"{"venue_rules":{"liquidate_same_day_shorts_at":"15:45"},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &credit_spread("wse-cs", 1));
+    cbbo(&feed, 2, T0 + 60 * S, 95, 97);
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    assert_eq!(fill(&mut c, "wse-cs")["fill"]["price"], "-0.40");
+    cbbo(&feed, 2, T0 + 5 * H + 44 * 60 * S, 30, 33);
+    clock
+        .advance("reactor", 1, T0 + 5 * H + 46 * 60 * S, WAIT)
+        .unwrap();
+    // The broker's order arrives as `foreign`; its fill as a FILL activity.
+    let f = c
+        .until(|v| v["kind"] == "activity" && v["activity_type"] == "FILL")
+        .pop()
+        .unwrap();
+    assert_eq!(f["broker_raw"]["price"], "0.33", "{f}");
+    assert_eq!(f["broker_raw"]["symbol"], PUT_A);
+    assert_eq!(
+        f["broker_raw"]["transaction_time_ns"],
+        T0 + 5 * H + 45 * 60 * S
+    );
+    let (r, _) = c.req("positions", "r2", "");
+    let syms: Vec<(&str, i64)> = r["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["symbol"].as_str().unwrap(), p["qty"].as_i64().unwrap()))
+        .collect();
+    assert_eq!(syms, [(PUT_B, 1)], "{r}");
+    gw.stop().unwrap();
+}
+
+/// Working orders count against buying power: two spreads sent in one step on
+/// cash for one, the second is refused.
+#[test]
+fn working_orders_count_against_buying_power() {
+    let (gw, feed, clock) = gateway(
+        "fed-bp-working",
+        r#"{"account":{"cash":"300.00"},"venue_rules":{"buying_power":"defined_risk"},"expiry":{"settle":false},"fill_on":"next_quote"}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    assert_eq!(
+        c.submit("r1", &credit_spread("wse-one", 1))["outcome"],
+        "accepted"
+    );
+    let r = c.submit("r2", &credit_spread("wse-two", 1));
+    assert_eq!(r["code"], "sim_insufficient_buying_power", "{r}");
+    gw.stop().unwrap();
+}
+
+/// Defined-risk buying power: a spread whose worst loss cash can't cover is
+/// refused, never resized; the account reports what's left.
+#[test]
+fn buying_power_refuses_what_cash_cant_cover() {
+    let (gw, feed, clock) = gateway(
+        "fed-bp",
+        r#"{"account":{"cash":"150.00"},"venue_rules":{"buying_power":"defined_risk"},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    // 570/568 for 0.40 credit: worst loss 2.00 × 100; cash 150 + 40 can't cover 200.
+    let r = c.submit("r1", &credit_spread("wse-big", 1));
+    assert_eq!(r["code"], "sim_insufficient_buying_power", "{r}");
+    let (a, _) = c.req("account", "r2", "");
+    assert_eq!(a["account"]["buying_power"], "150.00", "{a}");
+    gw.stop().unwrap();
+
+    let (gw, feed, clock) = gateway(
+        "fed-bp-ok",
+        r#"{"account":{"cash":"500.00"},"venue_rules":{"buying_power":"defined_risk"},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    assert_eq!(
+        c.submit("r1", &credit_spread("wse-ok", 1))["outcome"],
+        "accepted"
+    );
+    cbbo(&feed, 2, T0 + 60 * S, 95, 97);
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    fill(&mut c, "wse-ok");
+    // Cash 500 + 40 credit − 0.04 fees − 200 at risk.
+    let (a, _) = c.req("account", "r2", "");
+    assert_eq!(a["account"]["buying_power"], "339.96", "{a}");
     gw.stop().unwrap();
 }
 

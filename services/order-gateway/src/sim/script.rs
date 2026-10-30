@@ -72,6 +72,7 @@ pub(crate) struct Script {
     /// Per share of stock, nanodollars.
     pub(crate) fee_share: i64,
     pub(crate) expiry: super::expiry::Expiry,
+    pub(crate) venue: super::rules::VenueRules,
     pub(crate) latency_ms: u64,
     pub(crate) strategy_latency_ms: u64,
     pub(crate) size_cap: bool,
@@ -183,6 +184,7 @@ impl Script {
             drop_after: None,
             fee_cents: 2,
             fee_share: 0,
+            venue: super::rules::VenueRules::default(),
             expiry: super::expiry::Expiry {
                 settle: true,
                 from_quote: true,
@@ -294,6 +296,30 @@ impl Script {
         }
         if let Some(e) = f.take("expiry") {
             parse_expiry(&mut s.expiry, e)?;
+        }
+        if let Some(v) = f.take("venue_rules") {
+            let mut r = Fields::new(v, "venue_rules")?;
+            let time = |s: Option<String>, k: &str| {
+                s.map(|s| {
+                    super::rules::VenueRules::parse_time(&s)
+                        .ok_or_else(|| invalid(k, "HH:MM, New York"))
+                })
+                .transpose()
+            };
+            s.venue.no_same_day_opening_after = time(
+                r.opt_string("no_same_day_opening_after")?,
+                "venue_rules.no_same_day_opening_after",
+            )?;
+            s.venue.liquidate_at = time(
+                r.opt_string("liquidate_same_day_shorts_at")?,
+                "venue_rules.liquidate_same_day_shorts_at",
+            )?;
+            s.venue.defined_risk = match r.opt_string("buying_power")?.as_deref() {
+                None | Some("cash") => false,
+                Some("defined_risk") => true,
+                Some(_) => return Err(invalid("venue_rules.buying_power", "cash or defined_risk")),
+            };
+            r.finish()?;
         }
         s.next_quote = match f.opt_string("fill_on")?.as_deref() {
             None | Some("book") => false,

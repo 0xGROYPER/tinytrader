@@ -188,8 +188,13 @@ impl SimBroker {
         ))
     }
 
+    /// Whether `root`'s options settle into shares.
+    pub(super) fn physical(&self, root: &str) -> bool {
+        self.style(root) == Style::Physical
+    }
+
     /// The venue's quote of `symbol`, if it is from within the profile's age of `at`.
-    fn fresh(&self, symbol: &str, at: u64) -> Option<super::Quote> {
+    pub(super) fn fresh(&self, symbol: &str, at: u64) -> Option<super::Quote> {
         let m = self.market.as_ref()?;
         let q = m.ids.get(symbol).and_then(|id| m.book.get(id))?;
         (q.ts + self.s.expiry.max_age >= at).then_some(*q)

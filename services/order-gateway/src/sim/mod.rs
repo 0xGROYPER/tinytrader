@@ -4,6 +4,7 @@
 mod expiry;
 mod fill;
 mod market;
+mod rules;
 mod script;
 
 use crate::broker::{
@@ -23,7 +24,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 /// The simulator's model version, in every pin.
-pub const MODEL: &str = "tinytrader-sim/4";
+pub const MODEL: &str = "tinytrader-sim/5";
 
 /// Nanodollars per cent.
 const CENT: i64 = 10_000_000;
@@ -108,6 +109,8 @@ pub struct SimBroker {
     held: Vec<Update>,
     /// The next session close at which options are settled, once known.
     settle_at: Option<u64>,
+    /// The next time the venue's liquidation rule runs, once known.
+    liquidate_at: Option<u64>,
     updates: Vec<Update>,
     streamed: u64,
     down: Option<Instant>,
@@ -220,6 +223,7 @@ impl SimBroker {
             acts: 0,
             held: Vec::new(),
             settle_at: None,
+            liquidate_at: None,
             updates: Vec::new(),
             streamed: 0,
             down: None,
@@ -525,6 +529,7 @@ impl Broker for SimBroker {
             .s("fee_per_contract", &fmt_cents(self.s.fee_cents))
             .s("fee_per_share", &fmt_nanos(i128::from(self.s.fee_share)))
             .raw("expiry", &self.expiry_pin())
+            .raw("venue_rules", &self.rules_pin())
             .s(
                 "fill_on",
                 if self.s.next_quote {
@@ -602,6 +607,9 @@ impl Broker for SimBroker {
                     "sim_market_closed",
                     "outside the session",
                 ));
+            }
+            if let Some((code, message)) = self.refuse(intent) {
+                return SubmitResult::Rejected(error(403, code, &message));
             }
         }
         let legs = intent
@@ -767,11 +775,16 @@ impl Broker for SimBroker {
 
     fn account(&mut self) -> Query<AccountInfo> {
         let cash = fmt_nanos(self.cash);
+        let power = if self.s.venue.defined_risk {
+            fmt_nanos(self.buying_power())
+        } else {
+            cash.clone()
+        };
         let raw = Obj::new()
             .s("status", &self.s.status)
             .n("options_trading_level", self.s.level)
             .s("cash", &cash)
-            .s("buying_power", &cash)
+            .s("buying_power", &power)
             .b("trading_blocked", self.s.trading_blocked)
             .raw(
                 "sim",
@@ -784,7 +797,7 @@ impl Broker for SimBroker {
         let info = AccountInfo {
             status: self.s.status.clone(),
             cash: cash.clone(),
-            buying_power: cash,
+            buying_power: power,
             options_trading_level: self.s.level,
             blocked: self.s.trading_blocked,
         };
@@ -910,12 +923,28 @@ impl Broker for SimBroker {
 impl SimBroker {
     /// Applies quote records and order actions up to `to` in the section 10 order.
     fn run_to(&mut self, to: u64) -> Result<(), String> {
+        // A fed simulator's clock starts at zero: rules run from its first day.
+        let from = if self.now == 0 { to } else { self.now };
         if self.settle_at.is_none() && self.market.is_some() && self.s.expiry.settle {
-            // A fed simulator's clock starts at zero: settle from its first day.
-            let from = if self.now == 0 { to } else { self.now };
             self.settle_at = self.next_close(et_day(from));
         }
+        if self.liquidate_at.is_none() && self.market.is_some() {
+            self.liquidate_at = self.next_liquidation(et_day(from));
+        }
         while let Some(m) = &mut self.market {
+            // The venue's liquidation time, as the close below: after everything at or
+            // before it.
+            if let Some(c) = self.liquidate_at.filter(|c| *c <= to) {
+                let rec = m.src.peek_ts()?.filter(|t| *t <= c);
+                let act = m.actions.iter().any(|a| a.0 <= c);
+                if rec.is_none() && !act {
+                    self.now = self.now.max(c);
+                    self.liquidate(c);
+                    self.liquidate_at = self.next_liquidation(et_day(c) + 1);
+                    continue;
+                }
+            }
+            let Some(m) = &mut self.market else { break };
             // A session's close settles that day's expiries: after every record and
             // order action at or before it, before anything after it.
             if let Some(c) = self.settle_at.filter(|c| *c <= to) {
