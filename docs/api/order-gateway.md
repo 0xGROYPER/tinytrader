@@ -400,12 +400,17 @@ The script also sets the account fields (status, options level, cash, blocked fl
 
 All three are in the pin with the seed. From `tinytrader-sim/6`, runs with settlement or a liquidation also hash differently from `/5`: their activities are in the session's audit. `latency_ms` (5 ms by default) is the venue's; `strategy_latency_ms` (0 by default) is the strategy's declared latency, set by the session that clocks the simulator (decision 0022, section 2). Both are constants in the pin, at most an hour each. Scripted mode pins `strategy_latency_ms` but has no clock for it to delay.
 
-**Queue model** (`queue = {"ahead", "fill_on_print"}`, off by default). With trade prints (`tcbbo`), a limit order resting behind the touch fills only once the trading ahead of it has happened:
-- A marketable order still fills at the touch. An order that rests joins a queue on each leg, at its price: a single's limit; a combo leg's implied price, the net limit split over the legs in proportion to their mids. Ahead of it is `ahead` (a fraction, `"1"` by default) of the size displayed on its side when it joins, if its price is at or behind the touch, and nothing if it is inside the spread. It keeps its place if the book moves.
-- A print through a leg's price (below a buy's, above a sell's) clears the leg. A print at its price (within half a cent) clears it once the prints' sizes have used up the queue ahead, unless `fill_on_print = "through"`, under which only prints through count.
-- A single fills its remaining quantity at its limit when its leg clears. A combo fills, each leg at its implied price, when every leg has cleared within the same minute; a leg cleared in an earlier minute must clear again.
-- Each leg's price, size ahead and minute cleared are in the order's `broker_raw.order.queue`, on its events and queries.
-- Not modelled: market impact, partial fills from prints smaller than the order, and orders joining the queue behind this one.
+**Queue model** (`queue = {"ahead", "fill_on_print", "combo", "combo_window_s"}`, off by default). With trade prints (`tcbbo`), a limit order resting behind the touch fills only once the trading ahead of it has happened, and only as much as the prints leave. With bar data alone (`cbbo-1m`, `bbo-1m`) there are no prints, so a resting order never fills.
+- **Prints.** A print counts only inside its own pre-trade quote (bid ≤ price ≤ ask). Outside it are mostly complex-order legs, sweeps, auctions and late reports. Trade conditions aren't read, so a complex-order leg printing inside the quote still counts. Prints and displayed sizes are consolidated: a print on any exchange uses up the queue, and the size ahead is the size shown across all of them.
+- **Joining.** A marketable order still fills at the touch. An order that rests, once every leg has a bid and an ask, joins a queue on each leg:
+  - a single at its limit;
+  - a combo leg at its passive touch (the bid for a buy, the ask for a sell) under `combo = "touch"` (the default), or at its implied price under `"implied"`.
+
+  Ahead of it is `ahead` (a fraction to three places, `"1"` by default) of the size displayed on its side, if its price is at or behind the touch, and nothing if it is inside the spread. Behind the touch, that is the touch's size, which understates the queue. It keeps its place if the book moves.
+- **Clearing.** A print through a leg's queue price (below a buy's, above a sell's) makes its size available to the leg. A print at the price (within half a cent) first uses up the size ahead, and the rest is available, unless `fill_on_print = "through"`. Resting orders on one contract share a print, earliest first.
+- **Filling.** A single fills at its limit, as much as is available. A combo fills when every leg has had size available within `combo_window_s` (60 s by default, a rolling window), as many units as every leg allows, each leg at its implied price. The implied price splits the net limit over the legs in proportion to their mids, rounded to the cent in the order's favour, so the net is never worse than the limit. This models legging into the spread, not trading in a complex-order book. What isn't filled keeps its place at the front.
+- Each leg's fill price, queue price, size ahead, size available and last clearing time are in the order's `broker_raw.order.queue`, on its events and queries.
+- Not modelled: trade conditions, market impact, and orders joining behind.
 
 The settings are in the pin.
 

@@ -626,6 +626,8 @@ impl Broker for SimBroker {
                                 "at_or_through"
                             },
                         )
+                        .s("combo", if q.combo_implied { "implied" } else { "touch" })
+                        .n("combo_window_s", q.window / 1_000_000_000)
                         .done()
                 }),
             )
@@ -1165,7 +1167,14 @@ impl SimBroker {
                 print,
             } => {
                 let trade = print.is_some();
-                if let Some((px, size)) = print.filter(|(p, _)| *p != dbn::UNDEF_PRICE) {
+                // A print counts only inside its own pre-trade quote: outside it are
+                // mostly complex-order legs, intermarket sweeps, auctions and late
+                // reports, which a resting simple order wouldn't have traded with.
+                if let (Some((px, size)), Some(b), Some(a)) = (print, bid, ask)
+                    && px != dbn::UNDEF_PRICE
+                    && b <= px
+                    && px <= a
+                {
                     m.prints.push((iid, px, size));
                 }
                 // A tcbbo quote is the book only where no quote record gives one: beside
