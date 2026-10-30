@@ -703,6 +703,34 @@ fn working_orders_count_against_buying_power() {
     gw.stop().unwrap();
 }
 
+/// A resting order that closes doesn't free buying power before it fills.
+#[test]
+fn a_resting_close_frees_nothing() {
+    let (gw, feed, clock) = gateway(
+        "fed-bp-close",
+        r#"{"account":{"cash":"300.00"},"venue_rules":{"buying_power":"defined_risk"},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &credit_spread("wse-open", 1));
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    fill(&mut c, "wse-open");
+    let (a, _) = c.req("account", "r2", "");
+    let before = a["account"]["buying_power"].clone();
+    // A buy-to-close of the short put at 0.01, which won't fill.
+    c.submit("r3", &single("wse-close", PUT_A, "buy", "close", 1, "0.01"));
+    clock.advance("reactor", 2, T0 + 120 * S, WAIT).unwrap();
+    // Its own debit (0.01 × 100) is held as if paid; the risk it would remove isn't
+    // released until it fills.
+    let (a, _) = c.req("account", "r4", "");
+    assert_eq!(before, "139.96");
+    assert_eq!(a["account"]["buying_power"], "138.96", "{a}");
+    gw.stop().unwrap();
+}
+
 /// Defined-risk buying power: a spread whose worst loss cash can't cover is
 /// refused, never resized; the account reports what's left.
 #[test]

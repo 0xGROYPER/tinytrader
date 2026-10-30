@@ -595,7 +595,10 @@ impl Session {
                 let Ok(mut v) = serde_json::from_str::<Value>(line) else {
                     return Err(format!("{}: a journal line isn't JSON", f.display()));
                 };
-                if !matches!(v["kind"].as_str(), Some("submit" | "cancel" | "order")) {
+                if !matches!(
+                    v["kind"].as_str(),
+                    Some("submit" | "cancel" | "order" | "activity")
+                ) {
                     continue;
                 }
                 if let Some(o) = v.as_object_mut() {
