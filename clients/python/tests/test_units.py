@@ -63,7 +63,11 @@ class BookTests(unittest.TestCase):
         self.assertIsNone(b.quote("SPY261027C00749000"))
         self.assertEqual(b.chain("SPY", dt.date(2026, 10, 27)), {})
         self.assertAlmostEqual(b.quote("SPY270115C00060000").ask, 707.31)
-        self.assertEqual(b.expiries("SPY"), [dt.date(2026, 10, 30), dt.date(2027, 1, 15)])
+        # Yesterday's quotes are gone with the new day: only today's quoted expiry.
+        self.assertEqual(b.expiries("SPY"), [dt.date(2027, 1, 15)])
+        # A new day clears every quote: nothing is served from yesterday's book.
+        b.set_now(t1 + self.DAY)
+        self.assertIsNone(b.quote("SPY270115C00060000"))
         # A contract given a new id loses the old id's quote.
         b.apply(self.mapping(3, "SPY   261030C00754000"))
         self.assertIsNone(b.quote("SPY261030C00754000"))

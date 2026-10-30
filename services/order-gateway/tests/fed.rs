@@ -431,3 +431,119 @@ fn an_expired_contract_never_fills_against_a_reused_id() {
     assert_eq!(fill(&mut c, "wse-leap")["fill"]["price"], "707.31");
     gw.stop().unwrap();
 }
+
+/// Every quote is cleared at a new day: an order at the next day's open can't
+/// fill on yesterday's book, only on that day's first quote.
+#[test]
+fn an_order_at_the_open_never_fills_on_yesterdays_book() {
+    let day = 86_400 * S;
+    let (gw, feed, clock) = gateway("fed-overnight", "{}");
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    let weekly = "SPY261009P00570000";
+    let map = |iid: u32, ts: u64| {
+        let m = SymbolMappingMsg::new(
+            iid,
+            ts,
+            SType::Parent,
+            "SPY.OPT",
+            SType::RawSymbol,
+            "SPY   261009P00570000",
+            0,
+            0,
+        )
+        .unwrap();
+        feed.push(ts, RecordRef::from(&m)).unwrap();
+    };
+    map(4, T0 - S / 2);
+    cbbo(&feed, 4, T0 + 6 * 3_600 * S - 60 * S, 120, 125); // 15:59, ask 1.25
+    clock
+        .advance("reactor", 0, T0 + 6 * 3_600 * S - 30 * S, WAIT)
+        .unwrap();
+    // The next day at 09:30:30, before its first bar.
+    let open = T0 + day - 30 * 60 * S + 30 * S;
+    map(4, T0 + day - 14 * 3_600 * S);
+    clock.advance("reactor", 0, open, WAIT).unwrap();
+    c.submit("r1", &single("wse-open", weekly, "buy", "open", 1, "1.30"));
+    clock.advance("reactor", 1, open + 10 * S, WAIT).unwrap();
+    let (r, _) = c.req("order", "r2", r#""client_order_id":"wse-open""#);
+    assert_ne!(
+        r["order"]["status"], "filled",
+        "filled on yesterday's book: {r}"
+    );
+    cbbo(&feed, 4, open + 30 * S, 126, 129); // 09:31, ask 1.29
+    clock.advance("reactor", 1, open + 31 * S, WAIT).unwrap();
+    assert_eq!(fill(&mut c, "wse-open")["fill"]["price"], "1.29");
+    gw.stop().unwrap();
+}
+
+/// fill_on = "next_quote": a marketable order waits for the first quote after it
+/// activates, never filling on the bar its strategy decided on; the default fills
+/// on the book standing at activation.
+#[test]
+fn next_quote_fills_on_the_bar_after_the_decision() {
+    let run = |name: &str, script: &str| {
+        let (gw, feed, clock) = gateway(name, script);
+        let mut c = Conn::open(&gw, "reactor", None);
+        mappings(&feed);
+        cbbo(&feed, 1, T0, 120, 125);
+        clock.advance("reactor", 0, T0, WAIT).unwrap();
+        c.submit("r1", &single("wse-nq", CALL, "buy", "open", 1, "1.30"));
+        cbbo(&feed, 1, T0 + 60 * S, 126, 128);
+        clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+        let f = fill(&mut c, "wse-nq");
+        gw.stop().unwrap();
+        (
+            f["fill"]["price"].as_str().unwrap().to_owned(),
+            f["ts_broker"].as_u64().unwrap(),
+        )
+    };
+    assert_eq!(run("fed-book", "{}"), ("1.25".into(), T0 + 5_000_000));
+    assert_eq!(
+        run("fed-next", r#"{"fill_on":"next_quote"}"#),
+        ("1.28".into(), T0 + 60 * S)
+    );
+}
+
+/// Orders on an expired contract are refused, and however many there are, they
+/// never halt opens: the next valid order is accepted.
+#[test]
+fn expired_rejects_never_halt_opens() {
+    let day = 86_400 * S;
+    let (gw, feed, clock) = gateway("fed-rejects", "{}");
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    let t1 = T0 + day;
+    cbbo(&feed, 3, t1, 50, 52);
+    clock.advance("reactor", 0, t1, WAIT).unwrap();
+    for k in 0..8 {
+        let r = c.submit(
+            &format!("x{k}"),
+            &single(&format!("wse-x{k}"), CALL, "buy", "open", 1, "1.00"),
+        );
+        assert_eq!(r["code"], "sim_expired_instrument", "{r}");
+    }
+    let r = c.submit(
+        "ok",
+        &single("wse-ok", "SPY261009P00570000", "buy", "open", 1, "1.00"),
+    );
+    assert_ne!(r["reason"], "kill", "{r}");
+    assert_ne!(r["code"], "killed", "{r}");
+    gw.stop().unwrap();
+}
+
+/// A contract still trades on its expiry day, to the close: a fill at 15:59.
+#[test]
+fn a_contract_trades_on_its_expiry_day() {
+    let (gw, feed, clock) = gateway("fed-0dte", "{}");
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    let t = T0 + 6 * 3_600 * S - 60 * S; // 15:59 on CALL's expiry day
+    cbbo(&feed, 1, t - 60 * S, 5, 7);
+    clock.advance("reactor", 0, t - 60 * S, WAIT).unwrap();
+    c.submit("r1", &single("wse-0dte", CALL, "buy", "open", 1, "0.07"));
+    cbbo(&feed, 1, t, 4, 6);
+    clock.advance("reactor", 1, t, WAIT).unwrap();
+    assert_eq!(fill(&mut c, "wse-0dte")["fill"]["price"], "0.07");
+    gw.stop().unwrap();
+}
