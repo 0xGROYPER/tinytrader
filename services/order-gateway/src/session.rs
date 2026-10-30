@@ -57,9 +57,20 @@ pub(crate) enum Input {
         orders: u64,
         to: u64,
         deadline: Instant,
-        reply: Sender<Result<u64, String>>,
+        reply: Sender<Result<Advanced, String>>,
     },
     Shutdown,
+}
+
+/// What a clock advance did: the market time reached, and the account's last event
+/// sequence number once the advance's events were journaled. A strategy that has read
+/// its events up to `last_seq` has every report of the advance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Advanced {
+    /// Market time after the advance.
+    pub market_ts: u64,
+    /// The last event sequence number journaled.
+    pub last_seq: u64,
 }
 
 /// A clock advance waiting for a client's order messages to arrive.
@@ -68,7 +79,7 @@ struct ClockWait {
     orders: u64,
     to: u64,
     deadline: Instant,
-    reply: Sender<Result<u64, String>>,
+    reply: Sender<Result<Advanced, String>>,
 }
 
 struct Conn {
@@ -853,10 +864,16 @@ impl<B: Broker> Session<B> {
             let Some(w) = self.clocks.pop_front() else {
                 break;
             };
-            let answer = self.b.advance(w.to).map_err(|e| e.message);
-            if answer.is_ok() {
-                self.drain()?;
-            }
+            let answer = match self.b.advance(w.to) {
+                Ok(market_ts) => {
+                    self.drain()?;
+                    Ok(Advanced {
+                        market_ts,
+                        last_seq: self.last_seq.load(SeqCst),
+                    })
+                }
+                Err(e) => Err(e.message),
+            };
             let _ = w.reply.send(answer);
         }
         Ok(())
