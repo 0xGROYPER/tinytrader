@@ -30,7 +30,11 @@ fn probes_can_run() -> bool {
 /// strategy's profile doesn't let it read.
 #[cfg(target_os = "macos")]
 fn sandbox_exec_works() -> bool {
-    let ok = std::env::var_os("NIX_BUILD_TOP").is_none()
+    // A Nix build sets NIX_BUILD_TOP; a `nix develop` shell sets it too, but also
+    // IN_NIX_SHELL, and its binaries run sandboxed.
+    let nix_build =
+        std::env::var_os("NIX_BUILD_TOP").is_some() && std::env::var_os("IN_NIX_SHELL").is_none();
+    let ok = !nix_build
         && std::process::Command::new("/usr/bin/sandbox-exec")
             .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
             .status()
