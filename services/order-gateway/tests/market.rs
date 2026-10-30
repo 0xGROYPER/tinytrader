@@ -151,8 +151,11 @@ fn main_quotes() -> Vec<Vec<u8>> {
 
 #[test]
 fn market_session_is_byte_identical_across_runs() {
-    let a = run("market-a", "{}", &main_quotes(), main_session);
-    let b = run("market-b", "{}", &main_quotes(), main_session);
+    // The session holds a put spread through its expiry with no SPY quote: this
+    // test is about the transcript, so expiry settlement is off.
+    let off = r#"{"expiry":{"settle":false}}"#;
+    let a = run("market-a", off, &main_quotes(), main_session);
+    let b = run("market-b", off, &main_quotes(), main_session);
     assert_eq!(a, b);
     assert!(a.iter().any(|l| l.contains(r#""source":"sim""#)));
 }

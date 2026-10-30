@@ -28,7 +28,7 @@ class Toy(Strategy):
     revision = "test"
 
     def __init__(self):
-        self.timers, self.fills, self.records = [], [], 0
+        self.timers, self.fills, self.records, self.activities = [], [], 0, []
 
     def on_start(self, ctx):
         ctx.every(60, start="10:00", end="10:05")
@@ -44,6 +44,8 @@ class Toy(Strategy):
         ctx.record("ask", q.ask if q else None)
 
     def on_report(self, ctx, venue, event):
+        if event.get("kind") == "activity":
+            self.activities.append((event["activity_type"], event["broker_raw"]["symbol"]))
         if event.get("event") == "fill":
             self.fills.append((event["fill"]["price"], event["ts_broker"], ctx.now))
 
@@ -79,6 +81,9 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(toy.fills, [("1.24", T0 + 2 * MIN, T0 + 2 * MIN)])
         self.assertEqual([s["value"] for s in end["series"]], [1.30, 1.30, 1.24, 1.24, 1.24, 1.24])
         self.assertEqual(toy.records, 7)  # the day's mapping and six quotes
+        # At the close the call expires worthless against SPY's 579.00 settlement,
+        # and the strategy hears of it before the run ends.
+        self.assertEqual(toy.activities, [("OPEXP", "SPY261027C00580000")])
 
     def test_a_refused_order_is_the_strategy_s_to_handle(self):
         class Refused(Toy):
