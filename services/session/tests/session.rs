@@ -243,7 +243,15 @@ fn toy(control: std::net::SocketAddr, fault: Fault) -> Seen {
                 &format!(r#"{{"request_id":"r1","intent":{intent}}}"#),
             )
             .unwrap();
-            if fault != Fault::Undercount {
+            if fault == Fault::Undercount {
+                // Handled before the ready that leaves it out, so the next advance sees it.
+                loop {
+                    let v: Value = serde_json::from_str(&gw.line().unwrap().unwrap()).unwrap();
+                    if v["type"] == "response" {
+                        break;
+                    }
+                }
+            } else {
                 sent += 1;
             }
             new.push(json!({"at": T0 + 2 * MIN + MIN / 2, "id": "check"}));

@@ -83,7 +83,7 @@ Sources are read through the store producer (`libs/producer`). A day not held is
 
 **Timers** are set in `ready`, each for a time after the step's and no later than the last day's end. A timer at the step's own time is refused rather than moved: decision 0009 orders timers after market data at one time, and that step has passed.
 
-**After the last record**, the venues are advanced to the end of the last day, so day orders expire. `end` follows, with each venue's last event, so the strategy can read the last day's expiries before closing.
+**After the last record**, the venues are advanced to the end of the last day, so day orders expire. After a short pause the venues are asked again, so an order the strategy sent but didn't count, still in flight at the last advance, fails the run too. `end` follows, with each venue's last event, so the strategy can read the last day's expiries before closing.
 
 **The run ends `incomplete`** when the strategy:
 - doesn't answer within `ready_timeout_s`;

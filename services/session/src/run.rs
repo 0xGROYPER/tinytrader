@@ -44,6 +44,8 @@ use tinytrader_producer::StoreProducer;
 pub const STRATEGY: &str = "strategy";
 const PREFIX: &str = "s-";
 const DAY: u64 = 86_400_000_000_000;
+/// How long the run waits after its last advance for orders still in flight.
+const SETTLE: Duration = Duration::from_millis(200);
 
 /// Where a started session listens: the `READY` line's content.
 #[derive(Clone, Debug)]
@@ -294,12 +296,16 @@ impl Session {
                         "reports": state.reports}),
             );
         }
-        self.record(&outcome, &state)?;
+        // The venues stop whatever happens to the record.
+        let recorded = self.record(&outcome, &state);
+        let mut stopped = Ok(());
         for v in self.venues {
-            v.gateway
-                .stop()
-                .map_err(|e| format!("venue {}: {e}", v.name))?;
+            if let Err(e) = v.gateway.stop() {
+                stopped = stopped.and(Err(format!("venue {}: {e}", v.name)));
+            }
         }
+        recorded?;
+        stopped?;
         Ok(outcome)
     }
 
@@ -508,6 +514,11 @@ impl Session {
         // The rest of the last day, so day orders expire at the close.
         let end = last.max(as_of);
         let (reports, events) = self.advance(&sent, end, wait)?;
+        // An order the strategy sent but didn't count may still be on its way: give it
+        // a moment, then ask each venue again, so it fails the run rather than
+        // slipping past the last check.
+        std::thread::sleep(SETTLE);
+        self.advance(&sent, end, wait)?;
         st.reports = Some(reports);
         audit.update(format!("end {end} {events}\n"));
         st.sent = sent;
