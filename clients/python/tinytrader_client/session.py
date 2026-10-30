@@ -315,6 +315,7 @@ def _loop(strategy: Strategy, ctl: _Lines, data: _Lines, venues: dict[str, _Venu
         if msg.get("type") != "step":
             raise SessionError(f"session: {msg}")
         ctx.now = msg["as_of"]
+        ctx.book.set_now(ctx.now)
         want = msg["records"]
         while len(pending) < want:
             chunk = data.sock.recv(1 << 20)

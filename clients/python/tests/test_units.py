@@ -1,8 +1,9 @@
 import datetime as dt
 import unittest
+from types import SimpleNamespace as NS
 
 from tinytrader_client import combo, single
-from tinytrader_client.book import Quote, compact, occ
+from tinytrader_client.book import CBBO_1M, SYMBOL_MAPPING, Book, Quote, compact, occ
 
 
 class Units(unittest.TestCase):
@@ -31,6 +32,41 @@ class Units(unittest.TestCase):
             single("SPY", "buy", "open", 1, 1.234)
         with self.assertRaises(ValueError):
             combo([("SPY261027P00570000", 1, "sell", "open")], 1, -0.004)
+
+
+class BookTests(unittest.TestCase):
+    D27 = 1_793_059_200_000_000_000  # 2026-10-27T00:00Z
+    DAY = 86_400_000_000_000
+
+    def mapping(self, iid, raw):
+        return NS(rtype=SYMBOL_MAPPING, instrument_id=iid, stype_out_symbol=raw)
+
+    def quote(self, iid, ts, ask):
+        lv = NS(bid_px=int((ask - 0.02) * 1e9), ask_px=int(ask * 1e9), bid_sz=1, ask_sz=1)
+        return NS(rtype=CBBO_1M, instrument_id=iid, levels=[lv], ts_recv=ts, ts_event=ts)
+
+    def test_a_reused_id_and_an_expired_contract_are_forgotten(self):
+        b = Book()
+        b.set_now(self.D27 + 15 * 3_600_000_000_000)
+        b.apply(self.mapping(1, "SPY   261027C00749000"))
+        b.apply(self.mapping(2, "SPY   261030C00754000"))
+        b.apply(self.quote(1, self.D27, 1.25))
+        b.apply(self.quote(2, self.D27, 0.50))
+        self.assertAlmostEqual(b.quote("SPY261027C00749000").ask, 1.25)
+        self.assertEqual(b.expiries("SPY"), [dt.date(2026, 10, 27), dt.date(2026, 10, 30)])
+        self.assertEqual(set(b.chain("SPY", dt.date(2026, 10, 27))), {(749.0, "C")})
+        # The next day: id 1 is a LEAP, quoted at 707.31.
+        t1 = self.D27 + self.DAY + 15 * 3_600_000_000_000
+        b.set_now(t1)
+        b.apply(self.mapping(1, "SPY   270115C00060000"))
+        b.apply(self.quote(1, t1, 707.31))
+        self.assertIsNone(b.quote("SPY261027C00749000"))
+        self.assertEqual(b.chain("SPY", dt.date(2026, 10, 27)), {})
+        self.assertAlmostEqual(b.quote("SPY270115C00060000").ask, 707.31)
+        self.assertEqual(b.expiries("SPY"), [dt.date(2026, 10, 30), dt.date(2027, 1, 15)])
+        # A contract given a new id loses the old id's quote.
+        b.apply(self.mapping(3, "SPY   261030C00754000"))
+        self.assertIsNone(b.quote("SPY261030C00754000"))
 
 
 if __name__ == "__main__":

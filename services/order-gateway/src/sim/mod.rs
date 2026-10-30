@@ -22,7 +22,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 /// The simulator's model version, in every pin.
-pub const MODEL: &str = "tinytrader-sim/2";
+pub const MODEL: &str = "tinytrader-sim/3";
+
+/// Whether `symbol` is an option whose expiry is before ET day `day`.
+pub(crate) fn expired(symbol: &str, day: i64) -> bool {
+    crate::intent::occ(symbol).is_some_and(|(_, expiry)| expiry < day)
+}
 
 /// Nanodollars per cent.
 const CENT: i64 = 10_000_000;
@@ -75,6 +80,10 @@ pub(crate) struct Market {
     book: HashMap<u32, Quote>,
     /// Instruments a quote record other than `tcbbo` has given a book.
     quoted: std::collections::HashSet<u32>,
+    /// The ET day last checked for expired contracts.
+    day: i64,
+    /// Each instrument id's symbol, the reverse of `ids`.
+    names: HashMap<u32, String>,
     /// Fed and clocked by a session in process: the market time, shared with the feed.
     fed: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     ids: HashMap<String, u32>,
@@ -148,6 +157,8 @@ impl SimBroker {
             src,
             book: HashMap::new(),
             quoted: std::collections::HashSet::new(),
+            day: 0,
+            names: HashMap::new(),
             fed: None,
             ids: HashMap::new(),
             actions: Vec::new(),
@@ -171,6 +182,8 @@ impl SimBroker {
             src,
             book: HashMap::new(),
             quoted: std::collections::HashSet::new(),
+            day: 0,
+            names: HashMap::new(),
             fed: Some(floor),
             ids: HashMap::new(),
             actions: Vec::new(),
@@ -548,6 +561,14 @@ impl Broker for SimBroker {
             _ => {}
         }
         if let Some(m) = &self.market {
+            let today = et_day(self.now);
+            if intent.legs.iter().any(|l| expired(&l.symbol, today)) {
+                return SubmitResult::Rejected(error(
+                    422,
+                    "sim_expired_instrument",
+                    "an option leg has expired",
+                ));
+            }
             if !intent.legs.iter().all(|l| m.ids.contains_key(&l.symbol)) {
                 return SubmitResult::Rejected(error(
                     422,
@@ -909,10 +930,34 @@ impl SimBroker {
             }
         }
         self.now = self.now.max(to);
+        self.forget_expired();
         if let Some(floor) = self.market.as_ref().and_then(|m| m.fed.as_ref()) {
             floor.store(self.now, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(())
+    }
+
+    /// Once a day has passed an option's expiry, forgets the contract and its book:
+    /// it can't be quoted, and its id may name another contract by now.
+    fn forget_expired(&mut self) {
+        let today = et_day(self.now);
+        let Some(m) = &mut self.market else { return };
+        if m.day == today {
+            return;
+        }
+        m.day = today;
+        let gone: Vec<(String, u32)> = m
+            .ids
+            .iter()
+            .filter(|(s, _)| expired(s, today))
+            .map(|(s, i)| (s.clone(), *i))
+            .collect();
+        for (s, i) in gone {
+            m.ids.remove(&s);
+            m.names.remove(&i);
+            m.book.remove(&i);
+            m.quoted.remove(&i);
+        }
     }
 
     /// Applies one record to the book; a quote returns its instrument id.
@@ -920,7 +965,22 @@ impl SimBroker {
         let m = self.market.as_mut()?;
         match r {
             Rec::Def { iid, symbol } => {
-                m.ids.insert(symbol, iid);
+                // OPRA assigns instrument ids per day: an id can name another contract
+                // tomorrow, and a contract another id. Whatever an id meant before is
+                // forgotten, its quote included, so no order fills against another
+                // contract's book.
+                if let Some(was) = m.names.insert(iid, symbol.clone()).filter(|w| *w != symbol) {
+                    // The id named another contract: forget that one and its quote.
+                    m.ids.remove(&was);
+                    m.book.remove(&iid);
+                    m.quoted.remove(&iid);
+                }
+                if let Some(old) = m.ids.insert(symbol, iid).filter(|old| *old != iid) {
+                    // The contract had another id: that id's quote isn't its own now.
+                    m.names.remove(&old);
+                    m.book.remove(&old);
+                    m.quoted.remove(&old);
+                }
                 None
             }
             Rec::Quote {

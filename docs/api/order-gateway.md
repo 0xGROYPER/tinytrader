@@ -405,6 +405,9 @@ The script also sets the account fields (status, options level, cash, blocked fl
 
 **Rejects.**
 - An instrument with no definition seen gets `rejected{code:"sim_unknown_instrument"}`.
+- An option past its expiry date (New York) gets `rejected{code:"sim_expired_instrument"}`, and nothing fills against an expired contract.
+
+**Instrument ids change daily.** OPRA assigns ids per day, so an id can name another contract tomorrow. A definition or mapping that gives an id to a new symbol makes the simulator forget the symbol it named before, quote included. A symbol given a new id loses the old id's quote. On the first market time of a day past an option's expiry, the contract and its book are forgotten. A contract not mapped on a later day therefore has no book (`sim_unknown_instrument`), never yesterday's quote. Positions in an expired contract stay as they were until expiry settlement is modelled.
 - A client's `advance` to a simulator a session clocks gets `request_error{code:"clocked_by_session"}`.
 - A submit outside the session gets `rejected{code:"sim_market_closed"}`. This is a v1 simplification; Alpaca queues day orders submitted outside the session.
 
@@ -417,7 +420,7 @@ The script also sets the account fields (status, options level, cash, blocked fl
 
 **Reproducibility pin.** `pins` contains:
 - the quote source and its manifest sha256 or relay stream id
-- the simulator model version (`tinytrader-sim/2`: definitions from symbol mappings, `cbbo`, `bbo` and `tcbbo` books, one book per instant, the strategy's latency)
+- the simulator model version (`tinytrader-sim/3`; `/2` brought definitions from symbol mappings, `cbbo`, `bbo` and `tcbbo` books, one book per instant and the strategy's latency; `/3` forgets expired contracts and reused instrument ids)
 - the latencies
 - the fee profile
 - `size_cap`

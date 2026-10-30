@@ -70,9 +70,16 @@ fn bbo(feed: &Feed, iid: u32, ts: u64, bid: i64, ask: i64) {
 }
 
 fn gateway(name: &str, script: &str) -> (Gateway, Feed, Clock) {
+    gateway_capped(name, script, None)
+}
+
+fn gateway_capped(name: &str, script: &str, cap_dollars: Option<i64>) -> (Gateway, Feed, Clock) {
     let (sim, feed) = SimBroker::fed(script, r#"{"source":"session","run":"test"}"#).unwrap();
     let mut cfg = config(root(name));
     cfg.profile.equities = vec!["SPY".into()];
+    if let Some(c) = cap_dollars {
+        cfg.profile.max_notional_cents = c * 100;
+    }
     let gw = start(cfg, sim).unwrap();
     let clock = gw.clock();
     (gw, feed, clock)
@@ -98,7 +105,7 @@ fn options_and_shares_fill_from_minute_quotes() {
     let mut c = Conn::open(&gw, "reactor", None);
     let welcome = serde_json::from_str::<Value>(&c.lines[0]).unwrap();
     let pins = &welcome["pins"]["broker"];
-    assert_eq!(pins["model"], "tinytrader-sim/2");
+    assert_eq!(pins["model"], "tinytrader-sim/3");
     assert_eq!(pins["quotes"]["source"], "session");
     mappings(&feed);
     // At first neither fills: the spread's natural is 0.92 - 0.53 = 0.39 credit, short
@@ -362,5 +369,65 @@ fn a_record_behind_the_clock_is_refused() {
     let e = feed.push(T0 + S / 2, RecordRef::from(&q)).unwrap_err();
     assert!(e.contains("the simulator is at"), "{e}");
     cbbo(&feed, 1, T0 + 2 * S, 120, 130);
+    gw.stop().unwrap();
+}
+
+/// The bug a year-long run found: a position held past its expiry, its contract's
+/// instrument id reused the next day by a deep in-the-money LEAP quoted near $707,
+/// and a close on the expired contract filled against the LEAP's book. An expired
+/// contract is refused and has no book; a reused id forgets the contract it was;
+/// a contract no longer mapped has no stale quote.
+#[test]
+fn an_expired_contract_never_fills_against_a_reused_id() {
+    let day = 86_400 * S;
+    let (gw, feed, clock) = gateway_capped("fed-expired", "{}", Some(100_000));
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed); // CALL (expires on T0's day) as 1, PUT_A as 2, …
+    let map = |iid: u32, ts: u64, raw: &str| {
+        let m = SymbolMappingMsg::new(
+            iid,
+            ts,
+            SType::Parent,
+            "SPY.OPT",
+            SType::RawSymbol,
+            raw,
+            0,
+            0,
+        )
+        .unwrap();
+        feed.push(ts, RecordRef::from(&m)).unwrap();
+    };
+    // A weekly expiring later, as 4.
+    map(4, T0 - S / 2, "SPY   261009P00570000");
+    cbbo(&feed, 1, T0, 120, 125);
+    cbbo(&feed, 4, T0, 80, 82);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    assert_eq!(c.submit("r1", &buy("wse-open"))["outcome"], "accepted");
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    assert_eq!(fill(&mut c, "wse-open")["fill"]["price"], "1.25");
+    // The next day: id 1 is a LEAP now, and id 4 another weekly.
+    let t1 = T0 + day;
+    map(1, t1 - 60 * S, "SPY   270115C00060000");
+    map(4, t1 - 60 * S, "SPY   261009P00560000");
+    cbbo(&feed, 1, t1, 70_700, 70_731);
+    cbbo(&feed, 4, t1, 40, 42);
+    clock.advance("reactor", 1, t1, WAIT).unwrap();
+    let r = c.submit("r2", &single("wse-close", CALL, "sell", "close", 1, "0.01"));
+    assert_eq!(r["outcome"], "rejected", "{r}");
+    assert_eq!(r["code"], "sim_expired_instrument", "{r}");
+    // A contract not mapped today is unknown, never priced from yesterday's quote.
+    let r = c.submit(
+        "r3",
+        &single("wse-weekly", "SPY261009P00570000", "buy", "open", 1, "1.00"),
+    );
+    assert_eq!(r["code"], "sim_unknown_instrument", "{r}");
+    // The LEAP itself trades on its own, new book.
+    let r = c.submit(
+        "r4",
+        &single("wse-leap", "SPY270115C00060000", "buy", "open", 1, "707.31"),
+    );
+    assert_eq!(r["outcome"], "accepted", "{r}");
+    clock.advance("reactor", 2, t1 + 60 * S, WAIT).unwrap();
+    assert_eq!(fill(&mut c, "wse-leap")["fill"]["price"], "707.31");
     gw.stop().unwrap();
 }

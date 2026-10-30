@@ -6,6 +6,10 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
+from functools import lru_cache
+from zoneinfo import ZoneInfo
+
+NEW_YORK = ZoneInfo("America/New_York")
 
 UNDEF_PRICE = 2**63 - 1
 # DBN rtypes (dbn's RType).
@@ -20,7 +24,7 @@ BBO_1M = 0xC4
 QUOTES = {MBP_1, CMBP_1, CBBO_1S, CBBO_1M, BBO_1S, BBO_1M}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Quote:
     """A top of book: prices in dollars, ``None`` for a side that isn't there;
     ``ts`` when it was received (ns), for its age."""
@@ -49,6 +53,7 @@ def compact(symbol: str) -> str:
     return symbol.replace(" ", "")
 
 
+@lru_cache(maxsize=1 << 16)
 def occ(symbol: str) -> tuple[str, dt.date, str, float] | None:
     """Root, expiry, ``C``/``P`` and strike of a compact OCC symbol, else None."""
     s = compact(symbol)
@@ -69,13 +74,26 @@ def _px(raw: int) -> float | None:
 class Book:
     """Instruments by id (from symbol mappings and definitions) and their last
     quote. A ``tcbbo`` record's quote (the one before its trade) counts only for an
-    instrument no quote record has quoted, as in the simulator."""
+    instrument no quote record has quoted, as in the simulator.
+
+    OPRA assigns instrument ids per day, so an id can name another contract
+    tomorrow: a mapping that gives an id to a new symbol forgets the symbol it
+    named, quote included. An option whose expiry is before today (New York) is
+    never served. Each symbol is parsed once, and options are indexed by root and
+    expiry, so ``chain`` touches only its expiry."""
 
     def __init__(self) -> None:
         self.symbols: dict[int, str] = {}
         self._ids: dict[str, int] = {}
         self._quotes: dict[int, Quote] = {}
         self._quoted: set[int] = set()
+        self._occ: dict[int, tuple[str, dt.date, str, float]] = {}
+        self._index: dict[tuple[str, dt.date], set[int]] = {}
+        self.today: dt.date | None = None
+
+    def set_now(self, ns: int) -> None:
+        """The session's time, so expired contracts drop out."""
+        self.today = dt.datetime.fromtimestamp(ns / 1e9, NEW_YORK).date()
 
     def apply(self, rec) -> None:
         """Takes one delivered record (a ``databento_dbn`` record)."""
@@ -94,29 +112,59 @@ class Book:
             ts = rec.ts_recv if rtype != MBP_1 else rec.ts_event
             self._quotes[iid] = Quote(_px(lv.bid_px), _px(lv.ask_px), lv.bid_sz, lv.ask_sz, ts)
 
+    def _forget(self, iid: int) -> None:
+        sym = self.symbols.pop(iid, None)
+        if sym is not None and self._ids.get(compact(sym)) == iid:
+            del self._ids[compact(sym)]
+        self._quotes.pop(iid, None)
+        self._quoted.discard(iid)
+        o = self._occ.pop(iid, None)
+        if o is not None:
+            self._index.get((o[0], o[1]), set()).discard(iid)
+
     def _map(self, iid: int, symbol: str) -> None:
+        key = compact(symbol)
+        if self.symbols.get(iid) not in (None, symbol):
+            self._forget(iid)  # the id named another contract
+        prev = self._ids.get(key)
+        if prev is not None and prev != iid:
+            self._forget(prev)  # the contract had another id
         self.symbols[iid] = symbol
-        self._ids[compact(symbol)] = iid
+        self._ids[key] = iid
+        o = occ(key)
+        if o is not None:
+            self._occ[iid] = o
+            self._index.setdefault((o[0], o[1]), set()).add(iid)
+
+    def _live(self, iid: int) -> bool:
+        o = self._occ.get(iid)
+        return o is None or self.today is None or o[1] >= self.today
 
     def quote(self, symbol: str) -> Quote | None:
-        """The last quote of a symbol (raw or compact OCC, or a stock)."""
+        """The last quote of a symbol (raw or compact OCC, or a stock); ``None`` for
+        an option past its expiry."""
         iid = self._ids.get(compact(symbol))
-        return None if iid is None else self._quotes.get(iid)
+        if iid is None or not self._live(iid):
+            return None
+        return self._quotes.get(iid)
 
     def expiries(self, root: str) -> list[dt.date]:
-        """The expiries of a root's quoted options, in order."""
-        out = set()
-        for iid in self._quotes:
-            o = occ(self.symbols.get(iid, ""))
-            if o and o[0] == root:
-                out.add(o[1])
-        return sorted(out)
+        """The expiries of a root's quoted options, today's and later, in order."""
+        return sorted(
+            e for (r, e), ids in self._index.items()
+            if r == root and (self.today is None or e >= self.today)
+            and any(i in self._quotes for i in ids)
+        )
 
     def chain(self, root: str, expiry: dt.date) -> dict[tuple[float, str], Quote]:
-        """One expiry's quoted options: ``(strike, "C"|"P") → Quote``."""
+        """One expiry's quoted options: ``(strike, "C"|"P") → Quote``; empty once
+        the expiry has passed."""
+        if self.today is not None and expiry < self.today:
+            return {}
         out = {}
-        for iid, q in self._quotes.items():
-            o = occ(self.symbols.get(iid, ""))
-            if o and o[0] == root and o[1] == expiry:
+        for iid in self._index.get((root, expiry), ()):
+            q = self._quotes.get(iid)
+            if q is not None:
+                o = self._occ[iid]
                 out[(o[3], o[2])] = q
         return out

@@ -13,6 +13,13 @@ impl SimBroker {
         if !o.active || terminal(&o.status) {
             return;
         }
+        // An expired contract has no book: nothing fills against it.
+        if o.legs
+            .iter()
+            .any(|l| super::expired(&l.symbol, crate::safety::et_day(self.now)))
+        {
+            return;
+        }
         let (mut net, mut prices, mut avail) = (0_i128, Vec::new(), u64::MAX);
         for l in &o.legs {
             let Some(q) = m.ids.get(&l.symbol).and_then(|id| m.book.get(id)) else {
