@@ -9,6 +9,7 @@ members = [
     "services/alpaca-data",
     "services/relay",
     "libs/dbn",
+    "libs/producer",
     "libs/alpaca",
     "libs/tinytrader",
     "libs/schedule",

@@ -337,6 +337,20 @@ are the stored DBN, unchanged.
   A partial day sends what's held and a gap message naming what isn't (its
   coverage pieces: the contracts and hours missing).
 
+**As built (step 5a, `libs/producer`).** The producer is a library first,
+so sessions (0022) and, later, the relay serve the same code. It reads the
+store's API, or a local copy (a finished `databento-jobs` cache job, or a
+folder in the store's layout) behind the same contract. The gap is a
+`SystemMsg` `store-gap day=… reason=…` and a partial day is announced by
+`store-partial day=…`; the coverage pieces stay in `/coverage`, since a
+`SystemMsg` holds 303 characters. Batch files carry no definitions, so each
+day starts with a `SymbolMappingMsg` per instrument its files map, stamped
+at the day's start, with `stype_out_symbol` the raw symbol, as a live
+session sends them. Each file's SHA-256 is taken while it streams and
+checked where the holdings state one (the cache job's manifest; the store's
+`/coverage` for a day in one file), and the producer lists what it read for
+the run's manifest.
+
 ### 9. Warm-up: history, then live, in one join
 
 A strategy that needs a lookback (indicator windows, today's high and low,

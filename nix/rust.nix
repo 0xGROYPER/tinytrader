@@ -22,6 +22,7 @@
           ../libs/fleet
           ../libs/schedule
           ../libs/dbn
+          ../libs/producer
           ../libs/tinytrader
           ../libs/alpaca
           ../libs/openapi

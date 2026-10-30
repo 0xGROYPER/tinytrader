@@ -3274,6 +3274,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinytrader-producer"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "dbn",
+ "serde_json",
+ "sha2 0.10.9",
+ "time",
+ "tinytrader-dbn",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
 name = "tinytrader-schedule"
 version = "0.1.0"
 dependencies = [
