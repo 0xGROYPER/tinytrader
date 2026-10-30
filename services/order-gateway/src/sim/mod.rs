@@ -4,6 +4,7 @@
 mod expiry;
 mod fill;
 mod market;
+mod queue;
 mod rules;
 mod script;
 
@@ -24,7 +25,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 /// The simulator's model version, in every pin.
-pub const MODEL: &str = "tinytrader-sim/6";
+pub const MODEL: &str = "tinytrader-sim/7";
 
 /// Nanodollars per cent.
 const CENT: i64 = 10_000_000;
@@ -55,6 +56,8 @@ pub(crate) struct SimOrder {
     seq: u64,
     active: bool,
     updated: u64,
+    /// Its legs' queues, once it rests under the queue model.
+    queue: Option<Vec<queue::LegQueue>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -83,6 +86,8 @@ pub(crate) struct Market {
     quoted: std::collections::HashSet<u32>,
     /// The ET day last checked for expired contracts.
     day: i64,
+    /// Trade prints of the instant being applied, for the queue model.
+    prints: Vec<(u32, i64, u64)>,
     /// Each instrument id's symbol, the reverse of `ids`.
     names: HashMap<u32, String>,
     /// Fed and clocked by a session in process: the market time, shared with the feed.
@@ -173,6 +178,7 @@ impl SimBroker {
             book: HashMap::new(),
             quoted: std::collections::HashSet::new(),
             day: 0,
+            prints: Vec::new(),
             names: HashMap::new(),
             fed: None,
             ids: HashMap::new(),
@@ -198,6 +204,7 @@ impl SimBroker {
             book: HashMap::new(),
             quoted: std::collections::HashSet::new(),
             day: 0,
+            prints: Vec::new(),
             names: HashMap::new(),
             fed: Some(floor),
             ids: HashMap::new(),
@@ -364,6 +371,7 @@ impl SimBroker {
             seq: u64::try_from(n).unwrap_or(0),
             active: self.market.is_none(),
             updated: self.ts(),
+            queue: None,
         });
         n - 1
     }
@@ -402,6 +410,9 @@ impl SimBroker {
                 .s("side", side(l))
                 .s("position_intent", &intent(l))
                 .raw("legs", "null");
+        }
+        if let Some(q) = &o.queue {
+            r = r.raw("queue", &Self::queue_raw(q, &o.legs));
         }
         r.n("updated_at_ns", o.updated).done()
     }
@@ -599,6 +610,27 @@ impl Broker for SimBroker {
             .s("fee_per_share", &fmt_nanos(i128::from(self.s.fee_share)))
             .raw("expiry", &self.expiry_pin())
             .raw("venue_rules", &self.rules_pin())
+            .raw(
+                "queue",
+                &self.s.queue.map_or("null".into(), |q| {
+                    Obj::new()
+                        .s(
+                            "ahead",
+                            &format!("{}.{:03}", q.ahead_permille / 1000, q.ahead_permille % 1000),
+                        )
+                        .s(
+                            "fill_on_print",
+                            if q.through_only {
+                                "through"
+                            } else {
+                                "at_or_through"
+                            },
+                        )
+                        .s("combo", if q.combo_implied { "implied" } else { "touch" })
+                        .n("combo_window_s", q.window / 1_000_000_000)
+                        .done()
+                }),
+            )
             .s(
                 "fill_on",
                 if self.s.next_quote {
@@ -1013,6 +1045,11 @@ impl SimBroker {
                         }
                     }
                     self.evaluate_touched(&touched);
+                    // Then the instant's trade prints, against resting orders' queues.
+                    let prints = self.market.as_mut().map(|m| std::mem::take(&mut m.prints));
+                    for (iid, px, size) in prints.unwrap_or_default() {
+                        self.on_print(iid, px, size);
+                    }
                 }
                 _ => break,
             }
@@ -1127,8 +1164,19 @@ impl SimBroker {
                 ask,
                 bid_sz,
                 ask_sz,
-                trade,
+                print,
             } => {
+                let trade = print.is_some();
+                // A print counts only inside its own pre-trade quote: outside it are
+                // mostly complex-order legs, intermarket sweeps, auctions and late
+                // reports, which a resting simple order wouldn't have traded with.
+                if let (Some((px, size)), Some(b), Some(a)) = (print, bid, ask)
+                    && px != dbn::UNDEF_PRICE
+                    && b <= px
+                    && px <= a
+                {
+                    m.prints.push((iid, px, size));
+                }
                 // A tcbbo quote is the book only where no quote record gives one: beside
                 // cmbp-1 it would put back a quote a trade may have consumed.
                 if trade && m.quoted.contains(&iid) {

@@ -400,6 +400,20 @@ The script also sets the account fields (status, options level, cash, blocked fl
 
 All three are in the pin with the seed. From `tinytrader-sim/6`, runs with settlement or a liquidation also hash differently from `/5`: their activities are in the session's audit. `latency_ms` (5 ms by default) is the venue's; `strategy_latency_ms` (0 by default) is the strategy's declared latency, set by the session that clocks the simulator (decision 0022, section 2). Both are constants in the pin, at most an hour each. Scripted mode pins `strategy_latency_ms` but has no clock for it to delay.
 
+**Queue model** (`queue = {"ahead", "fill_on_print", "combo", "combo_window_s"}`, off by default). With trade prints (`tcbbo`), a limit order resting behind the touch fills only once the trading ahead of it has happened, and only as much as the prints leave. With bar data alone (`cbbo-1m`, `bbo-1m`) there are no prints, so a resting order never fills.
+- **Prints.** A print counts only inside its own pre-trade quote (bid ≤ price ≤ ask). Outside it are mostly complex-order legs, sweeps, auctions and late reports. Trade conditions aren't read, so a complex-order leg printing inside the quote still counts. Prints and displayed sizes are consolidated: a print on any exchange uses up the queue, and the size ahead is the size shown across all of them.
+- **Joining.** A marketable order still fills at the touch. An order that rests, once every leg has a bid and an ask, joins a queue on each leg:
+  - a single at its limit;
+  - a combo leg at its passive touch (the bid for a buy, the ask for a sell) under `combo = "touch"` (the default), or at its implied price under `"implied"`.
+
+  Ahead of it is `ahead` (a fraction to three places, `"1"` by default) of the size displayed on its side, if its price is at or behind the touch, and nothing if it is inside the spread. Behind the touch, that is the touch's size, which understates the queue. It keeps its place if the book moves.
+- **Clearing.** A print through a leg's queue price (below a buy's, above a sell's) makes its size available to the leg. A print at the price (within half a cent) first uses up the size ahead, and the rest is available, unless `fill_on_print = "through"`. Resting orders on one contract share a print, earliest first.
+- **Filling.** A single fills at its limit, as much as is available. A combo fills when every leg has size available from prints within the last `combo_window_s` (60 s by default; each print's size leaves the window on its own), as many units as every leg allows, each leg at its implied price. The implied price splits the net limit over the legs in proportion to their mids, rounded to the cent against the order (a buy up, a sell down); if that nets worse than the limit, the last leg moves back so the net meets it. This models legging into the spread, not trading in a complex-order book. What isn't filled keeps its place at the front.
+- Each leg's fill price, queue price, size ahead, size available and last clearing time are in the order's `broker_raw.order.queue`, on its events and queries. A combo whose implied prices can't be set (a leg would be priced at nothing) rests without a queue and fills only at the touch.
+- Not modelled: trade conditions, market impact, and orders joining behind.
+
+The settings are in the pin.
+
 **Fill model.**
 - *When an order may fill:* with `fill_on = "book"` (the default), an order is evaluated against the book standing when it activates, then after each instant that touches it. With `fill_on = "next_quote"`, it waits for the first quote after it activates. That suits bar data (`cbbo-1m`): a bar's quotes are what the strategy decided on, already in the past when the order arrives, so the fill comes from the next bar.
 - *Single buy limit L:* fillable when the ask is present and ask ≤ L. It fills at the **ask**, which is the price improvement up to the touch.
@@ -429,7 +443,7 @@ All three are in the pin with the seed. From `tinytrader-sim/6`, runs with settl
 
 **Reproducibility pin.** `pins` contains:
 - the quote source and its manifest sha256 or relay stream id
-- the simulator model version (`tinytrader-sim/6`; `/6` adds report latency and seeded jitter; `/5` adds the venue rules; `/4` settles expiries and charges stock its own fee; `/2` brought definitions from symbol mappings, `cbbo`, `bbo` and `tcbbo` books, one book per instant and the strategy's latency; `/3` forgets expired contracts and reused instrument ids)
+- the simulator model version (`tinytrader-sim/7`; `/7` adds the queue model; `/6` adds report latency and seeded jitter; `/5` adds the venue rules; `/4` settles expiries and charges stock its own fee; `/2` brought definitions from symbol mappings, `cbbo`, `bbo` and `tcbbo` books, one book per instant and the strategy's latency; `/3` forgets expired contracts and reused instrument ids)
 - the latencies
 - the fee profile
 - `size_cap`

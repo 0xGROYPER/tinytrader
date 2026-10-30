@@ -56,6 +56,22 @@ fn cbbo(feed: &Feed, iid: u32, ts: u64, bid: i64, ask: i64) {
     feed.push(ts, RecordRef::from(&q)).unwrap();
 }
 
+/// A `tcbbo` record: a trade of `size` at `price` cents, with the quote before it.
+fn print(feed: &Feed, iid: u32, ts: u64, (bid, ask): (i64, i64), price: i64, size: u32) {
+    let mut q = Cmbp1Msg {
+        hd: RecordHeader::new::<Cmbp1Msg>(rtype::TCBBO, 30, iid, ts),
+        ts_recv: ts,
+        price: px(price),
+        size,
+        ..Cmbp1Msg::default_for_schema(Schema::Tcbbo)
+    };
+    q.levels[0].bid_px = px(bid);
+    q.levels[0].ask_px = px(ask);
+    q.levels[0].bid_sz = 10;
+    q.levels[0].ask_sz = 10;
+    feed.push(ts, RecordRef::from(&q)).unwrap();
+}
+
 fn bbo(feed: &Feed, iid: u32, ts: u64, bid: i64, ask: i64) {
     let mut q = BboMsg {
         hd: RecordHeader::new::<BboMsg>(rtype::BBO_1M, 2, iid, ts),
@@ -105,7 +121,7 @@ fn options_and_shares_fill_from_minute_quotes() {
     let mut c = Conn::open(&gw, "reactor", None);
     let welcome = serde_json::from_str::<Value>(&c.lines[0]).unwrap();
     let pins = &welcome["pins"]["broker"];
-    assert_eq!(pins["model"], "tinytrader-sim/6");
+    assert_eq!(pins["model"], "tinytrader-sim/7");
     assert_eq!(pins["quotes"]["source"], "session");
     mappings(&feed);
     // At first neither fills: the spread's natural is 0.92 - 0.53 = 0.39 credit, short
@@ -888,5 +904,162 @@ fn reports_arrive_after_the_report_latency() {
     let f = fill(&mut c, "wse-late");
     assert_eq!(f["ts_broker"], T0 + 60 * S);
     assert_eq!(f["fill"]["price"], "1.24");
+    gw.stop().unwrap();
+}
+
+/// The queue model: a buy resting at the bid fills once prints at its price have
+/// traded the size shown ahead of it, at its limit.
+#[test]
+fn a_resting_order_fills_once_the_queue_ahead_has_traded() {
+    let (gw, feed, clock) = gateway("fed-queue-at", r#"{"queue":{},"expiry":{"settle":false}}"#);
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &single("wse-qat", PUT_B, "buy", "open", 1, "0.50"));
+    // Ten shown at the bid ahead of it: six trade, then six more.
+    print(&feed, 3, T0 + 60 * S, (50, 52), 50, 6);
+    let a = clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    let seen = c.until(|v| v["seq"].as_u64() == Some(a.last_seq));
+    assert!(!seen.iter().any(|v| v["event"] == "fill"), "{seen:?}");
+    print(&feed, 3, T0 + 61 * S, (50, 52), 50, 6);
+    clock.advance("reactor", 0, T0 + 61 * S, WAIT).unwrap();
+    let f = fill(&mut c, "wse-qat");
+    assert_eq!(f["fill"]["price"], "0.50", "{f}");
+    assert_eq!(f["broker_raw"]["order"]["queue"][0]["ahead"], 0, "{f}");
+    gw.stop().unwrap();
+}
+
+/// A print fills no more than it leaves past the queue; the rest stays queued.
+#[test]
+fn a_print_fills_only_its_size_past_the_queue() {
+    let (gw, feed, clock) = gateway(
+        "fed-queue-partial",
+        r#"{"queue":{"ahead":"0.5"},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &single("wse-qpart", PUT_B, "buy", "open", 5, "0.50"));
+    // Five ahead: a print of seven leaves two.
+    print(&feed, 3, T0 + 60 * S, (50, 52), 50, 7);
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    let f = c
+        .until(|v| v["client_order_id"] == "wse-qpart" && v["event"] == "partial_fill")
+        .pop()
+        .unwrap();
+    assert_eq!(f["filled_qty"], 2, "{f}");
+    print(&feed, 3, T0 + 61 * S, (50, 52), 50, 3);
+    clock.advance("reactor", 0, T0 + 61 * S, WAIT).unwrap();
+    let f = fill(&mut c, "wse-qpart");
+    assert_eq!(f["filled_qty"], 5, "{f}");
+    gw.stop().unwrap();
+}
+
+/// With `fill_on_print = "through"`, prints at the price never fill it, nor does
+/// one outside its own quote; one through it, inside its quote, does.
+#[test]
+fn through_only_needs_a_print_through_the_price() {
+    let (gw, feed, clock) = gateway(
+        "fed-queue-through",
+        r#"{"queue":{"ahead":"0.5","fill_on_print":"through"},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &single("wse-qth", PUT_B, "buy", "open", 1, "0.50"));
+    print(&feed, 3, T0 + 60 * S, (50, 52), 50, 500);
+    // Below its own quote: a complex order's leg, say.
+    print(&feed, 3, T0 + 61 * S, (50, 52), 45, 500);
+    let a = clock.advance("reactor", 1, T0 + 61 * S, WAIT).unwrap();
+    let seen = c.until(|v| v["seq"].as_u64() == Some(a.last_seq));
+    assert!(!seen.iter().any(|v| v["event"] == "fill"), "{seen:?}");
+    print(&feed, 3, T0 + 62 * S, (49, 52), 49, 1);
+    clock.advance("reactor", 0, T0 + 62 * S, WAIT).unwrap();
+    assert_eq!(fill(&mut c, "wse-qth")["fill"]["price"], "0.50");
+    gw.stop().unwrap();
+}
+
+/// A resting combo fills when every leg has cleared at its passive touch within
+/// the window, at its implied prices, never worse than its limit; legs clearing further
+/// apart don't fill it.
+#[test]
+fn a_combo_fills_when_its_legs_clear_within_the_window() {
+    let (gw, feed, clock) = gateway(
+        "fed-queue-combo",
+        r#"{"queue":{},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    // 0.46 credit, beyond the touch's 0.40: it rests. Its legs queue at the PUT_A
+    // ask (0.94) and the PUT_B bid (0.50).
+    let order = combo(
+        "wse-qcb",
+        &[(PUT_A, 1, "sell", "open"), (PUT_B, 1, "buy", "open")],
+        1,
+        "-0.46",
+    );
+    c.submit("r1", &order);
+    print(&feed, 2, T0 + 60 * S, (92, 96), 95, 1);
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    // 61 s later: outside the window.
+    print(&feed, 3, T0 + 121 * S, (48, 52), 48, 1);
+    let a = clock.advance("reactor", 0, T0 + 121 * S, WAIT).unwrap();
+    let seen = c.until(|v| v["seq"].as_u64() == Some(a.last_seq));
+    assert!(!seen.iter().any(|v| v["event"] == "fill"), "{seen:?}");
+    print(&feed, 2, T0 + 179 * S, (92, 96), 95, 1);
+    clock.advance("reactor", 0, T0 + 179 * S, WAIT).unwrap();
+    let f = fill(&mut c, "wse-qcb");
+    let q = &f["broker_raw"]["order"]["queue"];
+    // Implied 0.9558 and 0.4958, rounded against it to 0.95 and 0.50 (0.45),
+    // then the last leg back to 0.49: the 0.46 limit.
+    assert_eq!(q[0]["price"], "0.95", "{f}");
+    assert_eq!(q[1]["price"], "0.49", "{f}");
+    assert_eq!(q[0]["queue_price"], "0.94", "{f}");
+    gw.stop().unwrap();
+}
+
+/// A combo leg's size from prints leaves the window print by print: 1-lots
+/// trickling in over minutes never add up to fill the other leg's unit later.
+#[test]
+fn old_prints_leave_the_combo_window_one_by_one() {
+    let (gw, feed, clock) = gateway(
+        "fed-queue-roll",
+        r#"{"queue":{},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    let order = combo(
+        "wse-qroll",
+        &[(PUT_A, 1, "sell", "open"), (PUT_B, 1, "buy", "open")],
+        2,
+        "-0.46",
+    );
+    c.submit("r1", &order);
+    let mut sent = 1;
+    // One PUT_A contract through its ask every 50 s for five minutes.
+    for k in 1..=6 {
+        print(&feed, 2, T0 + k * 50 * S, (92, 96), 95, 1);
+        clock
+            .advance("reactor", sent, T0 + k * 50 * S, WAIT)
+            .unwrap();
+        sent = 0;
+    }
+    // Two PUT_B: only one PUT_A grant (at 300 s) is still within 60 s.
+    print(&feed, 3, T0 + 320 * S, (48, 52), 48, 2);
+    clock.advance("reactor", 0, T0 + 320 * S, WAIT).unwrap();
+    let f = c
+        .until(|v| v["client_order_id"] == "wse-qroll" && v["event"] == "partial_fill")
+        .pop()
+        .unwrap();
+    assert_eq!(f["filled_qty"], 1, "{f}");
     gw.stop().unwrap();
 }

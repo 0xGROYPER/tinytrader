@@ -85,6 +85,8 @@ pub(crate) struct Script {
     /// The seed of the jitter (a session derives it from its own and the venue's).
     pub(crate) seed: u64,
     pub(crate) size_cap: bool,
+    /// The queue model, if on.
+    pub(crate) queue: Option<super::queue::QueueModel>,
     /// Fill only on quotes after an order's activation, never the book standing then.
     pub(crate) next_quote: bool,
 }
@@ -216,6 +218,7 @@ impl Script {
             seed: f.opt_int("seed")?.unwrap_or(0),
             size_cap: false,
             next_quote: false,
+            queue: None,
         };
         if let Some(j) = f.take("latency_jitter_ms") {
             let mut j = Fields::new(j, "latency_jitter_ms")?;
@@ -354,6 +357,40 @@ impl Script {
                 Some(_) => return Err(invalid("venue_rules.buying_power", "cash or defined_risk")),
             };
             r.finish()?;
+        }
+        if let Some(q) = f.take("queue") {
+            let mut q = Fields::new(q, "queue")?;
+            let ahead = q.opt_string("ahead")?.unwrap_or_else(|| "1".into());
+            let permille = super::expiry::nanos(&ahead)
+                .filter(|n| *n >= 0 && n % 1_000_000 == 0)
+                .map(|n| u64::try_from(n / 1_000_000).unwrap_or(0))
+                .ok_or_else(|| {
+                    invalid(
+                        "queue.ahead",
+                        "a decimal of at most three places, such as 1 or 0.5",
+                    )
+                })?;
+            let through_only = match q.opt_string("fill_on_print")?.as_deref() {
+                None | Some("at_or_through") => false,
+                Some("through") => true,
+                Some(_) => return Err(invalid("queue.fill_on_print", "at_or_through or through")),
+            };
+            let combo_implied = match q.opt_string("combo")?.as_deref() {
+                None | Some("touch") => false,
+                Some("implied") => true,
+                Some(_) => return Err(invalid("queue.combo", "touch or implied")),
+            };
+            let window_s = q.opt_int("combo_window_s")?.unwrap_or(60);
+            if window_s > 3600 {
+                return Err(invalid("queue.combo_window_s", "at most 3600"));
+            }
+            q.finish()?;
+            s.queue = Some(super::queue::QueueModel {
+                ahead_permille: permille,
+                through_only,
+                combo_implied,
+                window: window_s * 1_000_000_000,
+            });
         }
         s.next_quote = match f.opt_string("fill_on")?.as_deref() {
             None | Some("book") => false,

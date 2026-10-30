@@ -30,7 +30,8 @@ pub(crate) enum Rec {
         ask_sz: u64,
         /// From a `tcbbo` record: the quote before a trade, used as a book only for an
         /// instrument no other quote record has given one.
-        trade: bool,
+        /// A `tcbbo` record's trade: its price (nanodollars) and size.
+        print: Option<(i64, u64)>,
     },
 }
 
@@ -95,7 +96,7 @@ fn decode(rec: &RecordRef<'_>) -> Option<(u64, Rec)> {
         ask: side(ask),
         bid_sz: u64::from(bid_sz),
         ask_sz: u64::from(ask_sz),
-        trade: false,
+        print: None,
     };
     if let Some(d) = rec.get::<InstrumentDefMsg>() {
         Some((
@@ -118,8 +119,11 @@ fn decode(rec: &RecordRef<'_>) -> Option<(u64, Rec)> {
         // OPRA consolidated quotes, and tcbbo's quote before each trade, by receipt.
         let l = &q.levels[0];
         let mut r = quote(q.hd.instrument_id, l.bid_px, l.ask_px, l.bid_sz, l.ask_sz);
-        if let Rec::Quote { trade, .. } = &mut r {
-            *trade = q.hd.rtype == dbn::rtype::TCBBO;
+        if let Rec::Quote { print, .. } = &mut r
+            && q.hd.rtype == dbn::rtype::TCBBO
+        {
+            // Its trade, beside the quote before it (a price of UNDEF_PRICE: none).
+            *print = Some((q.price, u64::from(q.size)));
         }
         Some((q.ts_recv, r))
     } else if let Some(q) = rec.get::<CbboMsg>() {
