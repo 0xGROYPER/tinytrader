@@ -1063,3 +1063,45 @@ fn old_prints_leave_the_combo_window_one_by_one() {
     assert_eq!(f["filled_qty"], 1, "{f}");
     gw.stop().unwrap();
 }
+
+/// A combo whose sold leg has an ask but no bid: refused by default; under
+/// no_bid_combo_leg = "zero" that leg goes for nothing.
+#[test]
+fn a_sold_leg_without_a_bid() {
+    for (setting, fills) in [("refuse", false), ("zero", true)] {
+        let (gw, feed, clock) = gateway(
+            &format!("fed-no-bid-{setting}"),
+            &format!(r#"{{"no_bid_combo_leg":"{setting}","expiry":{{"settle":false}}}}"#),
+        );
+        let mut c = Conn::open(&gw, "reactor", None);
+        mappings(&feed);
+        cbbo(&feed, 2, T0, 1, 2);
+        // PUT_B: offered at 0.01, no bid.
+        let mut q = CbboMsg {
+            hd: RecordHeader::new::<CbboMsg>(rtype::CBBO_1M, 30, 3, u64::MAX),
+            ts_recv: T0,
+            ..CbboMsg::default_for_schema(Schema::Cbbo1M)
+        };
+        q.levels[0].ask_px = px(1);
+        q.levels[0].ask_sz = 9000;
+        feed.push(T0, RecordRef::from(&q)).unwrap();
+        clock.advance("reactor", 0, T0, WAIT).unwrap();
+        // A put spread: buy PUT_A, sell PUT_B.
+        let spread = combo(
+            "wse-nobid",
+            &[(PUT_A, 1, "buy", "open"), (PUT_B, 1, "sell", "open")],
+            1,
+            "1.01",
+        );
+        assert_eq!(c.submit("r1", &spread)["outcome"], "accepted");
+        clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+        if fills {
+            // PUT_A at its 0.02 ask, PUT_B given away.
+            assert_eq!(fill(&mut c, "wse-nobid")["fill"]["price"], "0.02");
+        } else {
+            let (r, _) = c.req("order", "r2", r#""client_order_id":"wse-nobid""#);
+            assert_ne!(r["order"]["status"], "filled", "{setting}: {r}");
+        }
+        gw.stop().unwrap();
+    }
+}

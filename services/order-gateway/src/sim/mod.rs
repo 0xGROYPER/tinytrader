@@ -632,6 +632,10 @@ impl Broker for SimBroker {
                 }),
             )
             .s(
+                "no_bid_combo_leg",
+                if self.s.no_bid_zero { "zero" } else { "refuse" },
+            )
+            .s(
                 "fill_on",
                 if self.s.next_quote {
                     "next_quote"
