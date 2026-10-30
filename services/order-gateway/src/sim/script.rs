@@ -89,6 +89,9 @@ pub(crate) struct Script {
     pub(crate) queue: Option<super::queue::QueueModel>,
     /// Fill only on quotes after an order's activation, never the book standing then.
     pub(crate) next_quote: bool,
+    /// Under `next_quote`, a combo needs a new quote on one leg only; the others
+    /// fill on their standing quotes.
+    pub(crate) next_quote_any: bool,
 }
 
 fn price(v: &Value, path: &str) -> Result<i64, Invalid> {
@@ -218,6 +221,7 @@ impl Script {
             seed: f.opt_int("seed")?.unwrap_or(0),
             size_cap: false,
             next_quote: false,
+            next_quote_any: false,
             queue: None,
         };
         if let Some(j) = f.take("latency_jitter_ms") {
@@ -395,7 +399,13 @@ impl Script {
         s.next_quote = match f.opt_string("fill_on")?.as_deref() {
             None | Some("book") => false,
             Some("next_quote") => true,
-            Some(_) => return Err(invalid("fill_on", "book or next_quote")),
+            Some("next_quote_any") => {
+                s.next_quote_any = true;
+                true
+            }
+            Some(_) => {
+                return Err(invalid("fill_on", "book, next_quote or next_quote_any"));
+            }
         };
         s.size_cap = match f.opt_string("size_cap")?.as_deref() {
             None | Some("none") => false,

@@ -633,7 +633,9 @@ impl Broker for SimBroker {
             )
             .s(
                 "fill_on",
-                if self.s.next_quote {
+                if self.s.next_quote_any {
+                    "next_quote_any"
+                } else if self.s.next_quote {
                     "next_quote"
                 } else {
                     "book"

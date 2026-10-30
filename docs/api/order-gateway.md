@@ -415,7 +415,7 @@ All three are in the pin with the seed. From `tinytrader-sim/6`, runs with settl
 The settings are in the pin.
 
 **Fill model.**
-- *When an order may fill:* with `fill_on = "book"` (the default), an order is evaluated against the book standing when it activates, then after each instant that touches it. With `fill_on = "next_quote"`, it waits for the first quote after it activates. That suits bar data (`cbbo-1m`): a bar's quotes are what the strategy decided on, already in the past when the order arrives, so the fill comes from the next bar.
+- *When an order may fill:* with `fill_on = "book"` (the default), an order is evaluated against the book standing when it activates, then after each instant that touches it. With `fill_on = "next_quote"`, it waits for the first quote after it activates. That suits bar data (`cbbo-1m`): a bar's quotes are what the strategy decided on, already in the past when the order arrives, so the fill comes from the next bar. Under `next_quote` a combo waits for a new quote on every leg. With `fill_on = "next_quote_any"` it waits for a new quote on any one leg and takes the other legs' standing quotes, which suits bars that print only when a quote changes: a far wing that doesn't move would otherwise hold a combo until it expires.
 - *Single buy limit L:* fillable when the ask is present and ask ≤ L. It fills at the **ask**, which is the price improvement up to the touch.
 - *Single sell:* fillable when the bid is present and bid ≥ L, at the bid.
 - *Combo:* the net cost per unit is

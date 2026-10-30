@@ -1063,3 +1063,32 @@ fn old_prints_leave_the_combo_window_one_by_one() {
     assert_eq!(f["filled_qty"], 1, "{f}");
     gw.stop().unwrap();
 }
+
+/// fill_on = "next_quote_any": a combo fills on the first quote after activation
+/// on any leg, the others on their standing quotes.
+#[test]
+fn next_quote_any_fills_on_one_legs_new_quote() {
+    let (gw, feed, clock) = gateway(
+        "fed-nq-any",
+        r#"{"fill_on":"next_quote_any","expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    // Natural 0.40 credit; not on the book standing at activation.
+    c.submit("r1", &credit_spread("wse-nqa", 1));
+    let a = clock.advance("reactor", 1, T0 + 30 * S, WAIT).unwrap();
+    let seen = c.until(|v| v["seq"].as_u64() == Some(a.last_seq));
+    assert!(!seen.iter().any(|v| v["event"] == "fill"), "{seen:?}");
+    // Only the short put quotes again; the wing stands.
+    cbbo(&feed, 2, T0 + 60 * S, 92, 94);
+    clock.advance("reactor", 0, T0 + 60 * S, WAIT).unwrap();
+    let f = fill(&mut c, "wse-nqa");
+    assert_eq!(
+        (f["fill"]["price"].as_str(), f["ts_broker"].as_u64()),
+        (Some("-0.40"), Some(T0 + 60 * S))
+    );
+    gw.stop().unwrap();
+}

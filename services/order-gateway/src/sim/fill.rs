@@ -20,6 +20,18 @@ impl SimBroker {
         {
             return;
         }
+        // fill_on = "next_quote_any": a quote after activation on any leg, the
+        // others on their standing quotes (a leg that doesn't change prints no bar).
+        if self.s.next_quote_any
+            && !o.legs.iter().any(|l| {
+                m.ids
+                    .get(&l.symbol)
+                    .and_then(|id| m.book.get(id))
+                    .is_some_and(|q| q.ts > o.t_act)
+            })
+        {
+            return;
+        }
         let (mut net, mut prices, mut avail) = (0_i128, Vec::new(), u64::MAX);
         for l in &o.legs {
             let Some(q) = m.ids.get(&l.symbol).and_then(|id| m.book.get(id)) else {
@@ -27,7 +39,7 @@ impl SimBroker {
             };
             // fill_on = "next_quote": every leg on a quote after activation, never one
             // leg's new quote beside another's from before.
-            if self.s.next_quote && q.ts <= o.t_act {
+            if self.s.next_quote && !self.s.next_quote_any && q.ts <= o.t_act {
                 return;
             }
             if matches!((q.bid, q.ask), (Some(b), Some(a)) if b > a) {
