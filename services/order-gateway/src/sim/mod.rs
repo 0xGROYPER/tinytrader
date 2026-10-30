@@ -72,8 +72,8 @@ pub(crate) struct Market {
     book: HashMap<u32, Quote>,
     /// Instruments a quote record other than `tcbbo` has given a book.
     quoted: std::collections::HashSet<u32>,
-    /// Fed and clocked by a session in process.
-    fed: bool,
+    /// Fed and clocked by a session in process: the market time, shared with the feed.
+    fed: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     ids: HashMap<String, u32>,
     actions: Vec<(u64, u64, Action)>,
     n: u64,
@@ -145,7 +145,7 @@ impl SimBroker {
             src,
             book: HashMap::new(),
             quoted: std::collections::HashSet::new(),
-            fed: false,
+            fed: None,
             ids: HashMap::new(),
             actions: Vec::new(),
             n: 0,
@@ -162,12 +162,13 @@ impl SimBroker {
     /// An invalid script.
     pub fn fed(script: &str, pin: &str) -> Result<(Self, Feed), String> {
         let mut s = Self::new(script)?;
-        let (src, feed) = QuoteSource::feed(pin.to_owned());
+        let floor = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (src, feed) = QuoteSource::feed(pin.to_owned(), floor.clone());
         s.market = Some(Market {
             src,
             book: HashMap::new(),
             quoted: std::collections::HashSet::new(),
-            fed: true,
+            fed: Some(floor),
             ids: HashMap::new(),
             actions: Vec::new(),
             n: 0,
@@ -848,7 +849,7 @@ impl Broker for SimBroker {
     }
 
     fn session_clocked(&self) -> bool {
-        self.market.as_ref().is_some_and(|m| m.fed)
+        self.market.as_ref().is_some_and(|m| m.fed.is_some())
     }
 
     fn advance(&mut self, to_ts: u64) -> Result<u64, BrokerError> {
@@ -905,6 +906,9 @@ impl SimBroker {
             }
         }
         self.now = self.now.max(to);
+        if let Some(floor) = self.market.as_ref().and_then(|m| m.fed.as_ref()) {
+            floor.store(self.now, std::sync::atomic::Ordering::SeqCst);
+        }
         Ok(())
     }
 

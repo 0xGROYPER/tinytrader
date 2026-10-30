@@ -52,24 +52,37 @@ pub(crate) struct QuoteSource {
 /// time before it advances the simulator to that time, so an empty feed means nothing
 /// more has happened yet: the simulator never waits on it.
 #[derive(Clone)]
-pub struct Feed(Sender<(u64, RecordBuf)>, Arc<AtomicU64>);
+pub struct Feed {
+    tx: Sender<(u64, RecordBuf)>,
+    /// The time of the last record pushed.
+    last: Arc<AtomicU64>,
+    /// The time the simulator has been advanced to, which the simulator keeps.
+    floor: Arc<AtomicU64>,
+}
 
 impl Feed {
     /// Pushes one record at `ts`.
     ///
     /// # Errors
-    /// The simulator has gone, the record can't be copied, or `ts` is earlier than a
-    /// record pushed before it.
+    /// The simulator has gone, the record can't be copied, `ts` is earlier than a
+    /// record pushed before it, or the simulator has already been advanced to `ts`.
     pub fn push(&self, ts: u64, rec: RecordRef<'_>) -> Result<(), String> {
-        // Records come in the session's order (rule 1); one going back is a session bug.
-        let last = self.1.fetch_max(ts, Ordering::SeqCst);
+        // Records come in the session's order (rule 1), and never for a time the
+        // simulator has already passed: either is a session bug.
+        let last = self.last.load(Ordering::SeqCst);
+        let floor = self.floor.load(Ordering::SeqCst);
         if ts < last {
             return Err(format!("a record at {ts} after one at {last}"));
         }
+        if ts <= floor && floor > 0 {
+            return Err(format!("a record at {ts}, but the simulator is at {floor}"));
+        }
         let buf = RecordBuf::try_from(rec).map_err(|e| e.to_string())?;
-        self.0
+        self.tx
             .send((ts, buf))
-            .map_err(|_| "the simulator has stopped".to_owned())
+            .map_err(|_| "the simulator has stopped".to_owned())?;
+        self.last.store(ts, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -177,14 +190,21 @@ impl QuoteSource {
     }
 
     /// A source fed in process; `pin` says what feeds it (the session's own pins).
-    pub(crate) fn feed(pin: String) -> (Self, Feed) {
+    /// The source and its feed; the simulator stores its market time in `floor` after
+    /// each advance.
+    pub(crate) fn feed(pin: String, floor: Arc<AtomicU64>) -> (Self, Feed) {
         let (tx, rx) = channel();
         let src = Self {
             input: Input::Feed(rx),
             peeked: None,
             pin,
         };
-        (src, Feed(tx, Arc::new(AtomicU64::new(0))))
+        let feed = Feed {
+            tx,
+            last: Arc::new(AtomicU64::new(0)),
+            floor,
+        };
+        (src, feed)
     }
 
     /// Timestamp of the next applicable record, reading ahead as needed. A feed with

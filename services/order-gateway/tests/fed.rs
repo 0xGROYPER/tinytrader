@@ -324,3 +324,23 @@ fn tcbbo_is_a_book_only_where_nothing_else_is() {
     assert_ne!(r["order"]["status"], "filled", "{r}");
     gw.stop().unwrap();
 }
+
+/// A record for a time the simulator has already passed is refused, and a refused
+/// push doesn't move the feed's notion of the last time.
+#[test]
+fn a_record_behind_the_clock_is_refused() {
+    let (gw, feed, clock) = gateway("fed-floor", "{}");
+    let _c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 1, T0, 120, 130);
+    clock.advance("reactor", 0, T0 + S, WAIT).unwrap();
+    let q = CbboMsg {
+        hd: RecordHeader::new::<CbboMsg>(rtype::CBBO_1M, 30, 1, u64::MAX),
+        ts_recv: T0 + S / 2,
+        ..CbboMsg::default_for_schema(Schema::Cbbo1M)
+    };
+    let e = feed.push(T0 + S / 2, RecordRef::from(&q)).unwrap_err();
+    assert!(e.contains("the simulator is at"), "{e}");
+    cbbo(&feed, 1, T0 + 2 * S, 120, 130);
+    gw.stop().unwrap();
+}

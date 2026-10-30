@@ -832,15 +832,17 @@ impl<B: Broker> Session<B> {
     /// holds up the ones behind it nor runs after its caller has given up.
     fn clock(&mut self) -> Result<(), String> {
         let now = Instant::now();
+        let handled = &self.handled;
         self.clocks.retain(|w| {
-            if now < w.deadline {
+            // A wait whose order messages have all arrived runs, whatever the time.
+            if now < w.deadline || handled.get(&w.client).copied().unwrap_or(0) >= w.orders {
                 return true;
             }
             let _ = w.reply.send(Err(format!(
                 "no advance to {}: waited for {} order messages, {} arrived",
                 w.to,
                 w.orders,
-                self.handled.get(&w.client).copied().unwrap_or(0)
+                handled.get(&w.client).copied().unwrap_or(0)
             )));
             false
         });
