@@ -231,13 +231,18 @@ impl Venue {
         &self,
         strategy_latency_ms: u64,
         calendar: Option<&serde_json::Value>,
+        seed: u64,
     ) -> Result<String, String> {
         let mut sim = self.sim.clone();
         let ms = i64::try_from(strategy_latency_ms).map_err(|e| e.to_string())?;
         sim.insert("strategy_latency_ms".into(), toml::Value::Integer(ms));
         let mut json = serde_json::to_value(&sim).map_err(|e| e.to_string())?;
-        if let (Some(days), Some(o)) = (calendar, json.as_object_mut()) {
-            o.entry("calendar").or_insert_with(|| days.clone());
+        if let Some(o) = json.as_object_mut() {
+            if let Some(days) = calendar {
+                o.entry("calendar").or_insert_with(|| days.clone());
+            }
+            // The venue's own seed, from the run's: each venue draws its own stream.
+            o.entry("seed").or_insert_with(|| serde_json::json!(seed));
         }
         serde_json::to_string(&json).map_err(|e| e.to_string())
     }

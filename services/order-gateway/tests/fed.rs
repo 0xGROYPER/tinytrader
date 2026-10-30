@@ -105,7 +105,7 @@ fn options_and_shares_fill_from_minute_quotes() {
     let mut c = Conn::open(&gw, "reactor", None);
     let welcome = serde_json::from_str::<Value>(&c.lines[0]).unwrap();
     let pins = &welcome["pins"]["broker"];
-    assert_eq!(pins["model"], "tinytrader-sim/5");
+    assert_eq!(pins["model"], "tinytrader-sim/6");
     assert_eq!(pins["quotes"]["source"], "session");
     mappings(&feed);
     // At first neither fills: the spread's natural is 0.92 - 0.53 = 0.39 credit, short
@@ -802,5 +802,30 @@ fn next_quote_waits_for_every_leg_of_a_combo() {
         (f["fill"]["price"].as_str(), f["ts_broker"].as_u64()),
         (Some("-0.98"), Some(T0 + 120 * S))
     );
+    gw.stop().unwrap();
+}
+
+/// report_latency_ms: a fill happens at its time but reaches the client only once
+/// the market time has passed that time plus the latency; its stamp is the fill's.
+#[test]
+fn reports_arrive_after_the_report_latency() {
+    let (gw, feed, clock) = gateway(
+        "fed-report-latency",
+        r#"{"report_latency_ms":2000,"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 1, T0, 120, 130);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &buy("wse-late"));
+    cbbo(&feed, 1, T0 + 60 * S, 121, 124);
+    let a = clock.advance("reactor", 1, T0 + 61 * S, WAIT).unwrap();
+    // Every event up to the advance's last: no fill among them yet.
+    let seen = c.until(|v| v["seq"].as_u64() == Some(a.last_seq));
+    assert!(!seen.iter().any(|v| v["event"] == "fill"), "{seen:?}");
+    clock.advance("reactor", 1, T0 + 62 * S, WAIT).unwrap();
+    let f = fill(&mut c, "wse-late");
+    assert_eq!(f["ts_broker"], T0 + 60 * S);
+    assert_eq!(f["fill"]["price"], "1.24");
     gw.stop().unwrap();
 }

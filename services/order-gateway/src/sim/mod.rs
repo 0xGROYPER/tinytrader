@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 /// The simulator's model version, in every pin.
-pub const MODEL: &str = "tinytrader-sim/5";
+pub const MODEL: &str = "tinytrader-sim/6";
 
 /// Nanodollars per cent.
 const CENT: i64 = 10_000_000;
@@ -107,6 +107,10 @@ pub struct SimBroker {
     acts: u64,
     /// Activities held back while the stream is down, sent when it returns.
     held: Vec<Update>,
+    /// Reports waiting out the report latency: `(release time, update)`, in order.
+    delayed: std::collections::VecDeque<(u64, Update)>,
+    /// The latency jitter's generator state (SplitMix64), from the profile's seed.
+    rng: u64,
     /// The next session close at which options are settled, once known.
     settle_at: Option<u64>,
     /// The next time the venue's liquidation rule runs, once known.
@@ -201,9 +205,41 @@ impl SimBroker {
 
     /// When a submit or cancel received at market time `t` takes effect: after the
     /// strategy's declared latency and then the venue's.
-    fn effective(&self) -> u64 {
+    fn effective(&mut self) -> u64 {
         let ms = self.s.strategy_latency_ms.saturating_add(self.s.latency_ms);
-        self.now.saturating_add(ms.saturating_mul(1_000_000))
+        let jitter = self.jitter();
+        self.now
+            .saturating_add(ms.saturating_mul(1_000_000))
+            .saturating_add(jitter)
+    }
+
+    /// The next of the profile's random latency jitter, ns: uniform over
+    /// `latency_jitter_ms`, drawn from the seed, in the order orders and cancels
+    /// arrive. Zero without jitter.
+    fn jitter(&mut self) -> u64 {
+        let Some((lo, hi)) = self.s.jitter_ms else {
+            return 0;
+        };
+        // SplitMix64: small, fast and the same everywhere.
+        self.rng = self.rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.rng;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        let (lo, hi) = (lo * 1_000_000, hi * 1_000_000);
+        lo + z % (hi - lo + 1)
+    }
+
+    /// Queues an update for its client: at once, or after the profile's report
+    /// latency in market mode.
+    pub(super) fn report(&mut self, update: Update) {
+        let delay = self.s.report_latency_ms.saturating_mul(1_000_000);
+        if delay > 0 && self.market.is_some() {
+            self.delayed
+                .push_back((self.now.saturating_add(delay), update));
+        } else {
+            self.updates.push(update);
+        }
     }
 
     fn new(script: &str) -> Result<Self, String> {
@@ -222,6 +258,8 @@ impl SimBroker {
             activities: Vec::new(),
             acts: 0,
             held: Vec::new(),
+            delayed: std::collections::VecDeque::new(),
+            rng: 0,
             settle_at: None,
             liquidate_at: None,
             updates: Vec::new(),
@@ -229,6 +267,8 @@ impl SimBroker {
             down: None,
             dropped: false,
         };
+        sim.rng = sim.s.seed;
+        sim.rng = sim.s.seed;
         let preload: Vec<_> = sim.s.orders.drain(..).collect();
         for p in preload {
             let leg = SimLeg {
@@ -397,7 +437,7 @@ impl SimBroker {
             .n("timestamp_ns", ts)
             .raw("order", &order.raw)
             .done();
-        self.updates.push(Update::Order(Box::new(OrderUpdate {
+        self.report(Update::Order(Box::new(OrderUpdate {
             order,
             event: event.into(),
             ts_broker: ts,
@@ -526,6 +566,15 @@ impl Broker for SimBroker {
             )
             .n("latency_ms", self.s.latency_ms)
             .n("strategy_latency_ms", self.s.strategy_latency_ms)
+            .n("report_latency_ms", self.s.report_latency_ms)
+            .raw(
+                "latency_jitter_ms",
+                &self
+                    .s
+                    .jitter_ms
+                    .map_or("null".into(), |(a, b)| format!("[{a},{b}]")),
+            )
+            .n("seed", self.s.seed)
             .s("fee_per_contract", &fmt_cents(self.s.fee_cents))
             .s("fee_per_share", &fmt_nanos(i128::from(self.s.fee_share)))
             .raw("expiry", &self.expiry_pin())
@@ -900,6 +949,12 @@ impl Broker for SimBroker {
             self.updates.push(Update::StreamUp);
             self.updates.append(&mut self.held);
         }
+        // Reports whose latency has passed by the market time.
+        while self.delayed.front().is_some_and(|(t, _)| *t <= self.now) {
+            if let Some((_, u)) = self.delayed.pop_front() {
+                self.updates.push(u);
+            }
+        }
         out.append(&mut self.updates);
     }
 
@@ -1167,5 +1222,33 @@ impl SimBroker {
             Action::Expire(i) if self.open(i) => self.set_status(i, "expired"),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SimBroker;
+
+    fn draws(script: &str) -> Vec<u64> {
+        let (mut sim, _feed) = SimBroker::fed(script, "{}").unwrap();
+        (0..200).map(|_| sim.jitter()).collect()
+    }
+
+    /// Jitter is uniform within its bounds, the same for the same seed, and
+    /// different for another; none without jitter configured.
+    #[test]
+    fn jitter_is_seeded_and_bounded() {
+        let a = draws(r#"{"latency_jitter_ms":{"min":2,"max":20},"seed":7}"#);
+        assert_eq!(
+            a,
+            draws(r#"{"latency_jitter_ms":{"min":2,"max":20},"seed":7}"#)
+        );
+        assert_ne!(
+            a,
+            draws(r#"{"latency_jitter_ms":{"min":2,"max":20},"seed":8}"#)
+        );
+        assert!(a.iter().all(|j| (2_000_000..=20_000_000).contains(j)));
+        assert!(a.iter().any(|j| *j < 6_000_000) && a.iter().any(|j| *j > 16_000_000));
+        assert!(draws("{}").iter().all(|j| *j == 0));
     }
 }

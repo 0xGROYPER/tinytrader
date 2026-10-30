@@ -370,7 +370,7 @@ impl SimBroker {
         if self.down.is_some() {
             self.held.push(update);
         } else {
-            self.updates.push(update);
+            self.report(update);
         }
     }
 }
