@@ -1,0 +1,22 @@
+[package]
+name = "tinytrader-producer"
+description = "The store producer (decision 0021): held days of one dataset, symbol and schema as one DBN stream in time order, from the store's API or a local folder, with holes as gap messages and every day pinned by SHA-256"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+dbn = { version = "0.71", default-features = false, features = ["zstd"] }
+serde_json.workspace = true
+sha2 = "0.10.9"
+time = { version = "0.3", default-features = false }
+tinytrader-dbn.workspace = true
+ureq = { version = "=2.12.1", default-features = false }
+
+[dev-dependencies]
+axum.workspace = true
+tokio.workspace = true
