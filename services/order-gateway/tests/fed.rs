@@ -407,6 +407,8 @@ fn an_expired_contract_never_fills_against_a_reused_id() {
     assert_eq!(c.submit("r1", &buy("wse-open"))["outcome"], "accepted");
     clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
     assert_eq!(fill(&mut c, "wse-open")["fill"]["price"], "1.25");
+    // SPY just before the close, to settle the call that expires today.
+    bbo(&feed, 9, T0 + 6 * 3_600 * S - 30 * S, 57_000, 57_002);
     // The next day: id 1 is a LEAP now, and id 4 another weekly.
     let t1 = T0 + day;
     map(1, t1 - 60 * S, "SPY   270115C00060000");
@@ -450,8 +452,10 @@ fn a_call_held_to_expiry_is_exercised_into_shares() {
     c.submit("r1", &single("wse-call", CALL, "buy", "open", 1, "10.02"));
     clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
     assert_eq!(fill(&mut c, "wse-call")["fill"]["price"], "10.02");
-    // The close: SPY at 590.00, the call 10.00 in the money.
+    // The close: SPY at 590.00, the call 10.00 in the money; a quote within the
+    // close's minute settles it.
     let close = T0 + 6 * 3_600 * S;
+    bbo(&feed, 9, close - 30 * S, 58_999, 59_001);
     clock.advance("reactor", 1, close + S, WAIT).unwrap();
     let a = c.until(|v| v["kind"] == "activity").pop().unwrap();
     assert_eq!(a["activity_type"], "OPEXC", "{a}");

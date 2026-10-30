@@ -436,8 +436,11 @@ The same pin and the same request sequence produce a **byte-identical event tran
   - `cash-am` roots (SPX, NDX, RUT, VIX, DJX) settle against the AM special opening quotation.
   - `cash-pm` roots (SPXW, XSP, NDXP, RUTW, VIXW, …) settle against the PM close.
 - **Every other root is physically settled.** A long call or short put in the money by at least `exercise_threshold` ($0.01) buys 100 shares per contract at the strike; a long put or short call sells them. Anything less expires (`OPEXP`).
-- **Settlement prices** come from `expiry.settlement_file`, a CSV of `root, date, kind (AM-SOQ | PM-close), value` pinned by SHA-256. Where `settle_from_quote` allows (the default), a physically settled root may instead use the venue's own quote of the underlying at the close, its mid. A price that can't be had fails the advance with the reason, so a session ends the run incomplete. It is never guessed.
-- **Early assignment** is opt-in (`early_assignment`). At the close of the day before an ex-dividend date, from `expiry.dividends` (root → CSV with `ex_date`, `dividend_usd`), a physically settled short call in the money is assigned when its bid less its intrinsic value is below the dividend. At any close, a short put in the money is assigned when that is below `put_assignment_extrinsic` ($0.01).
+- **Settlement prices** come from `expiry.settlement_file`, a CSV of `root, date, kind (AM-SOQ | PM-close), value` pinned by SHA-256. It is read strictly: every row needs all four fields with a YYYY-MM-DD date and a known kind, and a row repeated for its root, date and kind is refused. Where `settle_from_quote` allows (the default), a physically settled root may instead use the venue's own quote of the underlying, its mid, if that quote is from within `quote_max_age_s` (60 s) of the close. A price that can't be had fails the advance with the reason, so a session ends the run incomplete. It is never guessed, and nothing of that close's settlements is applied.
+- **All or nothing.** A close's settlements and early assignments are all worked out, every price included, before any position, cash or share changes. Then their activities are sent; ones held back while the stream is down are sent when it returns.
+- **Last trading day.** An AM-settled root's options stop trading the session before their expiry date, whose morning gives the settlement value. From then on they're refused (`sim_expired_instrument`), never filled, and their book is dropped. VIX and VIXW settle that way too, on a Wednesday. Every other option trades through its expiry date's close.
+- **Early assignment** is opt-in (`early_assignment`). At the close of the day before an ex-dividend date, from `expiry.dividends` (root → CSV with `ex_date`, `dividend_usd`, read strictly), a physically settled short call in the money is assigned when its bid less its intrinsic value is below the dividend. When `put_assignment_extrinsic` is set, at any close a short put in the money is assigned when that is below it. Prices are looked up only where a rule applies, the option's bid only if fresh (within `quote_max_age_s`); without a fresh bid it isn't assigned.
+- **Contract size.** Settlement assumes 100 shares per contract. The gateway refuses non-standard (adjusted) OCC symbols, so no other deliverable reaches the simulator.
 - **Not modelled:** pin risk (a holder's choice not to exercise near the threshold) and assignment beyond these rules.
 - `expiry.settle = false` turns all of this off, for runs that hold nothing to expiry or quote no underlying.
 
@@ -445,7 +448,7 @@ The same pin and the same request sequence produce a **byte-identical event tran
 {"fee_per_contract": "0.65", "fee_per_share": "0",
  "expiry": {"styles": {"XSP": "cash-am"}, "settlement_file": "/path/settlements.csv", "settle_from_quote": true,
             "exercise_threshold": "0.01", "early_assignment": true, "dividends": {"SPY": "/path/SPY.csv"},
-            "put_assignment_extrinsic": "0.01"}}
+            "put_assignment_extrinsic": "0.01", "quote_max_age_s": 60}}
 ```
 
 **Deferred:** queue and L2 models, and stochastic latency. Each one changes the pin, not the protocol.

@@ -16,7 +16,7 @@ impl SimBroker {
         // An expired contract has no book: nothing fills against it.
         if o.legs
             .iter()
-            .any(|l| super::expired(&l.symbol, crate::safety::et_day(self.now)))
+            .any(|l| self.expired(&l.symbol, crate::safety::et_day(self.now)))
         {
             return;
         }

@@ -187,7 +187,8 @@ impl Script {
                 settle: true,
                 from_quote: true,
                 threshold: 10_000_000,
-                put_extrinsic: 10_000_000,
+                put_extrinsic: None,
+                max_age: 60_000_000_000,
                 ..Default::default()
             },
             latency_ms: f.opt_int("latency_ms")?.unwrap_or(5),
@@ -349,12 +350,30 @@ fn parse_expiry(e: &mut super::expiry::Expiry, v: Value) -> Result<(), Invalid> 
     }
     if let Some(path) = f.opt_string("settlement_file")? {
         let (text, sha) = read_pinned(&path, "expiry.settlement_file")?;
-        for row in csv(&text) {
-            let get = |k: &str| row.get(k).cloned().unwrap_or_default();
-            let value = nanos(&get("value"))
-                .ok_or_else(|| invalid("expiry.settlement_file", "root,date,kind,value rows"))?;
-            e.prices
-                .insert((get("root"), get("date"), get("kind")), value);
+        // Strict: every row has a root, a date, a kind of AM-SOQ or PM-close and a
+        // value; a row repeated for its root, date and kind is refused.
+        let bad = |why: &str| invalid("expiry.settlement_file", why);
+        for (n, row) in csv(&text).into_iter().enumerate() {
+            let get = |k: &str| row.get(k).filter(|v| !v.is_empty()).cloned();
+            let (Some(root), Some(date), Some(kind), Some(value)) =
+                (get("root"), get("date"), get("kind"), get("value"))
+            else {
+                return Err(bad(&format!("row {}: root, date, kind and value", n + 2)));
+            };
+            if parse_date(&date).is_none() || !matches!(kind.as_str(), "AM-SOQ" | "PM-close") {
+                return Err(bad(&format!(
+                    "row {}: a YYYY-MM-DD date and kind AM-SOQ or PM-close",
+                    n + 2
+                )));
+            }
+            let value =
+                nanos(&value).ok_or_else(|| bad(&format!("row {}: a decimal value", n + 2)))?;
+            if e.prices
+                .insert((root.clone(), date.clone(), kind.clone()), value)
+                .is_some()
+            {
+                return Err(bad(&format!("{root} {date} {kind} is given twice")));
+            }
         }
         e.prices_sha = Some(sha);
     }
@@ -378,7 +397,10 @@ fn parse_expiry(e: &mut super::expiry::Expiry, v: Value) -> Result<(), Invalid> 
         e.threshold = dollars(&v, "expiry.exercise_threshold")?;
     }
     if let Some(v) = f.take("put_assignment_extrinsic") {
-        e.put_extrinsic = dollars(&v, "expiry.put_assignment_extrinsic")?;
+        e.put_extrinsic = Some(dollars(&v, "expiry.put_assignment_extrinsic")?);
+    }
+    if let Some(v) = f.opt_int("quote_max_age_s")? {
+        e.max_age = v.saturating_mul(1_000_000_000);
     }
     if let Some(b) = f.take("early_assignment") {
         e.early = b
@@ -399,10 +421,16 @@ fn parse_expiry(e: &mut super::expiry::Expiry, v: Value) -> Result<(), Invalid> 
                         "ex_date and dividend_usd columns",
                     ));
                 };
-                by_date.insert(
-                    d.clone(),
-                    nanos(a).ok_or_else(|| invalid("expiry.dividends", "dividend_usd"))?,
-                );
+                if parse_date(d).is_none() {
+                    return Err(invalid("expiry.dividends", "ex_date as YYYY-MM-DD"));
+                }
+                let amount = nanos(a).ok_or_else(|| invalid("expiry.dividends", "dividend_usd"))?;
+                if by_date.insert(d.clone(), amount).is_some() {
+                    return Err(invalid(
+                        "expiry.dividends",
+                        &format!("{root} {d} is given twice"),
+                    ));
+                }
             }
             e.dividends.insert(root.clone(), by_date);
             e.dividends_sha.insert(root, sha);

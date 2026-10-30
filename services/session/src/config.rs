@@ -6,6 +6,7 @@
 //! strategy_latency_ms = 0        # the strategy's declared latency
 //! ready_timeout_s = 60           # how long a step waits for the strategy's ready
 //! seed = 0                       # recorded; the first models use no randomness
+//! calendar = "calendar.json"     # the market calendar for the venues (optional)
 //!
 //! [[sources]]
 //! name = "opra"
@@ -45,6 +46,12 @@ pub struct Config {
     /// first connection.
     #[serde(default = "ready_timeout")]
     pub ready_timeout_s: u64,
+    /// A market calendar for the venues (`{"days": [{"date", "open", "close"}]}`,
+    /// times in New York, as the deployment's market calendar serves it), given to
+    /// every venue whose profile has none: holidays have no session, early closes
+    /// close early. Without it, venues assume every weekday from 09:30 to 16:00.
+    #[serde(default)]
+    pub calendar: Option<PathBuf>,
     /// The seed of any declared randomness (decision 0022, section 6). The first
     /// models use none; it is recorded so a later model can't change old runs.
     #[serde(default)]
@@ -220,10 +227,18 @@ impl Venue {
     ///
     /// # Errors
     /// A profile that can't be written as JSON.
-    pub fn script(&self, strategy_latency_ms: u64) -> Result<String, String> {
+    pub fn script(
+        &self,
+        strategy_latency_ms: u64,
+        calendar: Option<&serde_json::Value>,
+    ) -> Result<String, String> {
         let mut sim = self.sim.clone();
         let ms = i64::try_from(strategy_latency_ms).map_err(|e| e.to_string())?;
         sim.insert("strategy_latency_ms".into(), toml::Value::Integer(ms));
-        serde_json::to_string(&sim).map_err(|e| e.to_string())
+        let mut json = serde_json::to_value(&sim).map_err(|e| e.to_string())?;
+        if let (Some(days), Some(o)) = (calendar, json.as_object_mut()) {
+            o.entry("calendar").or_insert_with(|| days.clone());
+        }
+        serde_json::to_string(&json).map_err(|e| e.to_string())
     }
 }

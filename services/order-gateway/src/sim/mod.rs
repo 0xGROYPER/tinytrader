@@ -25,11 +25,6 @@ use std::time::{Duration, Instant};
 /// The simulator's model version, in every pin.
 pub const MODEL: &str = "tinytrader-sim/4";
 
-/// Whether `symbol` is an option whose expiry is before ET day `day`.
-pub(crate) fn expired(symbol: &str, day: i64) -> bool {
-    crate::intent::occ(symbol).is_some_and(|(_, expiry)| expiry < day)
-}
-
 /// Nanodollars per cent.
 const CENT: i64 = 10_000_000;
 
@@ -67,6 +62,8 @@ pub(crate) struct Quote {
     ask_sz: u64,
     used_bid: u64,
     used_ask: u64,
+    /// When it was applied, ns.
+    ts: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -107,6 +104,8 @@ pub struct SimBroker {
     activities: Vec<String>,
     /// Non-trade activities so far, for their ids.
     acts: u64,
+    /// Activities held back while the stream is down, sent when it returns.
+    held: Vec<Update>,
     /// The next session close at which options are settled, once known.
     settle_at: Option<u64>,
     updates: Vec<Update>,
@@ -219,6 +218,7 @@ impl SimBroker {
             pos: BTreeMap::new(),
             activities: Vec::new(),
             acts: 0,
+            held: Vec::new(),
             settle_at: None,
             updates: Vec::new(),
             streamed: 0,
@@ -579,7 +579,7 @@ impl Broker for SimBroker {
         }
         if let Some(m) = &self.market {
             let today = et_day(self.now);
-            if intent.legs.iter().any(|l| expired(&l.symbol, today)) {
+            if intent.legs.iter().any(|l| self.expired(&l.symbol, today)) {
                 return SubmitResult::Rejected(error(
                     422,
                     "sim_expired_instrument",
@@ -885,6 +885,7 @@ impl Broker for SimBroker {
         if self.down.is_some_and(|t| t.elapsed() >= down_for) {
             self.down = None;
             self.updates.push(Update::StreamUp);
+            self.updates.append(&mut self.held);
         }
         out.append(&mut self.updates);
     }
@@ -997,17 +998,18 @@ impl SimBroker {
             m.quoted.clear();
         }
         m.day = today;
-        let gone: Vec<(String, u32)> = m
-            .ids
-            .iter()
-            .filter(|(s, _)| expired(s, today))
-            .map(|(s, i)| (s.clone(), *i))
+        let symbols: Vec<String> = m.ids.keys().cloned().collect();
+        let gone: Vec<String> = symbols
+            .into_iter()
+            .filter(|s| self.expired(s, today))
             .collect();
-        for (s, i) in gone {
-            m.ids.remove(&s);
-            m.names.remove(&i);
-            m.book.remove(&i);
-            m.quoted.remove(&i);
+        let Some(m) = &mut self.market else { return };
+        for s in gone {
+            if let Some(i) = m.ids.remove(&s) {
+                m.names.remove(&i);
+                m.book.remove(&i);
+                m.quoted.remove(&i);
+            }
         }
     }
 
@@ -1036,15 +1038,17 @@ impl SimBroker {
             .s("exercise_threshold", &fmt_nanos(i128::from(e.threshold)))
             .b("early_assignment", e.early)
             .raw("dividends_sha256", &divs)
-            .s(
+            .opt_s(
                 "put_assignment_extrinsic",
-                &fmt_nanos(i128::from(e.put_extrinsic)),
+                e.put_extrinsic.map(|p| fmt_nanos(i128::from(p))).as_deref(),
             )
+            .n("quote_max_age_s", e.max_age / 1_000_000_000)
             .done()
     }
 
     /// Applies one record to the book; a quote returns its instrument id.
     fn apply(&mut self, r: Rec) -> Option<u32> {
+        let now = self.now;
         let m = self.market.as_mut()?;
         match r {
             Rec::Def { iid, symbol } => {
@@ -1091,6 +1095,7 @@ impl SimBroker {
                         ask_sz,
                         used_bid: 0,
                         used_ask: 0,
+                        ts: now,
                     },
                 );
                 Some(iid)

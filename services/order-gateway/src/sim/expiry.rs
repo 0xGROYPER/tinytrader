@@ -16,10 +16,21 @@
 //!   run: never a guess.
 //! - **Early assignment** (opt-in, `early_assignment`): at the close of the day
 //!   before an ex-dividend date, a short call in the money whose extrinsic value
-//!   (its bid less its intrinsic value) is below the dividend is assigned; and at
-//!   any close, a short put in the money whose extrinsic value is below
-//!   `put_assignment_extrinsic`. Pin risk and the holder's choice not to exercise
+//!   (its bid less its intrinsic value) is below the dividend is assigned; and, when
+//!   `put_assignment_extrinsic` is set, at any close a short put in the money whose
+//!   extrinsic value is below it. Pin risk and the holder's choice not to exercise
 //!   are not modelled.
+//! - **Last trading day.** An AM-settled root (`cash-am`) stops trading the session
+//!   before its expiry date, whose morning gives its settlement value: from then on
+//!   it can't be ordered or filled, its book is gone, and the venue's same-day rules
+//!   treat that session as its last. Every other option trades through its expiry
+//!   date's close.
+//! - **Fresh prices only.** A quote stands in for a settlement price, or gives an
+//!   option's bid for early assignment, only if it is from within `quote_max_age_s`
+//!   (60 s) of the close.
+//! - **All or nothing.** A day's settlements and assignments are worked out first,
+//!   every price included; only then are positions, cash and shares changed and the
+//!   activities sent. A missing price changes nothing.
 use super::{SimBroker, fmt_nanos};
 use crate::broker::Update;
 use crate::protocol::Obj;
@@ -55,8 +66,9 @@ impl Style {
 /// The index roots that settle in cash unless the profile says otherwise.
 fn default_style(root: &str) -> Style {
     match root {
-        "SPX" | "NDX" | "RUT" | "VIX" | "DJX" => Style::CashAm,
-        "SPXW" | "XSP" | "NDXP" | "RUTW" | "VIXW" | "MRUT" | "XND" => Style::CashPm,
+        // VIX and its weeklies settle on a Wednesday morning's SOQ.
+        "SPX" | "NDX" | "RUT" | "VIX" | "VIXW" | "DJX" => Style::CashAm,
+        "SPXW" | "XSP" | "NDXP" | "RUTW" | "MRUT" | "XND" => Style::CashPm,
         _ => Style::Physical,
     }
 }
@@ -80,8 +92,11 @@ pub(crate) struct Expiry {
     pub(crate) dividends: BTreeMap<String, BTreeMap<String, i64>>,
     pub(crate) dividends_sha: BTreeMap<String, String>,
     pub(crate) early: bool,
-    /// A short put's extrinsic value below which it is assigned early, nanodollars.
-    pub(crate) put_extrinsic: i64,
+    /// A short put's extrinsic value below which it is assigned early, nanodollars;
+    /// `None`, no early assignment of puts.
+    pub(crate) put_extrinsic: Option<i64>,
+    /// How old a quote may be at the close to stand in for a price, ns.
+    pub(crate) max_age: u64,
 }
 
 /// Root, call or put, and strike (nanodollars) of a compact OCC symbol.
@@ -132,17 +147,21 @@ pub(crate) fn csv(text: &str) -> Vec<HashMap<String, String>> {
         .collect()
 }
 
-/// What happened to one option position.
+/// What happens to one option position.
 struct Settled {
     symbol: String,
     qty: i64,
     kind: &'static str,
     price: i64,
+    /// Shares delivered: `(root, call, strike)`; `None` when it pays cash.
+    deliver: Option<(String, bool, i64)>,
+    /// Cash paid (+) or taken (−), nanodollars, for a cash settlement.
+    cash: i128,
 }
 
 impl SimBroker {
-    /// The settlement price of `root` on ET day `day`, by its style.
-    fn settlement(&self, root: &str, day: i64, style: Style) -> Result<i64, String> {
+    /// The settlement price of `root` on ET day `day`, by its style, at `close`.
+    fn settlement(&self, root: &str, day: i64, style: Style, close: u64) -> Result<i64, String> {
         let e = &self.s.expiry;
         let date = date_string(day);
         if let Some(v) = e
@@ -151,25 +170,29 @@ impl SimBroker {
         {
             return Ok(*v);
         }
-        if e.from_quote && style == Style::Physical {
-            let m = self.market.as_ref();
-            if let Some(q) = m
-                .and_then(|m| m.ids.get(root))
-                .and_then(|id| m.and_then(|m| m.book.get(id)))
-                && let (Some(b), Some(a)) = (q.bid, q.ask)
-            {
-                return Ok((b + a) / 2);
-            }
+        if e.from_quote
+            && style == Style::Physical
+            && let Some((b, a)) = self.fresh(root, close).and_then(|q| q.bid.zip(q.ask))
+        {
+            return Ok((b + a) / 2);
         }
         Err(format!(
-            "no {} settlement price for {root} on {date}: add it to the settlement file{}",
+            "no {} settlement price for {root} on {date}: add it to the settlement file{} \
+             (or set expiry.settle = false)",
             style.kind(),
             if style == Style::Physical {
-                " or quote the underlying in this venue"
+                ", or quote the underlying in this venue within expiry.quote_max_age_s of the close"
             } else {
                 ""
             }
         ))
+    }
+
+    /// The venue's quote of `symbol`, if it is from within the profile's age of `at`.
+    fn fresh(&self, symbol: &str, at: u64) -> Option<super::Quote> {
+        let m = self.market.as_ref()?;
+        let q = m.ids.get(symbol).and_then(|id| m.book.get(id))?;
+        (q.ts + self.s.expiry.max_age >= at).then_some(*q)
     }
 
     /// The style `root` settles by.
@@ -182,28 +205,41 @@ impl SimBroker {
             .unwrap_or_else(|| default_style(root))
     }
 
+    /// The last ET day an option trades: the session before its expiry date for an
+    /// AM-settled root, else its expiry date. `None` for anything not an option.
+    pub(crate) fn last_trading_day(&self, symbol: &str) -> Option<i64> {
+        let (root, expiry) = crate::intent::occ(symbol)?;
+        if self.style(root) != Style::CashAm {
+            return Some(expiry);
+        }
+        Some(
+            (expiry - 14..expiry)
+                .rev()
+                .find(|d| self.session(*d).is_some())
+                .unwrap_or(expiry - 1),
+        )
+    }
+
+    /// Whether `symbol` is an option past its last trading day on ET day `day`.
+    pub(crate) fn expired(&self, symbol: &str, day: i64) -> bool {
+        self.last_trading_day(symbol).is_some_and(|last| last < day)
+    }
+
     /// Settles every option position expiring on ET day `day` (or before, missed),
-    /// then assigns early where the profile asks. `ts` is the session's close.
+    /// then assigns early where the profile asks: all worked out first, then
+    /// applied together. `ts` is the session's close.
     pub(super) fn settle_day(&mut self, day: i64, ts: u64) -> Result<(), String> {
-        let open: Vec<(String, i64)> = self
-            .pos
-            .iter()
-            .filter(|(_, p)| p.0 != 0)
-            .map(|(s, p)| (s.clone(), p.0))
-            .collect();
-        let mut done = Vec::new();
-        for (symbol, qty) in &open {
-            let Some((root, call, strike)) = contract(symbol) else {
+        let mut plan = Vec::new();
+        for (symbol, p) in &self.pos {
+            let qty = p.0;
+            let Some((root, call, strike)) = contract(symbol).filter(|_| qty != 0) else {
                 continue;
             };
-            let Some((_, expiry)) = crate::intent::occ(symbol) else {
+            let Some((_, expiry)) = crate::intent::occ(symbol).filter(|(_, e)| *e <= day) else {
                 continue;
             };
-            if expiry > day {
-                continue;
-            }
             let style = self.style(root);
-            let s = self.settlement(root, expiry, style)?;
+            let s = self.settlement(root, expiry, style, ts)?;
             let intrinsic = if call { s - strike } else { strike - s }.max(0);
             // Cash pays any intrinsic value; delivery needs the threshold.
             let floor = if style == Style::Physical {
@@ -213,85 +249,57 @@ impl SimBroker {
             };
             let kind = if intrinsic < floor {
                 "OPEXP"
-            } else if *qty > 0 {
+            } else if qty > 0 {
                 "OPEXC"
             } else {
                 "OPASN"
             };
-            done.push((
-                symbol.clone(),
-                *qty,
-                kind,
-                root.to_owned(),
-                call,
-                strike,
-                style,
-                s,
-                intrinsic,
-            ));
-        }
-        let mut out = Vec::new();
-        for (symbol, qty, kind, root, call, strike, style, s, intrinsic) in done {
-            self.close_option(&symbol);
-            if kind != "OPEXP" {
-                if style == Style::Physical {
-                    self.deliver(&root, call, strike, qty);
-                } else {
-                    self.cash += i128::from(qty) * 100 * i128::from(intrinsic);
-                }
-            }
-            out.push(Settled {
-                symbol,
+            let physical = style == Style::Physical && kind != "OPEXP";
+            plan.push(Settled {
+                symbol: symbol.clone(),
                 qty,
                 kind,
                 price: s,
+                deliver: physical.then(|| (root.to_owned(), call, strike)),
+                cash: if style == Style::Physical {
+                    0
+                } else {
+                    i128::from(qty) * 100 * i128::from(intrinsic)
+                },
             });
         }
         if self.s.expiry.early {
-            out.extend(self.assign_early(day)?);
+            plan.extend(self.plan_early(day, ts)?);
         }
-        for s in out {
-            self.activity(&s, ts);
+        for s in &plan {
+            self.pos.remove(&s.symbol);
+            if let Some((root, call, strike)) = &s.deliver {
+                self.deliver(root, *call, *strike, s.qty);
+            }
+            self.cash += s.cash;
+        }
+        for s in &plan {
+            self.activity(s, ts);
         }
         Ok(())
     }
 
-    /// Short options assigned before expiry, at the close of ET day `day`.
-    fn assign_early(&mut self, day: i64) -> Result<Vec<Settled>, String> {
+    /// Short options to assign before expiry at the close of ET day `day`: a price
+    /// is looked up only where a rule applies (a dividend tomorrow; the put rule).
+    fn plan_early(&self, day: i64, ts: u64) -> Result<Vec<Settled>, String> {
         let next = (day + 1..day + 8).find(|d| self.session(*d).is_some());
-        let mut hits = Vec::new();
-        let shorts: Vec<(String, i64)> = self
-            .pos
-            .iter()
-            .filter(|(_, p)| p.0 < 0)
-            .map(|(s, p)| (s.clone(), p.0))
-            .collect();
-        for (symbol, qty) in shorts {
-            let Some((root, call, strike)) =
-                contract(&symbol).map(|(r, c, k)| (r.to_owned(), c, k))
-            else {
+        let mut out = Vec::new();
+        for (symbol, p) in &self.pos {
+            let qty = p.0;
+            let Some((root, call, strike)) = contract(symbol).filter(|_| qty < 0) else {
                 continue;
             };
-            let root = root.as_str();
-            let style = self.style(root);
-            if style != Style::Physical {
-                continue; // European: no early exercise
-            }
-            let Some(bid) = self
-                .market
-                .as_ref()
-                .and_then(|m| m.ids.get(&symbol).and_then(|id| m.book.get(id)))
-                .and_then(|q| q.bid)
-            else {
-                continue;
-            };
-            let s = self.settlement(root, day, style)?;
-            let intrinsic = if call { s - strike } else { strike - s };
-            if intrinsic <= 0 {
+            // Settled today anyway, or European: no early exercise.
+            let expiring = crate::intent::occ(symbol).is_some_and(|(_, e)| e <= day);
+            if expiring || self.style(root) != Style::Physical {
                 continue;
             }
-            let extrinsic = bid - intrinsic;
-            let due = if call {
+            let threshold = if call {
                 let dividend = next.and_then(|d| {
                     self.s
                         .expiry
@@ -300,31 +308,32 @@ impl SimBroker {
                         .and_then(|m| m.get(&date_string(d)))
                         .copied()
                 });
-                dividend.is_some_and(|div| extrinsic < div)
+                let Some(div) = dividend else { continue };
+                div
             } else {
-                extrinsic < self.s.expiry.put_extrinsic
+                let Some(t) = self.s.expiry.put_extrinsic else {
+                    continue;
+                };
+                t
             };
-            if due {
-                hits.push((symbol, qty, root.to_owned(), call, strike, s));
+            // Its bid at the close; without a fresh one, it can't be judged.
+            let Some(bid) = self.fresh(symbol, ts).and_then(|q| q.bid) else {
+                continue;
+            };
+            let s = self.settlement(root, day, Style::Physical, ts)?;
+            let intrinsic = if call { s - strike } else { strike - s };
+            if intrinsic > 0 && bid - intrinsic < threshold {
+                out.push(Settled {
+                    symbol: symbol.clone(),
+                    qty,
+                    kind: "OPASN",
+                    price: s,
+                    deliver: Some((root.to_owned(), call, strike)),
+                    cash: 0,
+                });
             }
         }
-        let mut out = Vec::new();
-        for (symbol, qty, root, call, strike, s) in hits {
-            self.close_option(&symbol);
-            self.deliver(&root, call, strike, qty);
-            out.push(Settled {
-                symbol,
-                qty,
-                kind: "OPASN",
-                price: s,
-            });
-        }
         Ok(out)
-    }
-
-    /// Removes an option position.
-    fn close_option(&mut self, symbol: &str) {
-        self.pos.remove(symbol);
     }
 
     /// Exercise or assignment of `qty` contracts (signed: long +, short −) into
@@ -348,11 +357,15 @@ impl SimBroker {
             .n("transaction_time_ns", ts)
             .done();
         self.activities.push(raw.clone());
-        if self.down.is_none() {
-            self.updates.push(Update::Activity {
-                activity_type: s.kind.to_owned(),
-                raw,
-            });
+        let update = Update::Activity {
+            activity_type: s.kind.to_owned(),
+            raw,
+        };
+        // While the stream is down, held back and sent when it returns.
+        if self.down.is_some() {
+            self.held.push(update);
+        } else {
+            self.updates.push(update);
         }
     }
 }
@@ -427,7 +440,14 @@ mod tests {
     #[test]
     fn physical_options_exercise_and_assign_at_the_close() {
         let (mut sim, feed) = sim("{}");
-        push(&feed, 9, "SPY", 589_990_000_000, 590_010_000_000, T0);
+        push(
+            &feed,
+            9,
+            "SPY",
+            589_990_000_000,
+            590_010_000_000,
+            CLOSE - 30 * S,
+        );
         sim.pos.insert("SPY261005C00580000".into(), (2, 0));
         sim.pos.insert("SPY261005C00585000".into(), (-1, 0));
         sim.pos.insert("SPY261005P00570000".into(), (-3, 0));
@@ -511,7 +531,14 @@ mod tests {
             file.display().to_string()
         );
         let (mut sim, feed) = sim(&script);
-        push(&feed, 9, "SPY", 599_990_000_000, 600_010_000_000, T0);
+        push(
+            &feed,
+            9,
+            "SPY",
+            599_990_000_000,
+            600_010_000_000,
+            CLOSE - 30 * S,
+        );
         // Intrinsic 20: one bid 21.00 (extrinsic 1.00 < 1.80), one bid 23.00 (3.00).
         push(
             &feed,
@@ -519,7 +546,7 @@ mod tests {
             "SPY261016C00580000",
             21_000_000_000,
             21_100_000_000,
-            T0,
+            CLOSE - 30 * S,
         );
         push(
             &feed,
@@ -527,7 +554,7 @@ mod tests {
             "SPY261120C00580000",
             23_000_000_000,
             23_100_000_000,
-            T0,
+            CLOSE - 30 * S,
         );
         sim.pos.insert("SPY261016C00580000".into(), (-1, 0));
         sim.pos.insert("SPY261120C00580000".into(), (-1, 0));
@@ -538,5 +565,35 @@ mod tests {
         );
         assert_eq!(sim.pos.get("SPY").map(|p| p.0), Some(-100));
         assert_eq!(sim.pos.get("SPY261120C00580000").map(|p| p.0), Some(-1));
+    }
+
+    /// A quote from 10:00 is no settlement price at 16:00, and a price that can't be
+    /// had changes nothing: no position removed, no cash moved, no activity sent.
+    #[test]
+    fn a_stale_quote_settles_nothing() {
+        let (mut sim, feed) = sim("{}");
+        push(&feed, 9, "SPY", 589_990_000_000, 590_010_000_000, T0);
+        sim.pos.insert("SPY261005C00580000".into(), (1, 0));
+        sim.pos.insert("SPY261005P00570000".into(), (-1, 0));
+        let cash = sim.cash;
+        let e = sim.advance(CLOSE + S).unwrap_err();
+        assert!(e.message.contains("quote_max_age_s"), "{}", e.message);
+        assert_eq!(sim.pos.len(), 2);
+        assert_eq!(sim.cash, cash);
+        assert!(kinds(&mut sim).is_empty());
+    }
+
+    /// An AM-settled root's last trading day is the session before its expiry date:
+    /// on that Friday its monthly can't be ordered, VIX weeklies settle AM too.
+    #[test]
+    fn am_roots_stop_trading_the_session_before_expiry() {
+        let (sim, _feed) = sim("{}");
+        let friday = crate::safety::et_day(T0) + 4; // 2026-10-09
+        let thursday = friday - 1;
+        assert_eq!(sim.last_trading_day("SPX261009C05800000"), Some(thursday));
+        assert!(sim.expired("SPX261009C05800000", friday));
+        assert!(!sim.expired("SPXW261009C05800000", friday));
+        assert!(!sim.expired("SPY261009C00580000", friday));
+        assert_eq!(super::default_style("VIXW"), super::Style::CashAm);
     }
 }

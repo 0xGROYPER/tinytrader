@@ -395,3 +395,46 @@ fn an_order_sent_but_not_counted_ends_the_run() {
         "{o:?}"
     );
 }
+
+/// The session's market calendar reaches its venues: a run day the calendar
+/// doesn't list (a holiday) has no session, so the toy's order is refused as
+/// outside it, and the record pins the calendar.
+#[test]
+fn the_calendar_closes_a_holiday() {
+    let base = root("holiday");
+    let j = base.join("job");
+    std::fs::create_dir_all(&j).unwrap();
+    job(&j, 0);
+    let cal = base.join("calendar.json");
+    std::fs::write(
+        &cal,
+        r#"{"days":[{"date":"2026-10-26","open":"09:30","close":"16:00"},{"date":"2026-10-28","open":"09:30","close":"16:00"}]}"#,
+    )
+    .unwrap();
+    let config = config(&j, 30).replacen(
+        "days = [\"2026-10-27\"]",
+        &format!(
+            "days = [\"2026-10-27\"]\ncalendar = {:?}",
+            cal.display().to_string()
+        ),
+        1,
+    );
+    let dir = base.join("run");
+    let s = Session::start(&config, &dir, [127, 0, 0, 1].into()).unwrap();
+    let control = s.ready().control;
+    let strategy = std::thread::spawn(move || toy(control, Fault::None));
+    let o = s.run().unwrap();
+    let seen = strategy.join().unwrap();
+    assert_eq!(o.status, "complete", "{o:?}");
+    assert!(seen.fills.is_empty());
+    let journal =
+        std::fs::read_to_string(dir.join("venues/options/journal/2026-10-27.jsonl")).unwrap();
+    assert!(journal.contains("sim_market_closed"), "{journal}");
+    let rec: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("run.json")).unwrap()).unwrap();
+    assert_eq!(rec["calendar_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        rec["venues"][0]["script"]["calendar"][0]["date"],
+        "2026-10-26"
+    );
+}
