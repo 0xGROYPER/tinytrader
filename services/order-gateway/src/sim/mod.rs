@@ -22,7 +22,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 /// The simulator's model version, in every pin.
-pub const MODEL: &str = "tinytrader-sim/2";
+pub const MODEL: &str = "tinytrader-sim/3";
+
+/// Whether `symbol` is an option whose expiry is before ET day `day`.
+pub(crate) fn expired(symbol: &str, day: i64) -> bool {
+    crate::intent::occ(symbol).is_some_and(|(_, expiry)| expiry < day)
+}
 
 /// Nanodollars per cent.
 const CENT: i64 = 10_000_000;
@@ -75,6 +80,10 @@ pub(crate) struct Market {
     book: HashMap<u32, Quote>,
     /// Instruments a quote record other than `tcbbo` has given a book.
     quoted: std::collections::HashSet<u32>,
+    /// The ET day last checked for expired contracts.
+    day: i64,
+    /// Each instrument id's symbol, the reverse of `ids`.
+    names: HashMap<u32, String>,
     /// Fed and clocked by a session in process: the market time, shared with the feed.
     fed: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     ids: HashMap<String, u32>,
@@ -148,6 +157,8 @@ impl SimBroker {
             src,
             book: HashMap::new(),
             quoted: std::collections::HashSet::new(),
+            day: 0,
+            names: HashMap::new(),
             fed: None,
             ids: HashMap::new(),
             actions: Vec::new(),
@@ -171,6 +182,8 @@ impl SimBroker {
             src,
             book: HashMap::new(),
             quoted: std::collections::HashSet::new(),
+            day: 0,
+            names: HashMap::new(),
             fed: Some(floor),
             ids: HashMap::new(),
             actions: Vec::new(),
@@ -504,6 +517,14 @@ impl Broker for SimBroker {
             .n("strategy_latency_ms", self.s.strategy_latency_ms)
             .s("fee_per_contract", &fmt_cents(self.s.fee_cents))
             .s(
+                "fill_on",
+                if self.s.next_quote {
+                    "next_quote"
+                } else {
+                    "book"
+                },
+            )
+            .s(
                 "size_cap",
                 if self.s.size_cap { "displayed" } else { "none" },
             )
@@ -548,6 +569,14 @@ impl Broker for SimBroker {
             _ => {}
         }
         if let Some(m) = &self.market {
+            let today = et_day(self.now);
+            if intent.legs.iter().any(|l| expired(&l.symbol, today)) {
+                return SubmitResult::Rejected(error(
+                    422,
+                    "sim_expired_instrument",
+                    "an option leg has expired",
+                ));
+            }
             if !intent.legs.iter().all(|l| m.ids.contains_key(&l.symbol)) {
                 return SubmitResult::Rejected(error(
                     422,
@@ -883,6 +912,7 @@ impl SimBroker {
             match (rec, act) {
                 (_, Some((k, t))) if rec.is_none_or(|r| t < r) => {
                     let (_, _, a) = m.actions.remove(k);
+                    self.roll_day(t);
                     self.now = self.now.max(t);
                     self.act(a);
                 }
@@ -892,6 +922,7 @@ impl SimBroker {
                     // combo never fills on some legs' new quotes and others' old ones,
                     // nor on a quote replaced within the same instant.
                     let Some((t, r)) = m.src.next() else { break };
+                    self.roll_day(t);
                     self.now = self.now.max(t);
                     let mut touched = Vec::new();
                     let mut next = Some(r);
@@ -908,6 +939,7 @@ impl SimBroker {
                 _ => break,
             }
         }
+        self.roll_day(to);
         self.now = self.now.max(to);
         if let Some(floor) = self.market.as_ref().and_then(|m| m.fed.as_ref()) {
             floor.store(self.now, std::sync::atomic::Ordering::SeqCst);
@@ -915,12 +947,57 @@ impl SimBroker {
         Ok(())
     }
 
+    /// At the first market time of a new ET day, before anything of that day is
+    /// applied: every quote is cleared, so nothing fills on yesterday's book before
+    /// today's first quote; and contracts past their expiry are forgotten, as their
+    /// ids may name other contracts by now. Mappings stay: they arrive the evening
+    /// before.
+    fn roll_day(&mut self, t: u64) {
+        let today = et_day(t);
+        let Some(m) = &mut self.market else { return };
+        if m.day >= today {
+            return;
+        }
+        if m.day != 0 {
+            m.book.clear();
+            m.quoted.clear();
+        }
+        m.day = today;
+        let gone: Vec<(String, u32)> = m
+            .ids
+            .iter()
+            .filter(|(s, _)| expired(s, today))
+            .map(|(s, i)| (s.clone(), *i))
+            .collect();
+        for (s, i) in gone {
+            m.ids.remove(&s);
+            m.names.remove(&i);
+            m.book.remove(&i);
+            m.quoted.remove(&i);
+        }
+    }
+
     /// Applies one record to the book; a quote returns its instrument id.
     fn apply(&mut self, r: Rec) -> Option<u32> {
         let m = self.market.as_mut()?;
         match r {
             Rec::Def { iid, symbol } => {
-                m.ids.insert(symbol, iid);
+                // OPRA assigns instrument ids per day: an id can name another contract
+                // tomorrow, and a contract another id. Whatever an id meant before is
+                // forgotten, its quote included, so no order fills against another
+                // contract's book.
+                if let Some(was) = m.names.insert(iid, symbol.clone()).filter(|w| *w != symbol) {
+                    // The id named another contract: forget that one and its quote.
+                    m.ids.remove(&was);
+                    m.book.remove(&iid);
+                    m.quoted.remove(&iid);
+                }
+                if let Some(old) = m.ids.insert(symbol, iid).filter(|old| *old != iid) {
+                    // The contract had another id: that id's quote isn't its own now.
+                    m.names.remove(&old);
+                    m.book.remove(&old);
+                    m.quoted.remove(&old);
+                }
                 None
             }
             Rec::Quote {
@@ -980,7 +1057,11 @@ impl SimBroker {
                 if let Some((_, close)) = self.session(et_day(self.now)) {
                     self.schedule(close.max(self.now), Action::Expire(i));
                 }
-                self.evaluate(i);
+                // fill_on = "next_quote": wait for the first quote after activation, as
+                // a bar's quotes are the past by the time an order reaches the venue.
+                if !self.s.next_quote {
+                    self.evaluate(i);
+                }
             }
             Action::Cancel(i) if self.open(i) => self.set_status(i, "canceled"),
             Action::Expire(i) if self.open(i) => self.set_status(i, "expired"),
