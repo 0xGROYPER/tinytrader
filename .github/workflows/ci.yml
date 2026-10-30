@@ -75,6 +75,25 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
+  python-client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc --version
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: Build the session and its fixture
+        run: cargo build -p session --bins --examples --locked
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install the client
+        run: pip install ./clients/python
+      - name: Test the client against a session
+        working-directory: clients/python
+        run: python -W error::ResourceWarning -m unittest discover -s tests -v
+
   fmt:
     runs-on: ubuntu-latest
     timeout-minutes: 10

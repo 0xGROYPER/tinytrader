@@ -62,7 +62,7 @@ Sources are read through the store producer (`libs/producer`). A day not held is
 |---|---|
 | strategy → session | `{"type":"hello","protocol":"tinytrader.session/1","strategy":NAME,"revision":REV}` |
 | session → strategy | `{"type":"welcome","session","mode":"backtest","data":ADDR,"orders":{VENUE:{"addr","client","token","prefix"}},"days","strategy_latency_ms"}` |
-| strategy → session | `{"type":"ready","as_of":0,"sent":{}}`, once joined to the data stream and every venue |
+| strategy → session | `{"type":"ready","as_of":0,"sent":{},"timers":[…]}`, once joined to the data stream and every venue, with its first timers |
 | session → strategy | `{"type":"step","step":N,"as_of":TS,"records":K,"timers":[ID],"reports":{VENUE:SEQ}}` |
 | strategy → session | `{"type":"ready","as_of":TS,"sent":{VENUE:COUNT},"timers":[{"at":TS,"id":ID}]}` |
 | session → strategy | `{"type":"end","status","reason","audit","steps","records","reports":{VENUE:SEQ}}` |

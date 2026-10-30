@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinytrader-client"
+version = "0.1.0"
+description = "A strategy as a client of a tinytrader session (decision 0022): the session's lockstep, its data stream decoded with databento-dbn, and its order gateways, behind one class"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["databento-dbn>=0.70"]
+
+[tool.setuptools]
+packages = ["tinytrader_client"]

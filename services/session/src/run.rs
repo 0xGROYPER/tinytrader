@@ -404,19 +404,31 @@ impl Session {
             .encode(&self.metadata())
             .map_err(|e| e.to_string())?;
         out.flush().map_err(|e| e.to_string())?;
-        match protocol::read(&mut reader)? {
-            FromStrategy::Ready { as_of: 0, sent, .. } if sent.iter().all(|(_, n)| *n == 0) => {}
+        let first_timers = match protocol::read(&mut reader)? {
+            FromStrategy::Ready {
+                as_of: 0,
+                sent,
+                timers,
+            } if sent.iter().all(|(_, n)| *n == 0) => timers,
             _ => {
                 return Err(
                     "the strategy's first ready must be ready{as_of: 0}, sending nothing".into(),
                 );
             }
-        }
+        };
 
         let mut sent: BTreeMap<String, u64> =
             self.venues.iter().map(|v| (v.name.clone(), 0)).collect();
         let mut timers: BTreeMap<(u64, u64), String> = BTreeMap::new();
         let mut timer_seq = 0_u64;
+        for (at, id) in first_timers {
+            if at == 0 || at > last {
+                return Err(format!("timer {id} at {at} is outside the run"));
+            }
+            timer_seq += 1;
+            timers.insert((at, timer_seq), id);
+        }
+        audit.update(format!("start {timers:?}\n"));
         let mut as_of = 0_u64;
         loop {
             let next_rec = self
