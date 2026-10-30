@@ -828,3 +828,93 @@ fn a_folder_never_follows_a_link_outside_it() {
     let e = drain(&mut p).err().unwrap();
     assert!(e.contains("outside the folder"), "{e}");
 }
+
+/// A job bought for a day's hours (its query starts at 13:30Z) holds a partial day.
+#[test]
+fn a_job_of_some_hours_holds_partial_days() {
+    let dir = tmp("hours");
+    manifest_job(
+        &dir,
+        &[(
+            "opra-pillar-20261027.cbbo-1m.dbn.zst",
+            day_file(D27, &[0], true),
+        )],
+        "parent",
+        true,
+    );
+    std::fs::write(
+        dir.join("metadata.json"),
+        r#"{"query":{"dataset":"OPRA.PILLAR","schema":"cbbo-1m","symbols":["SPY.OPT"],"stype_in":"parent","start":"2026-10-27T13:30:00Z","end":"2026-10-27T20:15:00Z"}}"#,
+    )
+    .unwrap();
+    let mut p = StoreProducer::new(
+        Box::new(Folder::job(&dir).unwrap()),
+        query(),
+        &days(&["2026-10-27"]),
+    )
+    .unwrap();
+    let got = drain(&mut p).unwrap();
+    assert_eq!(got[0], Out::Sys("store-partial day=2026-10-27".into()));
+}
+
+/// A recording carries its mappings and notices in the stream, not the header:
+/// they pass, inside the day's window.
+#[test]
+fn in_stream_mappings_and_notices_pass_the_filter() {
+    let meta = Metadata::builder()
+        .dataset("OPRA.PILLAR")
+        .schema(Some(Schema::Cbbo1M))
+        .start(D27)
+        .stype_in(Some(SType::Parent))
+        .stype_out(SType::InstrumentId)
+        .symbols(vec!["SPY.OPT".into()])
+        .build();
+    let mut out = Vec::new();
+    {
+        let mut e = Encoder::new(&mut out, &meta).unwrap();
+        let t = D27 + 14 * 3_600_000_000_000;
+        let m = SymbolMappingMsg::new(
+            11,
+            t - 1,
+            SType::Parent,
+            "SPY.OPT",
+            SType::RawSymbol,
+            "SPY   261027C00580000",
+            0,
+            0,
+        )
+        .unwrap();
+        e.encode_record(&m).unwrap();
+        e.encode_record(&SystemMsg::new(t, None, "upstream-gap gap_from=1 gap_to=2").unwrap())
+            .unwrap();
+        e.encode_record(&CbboMsg {
+            hd: RecordHeader::new::<CbboMsg>(rtype::CBBO_1M, 30, 11, u64::MAX),
+            ts_recv: t,
+            ..CbboMsg::default_for_schema(Schema::Cbbo1M)
+        })
+        .unwrap();
+        // The next day's notice is outside the window.
+        e.encode_record(&SystemMsg::new(D27 + DAY + 1, None, "upstream-down since=1").unwrap())
+            .unwrap();
+    }
+    let root = tmp("instream");
+    let dir = root.join("Databento/OPRA.PILLAR/SPY.OPT/cbbo-1m");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("2026-10-27.dbn"), out).unwrap();
+    let mut p = StoreProducer::new(
+        Box::new(Folder::layout(&root)),
+        query(),
+        &days(&["2026-10-27"]),
+    )
+    .unwrap();
+    let got = drain(&mut p).unwrap();
+    let t = D27 + 14 * 3_600_000_000_000;
+    assert_eq!(
+        got,
+        [
+            Out::Map(11, "SPY.OPT".into(), "SPY   261027C00580000".into()),
+            Out::Sys("upstream-gap gap_from=1 gap_to=2".into()),
+            Out::Quote(t, 11),
+        ]
+    );
+}

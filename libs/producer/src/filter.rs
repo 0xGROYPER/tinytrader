@@ -2,9 +2,11 @@
 //! window. A batch file can hold other days (a range file listed on each of its
 //! days) and a folder can hold sidecars, so neither is trusted to hold only the
 //! day. Companion records (an extension record after its trade) go with the
-//! record before them.
+//! record before them. Symbol mappings, system and error messages in the
+//! stream (a recording carries them in-stream, as the relay sends them) pass
+//! too, inside the window.
 use dbn::decode::DecodeRecordRef;
-use dbn::{RType, RecordBuf, RecordRef};
+use dbn::{RType, RecordBuf, RecordRef, rtype};
 use tinytrader_dbn::Timing;
 
 pub(crate) struct DayFilter<D> {
@@ -38,9 +40,12 @@ impl<D: DecodeRecordRef> DecodeRecordRef for DayFilter<D> {
             let keep = match tinytrader_dbn::timing(&rec, 0).map_err(dbn::Error::decode)? {
                 Timing::Companion => self.keeping,
                 Timing::At(ts) | Timing::Flagged(ts) => {
-                    self.keeping = rec.header().rtype == self.rtype
-                        && ts >= self.window.0
-                        && ts < self.window.1;
+                    let rtype = rec.header().rtype;
+                    let wanted = rtype == self.rtype
+                        || rtype == rtype::SYMBOL_MAPPING
+                        || rtype == rtype::SYSTEM
+                        || rtype == rtype::ERROR;
+                    self.keeping = wanted && ts >= self.window.0 && ts < self.window.1;
                     self.keeping
                 }
             };

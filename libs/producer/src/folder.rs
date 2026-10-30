@@ -86,17 +86,51 @@ fn batch_name(name: &str, schema: &str) -> Option<((String, String), Option<Stri
     Some((days, symbol))
 }
 
-/// A query time: ns, or an RFC 3339 / `YYYY-MM-DD` text (its date only).
+/// A query time, in ns: a number, or text: digits, `YYYY-MM-DD`, or RFC 3339
+/// (`2026-10-27T13:30:00Z`, fractions and `±HH:MM` offsets allowed).
 fn query_ns(v: &Value) -> Option<u64> {
     if let Some(n) = v.as_u64() {
         return Some(n);
     }
-    let t = v.as_str()?;
-    let n: String = t.chars().take(10).collect();
-    if t.len() > 10 && !t[10..].trim_start_matches('T').starts_with("00:00:00") {
+    let t = v.as_str()?.trim();
+    if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
+        return t.parse().ok();
+    }
+    let day = crate::day_ns(t.get(..10)?)?;
+    let rest = &t[10..];
+    if rest.is_empty() {
+        return Some(day);
+    }
+    let rest = rest.strip_prefix(['T', 't', ' '])?;
+    let num = |s: &str| s.parse::<u64>().ok();
+    let (hms, zone) = match rest.find(['Z', 'z', '+', '-']) {
+        Some(i) => rest.split_at(i),
+        None => return None,
+    };
+    let (hms, frac) = hms.split_once('.').unwrap_or((hms, ""));
+    let mut it = hms.split(':');
+    let h = num(it.next()?)?;
+    let m = num(it.next()?)?;
+    let sec = it.next().map_or(Some(0), num)?;
+    if h > 23 || m > 59 || sec > 60 || it.next().is_some() {
         return None;
     }
-    crate::day_ns(&n)
+    let frac_ns = if frac.is_empty() {
+        0
+    } else {
+        let digits: String = frac.chars().take(9).collect();
+        num(&digits)? * 10_u64.pow(u32::try_from(9 - digits.len()).ok()?)
+    };
+    let offset: i64 = match zone {
+        "Z" | "z" => 0,
+        z => {
+            let sign = if z.starts_with('-') { -1 } else { 1 };
+            let (oh, om) = z[1..].split_once(':')?;
+            sign * i64::try_from(num(oh)? * 3600 + num(om)? * 60).ok()?
+        }
+    };
+    let local = i64::try_from(day + (h * 3600 + m * 60 + sec) * 1_000_000_000 + frac_ns).ok()?;
+    u64::try_from(local - offset * 1_000_000_000).ok()
 }
 
 impl Folder {
@@ -131,10 +165,11 @@ impl Folder {
         };
         let schema = text("schema");
         let contracts = q["stype_in"].as_str() == Some("raw_symbol");
-        let window = (
-            query_ns(&q["start"]).unwrap_or(0),
-            query_ns(&q["end"]).unwrap_or(u64::MAX),
-        );
+        let bound = |k: &str, open: u64| match &q[k] {
+            Value::Null => Ok(open),
+            v => query_ns(v).ok_or_else(|| format!("job {id}: can't read the query's {k}: {v}")),
+        };
+        let window = (bound("start", 0)?, bound("end", u64::MAX)?);
         let manifest = read_json(&root.join("manifest.json"))?;
         let mut files = Vec::new();
         for f in manifest["files"].as_array().into_iter().flatten() {
@@ -343,5 +378,34 @@ impl Holdings for Folder {
 
     fn local(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::query_ns;
+    use serde_json::json;
+
+    #[test]
+    fn query_times_parse_in_every_form() {
+        let d27 = 1_793_059_200_000_000_000_u64;
+        let h = 3_600_000_000_000_u64;
+        assert_eq!(query_ns(&json!(d27)), Some(d27));
+        assert_eq!(query_ns(&json!(d27.to_string())), Some(d27));
+        assert_eq!(query_ns(&json!("2026-10-27")), Some(d27));
+        assert_eq!(
+            query_ns(&json!("2026-10-27T13:30:00Z")),
+            Some(d27 + 13 * h + h / 2)
+        );
+        assert_eq!(
+            query_ns(&json!("2026-10-27T13:30:00.5Z")),
+            Some(d27 + 13 * h + h / 2 + 500_000_000)
+        );
+        assert_eq!(
+            query_ns(&json!("2026-10-27T09:30:00-04:00")),
+            Some(d27 + 13 * h + h / 2)
+        );
+        assert_eq!(query_ns(&json!("2026-10-27T13:30")), None);
+        assert_eq!(query_ns(&json!("not a time")), None);
     }
 }
