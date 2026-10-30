@@ -52,6 +52,8 @@ impl SimBroker {
             limit
         };
         if net > limit {
+            // Resting: under the queue model, it joins the queue at its price.
+            self.join_queue(i);
             return;
         }
         let remaining = o.qty - o.filled;

@@ -400,6 +400,15 @@ The script also sets the account fields (status, options level, cash, blocked fl
 
 All three are in the pin with the seed. From `tinytrader-sim/6`, runs with settlement or a liquidation also hash differently from `/5`: their activities are in the session's audit. `latency_ms` (5 ms by default) is the venue's; `strategy_latency_ms` (0 by default) is the strategy's declared latency, set by the session that clocks the simulator (decision 0022, section 2). Both are constants in the pin, at most an hour each. Scripted mode pins `strategy_latency_ms` but has no clock for it to delay.
 
+**Queue model** (`queue = {"ahead", "fill_on_print"}`, off by default). With trade prints (`tcbbo`), a limit order resting behind the touch fills only once the trading ahead of it has happened:
+- A marketable order still fills at the touch. An order that rests joins a queue on each leg, at its price: a single's limit; a combo leg's implied price, the net limit split over the legs in proportion to their mids. Ahead of it is `ahead` (a fraction, `"1"` by default) of the size displayed on its side when it joins, if its price is at or behind the touch, and nothing if it is inside the spread. It keeps its place if the book moves.
+- A print through a leg's price (below a buy's, above a sell's) clears the leg. A print at its price (within half a cent) clears it once the prints' sizes have used up the queue ahead, unless `fill_on_print = "through"`, under which only prints through count.
+- A single fills its remaining quantity at its limit when its leg clears. A combo fills, each leg at its implied price, when every leg has cleared within the same minute; a leg cleared in an earlier minute must clear again.
+- Each leg's price, size ahead and minute cleared are in the order's `broker_raw.order.queue`, on its events and queries.
+- Not modelled: market impact, partial fills from prints smaller than the order, and orders joining the queue behind this one.
+
+The settings are in the pin.
+
 **Fill model.**
 - *When an order may fill:* with `fill_on = "book"` (the default), an order is evaluated against the book standing when it activates, then after each instant that touches it. With `fill_on = "next_quote"`, it waits for the first quote after it activates. That suits bar data (`cbbo-1m`): a bar's quotes are what the strategy decided on, already in the past when the order arrives, so the fill comes from the next bar.
 - *Single buy limit L:* fillable when the ask is present and ask ≤ L. It fills at the **ask**, which is the price improvement up to the touch.
@@ -429,7 +438,7 @@ All three are in the pin with the seed. From `tinytrader-sim/6`, runs with settl
 
 **Reproducibility pin.** `pins` contains:
 - the quote source and its manifest sha256 or relay stream id
-- the simulator model version (`tinytrader-sim/6`; `/6` adds report latency and seeded jitter; `/5` adds the venue rules; `/4` settles expiries and charges stock its own fee; `/2` brought definitions from symbol mappings, `cbbo`, `bbo` and `tcbbo` books, one book per instant and the strategy's latency; `/3` forgets expired contracts and reused instrument ids)
+- the simulator model version (`tinytrader-sim/7`; `/7` adds the queue model; `/6` adds report latency and seeded jitter; `/5` adds the venue rules; `/4` settles expiries and charges stock its own fee; `/2` brought definitions from symbol mappings, `cbbo`, `bbo` and `tcbbo` books, one book per instant and the strategy's latency; `/3` forgets expired contracts and reused instrument ids)
 - the latencies
 - the fee profile
 - `size_cap`
