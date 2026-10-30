@@ -16,7 +16,8 @@ fn main() -> Result<(), String> {
     let dir = PathBuf::from(std::env::args().nth(1).ok_or("usage: fixture DIR")?);
     let job = dir.join("job");
     std::fs::create_dir_all(&job).map_err(|e| e.to_string())?;
-    let date = time::Date::from_calendar_date(2026, time::Month::October, 27).map_err(|e| e.to_string())?;
+    let date = time::Date::from_calendar_date(2026, time::Month::October, 27)
+        .map_err(|e| e.to_string())?;
     let meta = Metadata::builder()
         .dataset("OPRA.PILLAR")
         .schema(Some(Schema::Cbbo1M))
@@ -50,8 +51,12 @@ fn main() -> Result<(), String> {
         }
     }
     let name = "opra-pillar-20261027.cbbo-1m.dbn.zst";
-    let sha: String = Sha256::digest(&out).iter().map(|b| format!("{b:02x}")).collect();
-    let write = |p: PathBuf, b: &[u8]| std::fs::write(&p, b).map_err(|e| format!("{}: {e}", p.display()));
+    let sha: String = Sha256::digest(&out)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let write =
+        |p: PathBuf, b: &[u8]| std::fs::write(&p, b).map_err(|e| format!("{}: {e}", p.display()));
     write(job.join(name), &out)?;
     write(
         job.join("metadata.json"),

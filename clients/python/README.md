@@ -19,7 +19,7 @@ run(MyStrategy())   # TT_SESSION, or run(s, "127.0.0.1:PORT")
 **`ctx`** gives you:
 - `now`, the session's time in ns;
 - `book.quote(symbol)`, `book.chain(root, expiry)` and `book.expiries(root)`: the last quote per instrument, with its time;
-- orders: `submit(intent)`, which returns the client order id, and `cancel(cid)`;
+- orders: `submit(intent)`, which returns the client order id, or `None` when the gateway refuses the order (`last_response` says why), and `cancel(cid)`;
 - queries: `positions()`, `account()` and `open_orders()`;
 - `record(series, value)`, collected in what `run` returns.
 
@@ -28,6 +28,10 @@ Name the venue when a session has several.
 **Intents:**
 - `single(symbol, side, effect, qty, limit)`;
 - `combo([(symbol, ratio, side, effect), …], qty, net_limit)`, where a credit is negative.
+
+Sessions take several holdings per source as a list, read in order: `holdings = ["job:A", "job:B"]`.
+
+Limits are whole cents: a price that isn't, or is zero, raises `ValueError` rather than being rounded. `every` keeps fixed hours: it doesn't know early closes, so check the time in `on_timer`. A gateway that cuts the client off as a slow consumer ends the run. The client doesn't resume its gateway connections.
 
 The gateway has no `replace`, so cancel and resubmit, waiting for the `canceled` event in between. It refuses market orders that open a position, so open with marketable limits.
 

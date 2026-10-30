@@ -3,9 +3,22 @@ decimal strings; the gateway refuses a market order that opens a position."""
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 
-def _price(p: float | str) -> str:
-    return p if isinstance(p, str) else f"{p:.2f}"
+
+def _price(p: float | str | Decimal) -> str:
+    """A price in cents, exactly: one that isn't a whole number of cents, or is
+    zero, is refused rather than rounded."""
+    try:
+        d = Decimal(str(p))
+    except InvalidOperation as e:
+        raise ValueError(f"not a price: {p!r}") from e
+    cents = d.quantize(Decimal("0.01"))
+    if cents != d:
+        raise ValueError(f"price {p!r} isn't a whole number of cents")
+    if cents == 0:
+        raise ValueError("a limit of 0 isn't a price")
+    return str(cents)
 
 
 def _instrument(symbol: str) -> dict:

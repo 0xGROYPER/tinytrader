@@ -918,3 +918,44 @@ fn in_stream_mappings_and_notices_pass_the_filter() {
         ]
     );
 }
+
+/// Two jobs read as one source: each day from the first that holds it, and a day
+/// neither holds is a gap naming both reasons.
+#[test]
+fn layered_holdings_read_each_day_from_the_first_that_holds_it() {
+    let a = tmp("layer-a");
+    job(&a, true, false); // 10-27 and 10-29
+    let b = tmp("layer-b");
+    manifest_job(
+        &b,
+        &[(
+            "opra-pillar-20261028.cbbo-1m.dbn.zst",
+            day_file(D27 + DAY, &[3], true),
+        )],
+        "parent",
+        true,
+    );
+    let h = tinytrader_producer::Layered::new(vec![
+        Box::new(Folder::job(&a).unwrap()),
+        Box::new(Folder::job(&b).unwrap()),
+    ]);
+    let d = days(&["2026-10-27", "2026-10-28", "2026-10-29", "2026-10-30"]);
+    let mut p = StoreProducer::new(Box::new(h), query(), &d).unwrap();
+    let got = drain(&mut p).unwrap();
+    let t = |d: u64, m: u64| d + 14 * 3_600_000_000_000 + m * 60_000_000_000;
+    assert_eq!(
+        quotes(&got),
+        [
+            (t(D27, 0), 11),
+            (t(D27, 0), 12),
+            (t(D27, 1), 11),
+            (t(D27, 1), 12),
+            (t(D27 + DAY, 3), 11),
+            (t(D27 + DAY, 3), 12),
+            (t(D27 + 2 * DAY, 0), 11),
+            (t(D27 + 2 * DAY, 0), 12),
+        ]
+    );
+    assert!(got.iter().any(|o| matches!(o, Out::Sys(s) if s.starts_with("store-gap day=2026-10-30") && s.contains("; "))));
+    assert!(p.pins().iter().take(3).all(|d| d.files[0].verified));
+}

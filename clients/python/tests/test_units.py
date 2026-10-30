@@ -26,6 +26,11 @@ class Units(unittest.TestCase):
         c = combo([("SPY261027P00570000", 1, "sell", "open"), ("SPY261027P00565000", 1, "buy", "open")], 2, -0.4)
         self.assertEqual(c["limit_price"], "-0.40")
         self.assertEqual(c["legs"][0]["instrument"]["class"], "option")
+        self.assertEqual(single("SPY", "buy", "open", 1, "1.25")["limit_price"], "1.25")
+        with self.assertRaises(ValueError):
+            single("SPY", "buy", "open", 1, 1.234)
+        with self.assertRaises(ValueError):
+            combo([("SPY261027P00570000", 1, "sell", "open")], 1, -0.004)
 
 
 if __name__ == "__main__":

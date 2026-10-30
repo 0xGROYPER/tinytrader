@@ -35,6 +35,7 @@ seed = 0                              # recorded; the first models use no random
 [[sources]]                           # in rank order: ties in time go to the earlier
 name = "opra"
 holdings = "store:http://127.0.0.1:9120"   # or "job:DIR" (a databento-jobs cache job), "folder:DIR" (the store's layout)
+                                      # or a list, each day read from the first that holds it
 provider = "databento"
 dataset = "OPRA.PILLAR"
 symbol = "SPY.OPT"

@@ -9,7 +9,7 @@ description = "A strategy as a client of a tinytrader session (decision 0022): t
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = ["databento-dbn>=0.70"]
+dependencies = ["databento-dbn>=0.70,<1"]
 
 [tool.setuptools]
 packages = ["tinytrader_client"]

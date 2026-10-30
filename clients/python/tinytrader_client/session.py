@@ -13,10 +13,12 @@ Each step, in this order:
 
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import json
 import os
 import socket
+import threading
 import time
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -43,9 +45,12 @@ class _Lines:
         host, port = addr.rsplit(":", 1)
         self.sock = socket.create_connection((host, int(port)))
         self.file = self.sock.makefile("r", encoding="utf-8")
+        self.lock = threading.Lock()
 
     def send(self, msg: dict) -> None:
-        self.sock.sendall((json.dumps(msg, separators=(",", ":")) + "\n").encode())
+        line = (json.dumps(msg, separators=(",", ":")) + "\n").encode()
+        with self.lock:
+            self.sock.sendall(line)
 
     def close(self) -> None:
         self.file.close()
@@ -75,6 +80,7 @@ class _Venue:
         self.pending: list[dict] = []
         self.requests = 0
         self.orders = 0
+        self.used: set[str] = set()
         self.last_send = time.monotonic()
 
     def _send(self, msg: dict) -> None:
@@ -118,6 +124,16 @@ class _Venue:
             self._send({"type": "heartbeat"})
 
 
+def _heartbeats(venues: dict[str, _Venue], stop: threading.Event) -> None:
+    """Keeps every gateway connection alive however long a step's Python takes."""
+    while not stop.wait(HEARTBEAT_S / 2):
+        for v in venues.values():
+            try:
+                v.keep_alive()
+            except OSError:
+                return
+
+
 class Context:
     """What a strategy acts through: the time, the book, its venues and its timers."""
 
@@ -135,6 +151,8 @@ class Context:
             0,
         )
         self.series: list[dict] = []
+        # The last gateway response to submit, for a refusal's reason.
+        self.last_response: dict | None = None
 
     @property
     def venues(self) -> list[str]:
@@ -148,16 +166,24 @@ class Context:
         return self._venues[name]
 
     # Orders.
-    def submit(self, intent: dict, venue: str | None = None, tag: str = "") -> str:
-        """Submits an order (see :mod:`tinytrader_client.intent`); returns its
-        client order id. It takes effect after this step."""
+    def submit(self, intent: dict, venue: str | None = None, tag: str = "") -> str | None:
+        """Submits an order (see :mod:`tinytrader_client.intent`). Returns its client
+        order id, or ``None`` when the gateway refuses it (a risk rule, a closed
+        market): ``last_response`` then says why. It takes effect after this step."""
         v = self._venue(venue)
         v.orders += 1
-        cid = f"{v.prefix}{tag}{v.orders}"
+        cid = f"{v.prefix}{tag}-{v.orders}" if tag else f"{v.prefix}{v.orders}"
+        if cid in v.used:
+            raise SessionError(f"client order id {cid} was already used")
+        v.used.add(cid)
         r = v.request("submit", intent={"client_order_id": cid, **intent})
-        if r.get("outcome") not in ("accepted", "duplicate"):
-            raise SessionError(f"submit {cid}: {r}")
-        return cid
+        self.last_response = r
+        outcome = r.get("outcome")
+        if outcome == "duplicate":
+            raise SessionError(f"submit {cid}: the gateway has this id for another order: {r}")
+        if outcome in ("accepted", "unknown"):
+            return cid
+        return None
 
     def cancel(self, client_order_id: str, venue: str | None = None) -> dict:
         return self._venue(venue).request("cancel", client_order_id=client_order_id)
@@ -176,34 +202,43 @@ class Context:
         """Calls ``on_timer`` at ``at`` (ns): after this step, by the run's end."""
         if at <= self.now:
             raise SessionError(f"timer {timer_id} at {at} isn't after now ({self.now})")
+        if at > self._last:
+            raise SessionError(f"timer {timer_id} at {at} is after the run's last day")
         self._timers.append((at, timer_id))
 
     def every(self, seconds: int, start: str, end: str, timer_id: str = "every",
               tz: str = "America/New_York") -> None:
         """A timer every ``seconds`` from ``start`` to ``end`` (``HH:MM``, both
-        included, in ``tz``) on every day of the run, one at a time."""
+        included, in ``tz``) on every day of the run, one at a time. The hours are
+        fixed: an early close isn't known here, so check the time in ``on_timer``."""
         h0, m0 = map(int, start.split(":"))
         h1, m1 = map(int, end.split(":"))
-        self._every.append((seconds, h0 * 60 + m0, h1 * 60 + m1, timer_id, ZoneInfo(tz)))
+        self._every.append([seconds, h0 * 60 + m0, h1 * 60 + m1, timer_id, ZoneInfo(tz), None])
 
     def _next_every(self) -> list[tuple[int, str]]:
+        """Each ``every``'s next tick after now, kept until it fires."""
         out = []
-        for seconds, start, end, tid, zone in self._every:
-            t = self._next_tick(seconds, start, end, zone)
-            if t is not None:
-                out.append((t, tid))
+        for e in self._every:
+            seconds, start, end, tid, zone, nxt = e
+            if nxt is None or nxt <= self.now:
+                nxt = e[5] = self._next_tick(seconds, start, end, zone)
+            if nxt is not None:
+                out.append((nxt, tid))
         return out
 
     def _next_tick(self, seconds: int, start: int, end: int, zone: ZoneInfo) -> int | None:
-        now = dt.datetime.fromtimestamp(self.now / 1e9, dt.timezone.utc) if self.now else None
-        for day in self.days:
+        now = dt.datetime.fromtimestamp(self.now / 1e9, dt.timezone.utc)
+        # From the day of now on, never from the run's first day again.
+        first = bisect.bisect_left(self.days, now.astimezone(zone).date())
+        for day in self.days[first:]:
             t = dt.datetime.combine(day, dt.time(start // 60, start % 60), zone)
             last = dt.datetime.combine(day, dt.time(end // 60, end % 60), zone)
-            while t <= last:
-                if now is None or t > now:
-                    ns = int(t.timestamp()) * 1_000_000_000
-                    return ns if ns <= self._last else None
-                t += dt.timedelta(seconds=seconds)
+            if t <= now:
+                steps = int((now - t).total_seconds() // seconds) + 1
+                t += dt.timedelta(seconds=steps * seconds)
+            if t <= last:
+                ns = int(t.timestamp()) * 1_000_000_000
+                return ns if ns <= self._last else None
         return None
 
     def record(self, series: str, value: Any) -> None:
@@ -244,9 +279,14 @@ def run(strategy: Strategy, control: str | None = None) -> dict:
     data = _Lines(welcome["data"])
     data.send({"protocol": "tinytrader.relay/1", "client": strategy.name})
     venues = {n: _Venue(n, spec) for n, spec in welcome["orders"].items()}
+    stop = threading.Event()
+    beats = threading.Thread(target=_heartbeats, args=(venues, stop), daemon=True)
+    beats.start()
     try:
         return _loop(strategy, ctl, data, venues, welcome)
     finally:
+        stop.set()
+        beats.join()
         for conn in [ctl, data, *(v.conn for v in venues.values())]:
             conn.close()
 
@@ -296,8 +336,6 @@ def _loop(strategy: Strategy, ctl: _Lines, data: _Lines, venues: dict[str, _Venu
         new = [t for t in ctx._timers + ctx._next_every() if t not in armed]
         ctx._timers.clear()
         armed.update(new)
-        for v in venues.values():
-            v.keep_alive()
         ctl.send({"type": "ready", "as_of": ctx.now,
                   "sent": {n: v.sent for n, v in venues.items()},
                   "timers": [{"at": at, "id": tid} for at, tid in new]})

@@ -54,17 +54,16 @@ def session(name: str, strategy: Strategy) -> dict:
     subprocess.run([str(FIXTURE), str(base)], check=True)
     proc = subprocess.Popen(
         [str(SESSION), "run", str(base / "session.toml"), "--dir", str(base / "run")],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     )
     ready = proc.stdout.readline()
     control = dict(kv.split("=", 1) for kv in ready.split()[1:])["control"]
     result = {}
-    t = threading.Thread(target=lambda: result.update(run(strategy, control)))
+    t = threading.Thread(target=lambda: result.update(run(strategy, control)), daemon=True)
     t.start()
     t.join(60)
     proc.wait(60)
     proc.stdout.close()
-    proc.stderr.close()
     return result
 
 
@@ -80,6 +79,21 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(toy.fills, [("1.24", T0 + 2 * MIN, T0 + 2 * MIN)])
         self.assertEqual([s["value"] for s in end["series"]], [1.30, 1.30, 1.24, 1.24, 1.24, 1.24])
         self.assertEqual(toy.records, 7)  # the day's mapping and six quotes
+
+    def test_a_refused_order_is_the_strategy_s_to_handle(self):
+        class Refused(Toy):
+            def on_timer(self, ctx, timer_id, ts):
+                self.timers.append(ts)
+                if ts == T0:
+                    # A put the venue's profile doesn't allow: refused, not fatal.
+                    self.result = ctx.submit(single("QQQ261027P00500000", "buy", "open", 1, 1.0))
+                    self.why = ctx.last_response
+
+        r = Refused()
+        end = session("refused", r)
+        self.assertEqual(end["status"], "complete", end)
+        self.assertIsNone(r.result)
+        self.assertIn(r.why["outcome"], ("not_sent", "rejected"))
 
     def test_the_same_run_twice_gives_the_same_audit(self):
         a, b = session("twice-a", Toy()), session("twice-b", Toy())
