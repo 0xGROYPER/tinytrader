@@ -2236,7 +2236,7 @@ async fn store_reads_are_tried_again_after_a_dropped_answer() {
     for (script, works, tries) in cases {
         let (url, seen) = flaky_store(script, ok.clone()).await;
         let r = rig_with("flaky", |j| j.store = url).await;
-        let got = store_json(&r.jobs, "/coverage", &[], false).await;
+        let got = store_json(&r.jobs, "/coverage", &[], false, false).await;
         let n = seen.load(Ordering::SeqCst);
         assert_eq!((got.is_ok(), n), (works, tries), "{script:?}: {got:?}");
         let _ = std::fs::remove_dir_all(&r.dir);
@@ -2510,6 +2510,12 @@ async fn a_done_job_is_cached_whole_and_checked_outside_the_store() {
         serde_json::from_slice(&std::fs::read(folder.join("OPRA-K1/manifest.json")).unwrap())
             .unwrap();
     assert_eq!(manifest["job_id"], "OPRA-K1");
+    let complete: Value =
+        serde_json::from_slice(&std::fs::read(folder.join("OPRA-K1/COMPLETE")).unwrap()).unwrap();
+    assert_eq!(
+        (complete["job_id"].as_str(), complete["files"].as_u64()),
+        (Some("OPRA-K1"), Some(1))
+    );
     // Nothing went to the store.
     assert!(lock(&r.store).uploaded.is_empty());
     // Again: the whole file is kept, not fetched again.
@@ -2567,4 +2573,38 @@ async fn caching_needs_a_folder_a_done_job_and_a_job_id() {
     assert_eq!(code, StatusCode::CONFLICT);
     let (code, _) = cache(AxState(r.jobs.clone()), UrlPath("../etc".into())).await;
     assert_eq!(code, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_free_purchase_may_go_ahead_while_a_volume_is_missing_if_asked() {
+    let r = rig("free-missing").await;
+    lock(&r.store).catalog.1 = json!({ "roots": [], "missing_volumes": ["data"] });
+    lock(&r.store).coverage.1 = json!({ "days": [], "missing_volumes": ["data"] });
+    // Not asked: refused, as ever.
+    assert_eq!(r.price(json!({})).await.0, StatusCode::SERVICE_UNAVAILABLE);
+    // Asked, and free: priced and submitted.
+    let (code, v) = r.price(json!({ "free_while_volumes_missing": true })).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["cost_usd"], 0.0, "{v}");
+    let (code, v) = r.submit(v["quote"].as_str().unwrap(), None).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(r.fake.submits(), 1);
+}
+
+#[tokio::test]
+async fn a_paid_purchase_is_never_made_while_a_volume_is_missing() {
+    let r = rig("paid-missing").await;
+    lock(&r.store).catalog.1 = json!({ "roots": [], "missing_volumes": ["data"] });
+    lock(&r.store).coverage.1 = json!({ "days": [], "missing_volumes": ["data"] });
+    lock(&r.fake.s).price = 2.5;
+    let (code, v) = r.price(json!({ "free_while_volumes_missing": true })).await;
+    assert_eq!(code, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("only a free purchase"),
+        "{v}"
+    );
+    assert_eq!(r.fake.submits(), 0);
 }

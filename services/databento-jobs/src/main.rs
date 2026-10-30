@@ -169,6 +169,11 @@ struct PriceRequest {
     /// and days this buys again, by ID: `["OPRA-…"]`.
     #[serde(default)]
     again: Option<Value>,
+    /// Price it even while the store is missing a volume, taking what the
+    /// missing volumes hold as not held, so it may buy again what they
+    /// hold. Only a free ($0) quote can then be made or submitted.
+    #[serde(default)]
+    free_while_volumes_missing: bool,
 }
 
 /// A request checked, in the API's terms.
@@ -183,6 +188,8 @@ struct Asked {
     rule: Option<missing::Rule>,
     contracts: Option<BTreeMap<time::Date, BTreeSet<String>>>,
     hours: Option<missing::Hours>,
+    /// `free_while_volumes_missing`.
+    free_while_volumes_missing: bool,
 }
 
 impl PriceRequest {
@@ -257,6 +264,7 @@ impl PriceRequest {
             rule: self.rule.clone(),
             contracts,
             hours: self.hours.clone(),
+            free_while_volumes_missing: self.free_while_volumes_missing,
         })
     }
 }
@@ -1207,6 +1215,7 @@ async fn store_json(
     path: &str,
     query: &[(&str, &str)],
     fresh: bool,
+    volumes_missing_ok: bool,
 ) -> Result<Value, String> {
     let mut query = query.to_vec();
     if fresh {
@@ -1233,7 +1242,7 @@ async fn store_json(
     })
     .await?;
     match v["missing_volumes"].as_array() {
-        Some(m) if m.is_empty() => Ok(v),
+        Some(m) if m.is_empty() || volumes_missing_ok => Ok(v),
         Some(m) => Err(format!(
             "the store is missing volumes ({}), so what it holds isn't known",
             m.iter()
@@ -1286,7 +1295,8 @@ async fn live_jobs(jobs: &Jobs) -> Result<(Vec<BatchJob>, HashSet<String>), Stri
 /// holdings, Databento's jobs that aren't expired, and every purchase in the
 /// ledger, read now (see `had`). Fails when any of it can't be read in full.
 /// `fresh`: the store's answers from a rescan begun now (for a purchase),
-/// not its last scan (for a price).
+/// not its last scan (for a price). `volumes_missing_ok`: what the store's
+/// present volumes hold will do (`free_while_volumes_missing`).
 async fn had(
     jobs: &Jobs,
     dataset: &str,
@@ -1294,9 +1304,10 @@ async fn had(
     target: &str,
     (start, end): (time::Date, time::Date),
     fresh: bool,
+    volumes_missing_ok: bool,
 ) -> Result<Vec<had::Piece>, String> {
     let last = end.previous_day().unwrap_or(end).to_string();
-    let catalog = store_json(jobs, "/catalog", &[], fresh).await?;
+    let catalog = store_json(jobs, "/catalog", &[], fresh, volumes_missing_ok).await?;
     let coverage = store_json(
         jobs,
         "/coverage",
@@ -1309,6 +1320,7 @@ async fn had(
             ("end", &last),
         ],
         fresh,
+        volumes_missing_ok,
     )
     .await?;
     let (live, ids) = live_jobs(jobs).await?;
@@ -1468,9 +1480,17 @@ async fn plan(
     let bad = |e: String| (StatusCode::BAD_REQUEST, e);
     let down = |e: String| (StatusCode::SERVICE_UNAVAILABLE, e);
     let dataset = known_dataset(jobs, &a.dataset).await?;
-    let mut pieces = had(jobs, &dataset, a.schema, &a.symbol, (a.start, a.end), fresh)
-        .await
-        .map_err(down)?;
+    let mut pieces = had(
+        jobs,
+        &dataset,
+        a.schema,
+        &a.symbol,
+        (a.start, a.end),
+        fresh,
+        a.free_while_volumes_missing,
+    )
+    .await
+    .map_err(down)?;
     let gone: BTreeSet<String> = pieces
         .iter()
         .filter_map(|p| match &p.kind {
@@ -1851,12 +1871,27 @@ async fn price(AxState(jobs): AxState<Shared>, Json(r): Json<PriceRequest>) -> R
                     ),
                 ))
             });
-            let result = planned.map(|(parts, notes)| Priced {
-                cost_usd: price_of(&parts),
-                notes: warnings.into_iter().chain(notes).collect(),
-                parts,
-                conditions,
-            });
+            let free_only = asked.free_while_volumes_missing;
+            let result = planned
+                .map(|(parts, notes)| Priced {
+                    cost_usd: price_of(&parts),
+                    notes: warnings.into_iter().chain(notes).collect(),
+                    parts,
+                    conditions,
+                })
+                .and_then(|p| {
+                    if free_only && p.cost_usd > 0.0 {
+                        Err((
+                            StatusCode::CONFLICT,
+                            format!(
+                                "it costs ${:.2}; with free_while_volumes_missing only a free purchase is priced",
+                                p.cost_usd
+                            ),
+                        ))
+                    } else {
+                        Ok(p)
+                    }
+                });
             if let Some(q) = lock(&jobs.quotes).get_mut(&id) {
                 q.result = Some(result);
                 q.at = Instant::now();
@@ -2145,6 +2180,14 @@ async fn send_quote(
             format!(
                 "what's missing or its price changed (now ${now:.2} for {} requests); price it again",
                 parts.len()
+            ),
+        );
+    }
+    if a.free_while_volumes_missing && now > 0.0 {
+        return refused(
+            StatusCode::CONFLICT,
+            format!(
+                "it costs ${now:.2} now; with free_while_volumes_missing only a free purchase is submitted"
             ),
         );
     }
@@ -2530,6 +2573,10 @@ async fn fetch_to_cache(jobs: &Jobs, job: &str, dir: &std::path::Path) -> Result
         .map_err(|e| format!("list files: {e}"))?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
+    // COMPLETE is written last: until then the folder isn't whole (Databento's
+    // own file list has a manifest.json, which arrives like any other file).
+    let complete = dir.join("COMPLETE");
+    let _ = std::fs::remove_file(&complete);
     let total: u64 = files.iter().map(|f| f.size).sum();
     set_cache(jobs, job, |t| {
         t.state = "downloading".into();
@@ -2593,6 +2640,18 @@ async fn fetch_to_cache(jobs: &Jobs, job: &str, dir: &std::path::Path) -> Result
         .map_err(|e| format!("{}: {e}", path.display()))?;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
     }
+    let done = json!({
+        "job_id": job,
+        "files": files.len(),
+        "bytes": total,
+        "finished_at": tinytrader_observe::unix_seconds(),
+    });
+    std::fs::write(
+        &complete,
+        serde_json::to_vec_pretty(&done).unwrap_or_default(),
+    )
+    .map_err(|e| format!("{}: {e}", complete.display()))?;
+    let _ = std::fs::set_permissions(&complete, std::fs::Permissions::from_mode(0o644));
     Ok(fetched)
 }
 
