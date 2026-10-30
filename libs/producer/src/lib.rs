@@ -244,6 +244,8 @@ pub struct StoreProducer {
     cur: Option<RecordBuf>,
     reading: Vec<(FileRef, Hashed, bool)>,
     pins: Vec<DayPin>,
+    /// Options expiring more than this many days after each day are left out.
+    expiries_within_days: Option<u32>,
 }
 
 /// Midnight UTC of `YYYY-MM-DD`, in ns.
@@ -324,7 +326,17 @@ impl StoreProducer {
             cur: None,
             reading: Vec::new(),
             pins: Vec::new(),
+            expiries_within_days: None,
         })
+    }
+
+    /// Leaves out options expiring more than `days` days after each day (or
+    /// before it), with their symbol mappings: a session subscribed to the near
+    /// expiries only. Instruments that aren't options pass.
+    #[must_use]
+    pub fn expiries_within_days(mut self, days: u32) -> Self {
+        self.expiries_within_days = Some(days);
+        self
     }
 
     /// As [`StoreProducer::new`], to reproduce a run: each day must be held in the
@@ -439,6 +451,7 @@ impl StoreProducer {
                 let window = (ts, ts + 86_400_000_000_000);
                 let mut sources = Vec::new();
                 let mut mapped = BTreeSet::new();
+                let horizon = self.expiries_within_days.map(|n| (ts, n));
                 for f in &files {
                     if self.holdings.local()
                         && let Some(want) = &f.sha256
@@ -473,6 +486,7 @@ impl StoreProducer {
                         u64::try_from(i64::from(d.to_julian_day()) - 2_440_588)
                             .map_or(0, |n| n * 86_400_000_000_000)
                     };
+                    let mut denied = filter::Denied::new();
                     for m in &meta.mappings {
                         for iv in &m.intervals {
                             let (from, to) = (to_ns(iv.start_date), to_ns(iv.end_date));
@@ -484,6 +498,12 @@ impl StoreProducer {
                                 || from >= window.1
                                 || !mapped.insert((iid, m.raw_symbol.clone()))
                             {
+                                continue;
+                            }
+                            if !filter::admitted(&m.raw_symbol, horizon) {
+                                // Over its interval only: the id may name an admitted
+                                // contract in another.
+                                denied.entry(iid).or_default().push((from, to));
                                 continue;
                             }
                             let input = if parent {
@@ -509,7 +529,10 @@ impl StoreProducer {
                             self.queued.push_back(RecordBuf::from(msg));
                         }
                     }
-                    let filtered = DayFilter::new(dec, RType::from(self.schema), window);
+                    let mut filtered = DayFilter::new(dec, RType::from(self.schema), window);
+                    if let Some((day, n)) = horizon {
+                        filtered = filtered.horizon(day, n, denied);
+                    }
                     sources.push(DbnSource::new(filtered, 0));
                     self.reading.push((f.clone(), h, true));
                 }
