@@ -70,6 +70,7 @@ pub(crate) struct Script {
     pub(crate) drop_after: Option<(u64, u64)>,
     pub(crate) fee_cents: i64,
     pub(crate) latency_ms: u64,
+    pub(crate) strategy_latency_ms: u64,
     pub(crate) size_cap: bool,
 }
 
@@ -177,8 +178,12 @@ impl Script {
             drop_after: None,
             fee_cents: 2,
             latency_ms: f.opt_int("latency_ms")?.unwrap_or(5),
+            strategy_latency_ms: f.opt_int("strategy_latency_ms")?.unwrap_or(0),
             size_cap: false,
         };
+        if s.latency_ms > 3_600_000 || s.strategy_latency_ms > 3_600_000 {
+            return Err(invalid("latency_ms", "at most 3600000 (an hour)"));
+        }
         match f.map_entry("calendar") {
             None => {}
             Some(Value::Null) => s.calendar = None,

@@ -204,7 +204,8 @@ fn market_orders_fill_at_the_touch() {
     });
 }
 
-/// Rule 1: records with equal timestamps apply in input order.
+/// Rule 1: records with equal timestamps apply in input order, as one book: the
+/// instant's last quote of an instrument is its book, never one it replaced.
 #[test]
 fn rule1_equal_timestamps_keep_input_order() {
     let t1 = T0 + 50 * MS;
@@ -217,7 +218,7 @@ fn rule1_equal_timestamps_keep_input_order() {
         advance(c, T0);
         c.submit("r1", &single("wse-1", CALL, "buy", "open", 1, "1.50"));
         let ev = advance(c, t1);
-        assert_eq!(fill_price(&ev, "wse-1").as_deref(), Some("1.00"));
+        assert_eq!(fill_price(&ev, "wse-1").as_deref(), Some("1.20"));
     });
 }
 

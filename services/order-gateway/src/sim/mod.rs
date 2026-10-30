@@ -14,6 +14,7 @@ use crate::intent::{Intent, fmt_cents, hex};
 use crate::protocol::{Obj, arr, quote};
 use crate::safety::{date_string, et_day, et_ns, hhmm, parse_date};
 use crate::session::wall_ns;
+pub use market::Feed;
 use market::{QuoteSource, Rec};
 use script::{OnCancel, OnSubmit, Rule, Script};
 use sha2::{Digest, Sha256};
@@ -69,6 +70,10 @@ pub(crate) enum Action {
 pub(crate) struct Market {
     src: QuoteSource,
     book: HashMap<u32, Quote>,
+    /// Instruments a quote record other than `tcbbo` has given a book.
+    quoted: std::collections::HashSet<u32>,
+    /// Fed and clocked by a session in process: the market time, shared with the feed.
+    fed: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     ids: HashMap<String, u32>,
     actions: Vec<(u64, u64, Action)>,
     n: u64,
@@ -139,12 +144,43 @@ impl SimBroker {
         s.market = Some(Market {
             src,
             book: HashMap::new(),
+            quoted: std::collections::HashSet::new(),
+            fed: None,
             ids: HashMap::new(),
             actions: Vec::new(),
             n: 0,
         });
         s.run_to(first)?;
         Ok(s)
+    }
+
+    /// Market mode fed in process by the session that clocks it: records arrive through
+    /// the returned [`Feed`], and market time moves only with `advance`. `pin` says what
+    /// feeds it (the session's sources and their hashes), for `pins`.
+    ///
+    /// # Errors
+    /// An invalid script.
+    pub fn fed(script: &str, pin: &str) -> Result<(Self, Feed), String> {
+        let mut s = Self::new(script)?;
+        let floor = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (src, feed) = QuoteSource::feed(pin.to_owned(), floor.clone());
+        s.market = Some(Market {
+            src,
+            book: HashMap::new(),
+            quoted: std::collections::HashSet::new(),
+            fed: Some(floor),
+            ids: HashMap::new(),
+            actions: Vec::new(),
+            n: 0,
+        });
+        Ok((s, feed))
+    }
+
+    /// When a submit or cancel received at market time `t` takes effect: after the
+    /// strategy's declared latency and then the venue's.
+    fn effective(&self) -> u64 {
+        let ms = self.s.strategy_latency_ms.saturating_add(self.s.latency_ms);
+        self.now.saturating_add(ms.saturating_mul(1_000_000))
     }
 
     fn new(script: &str) -> Result<Self, String> {
@@ -404,7 +440,7 @@ impl SimBroker {
                 return CancelResult::Rejected(error(422, "42210000", "order is not cancelable"));
             }
             OnCancel::Ok if self.market.is_some() => {
-                let t = self.now + self.s.latency_ms * 1_000_000;
+                let t = self.effective();
                 self.schedule(t, Action::Cancel(i));
             }
             OnCancel::Ok => self.set_status(i, "canceled"),
@@ -447,7 +483,7 @@ impl Broker for SimBroker {
             (Some(_), false) => "script",
         };
         Obj::new()
-            .s("model", "tinytrader-sim/1")
+            .s("model", "tinytrader-sim/2")
             .s(
                 "mode",
                 if self.market.is_some() {
@@ -462,6 +498,7 @@ impl Broker for SimBroker {
                 self.market.as_ref().map_or("null", |m| m.src.pin.as_str()),
             )
             .n("latency_ms", self.s.latency_ms)
+            .n("strategy_latency_ms", self.s.strategy_latency_ms)
             .s("fee_per_contract", &fmt_cents(self.s.fee_cents))
             .s(
                 "size_cap",
@@ -563,7 +600,7 @@ impl Broker for SimBroker {
             self.push(i, "new", None, None, None);
         }
         if self.market.is_some() {
-            let t = self.now + self.s.latency_ms * 1_000_000;
+            let t = self.effective();
             self.orders[i].t_act = t;
             self.schedule(t, Action::Activate(i));
         } else {
@@ -811,6 +848,10 @@ impl Broker for SimBroker {
         out.append(&mut self.updates);
     }
 
+    fn session_clocked(&self) -> bool {
+        self.market.as_ref().is_some_and(|m| m.fed.is_some())
+    }
+
     fn advance(&mut self, to_ts: u64) -> Result<u64, BrokerError> {
         if self.market.is_none() && self.s.clock_ts.is_none() {
             return Err(BrokerError::local(
@@ -843,22 +884,41 @@ impl SimBroker {
                     self.act(a);
                 }
                 (Some(_), _) => {
+                    // Every record of one timestamp applies before orders are evaluated;
+                    // the last quote of an instrument in that instant is its book. A
+                    // combo never fills on some legs' new quotes and others' old ones,
+                    // nor on a quote replaced within the same instant.
                     let Some((t, r)) = m.src.next() else { break };
                     self.now = self.now.max(t);
-                    self.apply(r);
+                    let mut touched = Vec::new();
+                    let mut next = Some(r);
+                    while let Some(r) = next.take() {
+                        touched.extend(self.apply(r));
+                        if let Some(m) = &mut self.market
+                            && m.src.peek_ts()? == Some(t)
+                        {
+                            next = m.src.next().map(|(_, r)| r);
+                        }
+                    }
+                    self.evaluate_touched(&touched);
                 }
                 _ => break,
             }
         }
         self.now = self.now.max(to);
+        if let Some(floor) = self.market.as_ref().and_then(|m| m.fed.as_ref()) {
+            floor.store(self.now, std::sync::atomic::Ordering::SeqCst);
+        }
         Ok(())
     }
 
-    fn apply(&mut self, r: Rec) {
-        let Some(m) = &mut self.market else { return };
+    /// Applies one record to the book; a quote returns its instrument id.
+    fn apply(&mut self, r: Rec) -> Option<u32> {
+        let m = self.market.as_mut()?;
         match r {
             Rec::Def { iid, symbol } => {
                 m.ids.insert(symbol, iid);
+                None
             }
             Rec::Quote {
                 iid,
@@ -866,7 +926,16 @@ impl SimBroker {
                 ask,
                 bid_sz,
                 ask_sz,
+                trade,
             } => {
+                // A tcbbo quote is the book only where no quote record gives one: beside
+                // cmbp-1 it would put back a quote a trade may have consumed.
+                if trade && m.quoted.contains(&iid) {
+                    return None;
+                }
+                if !trade {
+                    m.quoted.insert(iid);
+                }
                 m.book.insert(
                     iid,
                     Quote {
@@ -878,20 +947,26 @@ impl SimBroker {
                         used_ask: 0,
                     },
                 );
-                let ids = &m.ids;
-                let mut touched: Vec<usize> = (0..self.orders.len())
-                    .filter(|i| {
-                        self.orders[*i]
-                            .legs
-                            .iter()
-                            .any(|l| ids.get(&l.symbol) == Some(&iid))
-                    })
-                    .collect();
-                touched.sort_by_key(|i| (self.orders[*i].t_act, self.orders[*i].seq));
-                for i in touched {
-                    self.evaluate(i);
-                }
+                Some(iid)
             }
+        }
+    }
+
+    /// Evaluates the working orders with a leg on any of `iids`, in (`t_act`, `seq`) order.
+    fn evaluate_touched(&mut self, iids: &[u32]) {
+        let Some(m) = &self.market else { return };
+        let ids = &m.ids;
+        let mut touched: Vec<usize> = (0..self.orders.len())
+            .filter(|i| {
+                self.orders[*i]
+                    .legs
+                    .iter()
+                    .any(|l| ids.get(&l.symbol).is_some_and(|id| iids.contains(id)))
+            })
+            .collect();
+        touched.sort_by_key(|i| (self.orders[*i].t_act, self.orders[*i].seq));
+        for i in touched {
+            self.evaluate(i);
         }
     }
 

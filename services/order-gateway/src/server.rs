@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Client role (section 4).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -407,7 +407,55 @@ pub struct Gateway {
     session: JoinHandle<Result<(), String>>,
 }
 
+/// An in-process clock for a simulated account (decision 0022): the session that owns
+/// market time advances the broker through this, never through a client connection.
+#[derive(Clone)]
+pub struct Clock {
+    tx: Sender<Input>,
+}
+
+impl Clock {
+    /// Advances the broker to `to` once `orders` order messages (submits and cancels,
+    /// valid or not, counted from the client's first connection) from `client` have been
+    /// handled, so an order sent before the strategy's `ready` is always stamped before
+    /// the clock moves. Queries don't count. Returns the market time. A wait that runs
+    /// past `wait` is dropped by the gateway and answered with an error, never run late.
+    ///
+    /// # Errors
+    /// An unknown client, the broker's refusal, the order messages not all arriving
+    /// within `wait`, or a stopped gateway.
+    pub fn advance(
+        &self,
+        client: &str,
+        orders: u64,
+        to: u64,
+        wait: Duration,
+    ) -> Result<u64, String> {
+        let (reply, rx) = channel();
+        self.tx
+            .send(Input::Clock {
+                client: client.to_owned(),
+                orders,
+                to,
+                deadline: Instant::now() + wait,
+                reply,
+            })
+            .map_err(|_| "the gateway has stopped".to_owned())?;
+        // The gateway answers at the deadline; the margin covers its tick.
+        rx.recv_timeout(wait + Duration::from_secs(5))
+            .map_err(|_| "the gateway has stopped answering".to_owned())?
+    }
+}
+
 impl Gateway {
+    /// The account's clock, for a session that owns market time.
+    #[must_use]
+    pub fn clock(&self) -> Clock {
+        Clock {
+            tx: self.tx.clone(),
+        }
+    }
+
     /// The bound listen address.
     #[must_use]
     pub fn addr(&self) -> SocketAddr {
