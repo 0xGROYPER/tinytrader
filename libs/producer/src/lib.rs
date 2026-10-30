@@ -486,7 +486,7 @@ impl StoreProducer {
                         u64::try_from(i64::from(d.to_julian_day()) - 2_440_588)
                             .map_or(0, |n| n * 86_400_000_000_000)
                     };
-                    let mut denied = std::collections::HashSet::new();
+                    let mut denied = filter::Denied::new();
                     for m in &meta.mappings {
                         for iv in &m.intervals {
                             let (from, to) = (to_ns(iv.start_date), to_ns(iv.end_date));
@@ -501,7 +501,9 @@ impl StoreProducer {
                                 continue;
                             }
                             if !filter::admitted(&m.raw_symbol, horizon) {
-                                denied.insert(iid);
+                                // Over its interval only: the id may name an admitted
+                                // contract in another.
+                                denied.entry(iid).or_default().push((from, to));
                                 continue;
                             }
                             let input = if parent {

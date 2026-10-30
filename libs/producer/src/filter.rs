@@ -12,7 +12,10 @@
 //! no mapping, or a symbol that isn't an option's, passes.
 use dbn::decode::DecodeRecordRef;
 use dbn::{RType, RecordBuf, RecordRef, SymbolMappingMsg, rtype};
-use std::collections::HashSet;
+use std::collections::HashMap;
+
+/// Instruments judged outside the horizon, each over the intervals it is.
+pub(crate) type Denied = HashMap<u32, Vec<(u64, u64)>>;
 use tinytrader_dbn::Timing;
 
 pub(crate) struct DayFilter<D> {
@@ -25,7 +28,8 @@ pub(crate) struct DayFilter<D> {
     /// The expiry horizon: the day's start and the days after it allowed.
     horizon: Option<(u64, u32)>,
     /// Instruments outside the horizon.
-    denied: HashSet<u32>,
+    /// Instruments outside the horizon, each over its intervals `[from, to)`.
+    denied: Denied,
 }
 
 impl<D> DayFilter<D> {
@@ -37,13 +41,13 @@ impl<D> DayFilter<D> {
             keeping: false,
             buf: None,
             horizon: None,
-            denied: HashSet::new(),
+            denied: Denied::new(),
         }
     }
 
     /// Drops options expiring more than `days` after the day starting at `day`,
     /// and `denied`, the file's mapped instruments already judged outside it.
-    pub(crate) fn horizon(mut self, day: u64, days: u32, denied: HashSet<u32>) -> Self {
+    pub(crate) fn horizon(mut self, day: u64, days: u32, denied: Denied) -> Self {
         self.horizon = Some((day, days));
         self.denied = denied;
         self
@@ -95,12 +99,21 @@ impl<D: DecodeRecordRef> DecodeRecordRef for DayFilter<D> {
                         // A mapping in the stream judges its instrument afresh (an id
                         // can be reused for another contract).
                         if admitted(m.stype_out_symbol().unwrap_or(""), self.horizon) {
-                            self.denied.remove(&iid);
+                            // From here on: an admitted contract.
+                            if let Some(ivs) = self.denied.get_mut(&iid) {
+                                for iv in ivs.iter_mut() {
+                                    iv.1 = iv.1.min(ts);
+                                }
+                            }
                         } else {
-                            self.denied.insert(iid);
+                            self.denied.entry(iid).or_default().push((ts, u64::MAX));
                         }
                     }
-                    let wanted = !self.denied.contains(&iid)
+                    let out = self
+                        .denied
+                        .get(&iid)
+                        .is_some_and(|ivs| ivs.iter().any(|(f, t)| *f <= ts && ts < *t));
+                    let wanted = !out
                         && (rtype == self.rtype
                             || rtype == rtype::SYMBOL_MAPPING
                             || rtype == rtype::SYSTEM
@@ -181,7 +194,7 @@ mod tests {
         let mut f = DayFilter::new(recs, RType::Cbbo1M, (D27, D27 + DAY)).horizon(
             D27,
             30,
-            std::collections::HashSet::new(),
+            super::Denied::new(),
         );
         let mut kept = Vec::new();
         while let Some(r) = f.decode_record_ref().unwrap() {

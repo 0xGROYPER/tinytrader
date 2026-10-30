@@ -647,6 +647,7 @@ impl Session {
                     .collect();
                 json!({"name": s.name, "holdings": p.describe(), "reading": p.reading(), "dataset": s.dataset, "symbol": s.symbol,
                        "schema": s.schema, "latency_offset_ns": s.latency_offset_ns,
+                       "expiries_within_days": s.expiries_within_days,
                        "records": src.position(), "clamped": src.clamped(), "days": days})
             })
             .collect();

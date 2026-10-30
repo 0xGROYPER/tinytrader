@@ -88,8 +88,9 @@ pub struct Source {
     /// Added to `ts_event` for records flagged `F_BAD_TS_RECV`.
     #[serde(default)]
     pub latency_offset_ns: u64,
-    /// Options expiring more than this many days after each day (or before it)
-    /// are left out, mappings and records: a subscription to the near expiries.
+    /// Options expiring more than this many calendar days (weekends included) after
+    /// each day, or before it, are left out, mappings and records: a subscription
+    /// to the near expiries.
     #[serde(default)]
     pub expiries_within_days: Option<u32>,
 }
