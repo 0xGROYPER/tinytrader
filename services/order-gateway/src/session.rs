@@ -71,6 +71,11 @@ pub struct Advanced {
     pub market_ts: u64,
     /// The last event sequence number journaled.
     pub last_seq: u64,
+    /// The client's order messages handled so far: at least the count waited for.
+    pub handled: u64,
+    /// Order events journaled so far (submits, cancels, broker order events), which,
+    /// unlike `last_seq`, connection and status events never move.
+    pub order_events: u64,
 }
 
 /// A clock advance waiting for a client's order messages to arrive.
@@ -552,6 +557,8 @@ pub(crate) struct Session<B: Broker> {
     handled: HashMap<usize, u64>,
     /// Clock advances waiting for requests, in arrival order.
     clocks: VecDeque<ClockWait>,
+    /// Order events journaled (submit, cancel, order).
+    order_events: u64,
 }
 
 impl<B: Broker> Session<B> {
@@ -594,6 +601,7 @@ impl<B: Broker> Session<B> {
             last_seq,
             handled: HashMap::new(),
             clocks: VecDeque::new(),
+            order_events: 0,
         };
         let today = utc_day(s.ts());
         for r in recovered {
@@ -711,6 +719,9 @@ impl<B: Broker> Session<B> {
 
     fn emit(&mut self, ts: u64, kind: &str, body: &str, aud: Aud) -> Result<(), String> {
         let (seq, line) = self.j.append(ts, kind, body)?;
+        if matches!(kind, "submit" | "cancel" | "order") {
+            self.order_events += 1;
+        }
         self.last_seq.store(seq, SeqCst);
         match &mut self.hold {
             Some(h) => h.push((line, aud)),
@@ -870,6 +881,8 @@ impl<B: Broker> Session<B> {
                     Ok(Advanced {
                         market_ts,
                         last_seq: self.last_seq.load(SeqCst),
+                        handled: self.handled.get(&w.client).copied().unwrap_or(0),
+                        order_events: self.order_events,
                     })
                 }
                 Err(e) => Err(e.message),

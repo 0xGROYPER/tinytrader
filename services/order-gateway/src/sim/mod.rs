@@ -21,6 +21,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
+/// The simulator's model version, in every pin.
+pub const MODEL: &str = "tinytrader-sim/2";
+
 /// Nanodollars per cent.
 const CENT: i64 = 10_000_000;
 
@@ -483,7 +486,7 @@ impl Broker for SimBroker {
             (Some(_), false) => "script",
         };
         Obj::new()
-            .s("model", "tinytrader-sim/2")
+            .s("model", MODEL)
             .s(
                 "mode",
                 if self.market.is_some() {

@@ -138,9 +138,27 @@ struct Seen {
     end: Value,
 }
 
+/// How the toy misbehaves, if it does.
+#[derive(Clone, Copy, PartialEq)]
+enum Fault {
+    None,
+    /// Stops answering at this step.
+    Stall(u64),
+    /// Sets a timer after the last day.
+    FarTimer,
+    /// Never reads the data stream.
+    NoRead,
+    /// Says it sent no orders after sending one.
+    Undercount,
+}
+
 /// Buys one call at 1.25 on the 10:00 step, sets a timer for 10:02:30, and answers
-/// every step; `stall_at` stops answering at that step.
-fn toy(control: std::net::SocketAddr, stall_at: Option<u64>) -> Seen {
+/// every step, misbehaving as `fault` says.
+fn toy(control: std::net::SocketAddr, fault: Fault) -> Seen {
+    let stall_at = match fault {
+        Fault::Stall(n) => Some(n),
+        _ => None,
+    };
     let mut ctl = TcpStream::connect(control).unwrap();
     let mut cr = BufReader::new(ctl.try_clone().unwrap());
     send(
@@ -181,6 +199,10 @@ fn toy(control: std::net::SocketAddr, stall_at: Option<u64>) -> Seen {
             return seen;
         }
         let as_of = step["as_of"].as_u64().unwrap();
+        if fault == Fault::NoRead {
+            seen.end = recv(&mut cr);
+            return seen;
+        }
         for _ in 0..step["records"].as_u64().unwrap() {
             let rec = dec.decode_record_ref().unwrap().unwrap();
             assert!(rec.get::<CbboMsg>().is_some() || rec.header().rtype == rtype::SYMBOL_MAPPING);
@@ -221,8 +243,13 @@ fn toy(control: std::net::SocketAddr, stall_at: Option<u64>) -> Seen {
                 &format!(r#"{{"request_id":"r1","intent":{intent}}}"#),
             )
             .unwrap();
-            sent += 1;
+            if fault != Fault::Undercount {
+                sent += 1;
+            }
             new.push(json!({"at": T0 + 2 * MIN + MIN / 2, "id": "check"}));
+            if fault == Fault::FarTimer {
+                new.push(json!({"at": D27 + 2 * DAY, "id": "far"}));
+            }
         }
         send(
             &mut ctl,
@@ -231,14 +258,14 @@ fn toy(control: std::net::SocketAddr, stall_at: Option<u64>) -> Seen {
     }
 }
 
-fn run(name: &str, timeout: u64, stall_at: Option<u64>) -> (session::Outcome, Seen, PathBuf) {
-    run_with(name, timeout, stall_at, 0)
+fn run(name: &str, timeout: u64, fault: Fault) -> (session::Outcome, Seen, PathBuf) {
+    run_with(name, timeout, fault, 0)
 }
 
 fn run_with(
     name: &str,
     timeout: u64,
-    stall_at: Option<u64>,
+    fault: Fault,
     extra: u32,
 ) -> (session::Outcome, Seen, PathBuf) {
     let base = root(name);
@@ -249,14 +276,14 @@ fn run_with(
     let s = Session::start(&config(&j, timeout), &dir, [127, 0, 0, 1].into()).unwrap();
     let control = s.ready().control;
     assert!(s.ready().line().starts_with("READY session="));
-    let strategy = std::thread::spawn(move || toy(control, stall_at));
+    let strategy = std::thread::spawn(move || toy(control, fault));
     let outcome = s.run().unwrap();
     (outcome, strategy.join().unwrap(), dir)
 }
 
 #[test]
 fn a_session_runs_a_strategy_in_lockstep() {
-    let (o, seen, dir) = run("lockstep", 30, None);
+    let (o, seen, dir) = run("lockstep", 30, Fault::None);
     assert_eq!(o.status, "complete", "{o:?}");
     assert_eq!(seen.end["status"], "complete");
     assert_eq!(seen.end["audit"], o.audit);
@@ -288,19 +315,23 @@ fn a_session_runs_a_strategy_in_lockstep() {
     assert_eq!(rec["strategy"]["name"], "toy");
     assert_eq!(rec["sources"][0]["days"][0]["files"][0]["verified"], true);
     assert_eq!(rec["venues"][0]["sent"], 1);
+    assert_eq!(rec["venues"][0]["model"], "tinytrader-sim/2");
+    assert_eq!(rec["seed"], 0);
+    // The end names each venue's last event after the final advance.
+    assert!(seen.end["reports"]["options"].as_u64().unwrap() > 0);
 }
 
 #[test]
 fn the_same_run_twice_gives_the_same_audit_hash() {
-    let (a, sa, _) = run("twice-a", 30, None);
-    let (b, sb, _) = run("twice-b", 30, None);
+    let (a, sa, _) = run("twice-a", 30, Fault::None);
+    let (b, sb, _) = run("twice-b", 30, Fault::None);
     assert_eq!(a.audit, b.audit);
     assert_eq!(sa, sb);
 }
 
 #[test]
 fn a_strategy_that_stops_answering_leaves_the_run_incomplete() {
-    let (o, seen, dir) = run("stall", 1, Some(3));
+    let (o, seen, dir) = run("stall", 1, Fault::Stall(3));
     assert_eq!(o.status, "incomplete");
     assert!(
         o.reason.as_deref().unwrap_or_default().contains("control"),
@@ -316,8 +347,40 @@ fn a_strategy_that_stops_answering_leaves_the_run_incomplete() {
 /// about 5 MB) flows: the step goes first, then its records as the strategy reads.
 #[test]
 fn a_step_larger_than_a_socket_buffer_flows() {
-    let (o, seen, _) = run_with("big-step", 30, None, 30_000);
+    let (o, seen, _) = run_with("big-step", 30, Fault::None, 30_000);
     assert_eq!(o.status, "complete", "{o:?}");
     assert_eq!(o.records, 6 + 30_001);
     assert_eq!(seen.fills.len(), 1);
+}
+
+fn reason(o: &session::Outcome) -> &str {
+    o.reason.as_deref().unwrap_or_default()
+}
+
+#[test]
+fn a_timer_after_the_last_day_ends_the_run() {
+    let (o, _, _) = run("far-timer", 30, Fault::FarTimer);
+    assert_eq!(o.status, "incomplete");
+    assert!(reason(&o).contains("after the last day"), "{o:?}");
+}
+
+/// A strategy that stops reading its data ends the run at the write timeout, never
+/// blocks it.
+#[test]
+fn a_strategy_that_stops_reading_leaves_the_run_incomplete() {
+    let (o, _, _) = run_with("no-read", 1, Fault::NoRead, 30_000);
+    assert_eq!(o.status, "incomplete");
+    assert!(reason(&o).contains("data"), "{o:?}");
+}
+
+/// An order the strategy sent but didn't count is caught, not stamped on whichever
+/// side of the clock it happened to land.
+#[test]
+fn an_order_sent_but_not_counted_ends_the_run() {
+    let (o, _, _) = run("undercount", 5, Fault::Undercount);
+    assert_eq!(o.status, "incomplete");
+    assert!(
+        reason(&o).contains("order messages handled, but the strategy said 0"),
+        "{o:?}"
+    );
 }

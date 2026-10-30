@@ -126,7 +126,7 @@ fn wall_ns() -> u128 {
 }
 
 /// Midnight UTC of `YYYY-MM-DD`, ns.
-fn day_ns(day: &str) -> Option<u64> {
+pub(crate) fn day_ns(day: &str) -> Option<u64> {
     let mut it = day.splitn(3, '-').map(i64::from_str);
     let (y, m, d) = (it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?);
     let y = if m <= 2 { y - 1 } else { y };
@@ -267,10 +267,14 @@ impl Session {
     /// Only when the run record can't be written; a run that fails part way is an
     /// `incomplete` outcome.
     pub fn run(mut self) -> Result<Outcome, String> {
-        let mut audit = Audit::default();
+        let mut audit = Audit::create(&self.dir.join("audit.log"))?;
         let mut state = Run::default();
         let result = self.serve(&mut audit, &mut state);
-        let reason = result.err();
+        let flushed = audit.log.flush().map_err(|e| format!("audit.log: {e}"));
+        let reason = result
+            .err()
+            .or_else(|| audit.failed.take())
+            .or_else(|| flushed.err());
         let outcome = Outcome {
             status: if reason.is_none() {
                 "complete"
@@ -286,11 +290,11 @@ impl Session {
             let _ = protocol::send(
                 c,
                 &json!({"type": "end", "status": outcome.status, "reason": outcome.reason,
-                        "audit": outcome.audit, "steps": outcome.steps, "records": outcome.records}),
+                        "audit": outcome.audit, "steps": outcome.steps, "records": outcome.records,
+                        "reports": state.reports}),
             );
         }
         self.record(&outcome, &state)?;
-        std::fs::write(self.dir.join("audit.log"), &audit.log).map_err(|e| e.to_string())?;
         for v in self.venues {
             v.gateway
                 .stop()
@@ -351,9 +355,19 @@ impl Session {
     fn serve(&mut self, audit: &mut Audit, st: &mut Run) -> Result<(), String> {
         let wait = Duration::from_secs(self.cfg.ready_timeout_s);
         let deadline = Instant::now() + wait;
+        // The last instant of the last day: nothing is stepped after it.
+        let last = self
+            .cfg
+            .days
+            .last()
+            .and_then(|d| day_ns(d))
+            .map(|d| d + DAY - 1)
+            .ok_or("no last day")?;
         // The strategy: control first, then data.
         let ctl = accept(&self.control, deadline, "control")?;
         ctl.set_read_timeout(Some(wait))
+            .map_err(|e| e.to_string())?;
+        ctl.set_write_timeout(Some(wait))
             .map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(ctl.try_clone().map_err(|e| e.to_string())?);
         st.control = Some(ctl);
@@ -367,6 +381,9 @@ impl Session {
         protocol::send(st.control.as_mut().ok_or("no control")?, &w)?;
         let data = accept(&self.data, deadline, "data")?;
         data.set_read_timeout(Some(wait))
+            .map_err(|e| e.to_string())?;
+        // A strategy that stops reading its data ends the run, never blocks it.
+        data.set_write_timeout(Some(wait))
             .map_err(|e| e.to_string())?;
         let mut join = String::new();
         BufReader::new(data.try_clone().map_err(|e| e.to_string())?)
@@ -433,7 +450,7 @@ impl Session {
                 n += 1;
             }
             // Venue reports at t come after its market data (class 2).
-            let reports = self.advance(&sent, t, wait)?;
+            let (reports, events) = self.advance(&sent, t, wait)?;
             // Then timers (class 3).
             let due: Vec<String> = timers
                 .range((t, 0)..=(t, u64::MAX))
@@ -446,7 +463,7 @@ impl Session {
             let step = json!({"type": "step", "step": st.steps, "as_of": t, "records": n,
                               "timers": due, "reports": reports});
             audit.update(format!(
-                "step {} {t} {spans:?} {due:?} {reports}\n",
+                "step {} {t} {spans:?} {due:?} {events}\n",
                 st.steps
             ));
             protocol::send(st.control.as_mut().ok_or("no control")?, &step)?;
@@ -475,6 +492,11 @@ impl Session {
                         if at <= t {
                             return Err(format!("timer {id} at {at} isn't after the step at {t}"));
                         }
+                        if at > last {
+                            return Err(format!(
+                                "timer {id} at {at} is after the last day ends at {last}"
+                            ));
+                        }
                         timer_seq += 1;
                         timers.insert((at, timer_seq), id);
                     }
@@ -484,14 +506,10 @@ impl Session {
             }
         }
         // The rest of the last day, so day orders expire at the close.
-        let end = self
-            .cfg
-            .days
-            .last()
-            .and_then(|d| day_ns(d))
-            .map_or(as_of, |d| (d + DAY - 1).max(as_of));
-        let reports = self.advance(&sent, end, wait)?;
-        audit.update(format!("end {end} {reports}\n"));
+        let end = last.max(as_of);
+        let (reports, events) = self.advance(&sent, end, wait)?;
+        st.reports = Some(reports);
+        audit.update(format!("end {end} {events}\n"));
         st.sent = sent;
         for v in &self.venues {
             for line in self.order_events(&v.name)? {
@@ -540,17 +558,27 @@ impl Session {
         sent: &BTreeMap<String, u64>,
         t: u64,
         wait: Duration,
-    ) -> Result<Value, String> {
+    ) -> Result<(Value, String), String> {
         let mut reports = serde_json::Map::new();
+        let mut events = Vec::new();
         for v in &self.venues {
             let n = sent.get(&v.name).copied().unwrap_or(0);
             let a = v
                 .clock
                 .advance(STRATEGY, n, t, wait)
                 .map_err(|e| format!("venue {}: {e}", v.name))?;
+            // More handled than said means an order the strategy didn't count: it may
+            // have been stamped on either side of this advance.
+            if a.handled != n {
+                return Err(format!(
+                    "venue {}: {} order messages handled, but the strategy said {n}",
+                    v.name, a.handled
+                ));
+            }
             reports.insert(v.name.clone(), json!(a.last_seq));
+            events.push(format!("{}={}", v.name, a.order_events));
         }
-        Ok(Value::Object(reports))
+        Ok((Value::Object(reports), events.join(",")))
     }
 
     /// The run record: what was read, from where, with what pins, and how it ended.
@@ -571,7 +599,7 @@ impl Session {
                                    "bytes": f.bytes, "verified": f.verified, "used": f.used})).collect::<Vec<_>>()})
                     })
                     .collect();
-                json!({"name": s.name, "holdings": p.describe(), "dataset": s.dataset, "symbol": s.symbol,
+                json!({"name": s.name, "holdings": p.describe(), "reading": p.reading(), "dataset": s.dataset, "symbol": s.symbol,
                        "schema": s.schema, "latency_offset_ns": s.latency_offset_ns,
                        "records": src.position(), "clamped": src.clamped(), "days": days})
             })
@@ -580,7 +608,7 @@ impl Session {
             .venues
             .iter()
             .map(|v| {
-                json!({"name": v.name, "model": "tinytrader-sim/2", "script": serde_json::from_str::<Value>(&v.script).unwrap_or(Value::Null),
+                json!({"name": v.name, "model": order_gateway::SIM_MODEL, "script": serde_json::from_str::<Value>(&v.script).unwrap_or(Value::Null),
                        "quotes": v.ranks.iter().map(|r| self.cfg.sources[*r as usize].name.clone()).collect::<Vec<_>>(),
                        "sent": st.sent.get(&v.name)})
             })
@@ -596,6 +624,7 @@ impl Session {
             "records": o.records,
             "strategy": st.strategy.as_ref().map(|(s, r)| json!({"name": s, "revision": r})),
             "days": self.cfg.days,
+            "seed": self.cfg.seed,
             "lockstep": {"batch": "instant", "strategy_latency_ms": self.cfg.strategy_latency_ms},
             "merge": {"order": "(ts, class, rank, position)", "ranks": self.cfg.sources.iter().map(|s| s.name.clone()).collect::<Vec<_>>()},
             "config_sha256": hex(&Sha256::digest(self.cfg_text.as_bytes())),
@@ -608,17 +637,31 @@ impl Session {
     }
 }
 
-/// The audit log: every line hashed as it is written (0009, "Provenance").
-#[derive(Default)]
+/// The audit log: every line hashed and written as it happens (0009,
+/// "Provenance"), so a long run never holds it in memory and a crash keeps it.
 struct Audit {
     hash: Sha256,
-    log: Vec<u8>,
+    log: BufWriter<std::fs::File>,
+    failed: Option<String>,
 }
 
 impl Audit {
+    fn create(path: &Path) -> Result<Self, String> {
+        let f = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Self {
+            hash: Sha256::new(),
+            log: BufWriter::new(f),
+            failed: None,
+        })
+    }
+
     fn update(&mut self, line: impl AsRef<[u8]>) {
         self.hash.update(line.as_ref());
-        self.log.extend_from_slice(line.as_ref());
+        if let Err(e) = self.log.write_all(line.as_ref())
+            && self.failed.is_none()
+        {
+            self.failed = Some(format!("audit.log: {e}"));
+        }
     }
 }
 
@@ -629,4 +672,6 @@ struct Run {
     steps: u64,
     records: u64,
     sent: BTreeMap<String, u64>,
+    /// Each venue's last event after the final advance.
+    reports: Option<Value>,
 }

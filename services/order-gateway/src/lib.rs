@@ -27,4 +27,4 @@ pub use server::{
     start,
 };
 pub use session::{Advanced, wall_ns};
-pub use sim::{Feed, SimBroker};
+pub use sim::{Feed, MODEL as SIM_MODEL, SimBroker};

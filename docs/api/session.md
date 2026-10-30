@@ -29,7 +29,8 @@ The strategy reads the control address (from the `READY` line, or `TT_SESSION` s
 ```toml
 days = ["2026-10-26", "2026-10-27"]   # in order
 strategy_latency_ms = 0               # the strategy's declared latency
-ready_timeout_s = 60                  # per step, and for the first connections
+ready_timeout_s = 60                  # per step, for the first connections, and for every write
+seed = 0                              # recorded; the first models use no randomness
 
 [[sources]]                           # in rank order: ties in time go to the earlier
 name = "opra"
@@ -64,7 +65,7 @@ Sources are read through the store producer (`libs/producer`). A day not held is
 | strategy → session | `{"type":"ready","as_of":0,"sent":{}}`, once joined to the data stream and every venue |
 | session → strategy | `{"type":"step","step":N,"as_of":TS,"records":K,"timers":[ID],"reports":{VENUE:SEQ}}` |
 | strategy → session | `{"type":"ready","as_of":TS,"sent":{VENUE:COUNT},"timers":[{"at":TS,"id":ID}]}` |
-| session → strategy | `{"type":"end","status","reason","audit","steps","records"}` |
+| session → strategy | `{"type":"end","status","reason","audit","steps","records","reports":{VENUE:SEQ}}` |
 
 **A step** is the next time anything happens: the records of one index time (decision 0009's order: `ts_recv`, or `ts_event` plus the source's offset where flagged), timers due then, or both. For each step the session:
 1. pushes the records to the venues that quote their source;
@@ -78,13 +79,18 @@ Sources are read through the store producer (`libs/producer`). A day not held is
 3. acts;
 4. answers `ready`.
 
-**`sent`** counts the submits and cancels the strategy has sent to each venue since it first connected, valid or not, resent ones included; queries don't count ([order-gateway.md §10](order-gateway.md#10-simulated-broker)). Orders take effect at `as_of` plus the strategy's and the venue's latencies.
+**`sent`** counts the submits and cancels the strategy has sent to each venue since it first connected, valid or not, resent ones included; queries don't count ([order-gateway.md §10](order-gateway.md#10-simulated-broker)). It must be exact. Each venue reports how many it has handled when it advances, and a count higher than `sent` means an order the strategy didn't count, which could have been stamped on either side of the advance. Orders take effect at `as_of` plus the strategy's and the venue's latencies.
 
-**Timers** are set in `ready`, each for a time after the step's.
+**Timers** are set in `ready`, each for a time after the step's and no later than the last day's end. A timer at the step's own time is refused rather than moved: decision 0009 orders timers after market data at one time, and that step has passed.
 
-**After the last record**, the venues are advanced to the end of the last day, so day orders expire, and `end` follows.
+**After the last record**, the venues are advanced to the end of the last day, so day orders expire. `end` follows, with each venue's last event, so the strategy can read the last day's expiries before closing.
 
-A strategy that doesn't answer within `ready_timeout_s` ends the run `incomplete`. So does one that answers for another time, or whose `sent` goes back.
+**The run ends `incomplete`** when the strategy:
+- doesn't answer within `ready_timeout_s`;
+- stops reading its control or data connection for that long (every write has that timeout);
+- answers for another time;
+- sends a `sent` that goes back, or that doesn't match what a venue handled;
+- sets a timer outside the run.
 
 ## The data stream
 
@@ -102,18 +108,18 @@ With one source, the header's schema is that source's. With several, it's unset 
 - the audit hash;
 - the steps and records;
 - the strategy's name and revision;
-- the days;
+- the days and the seed;
 - the lockstep batch and strategy latency;
 - the merge's rank order;
 - the configuration's SHA-256;
-- per source: its holdings, records, clamps and each day's files with their SHA-256s;
+- per source: its holdings, records, clamps, each day's files with their SHA-256s, and the files being read when a run stopped part way;
 - per venue: the simulator model, its profile, the sources it quotes, and the order messages sent.
 
 The **audit hash** is a SHA-256 over `audit.log`, which records:
 - the strategy's `hello`;
-- every step (its time, each source's span of positions, the timers fired, each venue's last event);
+- every step (its time, each source's span of positions, the timers fired, each venue's count of journaled order events). The count is used rather than the last event number, which also counts connection events that land by wall time;
 - every `ready`;
 - the final advance;
 - each venue's journaled order events (submits, cancels, broker order events), without their sequence numbers and hash-chain links, which also count connection events.
 
-The same configuration, the same held days and the same strategy give the same hash.
+The log is written as the run goes, never held whole. The same configuration, the same held days and the same strategy give the same hash. A strategy that reconnects to a gateway mid-run still gets the same hash, but its connection events aren't checked.

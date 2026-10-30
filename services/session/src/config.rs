@@ -5,6 +5,7 @@
 //! days = ["2026-10-26", "2026-10-27"]
 //! strategy_latency_ms = 0        # the strategy's declared latency
 //! ready_timeout_s = 60           # how long a step waits for the strategy's ready
+//! seed = 0                       # recorded; the first models use no randomness
 //!
 //! [[sources]]
 //! name = "opra"
@@ -43,6 +44,10 @@ pub struct Config {
     /// first connection.
     #[serde(default = "ready_timeout")]
     pub ready_timeout_s: u64,
+    /// The seed of any declared randomness (decision 0022, section 6). The first
+    /// models use none; it is recorded so a later model can't change old runs.
+    #[serde(default)]
+    pub seed: u64,
     /// The sources, in rank order: ties in time go to the earlier one.
     pub sources: Vec<Source>,
     /// The simulated venues, one gateway each.
@@ -114,6 +119,12 @@ impl Config {
         let c: Self = toml::from_str(text).map_err(|e| e.to_string())?;
         if c.days.is_empty() || c.sources.is_empty() || c.venues.is_empty() {
             return Err("a session needs days, sources and venues".into());
+        }
+        let parsed: Option<Vec<u64>> = c.days.iter().map(|d| crate::run::day_ns(d)).collect();
+        match parsed {
+            Some(p)
+                if p.windows(2).all(|w| w[0] < w[1]) && c.days.iter().all(|d| d.len() == 10) => {}
+            _ => return Err("days must be YYYY-MM-DD, in order, each once".into()),
         }
         let mut names: Vec<&str> = c.sources.iter().map(|s| s.name.as_str()).collect();
         names.sort_unstable();
