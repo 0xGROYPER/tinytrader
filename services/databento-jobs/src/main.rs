@@ -169,9 +169,10 @@ struct PriceRequest {
     /// and days this buys again, by ID: `["OPRA-…"]`.
     #[serde(default)]
     again: Option<Value>,
-    /// Buy every day asked for whole, without asking the store, Databento's
-    /// job list or the ledger what is held or pending: it may buy again what
-    /// is. Only a free ($0) quote can then be made or submitted. For the
+    /// Buy every day asked for whole without asking the store what it holds
+    /// (it may buy again what the store has), skipping only the days a whole
+    /// job of the symbol on Databento's list, or bought here, already
+    /// covers. Only a free ($0) quote can then be made or submitted. For the
     /// plan's free data while the store can't answer (a drive away).
     #[serde(default)]
     free_ignore_held: bool,
@@ -1338,6 +1339,27 @@ async fn had(
     Ok(pieces)
 }
 
+/// What Databento's job list (jobs that aren't expired) and the ledger's
+/// purchases cover of `target`, without the store (`free_ignore_held`).
+async fn jobs_had(
+    jobs: &Jobs,
+    dataset: &str,
+    schema: Schema,
+    target: &str,
+) -> Result<Vec<had::Piece>, String> {
+    let (live, ids) = live_jobs(jobs).await?;
+    let purchases = lock(&jobs.ledger)
+        .as_ref()
+        .map(ledger::Ledger::purchases)
+        .unwrap_or_default();
+    let schema = schema.as_str();
+    let mut pieces = had::job_pieces(&live, dataset, schema, target);
+    pieces.extend(had::ledger_pieces(
+        &purchases, dataset, schema, target, &ids,
+    ));
+    Ok(pieces)
+}
+
 /// The dataset in Databento's spelling, refused unless it is on Databento's
 /// dataset list (read at most hourly).
 async fn known_dataset(jobs: &Jobs, d: &str) -> Result<String, (StatusCode, String)> {
@@ -1480,9 +1502,16 @@ async fn plan(
     let bad = |e: String| (StatusCode::BAD_REQUEST, e);
     let down = |e: String| (StatusCode::SERVICE_UNAVAILABLE, e);
     let dataset = known_dataset(jobs, &a.dataset).await?;
-    // With free_ignore_held, nothing is asked: every day is bought whole.
+    // With free_ignore_held the store isn't asked: only whole jobs of the
+    // symbol on Databento's list or bought here count, and every other day
+    // is bought whole.
     let mut pieces = if a.free_ignore_held {
-        Vec::new()
+        jobs_had(jobs, &dataset, a.schema, &a.symbol)
+            .await
+            .map_err(down)?
+            .into_iter()
+            .filter(|p| matches!(p.scope, had::Scope::All) && !matches!(p.kind, had::Kind::Gone(_)))
+            .collect()
     } else {
         had(jobs, &dataset, a.schema, &a.symbol, (a.start, a.end), fresh)
             .await
@@ -1528,7 +1557,18 @@ async fn plan(
             .iter()
             .filter(|p| p.window.0 < window.1 && window.0 < p.window.1)
             .collect();
-        if !by_contract && touching.is_empty() {
+        if a.free_ignore_held && !by_contract {
+            // Only whole jobs count here: a day one covers is skipped, any
+            // other is bought whole (never by contract, which needs the
+            // store's definitions).
+            match touching
+                .iter()
+                .find(|p| p.window.0 <= window.0 && window.1 <= p.window.1)
+            {
+                Some(p) => notes.push(format!("{d}: not bought, {} covers it", p.what)),
+                None => whole.push((d, window)),
+            }
+        } else if !by_contract && touching.is_empty() {
             whole.push((d, window));
         } else if option {
             by_day.push((d, window));

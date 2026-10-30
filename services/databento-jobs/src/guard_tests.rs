@@ -2606,3 +2606,29 @@ async fn a_paid_purchase_never_ignores_what_is_held() {
     );
     assert_eq!(r.fake.submits(), 0);
 }
+
+#[tokio::test]
+async fn a_free_purchase_ignoring_held_still_skips_a_whole_job_on_databentos_list() {
+    // A whole-chain job of the day on Databento's list: nothing to buy.
+    let r = rig("free-ignore-listed").await;
+    lock(&r.store).catalog = (503, json!({ "error": "rescanning" }));
+    r.fake.add(job(
+        "OPRA-W1",
+        json!("SPY.OPT"),
+        "parent",
+        whole_day(),
+        "done",
+    ));
+    let (code, v) = r.price(json!({ "free_ignore_held": true })).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert!(v["requests"].as_array().is_none_or(Vec::is_empty), "{v}");
+    assert!(v.to_string().contains("OPRA-W1"), "{v}");
+    // A job of some contracts only doesn't count: the day is bought whole.
+    let r = rig("free-ignore-contracts").await;
+    lock(&r.store).catalog = (503, json!({ "error": "rescanning" }));
+    r.fake
+        .add(job("OPRA-C9", json!(C1), "raw_symbol", whole_day(), "done"));
+    let (code, v) = r.price(json!({ "free_ignore_held": true })).await;
+    assert_eq!(code, StatusCode::OK, "{v}");
+    assert_eq!(v["requests"][0]["kind"], "whole", "{v}");
+}
