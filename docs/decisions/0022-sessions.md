@@ -107,6 +107,21 @@ The strategy says how it keeps up:
 A strategy that stops answering in lockstep stops the run after a stated
 timeout, with the run marked incomplete, never silently advanced.
 
+**As built (the merge, `libs/dbn`).** Two cases the key above doesn't
+settle:
+
+- *Companion records.* A record whose rtype `dbn` doesn't know (an
+  extension such as `tinytrader.trade-conditions/1`, which must follow its
+  trade) or that has no time takes the index time of the record before it
+  in its source and is delivered right after it, never separated by
+  another source's record. A source that starts with one fails.
+- *Flagged sources stepping back.* `F_BAD_TS_RECV` records can be out of
+  order by `ts_event` (reordered packets at the venue). Their index time is
+  clamped to the source's last, keeping the file's order, and each source
+  counts its clamps for the run's record. Unflagged records that go back in
+  time fail the run.
+
+
 ### 3. Many sources, many venues
 
 A session names its sources and venues:
