@@ -1857,11 +1857,21 @@ impl<B: Broker> Session<B> {
         let bo = up.order;
         let cid = bo.client_order_id.clone();
         if !self.orders.contains_key(&cid) {
-            let f = Obj::new()
+            // Each event of a broker's own order (a flatten's closes, a venue's
+            // liquidation) once, its fill included, as section 9 promises.
+            let event = normalize_event(&up.event);
+            let mut f = Obj::new()
                 .s("broker_order_id", &bo.broker_order_id)
-                .raw("broker_raw", &bo.raw)
-                .done();
-            return self.foreign(&bo.broker_order_id, &f);
+                .s("event", event)
+                .s("status", &bo.status);
+            if let Some(fill) = &up.fill {
+                f = f.raw("fill", fill);
+            }
+            let f = f.raw("broker_raw", &bo.raw).done();
+            return self.foreign(
+                &format!("{}:{}:{}", bo.broker_order_id, event, bo.filled_qty),
+                &f,
+            );
         }
         if let Some(i) = self.pending.iter().position(|p| p.cid == cid) {
             let p = self.pending.remove(i);

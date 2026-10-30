@@ -280,7 +280,7 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 | `account` | `snapshot: account \| positions`, `broker_raw`. Derived from polling and emitted on change; Alpaca has no account stream. |
 | `activity` | `activity_type`, `broker_raw`, for example `OPEXP`, `OPASN`, `OPEXC`, `FILL` or `FEE`. The simulator sends `OPEXP`, `OPEXC` and `OPASN` at expiry, with `broker_raw{symbol, qty (signed), price (the settlement price), date}`. |
 | `status` | `state`, `broker_stream: up \| down{since}`, `resync?{from_ts, to_ts, orders_checked}`, `kill?{level, reason}`, `cap?{name}` |
-| `foreign` | `broker_raw`. A broker order with no journal entry, such as one placed in the dashboard. |
+| `foreign` | `broker_order_id`, `event`, `status`, `fill?`, `broker_raw`. An event of a broker order with no journal entry, such as one placed in the dashboard, a flatten's closing orders, or a simulated venue's liquidation. Each event of such an order is sent once, a fill with its `fill`. |
 | `client` | `client`, `phase: connected \| disconnected`, `resume_after_seq` |
 | `day` | `day_open{format, previous_file, previous_last_hash}`. The first line of each journal file. |
 
@@ -422,7 +422,7 @@ The script also sets the account fields (status, options level, cash, blocked fl
 
 **Reproducibility pin.** `pins` contains:
 - the quote source and its manifest sha256 or relay stream id
-- the simulator model version (`tinytrader-sim/4`; `/4` settles expiries and charges stock its own fee; `/2` brought definitions from symbol mappings, `cbbo`, `bbo` and `tcbbo` books, one book per instant and the strategy's latency; `/3` forgets expired contracts and reused instrument ids)
+- the simulator model version (`tinytrader-sim/5`; `/5` adds the venue rules; `/4` settles expiries and charges stock its own fee; `/2` brought definitions from symbol mappings, `cbbo`, `bbo` and `tcbbo` books, one book per instant and the strategy's latency; `/3` forgets expired contracts and reused instrument ids)
 - the latencies
 - the fee profile
 - `size_cap`
@@ -449,6 +449,15 @@ The same pin and the same request sequence produce a **byte-identical event tran
  "expiry": {"styles": {"XSP": "cash-am"}, "settlement_file": "/path/settlements.csv", "settle_from_quote": true,
             "exercise_threshold": "0.01", "early_assignment": true, "dividends": {"SPY": "/path/SPY.csv"},
             "put_assignment_extrinsic": "0.01", "quote_max_age_s": 60}}
+```
+
+**Venue rules** (`venue_rules`), each off unless set, as a broker applies them:
+- **`no_same_day_opening_after = "15:30"`.** After this New York time, an order opening an option on its last trading day is refused (`sim_same_day_opening`). That's Alpaca's rule.
+- **`liquidate_same_day_shorts_at = "15:45"`.** At this time, every short option position on its last trading day, in a physically settled root, is bought back at its ask as a broker order. Working orders on it are canceled first. The account's clients see the broker order as `foreign` events, its fill included. A short with no ask stays, to settle at the close. That's Alpaca's rule for accounts that can't cover exercise or assignment; the long wings stay.
+- **`buying_power = "defined_risk"`.** An opening order is refused (`sim_insufficient_buying_power`), never resized, when cash, less the order's premium, less the worst loss at expiry of each expiry's option positions with the order filled, would be negative. A position whose loss has no bound (more short calls than long in an expiry) is refused outright. `account` reports that buying power. It approximates a broker's options buying power for defined-risk spreads; margin on naked positions isn't modelled.
+
+```json
+{"venue_rules": {"no_same_day_opening_after": "15:30", "liquidate_same_day_shorts_at": "15:45", "buying_power": "defined_risk"}}
 ```
 
 **Deferred:** queue and L2 models, and stochastic latency. Each one changes the pin, not the protocol.
