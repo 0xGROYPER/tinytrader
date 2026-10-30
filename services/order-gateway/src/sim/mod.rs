@@ -217,8 +217,8 @@ impl SimBroker {
             .saturating_add(jitter)
     }
 
-    /// The profile's random latency jitter for `key` (an order's id, or its id and
-    /// a cancel's number), ns: uniform over `latency_jitter_ms`, from the seed and
+    /// The profile's random latency jitter for `key` (the venue's admission number of
+    /// the submit or cancel), ns: uniform over `latency_jitter_ms`, from the seed and
     /// the key alone, so it doesn't depend on the order requests arrive in. Zero
     /// without jitter.
     fn jitter(&mut self, key: &str) -> u64 {
@@ -518,7 +518,7 @@ impl SimBroker {
                 return CancelResult::Rejected(error(422, "42210000", "order is not cancelable"));
             }
             OnCancel::Ok if self.market.is_some() => {
-                let key = format!("{}#cancel", self.orders[i].cid);
+                let key = format!("cancel-{}", self.cancels);
                 let t = self.effective(&key);
                 self.schedule(t, Action::Cancel(i));
             }
@@ -718,7 +718,7 @@ impl Broker for SimBroker {
             self.push(i, "new", None, None, None);
         }
         if self.market.is_some() {
-            let t = self.effective(&intent.client_order_id);
+            let t = self.effective(&format!("order-{}", self.submits));
             self.orders[i].t_act = t;
             self.schedule(t, Action::Activate(i));
         } else {
@@ -812,6 +812,14 @@ impl Broker for SimBroker {
     }
 
     fn order(&mut self, target: &OrderRef) -> Query<Option<BrokerOrder>> {
+        // A scripted fill on query happens to the live state, before any view.
+        if let Some(i) = self.find(target)
+            && self.orders[i].rule.fill_on_query
+            && self.open(i)
+        {
+            let units = self.orders[i].qty - self.orders[i].filled;
+            self.execute(i, units, &self.script_prices(i));
+        }
         let saved = self.enter_view();
         let r = self.order_now(target);
         self.leave_view(saved);
@@ -1189,10 +1197,6 @@ impl SimBroker {
         let Some(i) = self.find(target) else {
             return Self::reply(None, error(404, "40410000", "order not found").raw);
         };
-        if self.orders[i].rule.fill_on_query && self.open(i) {
-            let units = self.orders[i].qty - self.orders[i].filled;
-            self.execute(i, units, &self.script_prices(i));
-        }
         let o = self.broker_order(i);
         let raw = o.raw.clone();
         Self::reply(Some(o), raw)

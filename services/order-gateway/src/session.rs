@@ -1871,14 +1871,6 @@ impl<B: Broker> Session<B> {
                 .map_or(Duration::ZERO, |k| self.cfg.timing.resolve[k]);
             self.resolution(&cid, "found", w)?;
         }
-        // A fill the gateway already holds (a REST lookup reported it before the
-        // stream did) isn't reported twice.
-        let known = self.orders.get(&cid).is_some_and(|st| {
-            st.phase == Phase::Done && st.status == bo.status && st.filled >= bo.filled_qty
-        });
-        if known && up.fill.is_some() && up.source != "rest_reconcile" {
-            return Ok(());
-        }
         let event = if up.source == "rest_reconcile" {
             status_event(&up.event)
         } else {
