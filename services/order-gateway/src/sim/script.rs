@@ -69,6 +69,9 @@ pub(crate) struct Script {
     pub(crate) rules: Vec<(Match, Rule)>,
     pub(crate) drop_after: Option<(u64, u64)>,
     pub(crate) fee_cents: i64,
+    /// Per share of stock, nanodollars.
+    pub(crate) fee_share: i64,
+    pub(crate) expiry: super::expiry::Expiry,
     pub(crate) latency_ms: u64,
     pub(crate) strategy_latency_ms: u64,
     pub(crate) size_cap: bool,
@@ -177,6 +180,14 @@ impl Script {
             rules: Vec::new(),
             drop_after: None,
             fee_cents: 2,
+            fee_share: 0,
+            expiry: super::expiry::Expiry {
+                settle: true,
+                from_quote: true,
+                threshold: 10_000_000,
+                put_extrinsic: 10_000_000,
+                ..Default::default()
+            },
             latency_ms: f.opt_int("latency_ms")?.unwrap_or(5),
             strategy_latency_ms: f.opt_int("strategy_latency_ms")?.unwrap_or(0),
             size_cap: false,
@@ -270,6 +281,16 @@ impl Script {
         if let Some(fee) = f.take("fee_per_contract") {
             s.fee_cents = price(&fee, "fee_per_contract")?;
         }
+        if let Some(v) = f.take("fee_per_share") {
+            s.fee_share = v
+                .as_str()
+                .and_then(super::expiry::nanos)
+                .filter(|n| *n >= 0)
+                .ok_or_else(|| invalid("fee_per_share", "a decimal dollar amount"))?;
+        }
+        if let Some(e) = f.take("expiry") {
+            parse_expiry(&mut s.expiry, e)?;
+        }
         s.size_cap = match f.opt_string("size_cap")?.as_deref() {
             None | Some("none") => false,
             Some("displayed") => true,
@@ -294,4 +315,90 @@ impl Script {
             .or_else(by_nth)
             .map_or_else(|| self.default.clone(), |(_, r)| r.clone())
     }
+}
+
+/// A file named in the profile: its text and SHA-256.
+fn read_pinned(path: &str, key: &str) -> Result<(String, String), Invalid> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).map_err(|e| invalid(key, &format!("{path}: {e}")))?;
+    let sha = crate::intent::hex(&Sha256::digest(&bytes));
+    let text = String::from_utf8(bytes).map_err(|_| invalid(key, "UTF-8 text"))?;
+    Ok((text, sha))
+}
+
+/// The profile's `expiry` object.
+fn parse_expiry(e: &mut super::expiry::Expiry, v: Value) -> Result<(), Invalid> {
+    use super::expiry::{Style, csv, nanos};
+    let mut f = Fields::new(v, "expiry")?;
+    if let Some(Value::Object(m)) = f.take("styles") {
+        for (root, style) in m {
+            let st = style
+                .as_str()
+                .and_then(Style::parse)
+                .ok_or_else(|| invalid("expiry.styles", "cash-pm, cash-am or physical"))?;
+            e.styles.insert(root, st);
+        }
+    }
+    if let Some(path) = f.opt_string("settlement_file")? {
+        let (text, sha) = read_pinned(&path, "expiry.settlement_file")?;
+        for row in csv(&text) {
+            let get = |k: &str| row.get(k).cloned().unwrap_or_default();
+            let value = nanos(&get("value"))
+                .ok_or_else(|| invalid("expiry.settlement_file", "root,date,kind,value rows"))?;
+            e.prices
+                .insert((get("root"), get("date"), get("kind")), value);
+        }
+        e.prices_sha = Some(sha);
+    }
+    if let Some(b) = f.take("settle") {
+        e.settle = b
+            .as_bool()
+            .ok_or_else(|| invalid("expiry.settle", "true or false"))?;
+    }
+    if let Some(b) = f.take("settle_from_quote") {
+        e.from_quote = b
+            .as_bool()
+            .ok_or_else(|| invalid("expiry.settle_from_quote", "true or false"))?;
+    }
+    let dollars = |v: &Value, k: &str| {
+        v.as_str()
+            .and_then(nanos)
+            .filter(|n| *n >= 0)
+            .ok_or_else(|| invalid(k, "a decimal dollar amount"))
+    };
+    if let Some(v) = f.take("exercise_threshold") {
+        e.threshold = dollars(&v, "expiry.exercise_threshold")?;
+    }
+    if let Some(v) = f.take("put_assignment_extrinsic") {
+        e.put_extrinsic = dollars(&v, "expiry.put_assignment_extrinsic")?;
+    }
+    if let Some(b) = f.take("early_assignment") {
+        e.early = b
+            .as_bool()
+            .ok_or_else(|| invalid("expiry.early_assignment", "true or false"))?;
+    }
+    if let Some(Value::Object(m)) = f.take("dividends") {
+        for (root, path) in m {
+            let path = path
+                .as_str()
+                .ok_or_else(|| invalid("expiry.dividends", "root: path"))?;
+            let (text, sha) = read_pinned(path, "expiry.dividends")?;
+            let mut by_date = BTreeMap::new();
+            for row in csv(&text) {
+                let (Some(d), Some(a)) = (row.get("ex_date"), row.get("dividend_usd")) else {
+                    return Err(invalid(
+                        "expiry.dividends",
+                        "ex_date and dividend_usd columns",
+                    ));
+                };
+                by_date.insert(
+                    d.clone(),
+                    nanos(a).ok_or_else(|| invalid("expiry.dividends", "dividend_usd"))?,
+                );
+            }
+            e.dividends.insert(root.clone(), by_date);
+            e.dividends_sha.insert(root, sha);
+        }
+    }
+    f.finish()
 }

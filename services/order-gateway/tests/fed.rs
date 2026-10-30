@@ -105,7 +105,7 @@ fn options_and_shares_fill_from_minute_quotes() {
     let mut c = Conn::open(&gw, "reactor", None);
     let welcome = serde_json::from_str::<Value>(&c.lines[0]).unwrap();
     let pins = &welcome["pins"]["broker"];
-    assert_eq!(pins["model"], "tinytrader-sim/3");
+    assert_eq!(pins["model"], "tinytrader-sim/4");
     assert_eq!(pins["quotes"]["source"], "session");
     mappings(&feed);
     // At first neither fills: the spread's natural is 0.92 - 0.53 = 0.39 credit, short
@@ -399,6 +399,8 @@ fn an_expired_contract_never_fills_against_a_reused_id() {
     };
     // A weekly expiring later, as 4.
     map(4, T0 - S / 2, "SPY   261009P00570000");
+    // SPY itself, so the call held through its expiry settles at the close.
+    bbo(&feed, 9, T0, 57_000, 57_002);
     cbbo(&feed, 1, T0, 120, 125);
     cbbo(&feed, 4, T0, 80, 82);
     clock.advance("reactor", 0, T0, WAIT).unwrap();
@@ -412,7 +414,9 @@ fn an_expired_contract_never_fills_against_a_reused_id() {
     cbbo(&feed, 1, t1, 70_700, 70_731);
     cbbo(&feed, 4, t1, 40, 42);
     clock.advance("reactor", 1, t1, WAIT).unwrap();
-    let r = c.submit("r2", &single("wse-close", CALL, "sell", "close", 1, "0.01"));
+    // Settled at its close (exercised against SPY's quote), nothing is left to
+    // close; an order on it is refused as expired, never priced at the LEAP's ask.
+    let r = c.submit("r2", &single("wse-again", CALL, "buy", "open", 1, "707.31"));
     assert_eq!(r["outcome"], "rejected", "{r}");
     assert_eq!(r["code"], "sim_expired_instrument", "{r}");
     // A contract not mapped today is unknown, never priced from yesterday's quote.
@@ -429,5 +433,37 @@ fn an_expired_contract_never_fills_against_a_reused_id() {
     assert_eq!(r["outcome"], "accepted", "{r}");
     clock.advance("reactor", 2, t1 + 60 * S, WAIT).unwrap();
     assert_eq!(fill(&mut c, "wse-leap")["fill"]["price"], "707.31");
+    gw.stop().unwrap();
+}
+
+/// End to end: a long call held to its expiry is exercised at the close against
+/// the venue's quote of the underlying, as an `activity` event the client sees,
+/// and the position becomes 100 shares at the strike.
+#[test]
+fn a_call_held_to_expiry_is_exercised_into_shares() {
+    let (gw, feed, clock) = gateway("fed-exercise", "{}");
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed); // CALL is SPY 2026-10-05 580 call, as 1; SPY shares as 9
+    cbbo(&feed, 1, T0, 1_000, 1_002);
+    bbo(&feed, 9, T0, 58_999, 59_001);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    c.submit("r1", &single("wse-call", CALL, "buy", "open", 1, "10.02"));
+    clock.advance("reactor", 1, T0 + 60 * S, WAIT).unwrap();
+    assert_eq!(fill(&mut c, "wse-call")["fill"]["price"], "10.02");
+    // The close: SPY at 590.00, the call 10.00 in the money.
+    let close = T0 + 6 * 3_600 * S;
+    clock.advance("reactor", 1, close + S, WAIT).unwrap();
+    let a = c.until(|v| v["kind"] == "activity").pop().unwrap();
+    assert_eq!(a["activity_type"], "OPEXC", "{a}");
+    assert_eq!(a["broker_raw"]["symbol"], CALL);
+    assert_eq!(a["broker_raw"]["price"], "590.00");
+    let (r, _) = c.req("positions", "r2", "");
+    let pos = r["positions"].as_array().unwrap();
+    assert_eq!(pos.len(), 1, "{r}");
+    assert_eq!(
+        (pos[0]["symbol"].as_str(), pos[0]["qty"].as_i64()),
+        (Some("SPY"), Some(100))
+    );
+    assert_eq!(pos[0]["avg_entry_price"], "580.00");
     gw.stop().unwrap();
 }

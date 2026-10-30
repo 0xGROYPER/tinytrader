@@ -1810,6 +1810,13 @@ impl<B: Broker> Session<B> {
         for u in updates {
             match u {
                 Update::Order(o) => self.on_order(*o)?,
+                Update::Activity { activity_type, raw } => {
+                    let body = Obj::new()
+                        .s("activity_type", &activity_type)
+                        .raw("broker_raw", &raw)
+                        .done();
+                    self.emit(self.ts(), "activity", &body, Aud::All)?;
+                }
                 Update::StreamDown => {
                     if self.stream_down.is_none() {
                         self.stream_down = Some((Instant::now(), self.ts()));

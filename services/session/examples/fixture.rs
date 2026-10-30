@@ -67,9 +67,16 @@ fn main() -> Result<(), String> {
         format!(r#"{{"files":[{{"filename":"{name}","hash":"sha256:{sha}"}}]}}"#).as_bytes(),
     )?;
     write(job.join("COMPLETE"), b"")?;
+    // SPY's close that day, for settling the call at its expiry: 579.00, so a
+    // 580 call expires worthless.
+    write(
+        dir.join("settlements.csv"),
+        b"root,date,kind,value\nSPY,2026-10-27,PM-close,579.00\n",
+    )?;
     let config = format!(
-        "days = [\"2026-10-27\"]\nready_timeout_s = 20\n\n[[sources]]\nname = \"opra\"\nholdings = \"job:{}\"\nprovider = \"databento\"\ndataset = \"OPRA.PILLAR\"\nsymbol = \"SPY.OPT\"\nschema = \"cbbo-1m\"\n\n[[venues]]\nname = \"options\"\nquotes = [\"opra\"]\nunderlyings = [\"SPY\"]\n",
-        job.display()
+        "days = [\"2026-10-27\"]\nready_timeout_s = 20\n\n[[sources]]\nname = \"opra\"\nholdings = \"job:{}\"\nprovider = \"databento\"\ndataset = \"OPRA.PILLAR\"\nsymbol = \"SPY.OPT\"\nschema = \"cbbo-1m\"\n\n[[venues]]\nname = \"options\"\nquotes = [\"opra\"]\nunderlyings = [\"SPY\"]\n\n[venues.sim.expiry]\nsettlement_file = \"{}\"\n",
+        job.display(),
+        dir.join("settlements.csv").display()
     );
     write(dir.join("session.toml"), config.as_bytes())?;
     Ok(())

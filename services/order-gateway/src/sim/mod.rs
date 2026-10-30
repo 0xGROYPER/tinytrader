@@ -1,6 +1,7 @@
 //! `SimBroker`: a deterministic simulated broker behind the same `Broker` seam.
 //! Scripted mode replays `FakeBroker` scenarios; market mode fills against DBN quotes in
 //! client-clocked market time. Its cash, positions and activities are broker state.
+mod expiry;
 mod fill;
 mod market;
 mod script;
@@ -22,7 +23,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 /// The simulator's model version, in every pin.
-pub const MODEL: &str = "tinytrader-sim/3";
+pub const MODEL: &str = "tinytrader-sim/4";
 
 /// Whether `symbol` is an option whose expiry is before ET day `day`.
 pub(crate) fn expired(symbol: &str, day: i64) -> bool {
@@ -104,6 +105,10 @@ pub struct SimBroker {
     cash: i128,
     pos: BTreeMap<String, (i64, i128)>,
     activities: Vec<String>,
+    /// Non-trade activities so far, for their ids.
+    acts: u64,
+    /// The next session close at which options are settled, once known.
+    settle_at: Option<u64>,
     updates: Vec<Update>,
     streamed: u64,
     down: Option<Instant>,
@@ -213,6 +218,8 @@ impl SimBroker {
             execs: 0,
             pos: BTreeMap::new(),
             activities: Vec::new(),
+            acts: 0,
+            settle_at: None,
             updates: Vec::new(),
             streamed: 0,
             down: None,
@@ -516,6 +523,8 @@ impl Broker for SimBroker {
             .n("latency_ms", self.s.latency_ms)
             .n("strategy_latency_ms", self.s.strategy_latency_ms)
             .s("fee_per_contract", &fmt_cents(self.s.fee_cents))
+            .s("fee_per_share", &fmt_nanos(i128::from(self.s.fee_share)))
+            .raw("expiry", &self.expiry_pin())
             .s(
                 "size_cap",
                 if self.s.size_cap { "displayed" } else { "none" },
@@ -892,7 +901,24 @@ impl Broker for SimBroker {
 impl SimBroker {
     /// Applies quote records and order actions up to `to` in the section 10 order.
     fn run_to(&mut self, to: u64) -> Result<(), String> {
+        if self.settle_at.is_none() && self.market.is_some() && self.s.expiry.settle {
+            // A fed simulator's clock starts at zero: settle from its first day.
+            let from = if self.now == 0 { to } else { self.now };
+            self.settle_at = self.next_close(et_day(from));
+        }
         while let Some(m) = &mut self.market {
+            // A session's close settles that day's expiries: after every record and
+            // order action at or before it, before anything after it.
+            if let Some(c) = self.settle_at.filter(|c| *c <= to) {
+                let rec = m.src.peek_ts()?.filter(|t| *t <= c);
+                let act = m.actions.iter().any(|a| a.0 <= c);
+                if rec.is_none() && !act {
+                    self.now = self.now.max(c);
+                    self.settle_day(et_day(c), c)?;
+                    self.settle_at = self.next_close(et_day(c) + 1);
+                    continue;
+                }
+            }
             let rec = m.src.peek_ts()?.filter(|t| *t <= to);
             let act = m
                 .actions
@@ -937,6 +963,14 @@ impl SimBroker {
         Ok(())
     }
 
+    /// The close of the first session on or after ET day `day`, within a fortnight.
+    fn next_close(&self, day: i64) -> Option<u64> {
+        (day..day + 14)
+            .filter_map(|d| self.session(d))
+            .map(|(_, c)| c)
+            .find(|c| *c >= self.now)
+    }
+
     /// Once a day has passed an option's expiry, forgets the contract and its book:
     /// it can't be quoted, and its id may name another contract by now.
     fn forget_expired(&mut self) {
@@ -958,6 +992,38 @@ impl SimBroker {
             m.book.remove(&i);
             m.quoted.remove(&i);
         }
+    }
+
+    /// The expiry settings, for `pins`.
+    fn expiry_pin(&self) -> String {
+        let e = &self.s.expiry;
+        let styles = e
+            .styles
+            .iter()
+            .fold(Obj::new(), |o, (k, v)| o.s(k, &format!("{v:?}")))
+            .done();
+        let divs = e
+            .dividends_sha
+            .iter()
+            .fold(Obj::new(), |o, (k, v)| o.s(k, v))
+            .done();
+        Obj::new()
+            .b("settle", e.settle)
+            .s(
+                "model",
+                "settle at the session close: cash at intrinsic, physical at the strike",
+            )
+            .raw("styles", &styles)
+            .opt_s("settlement_file_sha256", e.prices_sha.as_deref())
+            .b("settle_from_quote", e.from_quote)
+            .s("exercise_threshold", &fmt_nanos(i128::from(e.threshold)))
+            .b("early_assignment", e.early)
+            .raw("dividends_sha256", &divs)
+            .s(
+                "put_assignment_extrinsic",
+                &fmt_nanos(i128::from(e.put_extrinsic)),
+            )
+            .done()
     }
 
     /// Applies one record to the book; a quote returns its instrument id.

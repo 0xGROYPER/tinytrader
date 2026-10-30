@@ -115,6 +115,9 @@ quotes = ["opra"]
 underlyings = ["SPY"]
 [venues.sim]
 fee_per_contract = "0.65"
+# These tests are about lockstep; the toy's call isn't settled at expiry.
+[venues.sim.expiry]
+settle = false
 "#,
         job.display()
     )
@@ -323,7 +326,7 @@ fn a_session_runs_a_strategy_in_lockstep() {
     assert_eq!(rec["strategy"]["name"], "toy");
     assert_eq!(rec["sources"][0]["days"][0]["files"][0]["verified"], true);
     assert_eq!(rec["venues"][0]["sent"], 1);
-    assert_eq!(rec["venues"][0]["model"], "tinytrader-sim/3");
+    assert_eq!(rec["venues"][0]["model"], "tinytrader-sim/4");
     assert_eq!(rec["seed"], 0);
     // The end names each venue's last event after the final advance.
     assert!(seen.end["reports"]["options"].as_u64().unwrap() > 0);
