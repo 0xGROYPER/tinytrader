@@ -1023,3 +1023,43 @@ fn a_combo_fills_when_its_legs_clear_within_the_window() {
     assert_eq!(q[0]["queue_price"], "0.94", "{f}");
     gw.stop().unwrap();
 }
+
+/// A combo leg's size from prints leaves the window print by print: 1-lots
+/// trickling in over minutes never add up to fill the other leg's unit later.
+#[test]
+fn old_prints_leave_the_combo_window_one_by_one() {
+    let (gw, feed, clock) = gateway(
+        "fed-queue-roll",
+        r#"{"queue":{},"expiry":{"settle":false}}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    let order = combo(
+        "wse-qroll",
+        &[(PUT_A, 1, "sell", "open"), (PUT_B, 1, "buy", "open")],
+        2,
+        "-0.46",
+    );
+    c.submit("r1", &order);
+    let mut sent = 1;
+    // One PUT_A contract through its ask every 50 s for five minutes.
+    for k in 1..=6 {
+        print(&feed, 2, T0 + k * 50 * S, (92, 96), 95, 1);
+        clock
+            .advance("reactor", sent, T0 + k * 50 * S, WAIT)
+            .unwrap();
+        sent = 0;
+    }
+    // Two PUT_B: only one PUT_A grant (at 300 s) is still within 60 s.
+    print(&feed, 3, T0 + 320 * S, (48, 52), 48, 2);
+    clock.advance("reactor", 0, T0 + 320 * S, WAIT).unwrap();
+    let f = c
+        .until(|v| v["client_order_id"] == "wse-qroll" && v["event"] == "partial_fill")
+        .pop()
+        .unwrap();
+    assert_eq!(f["filled_qty"], 1, "{f}");
+    gw.stop().unwrap();
+}

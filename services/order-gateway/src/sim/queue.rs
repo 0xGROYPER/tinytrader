@@ -22,13 +22,16 @@
 //!   `fill_on_print = "through"`. Several resting orders on one contract share a
 //!   print, earliest (`t_act`, then arrival) first.
 //! - **Filling.** A single fills at its limit, as much as is available. A combo
-//!   fills when every leg has had size available within `combo_window_s` (60 s by
-//!   default, a rolling window), as many units as every leg allows, each leg at its
+//!   fills when every leg has size available from prints within the last
+//!   `combo_window_s` (60 s by default; each print's size leaves the window on its
+//!   own), as many units as every leg allows, each leg at its
 //!   implied price: the net limit split over the legs in proportion to their mids,
 //!   rounded to the cent against the order, the last leg then moved back so the net
 //!   is never worse than the limit. This is legging the spread, not trading in a complex book. What isn't
 //!   filled keeps its place, at the front.
-//! - Each leg's queue is in the order's `broker_raw.order.queue`.
+//! - Each leg's queue is in the order's `broker_raw.order.queue`. A combo whose
+//!   implied prices can't be set (a leg at nothing, or no mids) rests unqueued, with
+//!   no `queue` in its `broker_raw`, and fills only at the touch.
 //! - Not modelled: trade conditions, market impact, orders joining behind.
 use super::{CENT, SimBroker};
 use std::fmt::Write as _;
@@ -60,8 +63,26 @@ pub(crate) struct LegQueue {
     pub(crate) ahead: u64,
     /// Contracts prints have left for it, not yet filled.
     pub(crate) avail: u64,
+    /// Each grant of available size: when, and how much is left of it. A grant
+    /// leaves the window on its own.
+    pub(crate) grants: std::collections::VecDeque<(u64, u64)>,
     /// When size last became available, ns.
     pub(crate) cleared: Option<u64>,
+}
+
+impl LegQueue {
+    /// Drops the size granted before the window, grant by grant.
+    fn expire(&mut self, now: u64, window: u64) {
+        while self
+            .grants
+            .front()
+            .is_some_and(|(t, _)| now.saturating_sub(*t) > window)
+        {
+            if let Some((_, n)) = self.grants.pop_front() {
+                self.avail -= n;
+            }
+        }
+    }
 }
 
 impl SimBroker {
@@ -114,6 +135,7 @@ impl SimBroker {
                     at,
                     ahead: (shown * model.ahead_permille).div_ceil(1000),
                     avail: 0,
+                    grants: std::collections::VecDeque::new(),
                     cleared: None,
                 }
             })
@@ -153,6 +175,7 @@ impl SimBroker {
                 if l.symbol != symbol {
                     continue;
                 }
+                q.expire(now, model.window);
                 let need = (remaining * l.ratio).saturating_sub(q.avail);
                 let through = if l.buy {
                     price < q.at - HALF_CENT
@@ -172,6 +195,7 @@ impl SimBroker {
                 let grant = free.min(need);
                 if grant > 0 {
                     q.avail += grant;
+                    q.grants.push_back((now, grant));
                     q.cleared = Some(now);
                     left -= grant;
                 }
@@ -190,17 +214,25 @@ impl SimBroker {
         let Some(queue) = &mut o.queue else { return };
         let mut units = o.qty - o.filled;
         for (l, q) in o.legs.iter().zip(queue.iter_mut()) {
-            // Size from a clearing that's left the window is gone.
-            if q.cleared.is_none_or(|t| now.saturating_sub(t) > window) {
-                q.avail = 0;
-            }
+            q.expire(now, window);
             units = units.min(q.avail / l.ratio);
         }
         if units == 0 {
             return;
         }
         for (l, q) in o.legs.iter().zip(queue.iter_mut()) {
-            q.avail -= units * l.ratio;
+            // Filled from the oldest grants first.
+            let mut take = units * l.ratio;
+            q.avail -= take;
+            while take > 0 {
+                let Some(g) = q.grants.front_mut() else { break };
+                let n = g.1.min(take);
+                g.1 -= n;
+                take -= n;
+                if g.1 == 0 {
+                    q.grants.pop_front();
+                }
+            }
         }
         let prices: Vec<i64> = queue.iter().map(|q| q.price).collect();
         self.execute(i, units, &prices);
