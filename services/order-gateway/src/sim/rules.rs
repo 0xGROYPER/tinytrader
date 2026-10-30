@@ -5,18 +5,23 @@
 //!   refused after it (`sim_same_day_opening`).
 //! - **Same-day short options liquidated at a time** (`liquidate_same_day_shorts_at`,
 //!   such as `"15:45"`, Alpaca's for accounts that can't cover exercise or
-//!   assignment): every short option position in a physically settled root
-//!   expiring that day is bought back at its ask, as a broker order the account's
-//!   clients see as a `foreign` order with its fill; working orders on those
-//!   contracts are canceled first. A short without an ask stays, to settle at the
-//!   close.
+//!   assignment): every short option position in a physically settled root on its
+//!   last trading day is bought back at its ask, if fresh (within the expiry
+//!   quote age), up to the ask's size, as a broker order: the account's clients see
+//!   it as a `foreign` order and its fill as a `FILL` activity. Working orders on
+//!   those contracts are canceled first. What isn't bought back settles at the
+//!   close. The fill is at the ask when the rule runs, without the venue's latency
+//!   or `fill_on`.
+//! - **Times move with an early close**: a rule's time keeps its distance from the
+//!   close, so 15:30 and 15:45 on a 16:00 day are 12:30 and 12:45 on a 13:00 day.
 //! - **Buying power** (`buying_power = "defined_risk"`): an opening order is refused
 //!   (`sim_insufficient_buying_power`), never resized, when cash, less the order's
 //!   premium, less the worst loss at expiry of each expiry's option positions with
 //!   the order filled, would be negative. A position whose loss has no bound (more
 //!   short calls than long) is refused outright. Shares are bought with cash. It
 //!   approximates a broker's options buying power for defined-risk spreads, and
-//!   does not model margin on naked positions.
+//!   does not model margin on naked positions. Working orders count as if filled:
+//!   their legs in the positions, their debits as paid.
 use super::{CENT, SimBroker};
 use crate::intent::Intent;
 use crate::safety::{et_day, et_ns, hhmm};
@@ -72,7 +77,7 @@ impl SimBroker {
         let r = &self.s.venue;
         let today = et_day(self.now);
         if let Some(after) = r.no_same_day_opening_after {
-            let late = self.now >= et_ns(today, after);
+            let late = self.rule_time(today, after).is_some_and(|t| self.now >= t);
             // Its last trading day: the session before expiry for an AM-settled root.
             let same_day = intent
                 .legs
@@ -105,16 +110,16 @@ impl SimBroker {
         } else {
             100
         };
-        let premium = i128::from(signed) * i128::from(CENT) * i128::from(qty) * multiplier;
-        // Option positions with the order filled, by root and expiry.
-        let extra: Vec<(String, i64)> = intent
-            .legs
-            .iter()
-            .map(|l| {
-                let sign = if l.buy { 1 } else { -1 };
-                (l.symbol.clone(), sign * qty * i64::from(l.ratio))
-            })
-            .collect();
+        // Its premium, and the working orders' debits still to pay (a credit not yet
+        // received counts for nothing).
+        let premium = i128::from(signed) * i128::from(CENT) * i128::from(qty) * multiplier
+            + self.working_debits();
+        // Option positions with the working orders and this one filled.
+        let mut extra = self.working_legs();
+        extra.extend(intent.legs.iter().map(|l| {
+            let sign = if l.buy { 1 } else { -1 };
+            (l.symbol.clone(), sign * qty * i64::from(l.ratio))
+        }));
         let required = match self.required(&extra) {
             Ok(r) => r,
             Err(root) => {
@@ -161,7 +166,63 @@ impl SimBroker {
 
     /// Cash less the worst expiry loss of the option positions held.
     pub(super) fn buying_power(&self) -> i128 {
-        self.required(&[]).map_or(0, |r| (self.cash - r).max(0))
+        self.required(&self.working_legs())
+            .map_or(0, |r| (self.cash - self.working_debits() - r).max(0))
+    }
+
+    /// Working orders' unfilled option legs, signed, as positions they would add.
+    fn working_legs(&self) -> Vec<(String, i64)> {
+        let mut out = Vec::new();
+        for (i, o) in self.orders.iter().enumerate() {
+            if !self.open(i) {
+                continue;
+            }
+            let left = i64::try_from(o.qty - o.filled).unwrap_or(0);
+            for l in &o.legs {
+                let sign = if l.buy { 1 } else { -1 };
+                out.push((
+                    l.symbol.clone(),
+                    sign * left * i64::try_from(l.ratio).unwrap_or(1),
+                ));
+            }
+        }
+        out
+    }
+
+    /// The debits working orders would still pay, nanodollars.
+    fn working_debits(&self) -> i128 {
+        self.orders
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.open(*i))
+            .map(|(_, o)| {
+                let left = i128::from(o.qty - o.filled);
+                let debit = if o.combo || o.legs[0].buy {
+                    o.limit_cents
+                } else {
+                    0
+                };
+                let multiplier = if o
+                    .legs
+                    .iter()
+                    .all(|l| crate::intent::occ(&l.symbol).is_none())
+                {
+                    1
+                } else {
+                    100
+                };
+                i128::from(debit.max(0)) * i128::from(CENT) * left * multiplier
+            })
+            .sum()
+    }
+
+    /// A rule's time on ET day `day`: as far before that session's close as before a
+    /// 16:00 close, so an early close (13:00) moves 15:45 to 12:45.
+    fn rule_time(&self, day: i64, minutes: i64) -> Option<u64> {
+        let (_, close) = self.session(day)?;
+        let regular = et_ns(day, 16 * 60);
+        let before = regular.checked_sub(et_ns(day, minutes))?;
+        close.checked_sub(before)
     }
 
     /// The rules, for `pins`.
@@ -189,8 +250,7 @@ impl SimBroker {
     pub(super) fn next_liquidation(&self, day: i64) -> Option<u64> {
         let at = self.s.venue.liquidate_at?;
         (day..day + 14)
-            .filter(|d| self.session(*d).is_some())
-            .map(|d| et_ns(d, at))
+            .filter_map(|d| self.rule_time(d, at))
             .find(|t| *t >= self.now)
     }
 
@@ -210,13 +270,16 @@ impl SimBroker {
             .map(|(s, p)| (s.clone(), -p.0))
             .collect();
         for (symbol, qty) in shorts {
-            let Some(ask) = self.market.as_ref().and_then(|m| {
-                m.ids
-                    .get(&symbol)
-                    .and_then(|id| m.book.get(id))
-                    .and_then(|q| q.ask)
-            }) else {
+            // A fresh ask only, and no more than it shows: what isn't bought back
+            // settles at the close.
+            let Some(q) = self.fresh(&symbol, ts) else {
                 continue;
+            };
+            let Some(ask) = q.ask else { continue };
+            let qty = if q.ask_sz > 0 {
+                qty.min(i64::try_from(q.ask_sz).unwrap_or(qty))
+            } else {
+                qty
             };
             let working: Vec<usize> = (0..self.orders.len())
                 .filter(|i| {
@@ -246,6 +309,37 @@ impl SimBroker {
             self.orders[i].active = true;
             self.push(i, "new", None, None, None);
             self.execute(i, u64::try_from(qty).unwrap_or(0), &[ask]);
+            // The client hears of the fill as an account activity: the gateway sends a
+            // broker's own order once, as `foreign`, without its fills.
+            self.liquidation_fill(&symbol, qty, ask, ts, i);
+        }
+    }
+}
+
+impl SimBroker {
+    fn liquidation_fill(&mut self, symbol: &str, qty: i64, ask: i64, ts: u64, i: usize) {
+        self.acts += 1;
+        let raw = crate::protocol::Obj::new()
+            .s("activity_type", "FILL")
+            .s("id", &format!("sim-act-{:06}", self.acts))
+            .s("order_id", &self.orders[i].id.clone())
+            .s("client_order_id", &self.orders[i].cid.clone())
+            .s("symbol", symbol)
+            .s("side", "buy")
+            .s("qty", &qty.to_string())
+            .s("price", &super::fmt_nanos(i128::from(ask)))
+            .s("reason", "liquidation")
+            .n("transaction_time_ns", ts)
+            .done();
+        self.activities.push(raw.clone());
+        let update = crate::broker::Update::Activity {
+            activity_type: "FILL".into(),
+            raw,
+        };
+        if self.down.is_some() {
+            self.held.push(update);
+        } else {
+            self.updates.push(update);
         }
     }
 }
@@ -274,5 +368,23 @@ mod tests {
         // A naked short call has no bound; a long call can't lose at expiry.
         assert_eq!(worst(&[(true, 590 * D, -1)]), None);
         assert_eq!(worst(&[(true, 590 * D, 1)]), Some(0));
+    }
+
+    /// A rule's time keeps its distance from the close: on a 13:00 early close,
+    /// 15:45 is 12:45.
+    #[test]
+    fn rule_times_move_with_an_early_close() {
+        let script = r#"{"calendar":[{"date":"2026-11-27","open":"09:30","close":"13:00"},{"date":"2026-11-30","open":"09:30","close":"16:00"}]}"#;
+        let (sim, _feed) = crate::sim::SimBroker::fed(script, "{}").unwrap();
+        let day = crate::safety::parse_date("2026-11-27").unwrap();
+        assert_eq!(
+            sim.rule_time(day, 15 * 60 + 45),
+            Some(crate::safety::et_ns(day, 12 * 60 + 45))
+        );
+        let monday = crate::safety::parse_date("2026-11-30").unwrap();
+        assert_eq!(
+            sim.rule_time(monday, 15 * 60 + 45),
+            Some(crate::safety::et_ns(monday, 15 * 60 + 45))
+        );
     }
 }

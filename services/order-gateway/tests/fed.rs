@@ -659,13 +659,17 @@ fn same_day_shorts_are_liquidated_at_the_venues_time() {
     clock
         .advance("reactor", 1, T0 + 5 * H + 46 * 60 * S, WAIT)
         .unwrap();
+    // The broker's order arrives as `foreign`; its fill as a FILL activity.
     let f = c
-        .until(|v| v["kind"] == "foreign" && v["event"] == "fill")
+        .until(|v| v["kind"] == "activity" && v["activity_type"] == "FILL")
         .pop()
         .unwrap();
-    assert_eq!(f["fill"]["price"], "0.33", "{f}");
-    // Filled at 15:45 by the broker's clock (the event is journaled when drained).
-    assert_eq!(f["broker_raw"]["updated_at_ns"], T0 + 5 * H + 45 * 60 * S);
+    assert_eq!(f["broker_raw"]["price"], "0.33", "{f}");
+    assert_eq!(f["broker_raw"]["symbol"], PUT_A);
+    assert_eq!(
+        f["broker_raw"]["transaction_time_ns"],
+        T0 + 5 * H + 45 * 60 * S
+    );
     let (r, _) = c.req("positions", "r2", "");
     let syms: Vec<(&str, i64)> = r["positions"]
         .as_array()
@@ -674,6 +678,28 @@ fn same_day_shorts_are_liquidated_at_the_venues_time() {
         .map(|p| (p["symbol"].as_str().unwrap(), p["qty"].as_i64().unwrap()))
         .collect();
     assert_eq!(syms, [(PUT_B, 1)], "{r}");
+    gw.stop().unwrap();
+}
+
+/// Working orders count against buying power: two spreads sent in one step on
+/// cash for one, the second is refused.
+#[test]
+fn working_orders_count_against_buying_power() {
+    let (gw, feed, clock) = gateway(
+        "fed-bp-working",
+        r#"{"account":{"cash":"300.00"},"venue_rules":{"buying_power":"defined_risk"},"expiry":{"settle":false},"fill_on":"next_quote"}"#,
+    );
+    let mut c = Conn::open(&gw, "reactor", None);
+    mappings(&feed);
+    cbbo(&feed, 2, T0, 92, 94);
+    cbbo(&feed, 3, T0, 50, 52);
+    clock.advance("reactor", 0, T0, WAIT).unwrap();
+    assert_eq!(
+        c.submit("r1", &credit_spread("wse-one", 1))["outcome"],
+        "accepted"
+    );
+    let r = c.submit("r2", &credit_spread("wse-two", 1));
+    assert_eq!(r["code"], "sim_insufficient_buying_power", "{r}");
     gw.stop().unwrap();
 }
 

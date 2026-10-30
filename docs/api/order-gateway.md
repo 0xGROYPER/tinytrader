@@ -280,7 +280,7 @@ Each event has the envelope `{type:"event", seq, ts_gateway, account, kind, …}
 | `account` | `snapshot: account \| positions`, `broker_raw`. Derived from polling and emitted on change; Alpaca has no account stream. |
 | `activity` | `activity_type`, `broker_raw`, for example `OPEXP`, `OPASN`, `OPEXC`, `FILL` or `FEE`. The simulator sends `OPEXP`, `OPEXC` and `OPASN` at expiry, with `broker_raw{symbol, qty (signed), price (the settlement price), date}`. |
 | `status` | `state`, `broker_stream: up \| down{since}`, `resync?{from_ts, to_ts, orders_checked}`, `kill?{level, reason}`, `cap?{name}` |
-| `foreign` | `broker_order_id`, `event`, `status`, `fill?`, `broker_raw`. An event of a broker order with no journal entry, such as one placed in the dashboard, a flatten's closing orders, or a simulated venue's liquidation. Each event of such an order is sent once, a fill with its `fill`. |
+| `foreign` | `broker_raw`. A broker order with no journal entry, such as one placed in the dashboard. |
 | `client` | `client`, `phase: connected \| disconnected`, `resume_after_seq` |
 | `day` | `day_open{format, previous_file, previous_last_hash}`. The first line of each journal file. |
 
