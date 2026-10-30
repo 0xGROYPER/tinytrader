@@ -121,11 +121,32 @@ impl Holdings for StoreApi {
             let Some(day) = r["day"].as_str() else {
                 continue;
             };
+            if !days.iter().any(|d| d == day) {
+                continue;
+            }
+            if r["conflict"].as_bool() == Some(true) {
+                return Err(format!(
+                    "{day}: the store's copies differ (conflict); resolve them before reading it"
+                ));
+            }
             let sha = r["sha256"].as_str().map(str::to_owned);
-            let names: Vec<&str> = r["files"]
+            let all: Vec<&str> = r["files"]
                 .as_array()
                 .map(|a| a.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
+            // One copy: the files on the day's own volume (or the first listed),
+            // never two copies merged into duplicates.
+            let vol = |n: &str| n.split('/').next().unwrap_or_default().to_owned();
+            let primary = r["volume"]
+                .as_str()
+                .map(str::to_owned)
+                .filter(|v| all.iter().any(|n| vol(n) == *v))
+                .or_else(|| all.first().map(|n| vol(n)));
+            let names: Vec<&str> = all
+                .iter()
+                .copied()
+                .filter(|n| Some(vol(n)) == primary)
+                .collect();
             if names.is_empty() {
                 continue;
             }
@@ -155,6 +176,13 @@ impl Holdings for StoreApi {
     }
 
     fn open(&self, file: &FileRef) -> Result<Box<dyn Read + Send>, String> {
+        if file
+            .name
+            .split('/')
+            .any(|seg| seg == ".." || seg == "." || seg.is_empty())
+        {
+            return Err(format!("{}: not a store file name", file.name));
+        }
         let r = self.get(&format!("/files/{}", escape(&file.name, true)))?;
         Ok(Box::new(r.into_reader()))
     }

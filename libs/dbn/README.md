@@ -11,6 +11,8 @@ for records the official [`dbn`](https://crates.io/crates/dbn) crate doesn't def
 - `Merge` (decision 0009, "Ordering"): a lazy k-way merge of DBN sources on one key, `(ts, class, seq)`.
   `ts` is a record's index time: `ts_recv`, or `ts_event` plus the source's declared latency offset where
   the record is flagged `F_BAD_TS_RECV` (filed IEX). Ties keep the sources' order, then each source's own,
-  so a merge is the same every time. A source that goes back in time is an error.
+  so a merge is the same every time. An extension record (or one with no time) stays right after the
+  record before it in its source; a flagged record whose `ts_event` steps back is clamped and counted; any
+  other step back is an error, and errors are sticky.
 
 Each extension is meant to be retired once Databento ships an equivalent.

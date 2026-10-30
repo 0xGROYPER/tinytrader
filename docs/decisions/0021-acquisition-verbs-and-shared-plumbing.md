@@ -347,9 +347,16 @@ folder in the store's layout) behind the same contract. The gap is a
 day starts with a `SymbolMappingMsg` per instrument its files map, stamped
 at the day's start, with `stype_out_symbol` the raw symbol, as a live
 session sends them. Each file's SHA-256 is taken while it streams and
-checked where the holdings state one (the cache job's manifest; the store's
-`/coverage` for a day in one file), and the producer lists what it read for
-the run's manifest.
+checked where one is stated: the cache job's manifest, the store's
+`/coverage` for a day in one file, or an earlier run's pins, which must
+also name the same files (a gap then must be a gap now). A local file is
+checked before its records are released; a store file at the end of its
+day, so a run must count a failed read as a failed run. Each file
+contributes only the asked schema's records inside the day's window (a
+range file is listed on each of its days; sidecars are listed beside
+them), and a file whose header names another schema or symbol is pinned
+but not read. A day whose copies differ (`conflict`) is refused; of
+several copies, the day's own volume's is read.
 
 ### 9. Warm-up: history, then live, in one join
 

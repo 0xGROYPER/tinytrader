@@ -8,7 +8,7 @@ use tinytrader_dbn::dbn::{
     Cmbp1Msg, FlagSet, Mbp1Msg, Metadata, Record, RecordHeader, SType, Schema, SystemMsg,
     UNDEF_TIMESTAMP, rtype,
 };
-use tinytrader_dbn::{Class, DbnSource, Merge, MergeError};
+use tinytrader_dbn::{Class, DbnSource, Merge, MergeError, TradeConditions, TradeUpdate};
 
 type Src = DbnSource<DbnDecoder<Cursor<Vec<u8>>>>;
 
@@ -55,6 +55,36 @@ fn source(records: &[R], offset_ns: u64) -> Src {
     {
         let mut enc = DbnRecordEncoder::new(&mut out);
         for r in records {
+            match r {
+                R::C(r) => enc.encode_record(r).unwrap(),
+                R::M(r) => enc.encode_record(r).unwrap(),
+                R::S(r) => enc.encode_record(r).unwrap(),
+            }
+        }
+    }
+    DbnSource::new(DbnDecoder::new(Cursor::new(out)).unwrap(), offset_ns)
+}
+
+/// A source of `before`, then raw record bytes, then `after`.
+fn source_with(before: &[R], raw: &[Vec<u8>], after: &[R], offset_ns: u64) -> Src {
+    let mut out = Vec::new();
+    DbnMetadataEncoder::new(&mut out).encode(&meta()).unwrap();
+    {
+        let mut enc = DbnRecordEncoder::new(&mut out);
+        for r in before {
+            match r {
+                R::C(r) => enc.encode_record(r).unwrap(),
+                R::M(r) => enc.encode_record(r).unwrap(),
+                R::S(r) => enc.encode_record(r).unwrap(),
+            }
+        }
+    }
+    for b in raw {
+        out.extend(b);
+    }
+    {
+        let mut enc = DbnRecordEncoder::new(&mut out);
+        for r in after {
             match r {
                 R::C(r) => enc.encode_record(r).unwrap(),
                 R::M(r) => enc.encode_record(r).unwrap(),
@@ -180,12 +210,142 @@ fn a_source_going_back_in_time_fails() {
 }
 
 #[test]
-fn an_untimed_record_fails() {
-    let a = source(&[R::C(cmbp(1, 10)), R::C(cmbp(2, UNDEF_TIMESTAMP))], 0);
+fn an_untimed_first_record_fails() {
+    let a = source(&[R::C(cmbp(2, UNDEF_TIMESTAMP)), R::C(cmbp(1, 10))], 0);
     assert!(matches!(
         drain(Merge::new(vec![a])),
-        Err(MergeError::Untimed { rank: 0, pos: 1 })
+        Err(MergeError::Untimed { rank: 0, pos: 0 })
     ));
+}
+
+/// An untimed record and an extension record (trade conditions, an rtype `dbn`
+/// doesn't know, whose `ts_event` is its trade's, earlier than the trade's
+/// `ts_recv`) take the time of the record before them and follow it directly,
+/// though another source has a record at that same time with a lower rank.
+#[test]
+fn companion_records_stay_with_their_record() {
+    let cond = TradeConditions {
+        publisher_id: 2,
+        instrument_id: 7,
+        ts_event: 15,
+        price: 1_000_000_000,
+        trade_id: 1,
+        size: 100,
+        codes: [b'@', 0, 0, 0],
+        count: 1,
+        tape: b'C',
+        update: TradeUpdate::None,
+        trade_seq: 1,
+    };
+    let b = source_with(
+        &[R::C(cmbp(7, 20))],
+        &[cond.encode().unwrap().to_vec()],
+        &[R::C(cmbp(8, UNDEF_TIMESTAMP)), R::C(cmbp(9, 40))],
+        0,
+    );
+    let a = source(
+        &[R::C(cmbp(1, 10)), R::C(cmbp(2, 20)), R::C(cmbp(3, 30))],
+        0,
+    );
+    let mut m = Merge::new(vec![a, b]);
+    let mut got = Vec::new();
+    while let Some(d) = m.next_delivery().unwrap() {
+        got.push((d.key.ts, d.key.rank, d.record().header().rtype));
+    }
+    let c = tinytrader_dbn::trade_conditions::RTYPE;
+    let q = rtype::CMBP_1;
+    assert_eq!(
+        got,
+        [
+            (10, 0, q),
+            (20, 0, q),
+            (20, 1, q),
+            (20, 1, c),
+            (20, 1, q),
+            (30, 0, q),
+            (40, 1, q)
+        ]
+    );
+}
+
+/// A flagged source whose `ts_event` steps back (reordered packets) keeps its
+/// file order, clamped to the time before, and counts it.
+#[test]
+fn a_flagged_record_stepping_back_is_clamped() {
+    let iex = source(
+        &[
+            R::M(mbp(1, 30, 1, true)),
+            R::M(mbp(2, 25, 1, true)),
+            R::M(mbp(3, 40, 1, true)),
+        ],
+        0,
+    );
+    let mut m = Merge::new(vec![iex]);
+    let mut got = Vec::new();
+    while let Some(d) = m.next_delivery().unwrap() {
+        got.push((d.key.ts, d.record().header().instrument_id));
+    }
+    assert_eq!(got, [(30, 1), (30, 2), (40, 3)]);
+    assert_eq!(m.sources()[0].clamped(), 1);
+}
+
+#[test]
+fn an_offset_that_overflows_is_its_own_error() {
+    let iex = source(&[R::M(mbp(1, u64::MAX - 3, 1, true))], 10);
+    assert!(matches!(
+        drain(Merge::new(vec![iex])),
+        Err(MergeError::BadRecord {
+            rank: 0,
+            pos: 0,
+            ..
+        })
+    ));
+}
+
+/// A read-ahead that fails mid-merge delivers the record already taken, then
+/// returns the error on every later call, never carrying on without the source.
+#[test]
+fn errors_mid_merge_are_sticky_and_lose_nothing() {
+    let a = source(
+        &[R::C(cmbp(1, 10)), R::C(cmbp(2, 30)), R::C(cmbp(3, 20))],
+        0,
+    );
+    let b = source(&[R::C(cmbp(4, 15)), R::C(cmbp(5, 35))], 0);
+    let mut m = Merge::new(vec![a, b]);
+    let mut ids = Vec::new();
+    let err = loop {
+        match m.next_delivery() {
+            Ok(Some(d)) => ids.push(d.record().header().instrument_id),
+            Ok(None) => panic!("ended without the error"),
+            Err(e) => break e,
+        }
+    };
+    // 1 at 10, 4 at 15, then 2 at 30 is taken and its read-ahead fails on 3.
+    assert_eq!(ids, [1, 4, 2]);
+    assert!(matches!(
+        err,
+        MergeError::OutOfOrder {
+            rank: 0,
+            pos: 2,
+            ..
+        }
+    ));
+    for _ in 0..3 {
+        assert_eq!(m.next_delivery().err(), Some(err.clone()));
+        assert_eq!(m.peek_key().err(), Some(err.clone()));
+    }
+}
+
+#[test]
+fn errors_while_priming_are_sticky() {
+    let a = source(&[R::C(cmbp(1, 10))], 0);
+    let b = source(&[R::C(cmbp(2, UNDEF_TIMESTAMP))], 0);
+    let mut m = Merge::new(vec![a, b]);
+    let e = m.peek_key().unwrap_err();
+    assert!(matches!(e, MergeError::Untimed { rank: 1, pos: 0 }));
+    for _ in 0..3 {
+        assert_eq!(m.next_delivery().err(), Some(e.clone()));
+    }
 }
 
 #[test]

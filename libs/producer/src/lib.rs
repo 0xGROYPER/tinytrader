@@ -19,10 +19,20 @@
 //!   silent skip;
 //! - a partial day is announced by a `SystemMsg` `store-partial day=…`.
 //!
-//! A day held in several files is merged by [`tinytrader_dbn::Merge`]. Each
-//! file's SHA-256 is computed while it streams and checked where the holdings
-//! state one; [`StoreProducer::pins`] lists what was read, for the run's
-//! manifest.
+//! Each file contributes only the records of the asked schema inside the day's
+//! window (a batch file may hold other days; a folder, sidecars), and a file
+//! whose header names another schema or symbol is left out. A day held in
+//! several files is merged by [`tinytrader_dbn::Merge`].
+//!
+//! **Pins.** Each file's SHA-256 is computed while it streams and checked
+//! where one is stated: by the holdings (a cache job's manifest, the store's
+//! `/coverage` for a day in one file) or by an earlier run's pins
+//! ([`StoreProducer::pinned`]), which must also name the same files. A local
+//! file with a stated hash is checked before any of its records is released; a
+//! store file is checked at the end of its day, so a mismatch fails the read
+//! there, and a run that uses the producer must count a failed read as a
+//! failed run. [`StoreProducer::pins`] lists what was read, for the manifest.
+mod filter;
 mod folder;
 mod hashing;
 mod store;
@@ -32,9 +42,10 @@ pub use store::{Retry, StoreApi};
 
 use dbn::decode::{DbnMetadata, DecodeRecordRef, DynDecoder};
 use dbn::{
-    Metadata, RecordBuf, RecordRef, SType, Schema, SymbolMappingMsg, SystemMsg,
+    Metadata, RType, RecordBuf, RecordRef, SType, Schema, SymbolMappingMsg, SystemMsg,
     VersionUpgradePolicy,
 };
+use filter::DayFilter;
 use hashing::Hashed;
 use std::collections::{BTreeSet, VecDeque};
 use std::io::{BufReader, Read};
@@ -94,6 +105,11 @@ pub trait Holdings: Send {
     /// # Errors
     /// It can't be opened.
     fn open(&self, file: &FileRef) -> Result<Box<dyn Read + Send>, String>;
+    /// Whether files are cheap to read twice, so a stated hash is checked
+    /// before the file's records are released.
+    fn local(&self) -> bool {
+        false
+    }
 }
 
 /// One file read, for the manifest.
@@ -105,8 +121,11 @@ pub struct FilePin {
     pub sha256: String,
     /// Its size.
     pub bytes: u64,
-    /// The holdings stated this hash and it matched.
+    /// The holdings (or an earlier run's pins) stated this hash and it matched.
     pub verified: bool,
+    /// Its records were read; false for a file listed with the day but left
+    /// out (another schema or symbol), pinned so a rerun lists the same.
+    pub used: bool,
 }
 
 /// One day of the stream, for the manifest.
@@ -122,7 +141,7 @@ pub struct DayPin {
     pub missing: Option<String>,
 }
 
-type Decoder = DynDecoder<'static, BufReader<Hashed>>;
+type Decoder = DayFilter<DynDecoder<'static, BufReader<Hashed>>>;
 
 enum State {
     Next,
@@ -134,18 +153,19 @@ enum State {
 pub struct StoreProducer {
     holdings: Box<dyn Holdings>,
     query: Query,
+    schema: Schema,
     plan: Vec<(String, Day)>,
     at: usize,
     metadata: Metadata,
     state: State,
     queued: VecDeque<RecordBuf>,
     cur: Option<RecordBuf>,
-    reading: Vec<(FileRef, Hashed)>,
+    reading: Vec<(FileRef, Hashed, bool)>,
     pins: Vec<DayPin>,
 }
 
 /// Midnight UTC of `YYYY-MM-DD`, in ns.
-fn day_ns(day: &str) -> Option<u64> {
+pub(crate) fn day_ns(day: &str) -> Option<u64> {
     let mut it = day.splitn(3, '-').map(i64::from_str);
     let (y, m, d) = (it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?);
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) || day.len() != 10 {
@@ -213,6 +233,7 @@ impl StoreProducer {
         Ok(Self {
             holdings,
             query,
+            schema,
             plan: days.iter().cloned().zip(plan).collect(),
             at: 0,
             metadata,
@@ -222,6 +243,66 @@ impl StoreProducer {
             reading: Vec::new(),
             pins: Vec::new(),
         })
+    }
+
+    /// As [`StoreProducer::new`], to reproduce a run: each day must be held in the
+    /// same files as in `pins`, a gap then must be a gap now, and every file's
+    /// hash is checked against its pin.
+    ///
+    /// # Errors
+    /// As [`StoreProducer::new`], or a day held differently from its pin.
+    pub fn pinned(
+        holdings: Box<dyn Holdings>,
+        query: Query,
+        days: &[String],
+        pins: &[DayPin],
+    ) -> Result<Self, String> {
+        let mut p = Self::new(holdings, query, days)?;
+        for (day, plan) in &mut p.plan {
+            let pin = pins
+                .iter()
+                .find(|x| &x.day == day)
+                .ok_or_else(|| format!("{day}: not in the pins"))?;
+            match (plan, &pin.missing) {
+                (Day::Missing { .. }, Some(_)) => {}
+                (Day::Missing { reason }, None) => {
+                    return Err(format!("{day}: pinned as held, now {reason}"));
+                }
+                (Day::Held { .. }, Some(_)) => {
+                    return Err(format!("{day}: a gap when pinned, held now"));
+                }
+                (Day::Held { files, partial }, None) => {
+                    let mut want: Vec<&str> = pin.files.iter().map(|f| f.name.as_str()).collect();
+                    let mut have: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+                    want.sort_unstable();
+                    have.sort_unstable();
+                    if want != have || *partial != pin.partial {
+                        return Err(format!(
+                            "{day}: held in {} now, pinned in {}",
+                            have.join(","),
+                            want.join(",")
+                        ));
+                    }
+                    for f in files {
+                        let sha = pin
+                            .files
+                            .iter()
+                            .find(|x| x.name == f.name)
+                            .map(|x| &x.sha256);
+                        match (&f.sha256, sha) {
+                            (Some(a), Some(b)) if !a.eq_ignore_ascii_case(b) => {
+                                return Err(format!(
+                                    "{}: the holdings state {a}, pinned {b}",
+                                    f.name
+                                ));
+                            }
+                            _ => f.sha256 = sha.cloned(),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(p)
     }
 
     /// What each day is held in, as planned.
@@ -264,29 +345,56 @@ impl StoreProducer {
                     self.queued
                         .push_back(system(ts, &format!("store-partial day={day}")));
                 }
+                let window = (ts, ts + 86_400_000_000_000);
                 let mut sources = Vec::new();
                 let mut mapped = BTreeSet::new();
                 for f in &files {
-                    let r = self.holdings.open(f)?;
-                    let h = Hashed::new(r);
+                    if self.holdings.local()
+                        && let Some(want) = &f.sha256
+                    {
+                        // Checked before any of its records is released.
+                        let (got, _) = Hashed::new(self.holdings.open(f)?)
+                            .finish()
+                            .map_err(|e| format!("{}: {e}", f.name))?;
+                        if !got.eq_ignore_ascii_case(want) {
+                            return Err(format!("{}: SHA-256 {got}, but {want} is stated", f.name));
+                        }
+                    }
+                    let h = Hashed::new(self.holdings.open(f)?);
                     let dec = DynDecoder::inferred_with_buffer(
                         BufReader::new(h.clone()),
                         VersionUpgradePolicy::UpgradeToV3,
                     )
                     .map_err(|e| format!("{}: {e}", f.name))?;
-                    let parent = dec.metadata().stype_in == Some(SType::Parent);
-                    for m in &dec.metadata().mappings {
+                    let meta = dec.metadata();
+                    // A sidecar or a file of another symbol, listed beside the day.
+                    let parent = meta.stype_in == Some(SType::Parent);
+                    if meta.schema.is_some_and(|x| x != self.schema)
+                        || (parent
+                            && !meta.symbols.is_empty()
+                            && !meta.symbols.contains(&self.query.symbol))
+                    {
+                        drop(dec);
+                        self.reading.push((f.clone(), h, false));
+                        continue;
+                    }
+                    let to_ns = |d: time::Date| {
+                        u64::try_from(i64::from(d.to_julian_day()) - 2_440_588)
+                            .map_or(0, |n| n * 86_400_000_000_000)
+                    };
+                    for m in &meta.mappings {
                         for iv in &m.intervals {
+                            let (from, to) = (to_ns(iv.start_date), to_ns(iv.end_date));
                             let Ok(iid) = iv.symbol.parse::<u32>() else {
                                 continue;
                             };
-                            if !mapped.insert((iid, m.raw_symbol.clone())) {
+                            // Only the intervals of this day, from a file of several.
+                            if to <= window.0
+                                || from >= window.1
+                                || !mapped.insert((iid, m.raw_symbol.clone()))
+                            {
                                 continue;
                             }
-                            let to_ns = |d: time::Date| {
-                                u64::try_from(i64::from(d.to_julian_day()) - 2_440_588)
-                                    .map_or(0, |n| n * 86_400_000_000_000)
-                            };
                             let input = if parent {
                                 &self.query.symbol
                             } else {
@@ -303,15 +411,16 @@ impl StoreProducer {
                                 input,
                                 SType::RawSymbol,
                                 &m.raw_symbol,
-                                to_ns(iv.start_date),
-                                to_ns(iv.end_date),
+                                from,
+                                to,
                             )
                             .map_err(|e| format!("{}: {e}", f.name))?;
                             self.queued.push_back(RecordBuf::from(msg));
                         }
                     }
-                    sources.push(DbnSource::new(dec, 0));
-                    self.reading.push((f.clone(), h));
+                    let filtered = DayFilter::new(dec, RType::from(self.schema), window);
+                    sources.push(DbnSource::new(filtered, 0));
+                    self.reading.push((f.clone(), h, true));
                 }
                 self.pins.push(DayPin {
                     day,
@@ -329,12 +438,12 @@ impl StoreProducer {
     fn end_day(&mut self) -> Result<(), String> {
         let reading = std::mem::take(&mut self.reading);
         let pin = self.pins.last_mut().ok_or("no day being read")?;
-        for (f, h) in reading {
+        for (f, h, used) in reading {
             let (sha256, bytes) = h.finish().map_err(|e| format!("{}: {e}", f.name))?;
             let verified = match &f.sha256 {
                 Some(want) if !want.eq_ignore_ascii_case(&sha256) => {
                     return Err(format!(
-                        "{}: SHA-256 {sha256}, but the holdings state {want}",
+                        "{}: SHA-256 {sha256}, but {want} is stated",
                         f.name
                     ));
                 }
@@ -346,6 +455,7 @@ impl StoreProducer {
                 sha256,
                 bytes,
                 verified,
+                used,
             });
         }
         self.state = State::Next;

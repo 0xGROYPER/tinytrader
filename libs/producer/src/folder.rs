@@ -2,27 +2,44 @@
 //!
 //! - a `databento-jobs` cache job (`POST /cache/{job}`): the batch's files,
 //!   `metadata.json` and `manifest.json` as Databento sent them, read only
-//!   once `COMPLETE` says the copy is whole. Each file's hash is the
-//!   manifest's, and is checked.
+//!   once `COMPLETE` says the copy is whole. The manifest's list of files is
+//!   the job: each DBN file it names must be in the folder with a SHA-256,
+//!   which is checked. A file holds the days its name says (one day, or a
+//!   range, both ends included); a file split by symbol holds only that
+//!   symbol's. A job bought as a list of contracts, or over less than a whole
+//!   day, holds partial days.
 //! - a folder in the store's layout, such as a copy of a volume:
 //!   `<Provider>/<DATASET>/<symbol>/<schema>/<day>.dbn.zst`, or a folder per
 //!   day holding its DBN files (the older layout). No hashes are stated, so
 //!   they are recorded, not checked.
 use crate::{Day, FileRef, Holdings, Query};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+/// One file of a cache job, from its manifest.
+struct JobFile {
+    name: String,
+    sha256: String,
+    /// The days it holds, `YYYYMMDD`, both ends included.
+    days: (String, String),
+    /// The symbol a split-by-symbol file is for.
+    symbol: Option<String>,
+}
+
 enum Kind {
-    /// A cache job: day (YYYYMMDD) → (file name, hash).
+    /// A cache job, by its manifest.
     Job {
         id: String,
         dataset: String,
         schema: String,
         symbols: Vec<String>,
-        files: HashMap<String, (String, Option<String>)>,
+        /// Bought as a list of contracts: every day is partial.
+        contracts: bool,
+        /// The query's window, ns.
+        window: (u64, u64),
+        files: Vec<JobFile>,
     },
     /// A volume in the store's layout.
     Layout,
@@ -43,11 +60,52 @@ fn read_json(path: &Path) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+fn is_ymd(s: &str) -> bool {
+    s.len() == 8 && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A Databento batch file name's days and split symbol:
+/// `opra-pillar-20261027.cbbo-1m.dbn.zst`, `…-20261001-20261031.cbbo-1m.dbn.zst`,
+/// `…-20261027.cbbo-1m.SPY.dbn.zst`.
+fn batch_name(name: &str, schema: &str) -> Option<((String, String), Option<String>)> {
+    let stem = name
+        .strip_suffix(".zst")
+        .unwrap_or(name)
+        .strip_suffix(".dbn")?;
+    let (head, tail) = stem.split_once(&format!(".{schema}"))?;
+    let symbol = tail.strip_prefix('.').map(str::to_owned);
+    let mut parts = head.rsplit('-');
+    let last = parts.next()?;
+    if !is_ymd(last) {
+        return None;
+    }
+    let days = match parts.next() {
+        Some(first) if is_ymd(first) => (first.to_owned(), last.to_owned()),
+        _ => (last.to_owned(), last.to_owned()),
+    };
+    Some((days, symbol))
+}
+
+/// A query time: ns, or an RFC 3339 / `YYYY-MM-DD` text (its date only).
+fn query_ns(v: &Value) -> Option<u64> {
+    if let Some(n) = v.as_u64() {
+        return Some(n);
+    }
+    let t = v.as_str()?;
+    let n: String = t.chars().take(10).collect();
+    if t.len() > 10 && !t[10..].trim_start_matches('T').starts_with("00:00:00") {
+        return None;
+    }
+    crate::day_ns(&n)
+}
+
 impl Folder {
-    /// A finished `databento-jobs` cache job.
+    /// A finished `databento-jobs` cache job, read by its manifest.
     ///
     /// # Errors
-    /// It has no `COMPLETE` marker yet, or its metadata or manifest can't be read.
+    /// It has no `COMPLETE` marker yet; its metadata or manifest can't be read;
+    /// a DBN file the manifest lists is absent, has no hash, or has a name
+    /// whose days can't be read.
     pub fn job(root: &Path) -> Result<Self, String> {
         let id = root
             .file_name()
@@ -71,43 +129,50 @@ impl Folder {
             Value::String(s) => s.split(',').map(str::to_owned).collect(),
             _ => Vec::new(),
         };
+        let schema = text("schema");
+        let contracts = q["stype_in"].as_str() == Some("raw_symbol");
+        let window = (
+            query_ns(&q["start"]).unwrap_or(0),
+            query_ns(&q["end"]).unwrap_or(u64::MAX),
+        );
         let manifest = read_json(&root.join("manifest.json"))?;
-        let hashes: HashMap<&str, &str> = manifest["files"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|f| Some((f["filename"].as_str()?, f["hash"].as_str()?)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut files = HashMap::new();
-        for e in fs::read_dir(root).map_err(|e| format!("{}: {e}", root.display()))? {
-            let name = e
-                .map_err(|e| e.to_string())?
-                .file_name()
-                .to_string_lossy()
-                .into_owned();
-            if !is_dbn(&name) {
+        let mut files = Vec::new();
+        for f in manifest["files"].as_array().into_iter().flatten() {
+            let Some(name) = f["filename"].as_str() else {
+                continue;
+            };
+            if !is_dbn(name) {
                 continue;
             }
-            // `opra-pillar-20261027.cbbo-1m.dbn.zst`: the day is the 8 digits
-            // before the first dot.
-            let stem = name.split('.').next().unwrap_or_default();
-            let day = stem.rsplit('-').next().unwrap_or_default();
-            if day.len() == 8 && day.bytes().all(|b| b.is_ascii_digit()) {
-                let sha = hashes
-                    .get(name.as_str())
-                    .map(|h| h.trim_start_matches("sha256:").to_owned());
-                files.insert(day.to_owned(), (name, sha));
+            if !root.join(name).is_file() {
+                return Err(format!(
+                    "job {id}: {name} is in the manifest but not in the folder"
+                ));
             }
+            let sha256 = f["hash"]
+                .as_str()
+                .and_then(|h| h.strip_prefix("sha256:"))
+                .ok_or_else(|| format!("job {id}: {name} has no SHA-256 in the manifest"))?
+                .to_owned();
+            let (days, symbol) = batch_name(name, &schema)
+                .ok_or_else(|| format!("job {id}: can't read the days of {name}"))?;
+            files.push(JobFile {
+                name: name.to_owned(),
+                sha256,
+                days,
+                symbol,
+            });
         }
+        files.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Self {
             root: root.to_owned(),
             kind: Kind::Job {
                 id,
                 dataset: text("dataset"),
-                schema: text("schema"),
+                schema,
                 symbols,
+                contracts,
+                window,
                 files,
             },
         })
@@ -153,6 +218,8 @@ impl Holdings for Folder {
                 dataset,
                 schema,
                 symbols,
+                contracts,
+                window,
                 files,
             } => {
                 if !dataset.eq_ignore_ascii_case(&q.dataset)
@@ -169,17 +236,29 @@ impl Holdings for Folder {
                 }
                 Ok(days
                     .iter()
-                    .map(|d| match files.get(&d.replace('-', "")) {
-                        Some((name, sha)) => Day::Held {
-                            files: vec![FileRef {
-                                name: name.clone(),
-                                sha256: sha.clone(),
-                            }],
-                            partial: false,
-                        },
-                        None => Day::Missing {
-                            reason: format!("not in job {id}"),
-                        },
+                    .map(|d| {
+                        let ymd = d.replace('-', "");
+                        let held: Vec<FileRef> = files
+                            .iter()
+                            .filter(|f| f.days.0 <= ymd && ymd <= f.days.1)
+                            .filter(|f| f.symbol.as_ref().is_none_or(|s| s == &q.symbol))
+                            .map(|f| FileRef {
+                                name: f.name.clone(),
+                                sha256: Some(f.sha256.clone()),
+                            })
+                            .collect();
+                        let day0 = crate::day_ns(d).unwrap_or(0);
+                        let whole = window.0 <= day0 && day0 + 86_400_000_000_000 <= window.1;
+                        if held.is_empty() {
+                            Day::Missing {
+                                reason: format!("not in job {id}"),
+                            }
+                        } else {
+                            Day::Held {
+                                files: held,
+                                partial: *contracts || !whole,
+                            }
+                        }
                     })
                     .collect())
             }
@@ -246,11 +325,23 @@ impl Holdings for Folder {
     }
 
     fn open(&self, file: &FileRef) -> Result<Box<dyn Read + Send>, String> {
-        let path = self.root.join(&file.name);
-        if !path.starts_with(&self.root) || file.name.contains("..") {
+        let root = self
+            .root
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", self.root.display()))?;
+        let path = root
+            .join(&file.name)
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", file.name))?;
+        // Links included: nothing outside the folder is read.
+        if !path.starts_with(&root) {
             return Err(format!("{}: outside the folder", file.name));
         }
         let f = fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(Box::new(f))
+    }
+
+    fn local(&self) -> bool {
+        true
     }
 }
