@@ -14,10 +14,11 @@
 //! 3. Each step is the next time anything happens: the records of one index time,
 //!    timers due then, or both. The session pushes the records to the venues that
 //!    quote their source, advances every venue to that time (once each has handled
-//!    the order messages the strategy said it sent), writes the records to the data
-//!    stream, and sends `step{as_of, records, timers, reports}`. The strategy reads
-//!    that many records, reads its gateway events up to `reports`, acts, and answers
-//!    `ready{as_of, sent, timers}`.
+//!    the order messages the strategy said it sent), sends `step{as_of, records,
+//!    timers, reports}`, then writes the records to the data stream. The strategy
+//!    reads that many records, reads its gateway events up to `reports`, acts, and
+//!    answers `ready{as_of, sent, timers}`. The step goes first so a step larger than
+//!    a socket's buffer can't block the session while the strategy waits for it.
 //! 4. After the last record, the venues are advanced to the end of the last day, so
 //!    day orders expire, and the session sends `end` with the outcome and the audit
 //!    hash, and writes the run record.
@@ -406,8 +407,9 @@ impl Session {
                 (Some(a), Some(b)) => a.min(b),
                 (Some(a), None) | (None, Some(a)) => a,
             };
-            // The records of this instant, to the venues and the data stream.
+            // The records of this instant, to the venues, and kept for the data stream.
             let mut n = 0_u64;
+            let mut bytes = Vec::new();
             let mut spans: BTreeMap<u32, (u64, u64)> = BTreeMap::new();
             while self
                 .merge
@@ -425,15 +427,13 @@ impl Session {
                             .map_err(|e| format!("venue {}: {e}", v.name))?;
                     }
                 }
-                out.write_all(d.record().as_ref())
-                    .map_err(|e| format!("data: {e}"))?;
+                bytes.extend_from_slice(d.record().as_ref());
                 let span = spans.entry(d.key.rank).or_insert((d.key.pos, d.key.pos));
                 span.1 = d.key.pos;
                 n += 1;
             }
             // Venue reports at t come after its market data (class 2).
             let reports = self.advance(&sent, t, wait)?;
-            out.flush().map_err(|e| format!("data: {e}"))?;
             // Then timers (class 3).
             let due: Vec<String> = timers
                 .range((t, 0)..=(t, u64::MAX))
@@ -450,6 +450,9 @@ impl Session {
                 st.steps
             ));
             protocol::send(st.control.as_mut().ok_or("no control")?, &step)?;
+            out.write_all(&bytes)
+                .and_then(|()| out.flush())
+                .map_err(|e| format!("data: {e}"))?;
             match protocol::read(&mut reader)? {
                 FromStrategy::Ready {
                     as_of: a,

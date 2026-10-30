@@ -69,8 +69,8 @@ Sources are read through the store producer (`libs/producer`). A day not held is
 **A step** is the next time anything happens: the records of one index time (decision 0009's order: `ts_recv`, or `ts_event` plus the source's offset where flagged), timers due then, or both. For each step the session:
 1. pushes the records to the venues that quote their source;
 2. advances every venue to `as_of`, once it has handled the order messages the strategy last said it sent (venue reports, class 2);
-3. writes the records to the data stream;
-4. sends `step`, whose `timers` are the timers due at `as_of` (class 3).
+3. sends `step`, whose `timers` are the timers due at `as_of` (class 3);
+4. writes the records to the data stream. They go after the step, so a step bigger than a socket's buffer can't block the session while the strategy waits for the step.
 
 **The strategy:**
 1. reads `records` records from the data stream;

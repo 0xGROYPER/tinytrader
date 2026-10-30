@@ -9,7 +9,8 @@
 //! | strategy → session | `ready{as_of, sent: {venue: order messages sent}, timers: [{at, id}]}` |
 //! | session → strategy | `end{status, reason, audit, steps, records}` |
 //!
-//! A step's records are on the data stream before the step is sent; its reports
+//! A step's records follow it on the data stream, written as the strategy reads
+//! them; its reports
 //! name each venue's last event, which the strategy reads from its gateway before
 //! acting. `sent` counts the submits and cancels the strategy has sent to each venue
 //! since it first connected (order-gateway.md §10). Timers are set in `ready`, for a

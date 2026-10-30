@@ -37,8 +37,8 @@ fn sha(b: &[u8]) -> String {
 }
 
 /// A cache job of one day: the call quoted every minute from 10:00, its ask 1.30
-/// until 10:02, then 1.24.
-fn job(dir: &Path) {
+/// until 10:02, then 1.24; `extra` more contracts mapped, never quoted.
+fn job(dir: &Path, extra: u32) {
     let date = time::Date::from_julian_day(i32::try_from(D27 / DAY).unwrap() + 2_440_588).unwrap();
     let meta = Metadata::builder()
         .dataset("OPRA.PILLAR")
@@ -47,14 +47,19 @@ fn job(dir: &Path) {
         .stype_in(Some(SType::Parent))
         .stype_out(SType::InstrumentId)
         .symbols(vec!["SPY.OPT".into()])
-        .mappings(vec![SymbolMapping {
-            raw_symbol: CALL.into(),
-            intervals: vec![MappingInterval {
-                start_date: date,
-                end_date: date.next_day().unwrap(),
-                symbol: "11".into(),
-            }],
-        }])
+        .mappings(
+            std::iter::once((CALL.to_owned(), 11))
+                .chain((0..extra).map(|k| (format!("SPY   261027P{:08}", 100_000 + k), 1000 + k)))
+                .map(|(raw, iid)| SymbolMapping {
+                    raw_symbol: raw,
+                    intervals: vec![MappingInterval {
+                        start_date: date,
+                        end_date: date.next_day().unwrap(),
+                        symbol: iid.to_string(),
+                    }],
+                })
+                .collect(),
+        )
         .build();
     let mut out = Vec::new();
     {
@@ -227,10 +232,19 @@ fn toy(control: std::net::SocketAddr, stall_at: Option<u64>) -> Seen {
 }
 
 fn run(name: &str, timeout: u64, stall_at: Option<u64>) -> (session::Outcome, Seen, PathBuf) {
+    run_with(name, timeout, stall_at, 0)
+}
+
+fn run_with(
+    name: &str,
+    timeout: u64,
+    stall_at: Option<u64>,
+    extra: u32,
+) -> (session::Outcome, Seen, PathBuf) {
     let base = root(name);
     let j = base.join("job");
     std::fs::create_dir_all(&j).unwrap();
-    job(&j);
+    job(&j, extra);
     let dir = base.join("run");
     let s = Session::start(&config(&j, timeout), &dir, [127, 0, 0, 1].into()).unwrap();
     let control = s.ready().control;
@@ -296,4 +310,14 @@ fn a_strategy_that_stops_answering_leaves_the_run_incomplete() {
     let rec: Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("run.json")).unwrap()).unwrap();
     assert_eq!(rec["status"], "incomplete");
+}
+
+/// A step far larger than a socket's buffer (30,000 mappings at the day's start,
+/// about 5 MB) flows: the step goes first, then its records as the strategy reads.
+#[test]
+fn a_step_larger_than_a_socket_buffer_flows() {
+    let (o, seen, _) = run_with("big-step", 30, None, 30_000);
+    assert_eq!(o.status, "complete", "{o:?}");
+    assert_eq!(o.records, 6 + 30_001);
+    assert_eq!(seen.fills.len(), 1);
 }
