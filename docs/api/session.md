@@ -42,6 +42,7 @@ dataset = "OPRA.PILLAR"
 symbol = "SPY.OPT"
 schema = "cbbo-1m"
 latency_offset_ns = 0                 # added to ts_event where F_BAD_TS_RECV is set
+expiries_within_days = 30             # optional: options expiring later, or already expired, are left out
 
 [[venues]]                            # one simulated account, one gateway
 name = "options"

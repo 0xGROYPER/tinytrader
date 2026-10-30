@@ -17,6 +17,7 @@
 //! symbol = "SPY.OPT"
 //! schema = "cbbo-1m"
 //! latency_offset_ns = 0          # added to ts_event where F_BAD_TS_RECV is set
+//! expiries_within_days = 30      # options expiring later are left out (optional)
 //!
 //! [[venues]]
 //! name = "options"
@@ -87,6 +88,10 @@ pub struct Source {
     /// Added to `ts_event` for records flagged `F_BAD_TS_RECV`.
     #[serde(default)]
     pub latency_offset_ns: u64,
+    /// Options expiring more than this many days after each day (or before it)
+    /// are left out, mappings and records: a subscription to the near expiries.
+    #[serde(default)]
+    pub expiries_within_days: Option<u32>,
 }
 
 /// One holdings, or several in order.
