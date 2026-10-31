@@ -2,7 +2,6 @@
 //! is portfolio or strategy state.
 use crate::intent::fmt_cents;
 use crate::protocol::Obj;
-use std::time::{Duration, Instant};
 
 const NS: i64 = 1_000_000_000;
 
@@ -88,12 +87,14 @@ impl Profile {
 }
 
 /// One token bucket per account with critical and poll priorities; polls keep a 20%
-/// reserve for critical requests and are shed first.
+/// reserve for critical requests and are shed first. Its times are ns on the
+/// gateway's rate clock (`at`): monotonic live, the market time under a session.
 pub(crate) struct Budget {
     per_min: f64,
     tokens: f64,
-    last: Instant,
-    pub(crate) blocked_until: Option<Instant>,
+    last: u64,
+    now: u64,
+    pub(crate) blocked_until: Option<u64>,
 }
 
 impl Budget {
@@ -101,18 +102,28 @@ impl Budget {
         Self {
             per_min: f64::from(per_min),
             tokens: f64::from(per_min),
-            last: Instant::now(),
+            last: 0,
+            now: 0,
             blocked_until: None,
         }
     }
+    /// The rate clock's time, ns: every use goes through it.
+    pub(crate) fn at(&mut self, now: u64) -> &mut Self {
+        if self.last == 0 {
+            self.last = now;
+        }
+        self.now = now.max(self.now);
+        self
+    }
+    #[allow(clippy::cast_precision_loss)]
     fn refill(&mut self) {
-        let now = Instant::now();
-        let gained = now.duration_since(self.last).as_secs_f64() * self.per_min / 60.0;
+        let gained = self.now.saturating_sub(self.last) as f64 / 1e9 * self.per_min / 60.0;
         self.tokens = (self.tokens + gained).min(self.per_min);
-        self.last = now;
+        self.last = self.now;
     }
     pub(crate) fn blocked(&mut self) -> bool {
-        self.blocked_until = self.blocked_until.filter(|t| *t > Instant::now());
+        let now = self.now;
+        self.blocked_until = self.blocked_until.filter(|t| *t > now);
         self.blocked_until.is_some()
     }
     /// Takes one token; `false` means throttled before any send.
@@ -147,7 +158,7 @@ impl Budget {
     }
     /// After a 429: `blocked_until = max(Retry-After, reset, backoff)`.
     pub(crate) fn block(&mut self, ms: Option<u64>) {
-        let until = Instant::now() + Duration::from_millis(ms.unwrap_or(0).max(1000));
+        let until = self.now + ms.unwrap_or(0).max(1000) * 1_000_000;
         self.blocked_until = Some(self.blocked_until.map_or(until, |b| b.max(until)));
     }
 }

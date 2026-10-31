@@ -526,8 +526,11 @@ pub(crate) struct Session<B: Broker> {
     degraded: bool,
     last_state: &'static str,
     budget: Budget,
-    minute: VecDeque<Instant>,
-    closes: VecDeque<Instant>,
+    /// Opens and closes submitted in the last minute, ns on the rate clock.
+    minute: VecDeque<u64>,
+    closes: VecDeque<u64>,
+    /// The rate clock's origin live.
+    rate_base: Instant,
     day: (i64, usize),
     rejects: u32,
     pending: Vec<Pending>,
@@ -585,6 +588,7 @@ impl<B: Broker> Session<B> {
             degraded: false,
             last_state: "",
             minute: VecDeque::new(),
+            rate_base: Instant::now(),
             closes: VecDeque::new(),
             day: (0, 0),
             rejects: 0,
@@ -703,6 +707,19 @@ impl<B: Broker> Session<B> {
 
     fn ts(&self) -> u64 {
         self.b.now().unwrap_or_else(wall_ns)
+    }
+
+    /// The clock the rate limits run on, ns: the market time when a session clocks
+    /// the broker (a backtest replays many minutes a minute, and must run the same
+    /// whatever the machine's load), and otherwise a monotonic clock.
+    fn rate_now(&self) -> u64 {
+        if self.b.session_clocked() {
+            self.ts()
+        } else {
+            u64::try_from(self.rate_base.elapsed().as_nanos())
+                .unwrap_or(u64::MAX)
+                .saturating_add(1)
+        }
     }
 
     fn state(&self) -> &'static str {
@@ -1145,7 +1162,7 @@ impl<B: Broker> Session<B> {
     #[expect(clippy::too_many_lines, reason = "one flat table of query mappings")]
     fn query(&mut self, rid: &str, op: Op) -> String {
         let name = op_name(&op);
-        if !self.budget.take(false) {
+        if !self.budget.at(self.rate_now()).take(false) {
             return request_error(rid, name, "throttled", "null");
         }
         let order = |o: &BrokerOrder, orders: &HashMap<String, OrderState>| {
@@ -1246,7 +1263,7 @@ impl<B: Broker> Session<B> {
             }
             Err(e) => {
                 if e.http_status == 429 {
-                    self.budget.block(e.retry_after_ms);
+                    self.budget.at(self.rate_now()).block(e.retry_after_ms);
                 }
                 let detail = Obj::new()
                     .n("http_status", e.http_status)
@@ -1328,7 +1345,7 @@ impl<B: Broker> Session<B> {
             return None;
         }
         // A 429 backoff holds opens, not closes, so the read takes a close token.
-        let read = if self.budget.take_close() {
+        let read = if self.budget.at(self.rate_now()).take_close() {
             self.b.positions()
         } else {
             Err(BrokerError::local("throttled", ""))
@@ -1449,7 +1466,7 @@ impl<B: Broker> Session<B> {
         };
         let notional = loss.unwrap_or(0);
         let open = self.orders.values().filter(|o| o.open()).count();
-        let minute_ago = Instant::now().checked_sub(Duration::from_mins(1));
+        let minute_ago = self.rate_now().checked_sub(60_000_000_000);
         self.minute.retain(|t| minute_ago.is_none_or(|m| *t > m));
         self.closes.retain(|t| minute_ago.is_none_or(|m| *t > m));
         let today = utc_day(self.ts());
@@ -1491,9 +1508,9 @@ impl<B: Broker> Session<B> {
             ));
         }
         let admitted = if opening {
-            self.budget.take(true)
+            self.budget.at(self.rate_now()).take(true)
         } else {
-            self.budget.take_close()
+            self.budget.at(self.rate_now()).take_close()
         };
         if !admitted {
             return Some(not_sent("throttled", "null"));
@@ -1517,10 +1534,10 @@ impl<B: Broker> Session<B> {
         );
         self.orders.insert(cid.clone(), st);
         if intent.has_open() {
-            self.minute.push_back(Instant::now());
+            self.minute.push_back(self.rate_now());
             self.day.1 += 1;
         } else {
-            self.closes.push_back(Instant::now());
+            self.closes.push_back(self.rate_now());
         }
         let extra = Obj::new()
             .raw("intent", &intent.canonical())
@@ -1561,7 +1578,7 @@ impl<B: Broker> Session<B> {
                 st.phase = Phase::Done;
                 "rejected".clone_into(&mut st.status);
                 if e.http_status == 429 {
-                    self.budget.block(e.retry_after_ms);
+                    self.budget.at(self.rate_now()).block(e.retry_after_ms);
                 }
                 broker_error_obj("rejected", &e).done()
             }
@@ -1571,7 +1588,7 @@ impl<B: Broker> Session<B> {
             } => {
                 st.phase = Phase::Unknown;
                 if reason == "http_429_after_send" {
-                    self.budget.block(retry_after_ms);
+                    self.budget.at(self.rate_now()).block(retry_after_ms);
                 }
                 self.pending.push(Pending {
                     cid: cid.clone(),
@@ -1617,7 +1634,7 @@ impl<B: Broker> Session<B> {
         let (cid, bid) = if let Some(k) = known {
             k
         } else {
-            if !self.budget.take(false) {
+            if !self.budget.at(self.rate_now()).take(false) {
                 return Ok(Err("throttled"));
             }
             match self.b.order(target).map(|r| r.value) {
@@ -1666,7 +1683,7 @@ impl<B: Broker> Session<B> {
             CancelResult::Accepted(raw) => outcome("accepted").raw("broker_raw", &raw).done(),
             CancelResult::Rejected(e) => {
                 if e.http_status == 429 {
-                    self.budget.block(e.retry_after_ms);
+                    self.budget.at(self.rate_now()).block(e.retry_after_ms);
                 }
                 broker_error_obj("rejected", &e).done()
             }
@@ -1675,7 +1692,7 @@ impl<B: Broker> Session<B> {
                 retry_after_ms,
             } => {
                 if reason == "http_429_after_send" {
-                    self.budget.block(retry_after_ms);
+                    self.budget.at(self.rate_now()).block(retry_after_ms);
                 }
                 outcome("unknown").s("reason", reason).done()
             }
@@ -1689,7 +1706,7 @@ impl<B: Broker> Session<B> {
         cid: &str,
         bid: &str,
     ) -> Result<String, String> {
-        let o = if self.budget.take(true) {
+        let o = if self.budget.at(self.rate_now()).take(true) {
             self.cancel_event(client, rid, cid, "sent", "{}")?;
             let r = self.b.cancel(bid);
             self.cancel_outcome(r)
@@ -1720,7 +1737,7 @@ impl<B: Broker> Session<B> {
             .done();
         self.status(&Obj::new().raw("kill", &k).done())?;
         if level == KillLevel::HaltAll {
-            self.budget.charge();
+            self.budget.at(self.rate_now()).charge();
             self.cancel_event(client, rid, "*", "sent", "{}")?;
             let r = self.b.cancel_all();
             let o = self.cancel_outcome(r);
@@ -1732,7 +1749,7 @@ impl<B: Broker> Session<B> {
                 &Obj::new().raw("outcome", &o).done(),
             )?;
             self.drain()?;
-            self.budget.charge();
+            self.budget.at(self.rate_now()).charge();
             if let Ok(r) = self.b.open_orders() {
                 for bo in r.value {
                     self.do_cancel(client, rid, &bo.client_order_id, &bo.broker_order_id)?;
@@ -1763,7 +1780,7 @@ impl<B: Broker> Session<B> {
         if !matches!(self.killed, Some((KillLevel::HaltAll, _))) {
             self.kill(KillLevel::HaltOpens, reason, client, rid)?;
         }
-        self.budget.charge();
+        self.budget.at(self.rate_now()).charge();
         self.cancel_event(client, rid, "*", "sent", "{}")?;
         let r = self.b.cancel_all();
         let o = self.cancel_outcome(r);
@@ -1775,7 +1792,7 @@ impl<B: Broker> Session<B> {
             &Obj::new().raw("outcome", &o).done(),
         )?;
         self.drain()?;
-        self.budget.charge();
+        self.budget.at(self.rate_now()).charge();
         let o = match self.b.flatten() {
             FlattenResult::Sent(closings, raw) => {
                 let list = arr(closings.iter().map(|c| {
@@ -1991,7 +2008,7 @@ impl<B: Broker> Session<B> {
             {
                 continue;
             }
-            if !self.budget.take(critical) {
+            if !self.budget.at(self.rate_now()).take(critical) {
                 self.reconcile_front(step);
                 return Ok(Turn::Waiting);
             }
@@ -2199,14 +2216,14 @@ impl<B: Broker> Session<B> {
     /// A failed reconcile call; a 429 holds the budget back.
     fn reconcile_failed(&mut self, e: &BrokerError) {
         if e.http_status == 429 {
-            self.budget.block(e.retry_after_ms);
+            self.budget.at(self.rate_now()).block(e.retry_after_ms);
         }
     }
 
     /// The open-orders check of a clear: the order's seen state and the listing's size.
     /// `None` when the budget refused the call, which sends nothing.
     fn open_check(&mut self, cid: &str, critical: bool) -> Option<(Seen, usize)> {
-        if !self.budget.take(critical) {
+        if !self.budget.at(self.rate_now()).take(critical) {
             return None;
         }
         Some(match self.b.open_orders() {
@@ -2229,7 +2246,7 @@ impl<B: Broker> Session<B> {
         cid: &str,
         critical: bool,
     ) -> Option<(Seen, String, Option<BrokerOrder>)> {
-        if !self.budget.take(critical) {
+        if !self.budget.at(self.rate_now()).take(critical) {
             return None;
         }
         Some(match self.b.order(&OrderRef::Client(cid.to_owned())) {
@@ -2244,7 +2261,7 @@ impl<B: Broker> Session<B> {
     /// A failed broker check; a 429 holds the budget back as it does for any query.
     fn failed(&mut self, e: &BrokerError) -> Seen {
         if e.http_status == 429 {
-            self.budget.block(e.retry_after_ms);
+            self.budget.at(self.rate_now()).block(e.retry_after_ms);
         }
         Seen::Failed(e.code.clone())
     }
@@ -2478,7 +2495,7 @@ impl<B: Broker> Session<B> {
             }
             // Refused by our own budget: no lookup was made, so the schedule does
             // not move and the order is looked up on a later tick.
-            if !self.budget.take(true) {
+            if !self.budget.at(self.rate_now()).take(true) {
                 i += 1;
                 continue;
             }
@@ -2487,7 +2504,7 @@ impl<B: Broker> Session<B> {
                 Ok(r) => r.value.map_or(Lookup::NotFound, Lookup::Found),
                 Err(e) => {
                     if e.http_status == 429 {
-                        self.budget.block(e.retry_after_ms);
+                        self.budget.at(self.rate_now()).block(e.retry_after_ms);
                     }
                     Lookup::Failed
                 }
@@ -2551,7 +2568,7 @@ impl<B: Broker> Session<B> {
         else {
             return Ok(false);
         };
-        if !self.budget.take(false) {
+        if !self.budget.at(self.rate_now()).take(false) {
             return Ok(false);
         }
         self.cursor = Some(cid.clone());
@@ -2565,7 +2582,7 @@ impl<B: Broker> Session<B> {
             },
             Err(e) => {
                 if e.http_status == 429 {
-                    self.budget.block(e.retry_after_ms);
+                    self.budget.at(self.rate_now()).block(e.retry_after_ms);
                 }
                 backoff(&mut self.rechecks, &cid, now, self.cfg.timing.poll);
             }
@@ -2620,7 +2637,7 @@ impl<B: Broker> Session<B> {
                 }
                 // Degraded: the listing reconciles what the stream missed. It runs only when no
                 // call was made this tick, and a refused token or a 429 is handled as any query.
-                if !called && self.degraded && self.budget.take(false) {
+                if !called && self.degraded && self.budget.at(self.rate_now()).take(false) {
                     called = true;
                     match self.b.open_orders() {
                         Ok(r) => {
@@ -2630,7 +2647,7 @@ impl<B: Broker> Session<B> {
                         }
                         Err(e) => {
                             if e.http_status == 429 {
-                                self.budget.block(e.retry_after_ms);
+                                self.budget.at(self.rate_now()).block(e.retry_after_ms);
                             }
                         }
                     }
