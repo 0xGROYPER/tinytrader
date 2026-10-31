@@ -90,6 +90,7 @@ function approvals(J) {
     const a = J.acts[q.quote] || {}, reqs = q.requests || [];
     const asked = [q.contracts != null ? `${q.contracts.toLocaleString()} contracts over ${plural(q.contract_days, 'day', 'days')}` : q.rule ? 'contracts by rule' : 'whole chain or symbol',
       q.hours ? `hours ${esc(q.hours.start)}–${esc(q.hours.end)} ${esc(q.hours.tz)}` : 'whole days',
+      q.price_only ? '<b>price only: an estimate, it can\'t be bought</b>' : '',
       (q.again || []).length ? `buys again ${q.again.map(esc).join(', ')}` : ''].filter(Boolean).join(' · ');
     const shown = reqs.slice(0, 12).map(requestLine).join('');
     const more = reqs.length > 12 ? `<tr><td colspan="4" class="muted">and ${reqs.length - 12} more requests</td></tr>` : '';

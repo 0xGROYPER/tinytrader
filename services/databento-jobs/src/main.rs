@@ -324,7 +324,7 @@ impl Quote {
             "quote": id, "dataset": a.dataset, "schema": a.schema.as_str(), "symbol": a.symbol,
             "stype_in": a.stype.as_str(), "start": a.start.to_string(),
             "end": a.end.previous_day().unwrap_or(a.end).to_string(), "hours": a.hours,
-            "rule": a.rule.is_some(), "again": again,
+            "rule": a.rule.is_some(), "again": again, "price_only": a.price_only,
             "contract_days": a.contracts.as_ref().map(BTreeMap::len),
             "contracts": a.contracts.as_ref().map(|m| m.values().map(BTreeSet::len).sum::<usize>()),
             "priced": self.priced.0.load(Ordering::Relaxed), "of": self.priced.1.load(Ordering::Relaxed),
@@ -362,7 +362,8 @@ impl Quote {
                 v["billable_bytes"] = json!(p.parts.iter().map(|r| r.bytes).sum::<u64>());
                 v["requests"] = json!(rows);
                 v["notes"] = json!(p.notes);
-                v["needs_approval"] = json!(p.cost_usd != 0.0);
+                // A price-only quote is an estimate: nothing to approve.
+                v["needs_approval"] = json!(p.cost_usd != 0.0 && !a.price_only);
                 let left = quote_ttl(p.cost_usd)
                     .saturating_sub(self.at.elapsed())
                     .as_secs();

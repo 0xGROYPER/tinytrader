@@ -31,6 +31,9 @@ struct Quote {
     contracts: Option<usize>,
     contract_days: Option<usize>,
     again: Vec<String>,
+    /// An estimate only (`price_only`): it can never be submitted, and needs
+    /// no approval.
+    price_only: bool,
     /// Not a number (`null`) when a price wasn't one: never bought.
     cost_usd: Option<f64>,
     billable_bytes: Option<u64>,

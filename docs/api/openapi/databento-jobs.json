@@ -247,6 +247,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "price_only": {
+            "description": "An estimate only (`price_only`): it can never be submitted, and needs\nno approval.",
+            "type": "boolean"
+          },
           "priced": {
             "description": "Requests priced so far, of how many; once submitting, `submitted` of `of`.",
             "format": "uint",
@@ -314,7 +318,8 @@
           "start",
           "end",
           "rule",
-          "again"
+          "again",
+          "price_only"
         ],
         "type": "object"
       },
