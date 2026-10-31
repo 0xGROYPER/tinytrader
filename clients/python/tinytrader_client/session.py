@@ -274,8 +274,11 @@ def run(strategy: Strategy, control: str | None = None) -> dict:
     if not addr:
         raise SessionError("no session: pass its control address or set TT_SESSION")
     ctl = _Lines(addr)
-    ctl.send({"type": "hello", "protocol": PROTOCOL, "strategy": strategy.name,
-              "revision": strategy.revision})
+    hello = {"type": "hello", "protocol": PROTOCOL, "strategy": strategy.name,
+             "revision": strategy.revision}
+    if os.environ.get("TT_SESSION_TOKEN"):
+        hello["token"] = os.environ["TT_SESSION_TOKEN"]
+    ctl.send(hello)
     welcome = ctl.read()
     if welcome.get("type") != "welcome":
         raise SessionError(f"session: {welcome}")

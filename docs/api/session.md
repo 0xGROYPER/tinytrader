@@ -61,11 +61,63 @@ fee_per_contract = "0.65"
 
 Sources are read through the store producer (`libs/producer`). A day not held is a `store-gap` message in the stream, never a skip. Each file read is pinned by SHA-256 in the run record.
 
+## Starting the strategy, and the sandbox
+
+With a `[strategy]` table the session starts the strategy itself. Its output goes to `strategy.out` and `strategy.err` in the run folder. Without the table, nothing changes: start the strategy yourself from the `READY` line.
+
+**Its environment starts empty**, then gets:
+- `PATH=/usr/bin:/bin`;
+- `HOME` and `TMPDIR`, both its scratch folder in the run folder;
+- the configured `env`;
+- `TT_SESSION`, the control address;
+- `TT_SESSION_TOKEN`.
+
+Nothing else of the session's environment reaches it: no keys, store addresses or agent sockets. The control connection must present the token in `hello`, so the record's claims are about the process the session started.
+
+**It runs in its own process group**, which is killed after the run, so nothing it started outlives it. A grandchild that calls `setsid` leaves the group and isn't killed, but it stays sandboxed.
+
+```toml
+[strategy]
+command = ["python3", "-m", "my_strategy"]
+cwd = "/path/to/code"                    # optional; with a sandbox, inside allow_read
+env = { PYTHONPATH = "/path/to/code" }   # optional
+sandbox = "macos"                        # or "off", the default
+allow_read = ["/path/to/code", "/path/to/venv", "/path/to/python"]
+deny_read = ["/path/to/local/caches"]    # never readable, even inside allow_read
+```
+
+`sandbox = "macos"` runs the strategy under `sandbox-exec` with a profile the session writes (`sandbox.sb` in the run folder, and in `run.json`). It denies by default, then allows:
+- reading the system's folders: `/System`, `/usr`, `/bin`, `/sbin`, `/private/etc`, dyld and timezone data, `/nix/store`, but not `/Library`, whose logs can carry market data;
+- reading the `allow_read` folders;
+- reading and writing its scratch folder and the harmless devices;
+- connecting to the session's control and data addresses and its venues' gateways, and nowhere else;
+- signalling only processes in its own sandbox.
+
+**What it denies:**
+- **Mach service lookups, all of them.** So the strategy can't ask an unsandboxed service (Launch Services' `open`, launchd's `launchctl submit`, background downloads, the DNS resolver) to act for it.
+- **The `deny_read` folders,** denied last, so they win over an `allow_read` that contains them. So are the per-user folders that hold caches, keys and configuration: `~/.cache`, `~/Library`, `~/.ssh`, `~/.gnupg`, `~/.config`, `~/.aws` and `~/.netrc`. An `allow_read` inside or containing one is refused.
+- **Unsafe `allow_read` folders.** Each must exist (it's made canonical), and none may be or contain `/`, `/Users`, `/Volumes`, `/Library`, `/private`, `/var`, `/var/lib/tinytrader`, the user's home, or a `deny_read` folder. A folder inside home, such as a virtualenv, is fine.
+
+Held data, caches, home and the store's API are therefore out of reach: a sandboxed strategy sees the market only through the session, as decision 0026 §5 asks of an actor. `allow_read` must name everything the strategy loads: its code, and its interpreter and libraries when they live outside the system's folders. `/nix/store` is readable; it holds no plaintext secrets in a sops deployment.
+
+**The run record says how the strategy ran.** `strategy_process` holds:
+- the command;
+- its exit status;
+- what the record attests: the control connection presented the token only that process had. That assumes no other process of the same user read the token from the child's environment and connected first;
+- `sandbox`: `"off"`, or its kind, the profile's text and SHA-256, `allow_read` and `deny_read`.
+
+So a result shows whether its strategy could have read ahead.
+
+**Limits:**
+- `sandbox-exec` is deprecated by Apple but works on current macOS.
+- On Linux a container with networking off can't reach the session's TCP addresses; that needs the session and its gateways on unix sockets, a later step.
+- A strategy that exits before the run ends leaves the run incomplete.
+
 ## The control connection
 
 | Direction | Message |
 |---|---|
-| strategy → session | `{"type":"hello","protocol":"tinytrader.session/1","strategy":NAME,"revision":REV}` |
+| strategy → session | `{"type":"hello","protocol":"tinytrader.session/1","strategy":NAME,"revision":REV,"token":TT_SESSION_TOKEN?}`. The token is required when the session started the strategy. |
 | session → strategy | `{"type":"welcome","session","mode":"backtest","data":ADDR,"orders":{VENUE:{"addr","client","token","prefix"}},"days","strategy_latency_ms"}` |
 | strategy → session | `{"type":"ready","as_of":0,"sent":{},"timers":[…]}`, once joined to the data stream and every venue, with its first timers |
 | session → strategy | `{"type":"step","step":N,"as_of":TS,"records":K,"timers":[ID],"reports":{VENUE:SEQ}}` |

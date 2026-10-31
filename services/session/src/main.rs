@@ -6,10 +6,30 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: tinytrader-session run CONFIG --dir RUN_DIR [--listen IP]";
+const USAGE: &str = "usage: tinytrader-session run CONFIG --dir RUN_DIR [--listen IP]\n       tinytrader-session watch [CONTROL_ADDR]  (a strategy that only watches; TT_SESSION by default)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("watch") {
+        let Some(addr) = args
+            .get(1)
+            .cloned()
+            .or_else(|| std::env::var("TT_SESSION").ok())
+        else {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        return match session::watch::run(&addr) {
+            Ok(line) => {
+                println!("{line}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("watch: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let (Some("run"), Some(config)) = (args.first().map(String::as_str), args.get(1)) else {
         eprintln!("{USAGE}");
         return ExitCode::from(2);

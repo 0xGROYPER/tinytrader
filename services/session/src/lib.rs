@@ -5,8 +5,11 @@
 //! strategy's `ready` (`tinytrader.session/1`). It ends with a run record and an
 //! audit hash: the same configuration and strategy give the same hash.
 pub mod config;
+pub mod fixture;
 pub mod protocol;
 pub mod run;
+pub mod sandbox;
+pub mod watch;
 
 pub use config::Config;
 pub use run::{Outcome, Ready, Session};

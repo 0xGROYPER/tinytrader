@@ -22,7 +22,7 @@
 //! 4. After the last record, the venues are advanced to the end of the last day, so
 //!    day orders expire, and the session sends `end` with the outcome and the audit
 //!    hash, and writes the run record.
-use crate::config::Config;
+use crate::config::{Config, Sandbox};
 use crate::protocol::{self, FromStrategy};
 use dbn::encode::DbnMetadataEncoder;
 use dbn::{Metadata, SType, Schema};
@@ -132,6 +132,15 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// 32 bytes of the OS's randomness, as hex: tokens nothing about the run predicts.
+fn random_hex() -> Result<String, String> {
+    let mut b = [0_u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b))
+        .map_err(|e| format!("/dev/urandom: {e}"))?;
+    Ok(hex(&b))
+}
+
 fn wall_ns() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -222,7 +231,7 @@ impl Session {
             )?;
             let (sim, feed) =
                 SimBroker::fed(&script, &pin).map_err(|e| format!("venue {}: {e}", v.name))?;
-            let token = hex(&Sha256::digest(format!("{id}{}{}", v.name, wall_ns())));
+            let token = random_hex()?;
             let d = Profile::default();
             let profile = Profile {
                 underlyings: v.underlyings.clone(),
@@ -299,6 +308,115 @@ impl Session {
         &self.ready
     }
 
+    /// Starts the strategy when the configuration names one, sandboxed if it says
+    /// so, from an empty environment plus `PATH`, `HOME` and `TMPDIR` (its scratch
+    /// folder), `TT_SESSION`, `TT_SESSION_TOKEN` and the configured variables, in
+    /// its own process group, with its output in the run folder.
+    fn start_strategy(&self, st: &mut Run) -> Result<(), String> {
+        use std::os::unix::process::CommandExt as _;
+        let Some(sp) = &self.cfg.strategy else {
+            return Ok(());
+        };
+        let scratch = self.dir.join("strategy-tmp");
+        std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+        let scratch = scratch.canonicalize().map_err(|e| e.to_string())?;
+        let out = |name: &str| {
+            std::fs::File::create(self.dir.join(name)).map_err(|e| format!("{name}: {e}"))
+        };
+        let token = random_hex()?;
+        let mut argv = sp.command.clone();
+        let sandbox = match sp.sandbox {
+            Sandbox::Off => json!("off"),
+            Sandbox::Macos => {
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let allow = crate::sandbox::check_allow_read(
+                    &sp.allow_read,
+                    &sp.deny_read,
+                    home.as_deref(),
+                )?;
+                if let Some(cwd) = &sp.cwd {
+                    let c = cwd
+                        .canonicalize()
+                        .map_err(|e| format!("strategy.cwd: {e}"))?;
+                    if !allow.iter().any(|a| c.starts_with(a)) {
+                        return Err(format!("strategy.cwd {} isn't in allow_read", c.display()));
+                    }
+                }
+                let mut ports = vec![self.ready.control, self.ready.data];
+                ports.extend(self.ready.orders.iter().map(|(_, a)| *a));
+                let denied = crate::sandbox::always_denied(home.as_deref(), &sp.deny_read);
+                let profile = crate::sandbox::profile(&allow, &denied, &scratch, &ports);
+                let path = self.dir.join("sandbox.sb");
+                std::fs::write(&path, &profile).map_err(|e| format!("sandbox.sb: {e}"))?;
+                let mut wrapped = vec![
+                    "/usr/bin/sandbox-exec".to_owned(),
+                    "-f".to_owned(),
+                    path.to_string_lossy().into_owned(),
+                ];
+                wrapped.append(&mut argv);
+                argv = wrapped;
+                json!({"kind": "macos-sandbox-exec", "profile_sha256": hex(&Sha256::digest(profile.as_bytes())),
+                       "profile": profile, "allow_read": allow, "deny_read": sp.deny_read})
+            }
+        };
+        let mut cmd = std::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &scratch)
+            .env("TMPDIR", &scratch)
+            .envs(&sp.env)
+            .env("TT_SESSION", self.ready.control.to_string())
+            .env("TT_SESSION_TOKEN", &token)
+            .stdin(std::process::Stdio::null())
+            .stdout(out("strategy.out")?)
+            .stderr(out("strategy.err")?)
+            .process_group(0);
+        if let Some(cwd) = &sp.cwd {
+            cmd.current_dir(cwd);
+        }
+        st.process = Some(json!({
+            "command": sp.command,
+            "sandbox": sandbox,
+            "attests": "the control connection presented the token only this process was given (assuming no other process of the same user read it from the child's environment and connected first); a process it starts inherits the sandbox",
+        }));
+        st.token = Some(token);
+        st.child = Some(
+            cmd.spawn()
+                .map_err(|e| format!("strategy {}: {e}", argv[0]))?,
+        );
+        Ok(())
+    }
+
+    /// Waits a moment for a started strategy to exit after the run, then stops it.
+    fn wait_strategy(&self, st: &mut Run) {
+        let Some(child) = &mut st.child else {
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break s.code().map_or_else(|| json!("signal"), |c| json!(c)),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break json!("killed");
+                }
+            }
+        };
+        // Whatever it started too: its process group.
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-9", &format!("-{}", child.id())])
+            .stderr(std::process::Stdio::null())
+            .status();
+        if let Some(Value::Object(p)) = &mut st.process {
+            p.insert("exit".into(), status);
+        }
+    }
+
     /// Serves the run to one strategy, then writes the run record and stops the
     /// venues.
     ///
@@ -308,7 +426,8 @@ impl Session {
     pub fn run(mut self) -> Result<Outcome, String> {
         let mut audit = Audit::create(&self.dir.join("audit.log"))?;
         let mut state = Run::default();
-        let result = self.serve(&mut audit, &mut state);
+        let started = self.start_strategy(&mut state);
+        let result = started.and_then(|()| self.serve(&mut audit, &mut state));
         let flushed = audit.log.flush().map_err(|e| format!("audit.log: {e}"));
         let reason = result
             .err()
@@ -333,6 +452,7 @@ impl Session {
                         "reports": state.reports}),
             );
         }
+        self.wait_strategy(&mut state);
         // The venues stop whatever happens to the record.
         let recorded = self.record(&outcome, &state);
         let mut stopped = Ok(());
@@ -415,9 +535,17 @@ impl Session {
         let mut reader = BufReader::new(ctl.try_clone().map_err(|e| e.to_string())?);
         st.control = Some(ctl);
         let hello = protocol::read(&mut reader)?;
-        let FromStrategy::Hello { strategy, revision } = hello else {
+        let FromStrategy::Hello {
+            strategy,
+            revision,
+            token,
+        } = hello
+        else {
             return Err("the strategy's first message must be hello".into());
         };
+        if st.token.is_some() && token != st.token {
+            return Err("the control connection isn't from the strategy the session started (no TT_SESSION_TOKEN)".into());
+        }
         st.strategy = Some((strategy.clone(), revision.clone()));
         audit.update(format!("hello {strategy} {revision}\n"));
         let w = self.welcome();
@@ -689,6 +817,7 @@ impl Session {
             "strategy": st.strategy.as_ref().map(|(s, r)| json!({"name": s, "revision": r})),
             "days": self.cfg.days,
             "seed": self.cfg.seed,
+            "strategy_process": st.process.clone().unwrap_or(Value::Null),
             "calendar_sha256": self.calendar_sha,
             "lockstep": {"batch": "instant", "strategy_latency_ms": self.cfg.strategy_latency_ms},
             "merge": {"order": "(ts, class, rank, position)", "ranks": self.cfg.sources.iter().map(|s| s.name.clone()).collect::<Vec<_>>()},
@@ -739,4 +868,9 @@ struct Run {
     sent: BTreeMap<String, u64>,
     /// Each venue's last event after the final advance.
     reports: Option<Value>,
+    /// The strategy process the session started, and what the record says of it.
+    child: Option<std::process::Child>,
+    process: Option<Value>,
+    /// The token a started strategy must present in its hello.
+    token: Option<String>,
 }

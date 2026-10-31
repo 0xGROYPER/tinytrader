@@ -132,6 +132,17 @@ run record (`run.json`) and the audit log. The audit hashes each venue's
 journaled order events, not the journal's own chain, since that chain also
 covers connection and status events.
 
+**As built (the strategy as the session's child, optionally sandboxed).**
+A session may start the strategy itself (`[strategy]` in its
+configuration), and on macOS confine it (`sandbox = "macos"`). The
+confinement is a deny-by-default profile: the system's folders and the
+folders the run names for the strategy's code, a scratch folder, and
+connections only to the session's own addresses. That makes 0026 §5's rule
+enforceable for session clients: an actor has no data or network of its
+own. The run record names the sandbox and its profile's hash, so a result
+shows whether its strategy could have read ahead. It's an option, off by
+default. A Linux container needs the session on unix sockets first.
+
 **As built (the merge, `libs/dbn`).** Two cases the key above doesn't
 settle:
 
